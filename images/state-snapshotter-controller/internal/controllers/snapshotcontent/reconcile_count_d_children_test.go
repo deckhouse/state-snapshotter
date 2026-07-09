@@ -124,8 +124,8 @@ func TestOwnerSnapshotReadStaysOnAPIReaderForDeclaredChildren(t *testing.T) {
 	ctx := context.Background()
 	scheme := harnessTestScheme(t)
 
-	content := contentWithSnapshotRef("c", "", "ns1", "snap-1")
-	owner := ownerSnapshotWithChildren("ns1", "snap-1") // declares no non-leaf children
+	content := contentWithSnapshotRef("c", "", "snap-1")
+	owner := ownerSnapshotWithChildren("snap-1") // declares no non-leaf children
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner).Build()
 
 	counters := newSplitCounters()

@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"

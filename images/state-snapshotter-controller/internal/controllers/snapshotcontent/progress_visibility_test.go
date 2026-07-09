@@ -34,13 +34,13 @@ import (
 // commonContentReadyWithMCPAndDataRefs builds a common SnapshotContent that already carries Ready=True
 // conditions and references a ready MCP plus a single VSC data artifact. It models a node that was
 // previously Ready=True; the aggregation recompute does not depend on the stored conditions.
-func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstructured.Unstructured {
+func commonContentReadyWithMCPAndDataRefs(name, vscName string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "SnapshotContent",
 		"metadata":   map[string]interface{}{"name": name},
 		"status": map[string]interface{}{
-			"manifestCheckpointName": mcpName,
+			"manifestCheckpointName": "mcp-ok",
 			"data": map[string]interface{}{
 				"source": map[string]interface{}{
 					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default", "uid": "pvc-1",
@@ -72,7 +72,7 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("c", "mcp-ok", "vsc-gone")
+	content := commonContentReadyWithMCPAndDataRefs("c", "vsc-gone")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)

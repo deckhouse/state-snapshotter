@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -82,7 +82,7 @@ func TestWeightLayerCaptureReady(t *testing.T) {
 	})
 
 	t.Run("child without a phase blocks the layer without terminal message", func(t *testing.T) {
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(demoSnapshotChild("pending", nil)).Build()}
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(demoSnapshotChild("pending")).Build()}
 		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending with no terminal message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
@@ -376,7 +376,7 @@ func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
 
 func TestSnapshotCoverageCheckerSkipsChildWithoutSourceRef(t *testing.T) {
 	ctx := context.Background()
-	child := demoSnapshotChild("missing-source-ref", nil)
+	child := demoSnapshotChild("missing-source-ref")
 	checker := newSnapshotCoverageChecker(
 		fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build(),
 		"ns1",
@@ -560,8 +560,8 @@ func TestSummarizePendingChildrenCapsMessage(t *testing.T) {
 	}
 }
 
-func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured.Unstructured {
-	child := &unstructured.Unstructured{
+func demoSnapshotChild(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "demo.test/v1",
 			"kind":       "DemoSnapshot",
@@ -572,29 +572,13 @@ func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured
 			},
 		},
 	}
-	if len(conditions) > 0 {
-		status := map[string]interface{}{}
-		items := make([]interface{}, 0, len(conditions))
-		for _, condition := range conditions {
-			items = append(items, map[string]interface{}{
-				"type":               condition.Type,
-				"status":             string(condition.Status),
-				"reason":             condition.Reason,
-				"message":            condition.Message,
-				"observedGeneration": condition.ObservedGeneration,
-			})
-		}
-		status["conditions"] = items
-		child.Object["status"] = status
-	}
-	return child
 }
 
 // demoSnapshotChildWithPhase builds a child snapshot carrying
 // status.captureState.domainSpecificController.phase, the domain-owned capture barrier read by the
 // weight-layer gate.
 func demoSnapshotChildWithPhase(name string, phase storagev1alpha1.SnapshotCapturePhase) *unstructured.Unstructured {
-	child := demoSnapshotChild(name, nil)
+	child := demoSnapshotChild(name)
 	if err := unstructured.SetNestedField(child.Object, string(phase), "status", "captureState", "domainSpecificController", "phase"); err != nil {
 		panic(err)
 	}
@@ -602,7 +586,7 @@ func demoSnapshotChildWithPhase(name string, phase storagev1alpha1.SnapshotCaptu
 }
 
 func demoSnapshotChildWithSource(name string, identity controllercommon.SnapshotSourceIdentity) *unstructured.Unstructured {
-	child := demoSnapshotChild(name, nil)
+	child := demoSnapshotChild(name)
 	if err := unstructured.SetNestedStringMap(child.Object, map[string]string{
 		"apiVersion": identity.APIVersion,
 		"kind":       identity.Kind,

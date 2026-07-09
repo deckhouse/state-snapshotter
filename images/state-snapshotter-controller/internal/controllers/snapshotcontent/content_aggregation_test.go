@@ -73,7 +73,7 @@ func commonContentWithStatus(name, mcpName string, childNames ...string) *unstru
 // contentWithSnapshotRef builds a common SnapshotContent unstructured carrying spec.snapshotRef (the
 // binding-subject back-reference used by the declared-children fail-closed check) plus optional
 // manifestCheckpointName and published child content edges.
-func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childContentNames ...string) *unstructured.Unstructured {
+func contentWithSnapshotRef(name, mcpName, ownerName string, childContentNames ...string) *unstructured.Unstructured {
 	status := map[string]interface{}{}
 	if mcpName != "" {
 		status["manifestCheckpointName"] = mcpName
@@ -94,7 +94,7 @@ func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childConte
 				"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 				"kind":       "Snapshot",
 				"name":       ownerName,
-				"namespace":  ownerNS,
+				"namespace":  "ns1",
 			},
 		},
 		"status": status,
@@ -105,7 +105,7 @@ func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childConte
 
 // ownerSnapshotWithChildren builds a typed Snapshot that declares the given child Snapshots in
 // status.childrenSnapshotRefs (strict storage Snapshot refs).
-func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot {
+func ownerSnapshotWithChildren(name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot {
 	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(childSnapshotNames))
 	for _, cn := range childSnapshotNames {
 		refs = append(refs, storagev1alpha1.SnapshotChildRef{
@@ -115,15 +115,15 @@ func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *s
 		})
 	}
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: name},
 		Status:     storagev1alpha1.SnapshotStatus{ChildrenSnapshotRefs: refs},
 	}
 }
 
 // boundChildSnapshot builds a typed child Snapshot already bound to a content name.
-func boundChildSnapshot(ns, name, boundContentName string) *storagev1alpha1.Snapshot {
+func boundChildSnapshot(boundContentName string) *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "child-snap"},
 		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: boundContentName},
 	}
 }
@@ -304,13 +304,13 @@ func TestComputeSubtreeManifestsPersisted_DeclaredButUnlinkedChildPends(t *testi
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner, childSnap).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	// Own MCP ready, but the declared child (child-snap -> child-content) is not in childrenSnapshotContentRefs.
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
@@ -329,13 +329,13 @@ func TestComputeSubtreeManifestsPersisted_DeclaredChildLinkedAndPersistedLatches
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
 	childContent := contentWithSubtreeManifestsPersisted("child-content", true)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner, childSnap, childContent).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner", "child-content")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner", "child-content")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
@@ -351,11 +351,11 @@ func TestComputeSubtreeManifestsPersisted_LeafLatchesWithSnapshotRef(t *testing.
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner") // no declared children
+	owner := ownerSnapshotWithChildren("owner") // no declared children
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	parent := contentWithSnapshotRef("leaf-content", "mcp-ok", "ns1", "owner")
+	parent := contentWithSnapshotRef("leaf-content", "mcp-ok", "owner")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
@@ -429,8 +429,8 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
 	// The declared child IS linked into childrenSnapshotContentRefs and IS Ready (so the ChildrenReady
 	// read barrier is satisfied — see validateCommonContentChildren), but the child's own subtree is not yet
 	// persisted (subtreeManifestsPersisted=false). Own MCP ready + linked+Ready child => own legs and
@@ -438,7 +438,7 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	// archive gate must hold Ready=False on SubtreeManifestCapturePending. This isolates the archive gate
 	// from the read barrier.
 	childContent := contentWithReadyCond("child-content", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner", "child-content")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner", "child-content")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(mcp, owner, childSnap, childContent, parent).

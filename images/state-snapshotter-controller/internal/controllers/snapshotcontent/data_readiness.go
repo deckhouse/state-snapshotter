@@ -148,7 +148,7 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	ctx context.Context,
 	name string,
 ) (bool, string, string, error) {
-	gvk := artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent)
+	gvk := volumeSnapshotContentGVK()
 	artifactObj := &unstructured.Unstructured{}
 	artifactObj.SetGroupVersionKind(gvk)
 
@@ -157,7 +157,7 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	// NotReady -> data leg pending), and a non-NotFound error (e.g. the external CSI VSC CRD/informer not
 	// yet available) still propagates below as a reconcile error so the pass requeues instead of falsely
 	// passing the data leg.
-	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, artifactObj)
+	err := r.Get(ctx, client.ObjectKey{Name: name}, artifactObj)
 	if errors.IsNotFound(err) {
 		return false, snapshot.ReasonArtifactMissing,
 			fmt.Sprintf("VolumeSnapshotContent %s not found", name), nil
@@ -189,17 +189,20 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	return true, "", "", nil
 }
 
-func artifactGVK(apiVersion, kind string) schema.GroupVersionKind {
-	if idx := strings.Index(apiVersion, "/"); idx != -1 {
+// volumeSnapshotContentGVK returns the fixed GroupVersionKind of the CSI VolumeSnapshotContent artifact
+// (snapshot.storage.k8s.io/v1, VolumeSnapshotContent) that a data leg resolves, reads for readiness, and
+// reclaims. Both coordinates are invariant — the aggregator only ever handles this one artifact kind — so
+// they are derived from the package constants here rather than passed in by every caller.
+func volumeSnapshotContentGVK() schema.GroupVersionKind {
+	if idx := strings.Index(volumeSnapshotContentAPIVersion, "/"); idx != -1 {
 		return schema.GroupVersionKind{
-			Group:   apiVersion[:idx],
-			Version: apiVersion[idx+1:],
-			Kind:    kind,
+			Group:   volumeSnapshotContentAPIVersion[:idx],
+			Version: volumeSnapshotContentAPIVersion[idx+1:],
+			Kind:    kindVolumeSnapshotContent,
 		}
 	}
 	return schema.GroupVersionKind{
-		Group:   "",
-		Version: apiVersion,
-		Kind:    kind,
+		Version: volumeSnapshotContentAPIVersion,
+		Kind:    kindVolumeSnapshotContent,
 	}
 }

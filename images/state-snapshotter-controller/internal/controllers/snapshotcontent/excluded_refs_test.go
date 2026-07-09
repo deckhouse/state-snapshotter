@@ -55,7 +55,7 @@ func TestComputeExcludedRefsAggregate_OwnUnionChildren(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner, childContent).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	parent := contentWithSnapshotRef("parent-content", "", "ns1", "owner", "child-content")
+	parent := contentWithSnapshotRef("parent-content", "", "owner", "child-content")
 	got, err := r.computeExcludedRefsAggregate(ctx, parent)
 	if err != nil {
 		t.Fatalf("computeExcludedRefsAggregate: %v", err)
@@ -79,7 +79,7 @@ func TestComputeExcludedRefsAggregate_MonotonicOnMissingChild(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	// parent already published `stale`, references a child that does not exist, and has no owning snapshot.
-	parent := contentWithSnapshotRef("parent-content", "", "ns1", "missing-owner", "missing-child")
+	parent := contentWithSnapshotRef("parent-content", "", "missing-owner", "missing-child")
 	status, _ := parent.Object["status"].(map[string]interface{})
 	status["excludedRefs"] = excludedRefsToUnstructured([]storagev1alpha1.ExcludedObjectRef{stale})
 	parent.Object["status"] = status

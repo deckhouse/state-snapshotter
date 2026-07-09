@@ -29,7 +29,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -186,7 +186,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			return ctrl.Result{}, lErr
 		}
 		if treason != "" {
-			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, treason, tmsg); perr != nil {
+			if perr := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, treason, tmsg); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{}, nil
@@ -205,7 +205,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		if _, _, dtreason, dtmsg := snapshotcontent.BuildImportDataBinding(di, obj); dtreason != "" {
 			// Actionable import failure (e.g. unsupported artifact kind): the content stays pending (no
 			// dataRef), so the pure content mirror cannot express it — co-write Ready=False directly.
-			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, dtreason, dtmsg); perr != nil {
+			if perr := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, dtreason, dtmsg); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{}, nil

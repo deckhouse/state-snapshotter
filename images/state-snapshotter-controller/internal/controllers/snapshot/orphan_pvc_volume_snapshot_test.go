@@ -94,8 +94,8 @@ func volumeSnapshotClass(name, driver string) *unstructured.Unstructured {
 	return obj
 }
 
-func pvcTarget(ns, name, uid string) vcpkg.Target {
-	return vcpkg.Target{UID: uid, APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: name, Namespace: ns}
+func pvcTarget() vcpkg.Target {
+	return vcpkg.Target{UID: "uid-a", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: "default"}
 }
 
 // orphanPVCVolumeSnapshotClass resolves the VolumeSnapshotClass for a residual/orphan PVC and validates its
@@ -115,7 +115,7 @@ func TestOrphanPVCVolumeSnapshotClass_HappyPath(t *testing.T) {
 	).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
-	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget(ns, "pvc-a", "uid-a"))
+	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestOrphanPVCVolumeSnapshotClass_DriverMismatchIsTerminal(t *testing.T) {
 	).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
-	className, reason, msg, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget(ns, "pvc-a", "uid-a"))
+	className, reason, msg, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget())
 	if err != nil {
 		t.Fatalf("driver mismatch must be terminal, not a raw error: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestOrphanPVCVolumeSnapshotClass_MissingAnnotationIsTerminal(t *testing.T) 
 	).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
-	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget(ns, "pvc-a", "uid-a"))
+	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget())
 	if err != nil {
 		t.Fatalf("missing annotation must be terminal, not a raw error: %v", err)
 	}
@@ -175,11 +175,11 @@ func TestOrphanPVCVolumeSnapshotClass_MissingAnnotationIsTerminal(t *testing.T) 
 
 // existingOrphanVS builds a pre-existing CSI VolumeSnapshot at the deterministic orphan name with the given
 // source PVC + class, for the pre-adoption spec-mismatch guard tests.
-func existingOrphanVS(ns, name, srcPVC, className string) *unstructured.Unstructured {
+func existingOrphanVS(ns, srcPVC, className string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(csiVolumeSnapshotGVK)
 	obj.SetNamespace(ns)
-	obj.SetName(name)
+	obj.SetName("orphan-vs")
 	if srcPVC != "" {
 		_ = unstructured.SetNestedField(obj.Object, srcPVC, "spec", "source", "persistentVolumeClaimName")
 	}
@@ -213,7 +213,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 
 	t.Run("matching source+class is not a mismatch", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(existingOrphanVS(ns, name, pvc, class)).Build()
+			WithObjects(existingOrphanVS(ns, pvc, class)).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != "" {
@@ -223,7 +223,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 
 	t.Run("wrong source PVC is terminal", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(existingOrphanVS(ns, name, "other-pvc", class)).Build()
+			WithObjects(existingOrphanVS(ns, "other-pvc", class)).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != snapshotpkg.ReasonVolumeCaptureFailed {
@@ -233,7 +233,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 
 	t.Run("empty-source shell is terminal", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(existingOrphanVS(ns, name, "", "")).Build()
+			WithObjects(existingOrphanVS(ns, "", "")).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != snapshotpkg.ReasonVolumeCaptureFailed {
@@ -243,7 +243,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 
 	t.Run("wrong class on an UNBOUND handle is terminal", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(existingOrphanVS(ns, name, pvc, "other-class")).Build()
+			WithObjects(existingOrphanVS(ns, pvc, "other-class")).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != snapshotpkg.ReasonVolumeCaptureFailed {
@@ -256,7 +256,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 		// creation and re-resolving it (e.g. the StorageClass annotation changed) MUST NOT flip an
 		// already-captured snapshot to terminal. Only the source PVC still matters once bound.
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(boundOrphanVS(existingOrphanVS(ns, name, pvc, "other-class"), "content-x")).Build()
+			WithObjects(boundOrphanVS(existingOrphanVS(ns, pvc, "other-class"), "content-x")).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != "" {
@@ -266,7 +266,7 @@ func TestOrphanPVCVolumeSnapshotSpecMismatch(t *testing.T) {
 
 	t.Run("wrong source on a BOUND handle is still terminal", func(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(testVolumeCaptureScheme(t)).
-			WithObjects(boundOrphanVS(existingOrphanVS(ns, name, "other-pvc", class), "content-x")).Build()
+			WithObjects(boundOrphanVS(existingOrphanVS(ns, "other-pvc", class), "content-x")).Build()
 		r := &SnapshotReconciler{Client: cl, APIReader: cl}
 		reason, _, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, ns, name, pvc, class)
 		if err != nil || reason != snapshotpkg.ReasonVolumeCaptureFailed {
@@ -288,7 +288,7 @@ func TestOrphanPVCVolumeSnapshotClass_UnboundPVCIsTransient(t *testing.T) {
 	).Build()
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 
-	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget(ns, "pvc-a", "uid-a"))
+	className, reason, _, err := r.orphanPVCVolumeSnapshotClass(ctx, pvcTarget())
 	if err == nil {
 		t.Fatal("unbound PVC must be transient (returns an error to requeue), got nil")
 	}

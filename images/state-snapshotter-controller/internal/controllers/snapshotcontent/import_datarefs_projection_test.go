@@ -193,7 +193,7 @@ func TestReconcileDataLegProjection_GenericImportStructuralNodeSkips(t *testing.
 	// GVKRegistry with the leaf kind NOT marked as data-bearing (default reads false).
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(nil), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	reg.MarkRequiresDataArtifact(importLeafKind, true)
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(nil), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}

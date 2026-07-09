@@ -76,7 +76,7 @@ func TestReconcileManifestCheckpointNameProjection_ImportPublishesReconstructed(
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileManifestCheckpointNameProjection(ctx, projContentObj(nil), importOwnerUnstructured(ownerUID), projTestNS, true)
+	requeue, err := r.reconcileManifestCheckpointNameProjection(ctx, projContentObj(), importOwnerUnstructured(ownerUID), projTestNS, true)
 	if err != nil {
 		t.Fatalf("projection: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestReconcileManifestCheckpointNameProjection_ImportPendingWhenNoMCP(t *tes
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileManifestCheckpointNameProjection(ctx, projContentObj(nil), importOwnerUnstructured("imp-uid"), projTestNS, true)
+	requeue, err := r.reconcileManifestCheckpointNameProjection(ctx, projContentObj(), importOwnerUnstructured("imp-uid"), projTestNS, true)
 	if err != nil {
 		t.Fatalf("projection: %v", err)
 	}

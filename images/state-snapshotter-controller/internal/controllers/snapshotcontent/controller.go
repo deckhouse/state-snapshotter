@@ -45,7 +45,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -257,7 +257,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		// this never forces a new informer and a non-match returns a clean NotFound, same as the uncached
 		// reader did. Spec is immutable and conditions are written under a changed-gate, so the cached
 		// (eventually consistent) read cannot add reconcile churn.
-		err = r.Client.Get(ctx, contentKey, obj)
+		err = r.Get(ctx, contentKey, obj)
 		if err != nil {
 			if errors.IsNotFound(err) {
 				continue
@@ -843,7 +843,7 @@ func (r *SnapshotContentController) aggregateChildrenSubtreeManifestsPersisted(c
 		// Cached read of the child content (same For-informer GVK). A just-created/not-yet-synced child
 		// missing from the cache is treated as pending (fail-closed), and the latch is one-way, so a stale
 		// read can only delay it, never falsely latch it true.
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
@@ -1084,7 +1084,7 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 		// Cached read of the child content (same For-informer GVK). A cache-missing child is collected as
 		// pending (fail-closed -> ChildrenPending), so a stale read delays the parent's Ready rather than
 		// asserting it.
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: name}, childContent); err != nil {
 			if errors.IsNotFound(err) {
 				pendingNames = append(pendingNames, name)
 				continue
@@ -1262,7 +1262,7 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 		return false, err
 	}
 	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if getErr := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, mcr); getErr != nil {
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, mcr); getErr != nil {
 		if errors.IsNotFound(getErr) {
 			// Post-publish: MCR reaped after a durable handoff -> keep the latched pointer, no requeue.
 			// Pre-publish: MCR not created yet -> requeue until it appears.
@@ -1297,7 +1297,7 @@ func (r *SnapshotContentController) projectImportManifestCheckpointName(ctx cont
 	}
 	mcpName := usecase.ReconstructedManifestCheckpointName(owner.GetUID(), "")
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if getErr := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); getErr != nil {
+	if getErr := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); getErr != nil {
 		if errors.IsNotFound(getErr) {
 			// Pre-publish: the upload endpoint has not reconstructed the checkpoint yet -> requeue until it
 			// appears. Post-publish: reaped after the content handoff -> keep the latched pointer, no requeue.
@@ -1372,7 +1372,7 @@ func childTerminalLeafInfo(childName string, readyCond *metav1.Condition) (leaf,
 func (r *SnapshotContentController) ensureChildSnapshotContentOwnedByParent(ctx context.Context, childName string, parentContentObj *unstructured.Unstructured) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		child := &storagev1alpha1.SnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: childName}, child); err != nil {
 			return err
 		}
 		parent := &storagev1alpha1.SnapshotContent{}
@@ -1420,7 +1420,7 @@ func (r *SnapshotContentController) validateCommonContentManifestCheckpoint(ctx 
 // (non-NotFound) errors are returned so reconcile requeues instead of falsely failing the tree.
 func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx context.Context, mcpName string) (string, error) {
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			// MCP vanished between checks; resolveManifestCheckpointReady reclassifies on the next reconcile.
 			return "", nil
@@ -1453,7 +1453,7 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 	contentOwned := false
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 			return err
 		}
 		reconstructed = mcp.Labels[usecase.ReconstructedManifestCheckpointLabelKey] == "true"
@@ -1475,7 +1475,7 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 		}
 		base := mcp.DeepCopy()
 		mcp.OwnerReferences = refs
-		if err := r.Client.Patch(ctx, mcp, client.MergeFrom(base)); err != nil {
+		if err := r.Patch(ctx, mcp, client.MergeFrom(base)); err != nil {
 			return err
 		}
 		contentOwned = true
@@ -1511,7 +1511,7 @@ func (r *SnapshotContentController) deleteReconstructedManifestCheckpointObjectK
 	}
 	okName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapshotUID))
 	ok := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: okName}}
-	if err := r.Client.Delete(ctx, ok); err != nil && !errors.IsNotFound(err) {
+	if err := r.Delete(ctx, ok); err != nil && !errors.IsNotFound(err) {
 		logger.V(1).Info("failed to delete redundant import ObjectKeeper after MCP handoff; it follows a live snapshot and owns nothing, so this is benign",
 			"objectKeeper", okName, "err", err.Error())
 	}
@@ -1538,8 +1538,8 @@ func (r *SnapshotContentController) selfHealDataArtifactOwnerRefs(ctx context.Co
 			continue
 		}
 		vsc := &unstructured.Unstructured{}
-		vsc.SetGroupVersionKind(artifactGVK(volumeSnapshotContentAPIVersion, kindVolumeSnapshotContent))
-		if getErr := r.Client.Get(ctx, client.ObjectKey{Name: art.Name}, vsc); getErr != nil {
+		vsc.SetGroupVersionKind(volumeSnapshotContentGVK())
+		if getErr := r.Get(ctx, client.ObjectKey{Name: art.Name}, vsc); getErr != nil {
 			if !errors.IsNotFound(getErr) {
 				logger.V(1).Info("self-heal: failed to get VolumeSnapshotContent; revalidation will backstop",
 					"vsc", art.Name, "err", getErr.Error())
@@ -1597,7 +1597,7 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 	// Cached read: the MCP informer is already started (ensureManifestCheckpointOwnedByContent reads it
 	// via the cache), so this forces no new watch. A stale/absent MCP keeps the manifest leg pending
 	// (fail-closed), which the self-requeue resolves once the cache catches up.
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 		if errors.IsNotFound(err) {
 			return mcpName, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcpName), nil
 		}

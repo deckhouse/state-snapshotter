@@ -72,7 +72,7 @@ const (
 // edge set (the frozen-edge mode).
 func lostFrozenContent(t *testing.T, childContentNames ...string) *unstructured.Unstructured {
 	t.Helper()
-	content := barrier2OwnedContent(t, "root", lostTestOwnerNS, lostTestOwnerName, true)
+	content := barrier2OwnedContent(t)
 	edges := make([]interface{}, 0, len(childContentNames))
 	for _, cn := range childContentNames {
 		edges = append(edges, map[string]interface{}{"name": cn})
@@ -248,8 +248,8 @@ func TestDetectLostDeclaredChildren(t *testing.T) {
 
 	t.Run("declared-ref mode: child CR missing -> Lost", func(t *testing.T) {
 		owner := lostOwnerSnapshot(t, planned, "child-snap")
-		content := barrier2OwnedContent(t, "root", "ns1", "owner", true) // no frozen edges
-		r := newLostChildrenController(t)                                // child-snap not seeded
+		content := barrier2OwnedContent(t) // no frozen edges
+		r := newLostChildrenController(t)  // child-snap not seeded
 		reason, _, err := r.detectLostDeclaredChildren(ctx, owner, content)
 		if err != nil {
 			t.Fatalf("detect: %v", err)
@@ -261,7 +261,7 @@ func TestDetectLostDeclaredChildren(t *testing.T) {
 
 	t.Run("declared-ref mode: child CR present -> none", func(t *testing.T) {
 		owner := lostOwnerSnapshot(t, planned, "child-snap")
-		content := barrier2OwnedContent(t, "root", "ns1", "owner", true)
+		content := barrier2OwnedContent(t)
 		r := newLostChildrenController(t, lostChildSnapshotCR("child-snap"))
 		reason, _, err := r.detectLostDeclaredChildren(ctx, owner, content)
 		if err != nil {

@@ -31,7 +31,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 

@@ -30,8 +30,8 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/demo"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/logger"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/usecase/restore"
 	domainsdk "github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"

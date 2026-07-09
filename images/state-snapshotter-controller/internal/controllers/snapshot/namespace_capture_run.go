@@ -26,7 +26,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -118,7 +117,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			// The binder is still gated on phase>=Planned here (MarkPlanned not reached), so it does not touch
 			// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
 			// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
-			if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
+			if perr := r.patchSnapshotNotReadyLocal(ctx, key, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{}, err
@@ -126,7 +125,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		if plan.outcome == namespaceChildrenTerminal {
 			// Terminal child-graph failure the content tree cannot express yet (binder still gated pre-Planned):
 			// surface it directly on Ready (matches the bespoke reconcileParentOwnedChildGraph terminal path).
-			if perr := r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, plan.reason, plan.message); perr != nil {
+			if perr := r.patchSnapshotNotReadyLocal(ctx, key, plan.reason, plan.message); perr != nil {
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{}, nil
@@ -276,7 +275,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 	if err != nil {
 		key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
 		if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
-			return ctrl.Result{}, r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, "DuplicateCoveredPVCUID", err.Error())
+			return ctrl.Result{}, r.patchSnapshotNotReadyLocal(ctx, key, "DuplicateCoveredPVCUID", err.Error())
 		}
 		// Transient (a child not created/bound yet, PVC list): requeue on the child-graph poll cadence.
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil

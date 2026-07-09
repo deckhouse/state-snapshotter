@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -172,7 +171,7 @@ func (r *SnapshotReconciler) failOrphanCaptureTerminal(
 	reason, message string,
 ) error {
 	key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-	return r.patchSnapshotReadyLocal(ctx, key, metav1.ConditionFalse, reason, message)
+	return r.patchSnapshotNotReadyLocal(ctx, key, reason, message)
 }
 
 // directReader returns the non-cached API reader (falling back to the cached client) for cluster-scoped

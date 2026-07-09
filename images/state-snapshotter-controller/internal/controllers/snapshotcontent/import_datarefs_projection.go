@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -81,7 +81,7 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr
 	}
 	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches both the

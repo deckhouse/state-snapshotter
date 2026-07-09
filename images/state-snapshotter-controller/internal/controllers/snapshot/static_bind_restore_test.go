@@ -35,7 +35,7 @@ import (
 
 // seedRestoreContentStatus latches a durable content into the recycle-bin state used by restore:
 // parentDeleted=true, Ready=True, a manifestCheckpointName, and the given content-graph children.
-func seedRestoreContentStatus(t *testing.T, ctx context.Context, cl client.Client, name string, children ...string) {
+func seedRestoreContentStatus(ctx context.Context, t *testing.T, cl client.Client, name string, children ...string) {
 	t.Helper()
 	c := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: name}, c); err != nil {
@@ -120,9 +120,9 @@ func TestReconcileStaticBindRestoreTree_DomainRecreateIdempotentRecursion(t *tes
 		WithObjects(snap, rootContent, childContent, grandContent).
 		WithStatusSubresource(&storagev1alpha1.Snapshot{}, &storagev1alpha1.SnapshotContent{}).Build()
 
-	seedRestoreContentStatus(t, ctx, cl, "root-content", "child-content")
-	seedRestoreContentStatus(t, ctx, cl, "child-content", "grand-content")
-	seedRestoreContentStatus(t, ctx, cl, "grand-content")
+	seedRestoreContentStatus(ctx, t, cl, "root-content", "child-content")
+	seedRestoreContentStatus(ctx, t, cl, "child-content", "grand-content")
+	seedRestoreContentStatus(ctx, t, cl, "grand-content")
 
 	r := &SnapshotReconciler{Client: cl, APIReader: cl}
 

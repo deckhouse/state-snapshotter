@@ -36,7 +36,7 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -701,13 +701,13 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsWithReady(
 	return changed, err
 }
 
-// patchSnapshotReadyLocal writes a local (non-mirror) Ready condition on the root Snapshot. It is used
-// for planning-time failures that cannot yet be represented by the bound SnapshotContent (e.g. a graph
-// planning error before any content Ready exists).
-func (r *SnapshotReconciler) patchSnapshotReadyLocal(
+// patchSnapshotNotReadyLocal writes a local (non-mirror) Ready=False condition on the root Snapshot. It is
+// used for planning-time failures that cannot yet be represented by the bound SnapshotContent (e.g. a graph
+// planning error before any content Ready exists); the Ready=True path is always driven by the mirror from
+// SnapshotContent, so this local writer only ever reports the failure state.
+func (r *SnapshotReconciler) patchSnapshotNotReadyLocal(
 	ctx context.Context,
 	key types.NamespacedName,
-	status metav1.ConditionStatus,
 	reason string,
 	message string,
 ) error {
@@ -718,7 +718,7 @@ func (r *SnapshotReconciler) patchSnapshotReadyLocal(
 		}
 		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
 		if existing != nil &&
-			existing.Status == status &&
+			existing.Status == metav1.ConditionFalse &&
 			existing.Reason == reason &&
 			existing.Message == message &&
 			existing.ObservedGeneration == cur.Generation {
@@ -727,7 +727,7 @@ func (r *SnapshotReconciler) patchSnapshotReadyLocal(
 		base := cur.DeepCopy()
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
-			Status:             status,
+			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            message,
 			ObservedGeneration: cur.Generation,

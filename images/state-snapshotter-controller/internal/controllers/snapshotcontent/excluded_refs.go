@@ -71,7 +71,7 @@ func (r *SnapshotContentController) computeExcludedRefsAggregate(ctx context.Con
 		}
 		childContent := &unstructured.Unstructured{}
 		childContent.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
-		if gerr := r.Client.Get(ctx, client.ObjectKey{Name: childName}, childContent); gerr != nil {
+		if gerr := r.Get(ctx, client.ObjectKey{Name: childName}, childContent); gerr != nil {
 			if errors.IsNotFound(gerr) {
 				// Monotonic aggregate: a not-yet-created child cannot subtract from the union.
 				continue
@@ -101,7 +101,7 @@ func (r *SnapshotContentController) ownDirectExcludedRefs(ctx context.Context, c
 	}
 	owner := &unstructured.Unstructured{}
 	owner.SetGroupVersionKind(schema.FromAPIVersionAndKind(apiVersion, kind))
-	if err := r.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
 		if errors.IsNotFound(err) {
 			return nil, nil
 		}

@@ -36,7 +36,7 @@ import (
 //   - NOT overwrite Ready when the bound content exists (steady state is owned by the content controller), and
 //   - still co-write the E3 degradation Ready=False/ContentMissing when the bound content is gone (a deleted
 //     content produces no reconcile for the content controller to mirror from).
-func newMirrorTestController(t *testing.T, objs ...client.Object) (*GenericSnapshotBinderController, *runtime.Scheme) {
+func newMirrorTestController(t *testing.T, objs ...client.Object) *GenericSnapshotBinderController {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
@@ -54,7 +54,7 @@ func newMirrorTestController(t *testing.T, objs ...client.Object) (*GenericSnaps
 	); err != nil {
 		t.Fatalf("register snapshot/content mapping: %v", err)
 	}
-	return &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme, GVKRegistry: reg}, scheme
+	return &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme, GVKRegistry: reg}
 }
 
 func newBoundSnapshotUnstructured(name, contentName string) *unstructured.Unstructured {
@@ -72,7 +72,7 @@ func newBoundSnapshotUnstructured(name, contentName string) *unstructured.Unstru
 func TestCheckConsistencyAndSetReady_ContentMissingCoWrite(t *testing.T) {
 	ctx := context.Background()
 	snapObj := newBoundSnapshotUnstructured("root-snap", "gone-content")
-	r, _ := newMirrorTestController(t, snapObj)
+	r := newMirrorTestController(t, snapObj)
 
 	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
 	if err != nil {
@@ -103,7 +103,7 @@ func TestCheckConsistencyAndSetReady_DoesNotOverwriteReadyWhenContentPresent(t *
 		Message: "ready",
 	}}
 	snapObj := newBoundSnapshotUnstructured("root-snap", "root-content")
-	r, _ := newMirrorTestController(t, content, snapObj)
+	r := newMirrorTestController(t, content, snapObj)
 
 	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
 	if err != nil {

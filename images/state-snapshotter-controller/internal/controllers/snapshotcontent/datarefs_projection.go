@@ -107,7 +107,7 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr
 	}
 	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
@@ -172,7 +172,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr
 	}
 	if content.Status.Data != nil && content.Status.Data.Artifact.Name == vscName {
@@ -198,7 +198,7 @@ func (r *SnapshotContentController) publishDataBindings(ctx context.Context, con
 		return false, err
 	}
 	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr
 	}
 	if handoffErr := EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
@@ -214,7 +214,7 @@ func (r *SnapshotContentController) publishDataBindings(ctx context.Context, con
 // contentHasData reports whether the SnapshotContent already carries a published status.data binding.
 func (r *SnapshotContentController) contentHasData(ctx context.Context, contentName string) bool {
 	content := &storagev1alpha1.SnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		return false
 	}
 	return content.Status.Data != nil

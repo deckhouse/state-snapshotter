@@ -251,7 +251,7 @@ func TestSelfHealVSCOwnerRefAddsAndPreservesForeign(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-1")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-1")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 
@@ -307,7 +307,7 @@ func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
 		}).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-owned")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-owned")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 
@@ -322,7 +322,7 @@ func TestSelfHealVSCMissingIsNoop(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build() // vsc-gone not created
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("c", "mcp-ok", "vsc-gone")
+	content := commonContentReadyWithMCPAndDataRefs("c", "vsc-gone")
 	// Must not panic / error; missing artifact is left to data readiness.
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 }
@@ -340,7 +340,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 		t.Fatalf("delete vsc: %v", err)
 	}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-del")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-del")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 

@@ -45,7 +45,7 @@ func subtreeObj(kind, name, uid string) map[string]interface{} {
 
 // subtreeCreateNode installs a Ready MCP (+chunk) holding objs and a SnapshotContent named contentName
 // pointing at that MCP with the given child content refs.
-func subtreeCreateNode(t *testing.T, cl client.Client, ctx context.Context, cpName, contentName string, objs []map[string]interface{}, children ...string) {
+func subtreeCreateNode(ctx context.Context, t *testing.T, cl client.Client, cpName, contentName string, objs []map[string]interface{}, children ...string) {
 	t.Helper()
 	d, cs := aggManifestEncodeChunk(objs)
 	ch := aggManifestCreateChunk("ch-"+cpName, cpName, d, cs)
@@ -92,9 +92,9 @@ func identityNames(ids []snapshotsdk.SubtreeManifestIdentity) map[string]struct{
 func TestBuildSubtreeManifestIdentities_RecursesWholeSubtree(t *testing.T) {
 	agg, cl, ctx := newSubtreeAgg(t)
 
-	subtreeCreateNode(t, cl, ctx, "mcp-gc", "gc-content", []map[string]interface{}{subtreeObj("Secret", "gc-own", "uid-gc")})
-	subtreeCreateNode(t, cl, ctx, "mcp-child", "child-content", []map[string]interface{}{subtreeObj("ConfigMap", "child-own", "uid-child")}, "gc-content")
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-gc", "gc-content", []map[string]interface{}{subtreeObj("Secret", "gc-own", "uid-gc")})
+	subtreeCreateNode(ctx, t, cl, "mcp-child", "child-content", []map[string]interface{}{subtreeObj("ConfigMap", "child-own", "uid-child")}, "gc-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
 
 	raw, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	if err != nil {
@@ -116,7 +116,7 @@ func TestBuildSubtreeManifestIdentities_RecursesWholeSubtree(t *testing.T) {
 // apiVersion/kind/namespace/name/uid projection consumers key on.
 func TestBuildSubtreeManifestIdentities_IdentityFields(t *testing.T) {
 	agg, cl, ctx := newSubtreeAgg(t)
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ConfigMap", "cm-1", "uid-cm-1")})
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ConfigMap", "cm-1", "uid-cm-1")})
 
 	raw, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	if err != nil {
@@ -151,7 +151,7 @@ func TestBuildSubtreeManifestIdentities_FailClosedNotReadyMCP(t *testing.T) {
 	if err := cl.Create(ctx, aggManifestContent("child-content", "mcp-child")); err != nil {
 		t.Fatal(err)
 	}
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
 
 	_, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	assertAggStatus(t, err, http.StatusConflict)
@@ -165,7 +165,7 @@ func TestBuildSubtreeManifestIdentities_FailClosedEmptyCheckpointName(t *testing
 	if err := cl.Create(ctx, aggManifestContent("child-content", "")); err != nil {
 		t.Fatal(err)
 	}
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "child-content")
 
 	_, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	assertAggStatus(t, err, http.StatusConflict)
@@ -177,8 +177,8 @@ func TestBuildSubtreeManifestIdentities_FailClosedDoubleCapture(t *testing.T) {
 	agg, cl, ctx := newSubtreeAgg(t)
 
 	dup := subtreeObj("ConfigMap", "shared", "uid-shared")
-	subtreeCreateNode(t, cl, ctx, "mcp-child", "child-content", []map[string]interface{}{dup})
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{dup}, "child-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-child", "child-content", []map[string]interface{}{dup})
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{dup}, "child-content")
 
 	_, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	assertAggStatus(t, err, http.StatusConflict)
@@ -202,7 +202,7 @@ func TestBuildSubtreeManifestIdentities_ContentNotFound(t *testing.T) {
 // (referenced but absent) fails the request 404 rather than silently dropping that subtree.
 func TestBuildSubtreeManifestIdentities_MissingChildContentNotFound(t *testing.T) {
 	agg, cl, ctx := newSubtreeAgg(t)
-	subtreeCreateNode(t, cl, ctx, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "ghost-content")
+	subtreeCreateNode(ctx, t, cl, "mcp-root", "root-content", []map[string]interface{}{subtreeObj("ServiceAccount", "root-own", "uid-root")}, "ghost-content")
 
 	_, err := agg.BuildSubtreeManifestIdentities(ctx, "root-content")
 	assertAggStatus(t, err, http.StatusNotFound)

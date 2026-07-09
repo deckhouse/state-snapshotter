@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package common //nolint:revive // package name matches internal/controllers/common directory
+package snaphelpers
 
 // Kind constants used by the demo domain controllers. KindSnapshot is the generic core snapshot kind
 // (referenced when resolving parent ownerRefs); the rest are demo-domain kinds. This package is

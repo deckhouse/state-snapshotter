@@ -48,7 +48,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/api/names"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -689,7 +689,7 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		var key client.ObjectKey
 		if mapping.Scope.Name() == meta.RESTScopeNameRoot {
 			// Cluster-scoped: only the capture's own Namespace is allowed (name == mcr.Namespace).
-			if !(gvk.Group == "" && gvk.Version == "v1" && gvk.Kind == "Namespace" && target.Name == mcr.Namespace) {
+			if gvk.Group != "" || gvk.Version != "v1" || gvk.Kind != "Namespace" || target.Name != mcr.Namespace {
 				return nil, terminalCapturef("cluster-scoped target %s/%s is not allowed in a namespace capture (only Namespace %q)", target.APIVersion, target.Kind, mcr.Namespace)
 			}
 			// A cluster-scoped GET keys on name only, and the captured object carries an empty namespace so

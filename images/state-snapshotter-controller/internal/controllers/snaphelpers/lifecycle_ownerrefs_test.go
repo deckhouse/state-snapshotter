@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package common //nolint:revive // package name matches internal/controllers/common directory
+package snaphelpers
 
 import (
 	"testing"
@@ -39,7 +39,9 @@ func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
 		}
 	}
 	// Deterministic per UID; distinct UIDs give distinct names.
-	if RootObjectKeeperName("a") != RootObjectKeeperName("a") {
+	firstA := RootObjectKeeperName("a")
+	secondA := RootObjectKeeperName("a")
+	if firstA != secondA {
 		t.Fatal("RootObjectKeeperName not deterministic")
 	}
 	if RootObjectKeeperName("a") == RootObjectKeeperName("b") {

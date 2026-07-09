@@ -51,9 +51,9 @@ func fsMode() *corev1.PersistentVolumeMode    { m := corev1.PersistentVolumeFile
 func blockMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeBlock; return &m }
 func scPtr(s string) *string                  { return &s }
 
-func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding {
+func pvcTargetBinding(name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: ns, Name: name},
+		Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
 	}
 }
 
@@ -75,7 +75,7 @@ func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, pv).Build()
 
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "data")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("data")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestEnrich_BlockPVCSkipsPV(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	// The PV is intentionally absent: a Block volume must not read it. If it did, the missing PV would
 	// surface as an error, so a nil error proves the PV read was skipped.
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "blk")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("blk")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestEnrich_NilVolumeModeDefaultsFilesystem(t *testing.T) {
 	scheme := enrichScheme(t)
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "nm"}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "nm")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("nm")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEnrich_MissingPVCTolerated(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-	in := []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "gone")}
+	in := []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("gone")}
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, in)
 	if err != nil {
 		t.Fatalf("a genuinely-gone source PVC must be tolerated, got error: %v", err)
@@ -164,7 +164,7 @@ func TestEnrich_PVReadErrorReturned(t *testing.T) {
 		},
 	}).Build()
 
-	_, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, directFail, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "data")})
+	_, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, directFail, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("data")})
 	if err == nil {
 		t.Fatal("expected a PV read error to be returned, not swallowed")
 	}
@@ -222,7 +222,7 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 		WithObjects(pvc, vscWithRestoreSize("vsc-pvc", tenGiB, false), vscWithRestoreSize("vsc-disk", tenGiB, false)).
 		Build()
 
-	pvcBinding := pvcTargetBinding("ns1", "data")
+	pvcBinding := pvcTargetBinding("data")
 	pvcBinding.Artifact = vscArtifact("vsc-pvc")
 	domainBinding := storagev1alpha1.SnapshotDataBinding{
 		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
@@ -348,7 +348,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	}
 
 	// Variant A: a content holds a single dataRef, so equality is per-binding (dataBindingEqual).
-	if !dataBindingEqual(base, mut(func(b *storagev1alpha1.SnapshotDataBinding) {})) {
+	if !dataBindingEqual(base, mut(func(_ *storagev1alpha1.SnapshotDataBinding) {})) {
 		t.Error("identical bindings must compare equal")
 	}
 	for name, f := range map[string]func(b *storagev1alpha1.SnapshotDataBinding){

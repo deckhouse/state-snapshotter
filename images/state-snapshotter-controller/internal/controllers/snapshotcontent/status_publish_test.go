@@ -147,7 +147,7 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsKeepsDegradedChildWhenCon
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content-missing"}},
 		},
 	}
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content-missing")
+	childSnap := boundChildSnapshot("child-content-missing")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, childSnap).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).Build()
 
@@ -182,7 +182,7 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsDoesNotPublishNewDangling
 		t.Fatalf("add scheme: %v", err)
 	}
 	parent := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content-pending")
+	childSnap := boundChildSnapshot("child-content-pending")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, childSnap).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).Build()
 

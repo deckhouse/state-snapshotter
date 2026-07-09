@@ -32,29 +32,27 @@ import (
 )
 
 // barrier2OwnedContent builds a common SnapshotContent unstructured that points its spec.snapshotRef at the
-// given owning Snapshot and (optionally) carries Ready=True, for the mirror-writer-switch tests.
-func barrier2OwnedContent(t *testing.T, name, ownerNS, ownerName string, readyTrue bool) *unstructured.Unstructured {
+// fixed owning Snapshot (ns1/owner) and carries Ready=True, for the mirror-writer-switch tests.
+func barrier2OwnedContent(t *testing.T) *unstructured.Unstructured {
 	t.Helper()
 	c := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: "root"},
 		Spec: storagev1alpha1.SnapshotContentSpec{
 			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 				Kind:       "Snapshot",
-				Name:       ownerName,
-				Namespace:  ownerNS,
+				Name:       "owner",
+				Namespace:  "ns1",
 			},
 		},
 	}
-	if readyTrue {
-		c.Status.Conditions = append(c.Status.Conditions, metav1.Condition{
-			Type:               snapshot.ConditionReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             snapshot.ReasonCompleted,
-			Message:            "ready",
-			LastTransitionTime: metav1.Now(),
-		})
-	}
+	c.Status.Conditions = append(c.Status.Conditions, metav1.Condition{
+		Type:               snapshot.ConditionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             snapshot.ReasonCompleted,
+		Message:            "ready",
+		LastTransitionTime: metav1.Now(),
+	})
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(c)
 	if err != nil {
 		t.Fatalf("to unstructured: %v", err)
@@ -145,7 +143,7 @@ func TestMirrorReadyToOwnerSnapshot_Barrier2FinishedGate(t *testing.T) {
 				Build()
 			r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-			contentObj := barrier2OwnedContent(t, "root", "ns1", "owner", true)
+			contentObj := barrier2OwnedContent(t)
 			if err := r.mirrorReadyToOwnerSnapshot(ctx, contentObj, "", ""); err != nil {
 				t.Fatalf("mirrorReadyToOwnerSnapshot: %v", err)
 			}

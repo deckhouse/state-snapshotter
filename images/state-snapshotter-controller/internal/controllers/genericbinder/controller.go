@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
@@ -682,7 +682,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	logger := log.FromContext(ctx)
 	contentName := snapshotLike.GetStatusContentName()
 	if contentName == "" {
-		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
+		return r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonContentMissing, "SnapshotContent is not bound")
 	}
 
 	contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
@@ -698,13 +698,13 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 			// E3 degradation: the bound content was deleted out from under a Ready snapshot. The content
 			// controller cannot express this (no reconcile for a gone object), so the binder co-writes the
 			// terminal-shaped ContentMissing directly, woken by mapBoundContentToSnapshots on the delete.
-			return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
+			return r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonContentMissing, fmt.Sprintf("SnapshotContent %s not found", contentName))
 		}
 		return fmt.Errorf("failed to get SnapshotContent: %w", err)
 	}
 
 	if !contentObj.GetDeletionTimestamp().IsZero() {
-		return r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
+		return r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonDeleting, fmt.Sprintf("SnapshotContent %s is being deleted", contentName))
 	}
 
 	// Mirror the bound content's durable excludedRefs aggregate onto this domain CR's top-level
@@ -721,15 +721,18 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	return nil
 }
 
-func (r *GenericSnapshotBinderController) patchSnapshotReadyFromContent(
+// patchSnapshotNotReadyFromContent mirrors a Ready=False condition from the bound SnapshotContent onto the
+// Snapshot. The binder only ever writes the failure state (content missing/misbound/deleting or an import
+// terminal); the Ready=True path is owned by the SnapshotContentController's post-bind mirror, so the status
+// is always ConditionFalse here.
+func (r *GenericSnapshotBinderController) patchSnapshotNotReadyFromContent(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	snapshotLike snapshot.SnapshotLike,
-	status metav1.ConditionStatus,
 	reason string,
 	message string,
 ) error {
-	return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionReady, status, reason, message)
+	return r.patchSnapshotConditionFromContent(ctx, obj, snapshotLike, snapshot.ConditionReady, metav1.ConditionFalse, reason, message)
 }
 
 // patchSnapshotConditionFromContent mirrors the Ready condition from the bound SnapshotContent onto the

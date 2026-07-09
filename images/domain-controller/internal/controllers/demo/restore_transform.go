@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	domainsdk "github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
 )
 

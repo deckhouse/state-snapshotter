@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,7 +80,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 	if contentName == "" {
 		// The CRD CEL guarantees StaticBind carries spec.source.snapshotContentName; treat a missing one as
 		// a terminal misconfiguration surfaced on Ready rather than a nil-deref.
-		if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonSnapshotContentMisbound,
+		if err := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonSnapshotContentMisbound,
 			"StaticBind snapshot has empty spec.source.snapshotContentName"); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -93,7 +92,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 		if errors.IsNotFound(err) {
 			// The core restore orchestrator may not have (re-)pointed the surviving content at this CR yet;
 			// hold non-terminally and poll (the content->snapshot watch also wakes us on the re-point).
-			if perr := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonSourceContentNotFound,
+			if perr := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonSourceContentNotFound,
 				fmt.Sprintf("pre-provisioned SnapshotContent %q not found", contentName)); perr != nil {
 				return ctrl.Result{}, perr
 			}
@@ -128,7 +127,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericStaticBind(
 		}
 		// Not re-pointed (parentDeleted not yet observed => relaxed-CEL gate closed, or a concurrent write):
 		// surface Ready=False and poll until the recycle-bin latch lands and the re-point can proceed.
-		if err := r.patchSnapshotReadyFromContent(ctx, obj, snapshotLike, metav1.ConditionFalse, snapshot.ReasonSnapshotContentMisbound,
+		if err := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonSnapshotContentMisbound,
 			fmt.Sprintf("SnapshotContent %q spec.snapshotRef does not yet point back at %s %s/%s (awaiting recycle-bin re-point)", contentName, gvk.Kind, obj.GetNamespace(), obj.GetName())); err != nil {
 			return ctrl.Result{}, err
 		}

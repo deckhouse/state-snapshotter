@@ -116,17 +116,13 @@ func projContentTyped() *storagev1alpha1.SnapshotContent {
 	}
 }
 
-// projContentObj is the unstructured SnapshotContent handed to the projection (labels + name only).
-func projContentObj(labels map[string]string) *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+// projContentObj is the unstructured SnapshotContent handed to the projection (name only).
+func projContentObj() *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "SnapshotContent",
 		"metadata":   map[string]interface{}{"name": projTestContent},
 	}}
-	if len(labels) > 0 {
-		obj.SetLabels(labels)
-	}
-	return obj
 }
 
 func projAssertPublishedAndHandedOff(t *testing.T, cl client.Client) {
@@ -187,7 +183,7 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(nil), owner, projTestNS, true)
+	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -226,7 +222,7 @@ func TestReconcileDataLegProjection_NativeCSIPublishesFromBoundVSC(t *testing.T)
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(nil), owner, projTestNS, true)
+	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}

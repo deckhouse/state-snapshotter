@@ -49,9 +49,9 @@ func uploadTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-func importModeSnapshot(name, ns string, uid types.UID) *storagev1alpha1.Snapshot {
+func importModeSnapshot() *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: uid},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: types.UID("snap-uid")},
 		Spec:       storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeImport},
 	}
 }
@@ -70,7 +70,7 @@ func uploadPayload(t *testing.T, childRefs ...UploadChildRef) []byte {
 
 func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
@@ -133,7 +133,7 @@ func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 
 func TestEnsureReconstructedManifestCheckpointObjectKeeper(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	gvk := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
 
@@ -173,7 +173,7 @@ func TestEnsureReconstructedManifestCheckpointObjectKeeper(t *testing.T) {
 
 func TestImportUpload_Idempotent(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
@@ -204,7 +204,7 @@ func TestImportUpload_RejectsNonImportMode(t *testing.T) {
 
 func TestImportUpload_RejectsBadPayload(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
@@ -243,7 +243,7 @@ func TestImportUpload_NotFound(t *testing.T) {
 // A non-leaf upload still needs the write, so the conflict must surface (no silent loss of child edges).
 func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	scheme := aggManifestTestScheme(t)
 	// Fail every Snapshot status update (the competing status owner always wins). The reconstructed
 	// ManifestCheckpoint status update is typed (*ManifestCheckpoint) and passes through untouched.

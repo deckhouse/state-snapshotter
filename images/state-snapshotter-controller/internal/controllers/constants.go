@@ -17,22 +17,22 @@ limitations under the License.
 package controllers
 
 import (
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 )
 
 const (
-	KindSnapshot = common.KindSnapshot
+	KindSnapshot = controllercommon.KindSnapshot
 )
 
 // API constants for ObjectKeeper
 const (
 	// DeckhouseAPIVersion is the API version for deckhouse.io resources (ObjectKeeper)
 	// Note: This is group/version, not just group, despite the name.
-	DeckhouseAPIVersion                 = common.DeckhouseAPIVersion
-	KindObjectKeeper                    = common.KindObjectKeeper
-	ObjectKeeperModeFollowObject        = common.ObjectKeeperModeFollowObject
-	ObjectKeeperModeFollowObjectWithTTL = common.ObjectKeeperModeFollowObjectWithTTL
+	DeckhouseAPIVersion                 = controllercommon.DeckhouseAPIVersion
+	KindObjectKeeper                    = controllercommon.KindObjectKeeper
+	ObjectKeeperModeFollowObject        = controllercommon.ObjectKeeperModeFollowObject
+	ObjectKeeperModeFollowObjectWithTTL = controllercommon.ObjectKeeperModeFollowObjectWithTTL
 )
 
 const (

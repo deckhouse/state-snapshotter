@@ -221,7 +221,7 @@ func TestPlanNamespaceChildren_LostDomainChild_Terminal(t *testing.T) {
 // TestPlanNamespaceChildren_StaleRefCRPresent_NotLost: a published ref whose source vanished but whose CR
 // still exists is NOT lost (losing the source does not un-capture an already-created child).
 func TestPlanNamespaceChildren_StaleRefCRPresent_NotLost(t *testing.T) {
-	stale := demoSnapshotChild("stale-child", nil)
+	stale := demoSnapshotChild("stale-child")
 	r, f, childName := planLostFixtureReconciler(t, stale)
 	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
 	nsSnap.Status.ChildrenSnapshotRefs = []storagev1alpha1.SnapshotChildRef{

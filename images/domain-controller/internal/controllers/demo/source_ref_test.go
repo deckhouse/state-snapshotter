@@ -33,7 +33,7 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
