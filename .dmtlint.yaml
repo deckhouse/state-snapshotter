@@ -17,8 +17,16 @@ linters-settings:
           name: d8:state-snapshotter:controller
         - kind: ClusterRole
           name: d8:state-snapshotter:webhooks
+        # capture-namespace intentionally uses wildcards: it must read arbitrary
+        # namespaced resources to capture a namespace's manifests.
         - kind: ClusterRole
           name: d8:state-snapshotter:capture-namespace
+      placement:
+        # auth-reader binds the controller SA to the kube-system
+        # extension-apiserver-authentication-reader Role; the name follows the
+        # upstream auth-reader convention rather than the module-name prefix.
+        - kind: RoleBinding
+          name: state-snapshotter-controller-auth-reader
   no-cyrillic:
     exclude-rules:
       directories:

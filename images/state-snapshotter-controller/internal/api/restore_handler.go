@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"compress/gzip"
