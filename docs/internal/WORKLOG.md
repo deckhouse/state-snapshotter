@@ -1406,3 +1406,34 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   disk layer sees `disk-vm` covered and skips it; a truly standalone disk (`disk-standalone`) is still captured
   at the root. Pure weight reorder in the demo CSD manifest + a load-bearing comment so it is not re-inverted;
   the Phase 3 full volume-data e2e is the regression guard. Unrelated to the built-in-VolumeSnapshot change.
+
+### Content child-edge freeze gated on owner Planned (fix ChildrenLinkPending)
+
+- **Bugfix** (snapshotcontent, planned-freeze-edge-gate) `reconcileChildContentEdges` now gates the ATOMIC
+  frozen-set write of `status.childrenSnapshotContentRefs` on the owning snapshot's DECLARED child set being
+  frozen, via a new `ownerChildSetFrozen(owner)` helper. A Capture owner publishes `childrenSnapshotRefs`
+  INCREMENTALLY while planning (domain children first, then the residual/orphan CSI `VolumeSnapshot` wave
+  ~20s later) and only freezes the set at barrier 1 (`domainSpecificController.phase >= Planned`). The eager
+  root content existed from ~tl+0.7s, so the aggregator resolved the two early domain children (~tl+4s) and
+  the Option A CEL froze the edge set at 2 BEFORE the orphan VS was declared — permanently stranding the
+  orphan VS content (`ChildrenLinkPending` forever) and wedging every Phase-3 volume-data spec (root
+  `vol-tree` stuck Ready=False, orphan VS content itself Ready=True). The gate treats a Capture owner as
+  frozen only at phase Planned/Finished (or terminal Failed), mirroring the SDK `childrenSetFrozen`
+  semantics; Import/StaticBind owners (no capture phase, atomic `childrenSnapshotRefs`) are frozen from the
+  start and keep today's behavior. Pre-Planned Capture owners requeue without projecting. The stale doc
+  comment (which wrongly assumed a not-yet-planned owner has an empty `childrenSnapshotRefs`) was rewritten.
+  Unit tests: `ownerChildSetFrozen` matrix (import/staticbind/capture phases incl. Failed) + three
+  `reconcileChildContentEdges` behavior specs (pre-Planned Capture does not freeze even when all current
+  children are bound; Planned freezes the full set; Import projects without a phase). gofmt + go vet + full
+  snapshotcontent package tests + module build green; golangci-lint adds no new findings.
+- **Note** (storage-foundation, secondary/out-of-scope) The forked VolumeSnapshot CRD
+  (`crds/snapshot.storage.k8s.io_volumesnapshots.yaml`) `status.captureState.commonController` schema carries
+  `manifestCaptured`/`dataCaptured`/`subtreeManifestsPersisted` but is MISSING `subtreePlanned` (added to the
+  shared `CommonControllerCaptureState` in Block 7b). The apiserver therefore prunes main's sideways
+  `subtreePlanned` latch write onto the orphan VS (log: `unknown field
+  "status.captureState.commonController.subtreePlanned"`). The Go type reuses the shared
+  `storagev1alpha1.CaptureStateStatus` (already correct), so the fix is CRD-schema-only: add the boolean
+  `subtreePlanned` under `commonController`. Does NOT affect this fix (the gate keys on
+  `domainSpecificController.phase`, which the VS CRD carries) and does NOT break the e2e `subtreePlanned`
+  specs (both skip `VolumeSnapshot` nodes; the root-`subtreePlanned` assertion runs on the manifest-only tree
+  with no VS). Left for a separate storage-foundation change.
