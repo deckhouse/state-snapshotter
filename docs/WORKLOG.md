@@ -1334,3 +1334,9 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   live on wave7, so the guard closes an already-open wedge window rather than landing before the CEL). Also
   tightened the ADR SDK bullet to state the excluded-set freeze + typed `ErrChildrenSetFrozen` (matches the
   implemented semantics). Docs only.
+- **Bugfix** (unifiedbootstrap) Fixed stale test assertion in
+  `TestDefaultGraphRegistryBuiltInPairs_hasNoDomainPairs` (`gvk_test.go`) still checking the pre-rename API
+  group `storage.deckhouse.io`; the group was renamed to `state-snapshotter.deckhouse.io` in `61e2795`
+  (`refactor(api): rename API group storage.deckhouse.io -> state-snapshotter.deckhouse.io`) but this one
+  assertion was missed, so the core built-in Snapshot pair itself tripped the "no hardcoded domain pair"
+  guard. Production code (`gvk.go`) was already correct; test-only fix.

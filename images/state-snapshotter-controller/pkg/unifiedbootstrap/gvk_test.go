@@ -154,7 +154,7 @@ func TestDefaultGraphRegistryBuiltInPairs_hasNoDomainPairs(t *testing.T) {
 	// The single built-in list must never carry a hardcoded domain kind (e.g. virtualization/demo):
 	// those have no static RBAC contract and would widen the watch surface into forbidden loops.
 	for _, p := range DefaultGraphRegistryBuiltInPairs() {
-		if p.Snapshot.Group != "storage.deckhouse.io" || p.Snapshot.Kind != "Snapshot" {
+		if p.Snapshot.Group != "state-snapshotter.deckhouse.io" || p.Snapshot.Kind != "Snapshot" {
 			t.Fatalf("built-in pairs must contain only the core Snapshot pair, found domain pair: %v", p)
 		}
 	}
