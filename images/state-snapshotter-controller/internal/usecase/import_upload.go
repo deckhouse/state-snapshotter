@@ -123,7 +123,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID),
 	// owned by the dedicated import ObjectKeeper (durable GC anchor until the SnapshotContent handoff).
 	checkpointName := ReconstructedManifestCheckpointName(uid, "")
-	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, []metav1.OwnerReference{okRef}, manifests); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, []metav1.OwnerReference{okRef}, manifests); err != nil {
 		return "", classifyReconstructError(err)
 	}
 

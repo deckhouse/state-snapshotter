@@ -883,9 +883,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 						},
 					},
 				},
-				Spec: storagev1alpha1.ManifestCheckpointSpec{
-					SourceNamespace: mcr.Namespace,
-				},
+				Spec: storagev1alpha1.ManifestCheckpointSpec{},
 			}
 			Expect(client.Create(ctx, checkpoint)).To(Succeed())
 
@@ -1419,14 +1417,11 @@ var _ = Describe("Resource Scoping", func() {
 					Name: "mcp-test-123",
 					// No Namespace field - cluster-scoped
 				},
-				Spec: storagev1alpha1.ManifestCheckpointSpec{
-					SourceNamespace: "test-namespace",
-				},
+				Spec: storagev1alpha1.ManifestCheckpointSpec{},
 			}
 
 			Expect(checkpoint.Namespace).To(Equal(""))
 			Expect(checkpoint.Name).ToNot(BeEmpty())
-			Expect(checkpoint.Spec.SourceNamespace).To(Equal("test-namespace"))
 		})
 
 		It("should verify ManifestCheckpointContentChunk is cluster-scoped", func() {
@@ -1452,7 +1447,7 @@ var _ = Describe("Resource Scoping", func() {
 })
 
 var _ = Describe("Source provenance", func() {
-	It("should carry the originating request namespace on spec and its name on the source-request label", func() {
+	It("should carry the originating request name on the source-request label", func() {
 		mcr := &storagev1alpha1.ManifestCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-mcr",
@@ -1461,8 +1456,9 @@ var _ = Describe("Source provenance", func() {
 			},
 		}
 
-		// The manifestCaptureRequestRef field was dropped (the originating request is short-lived and
-		// never resolved by ref); provenance is now spec.sourceNamespace + the source-request label.
+		// Both manifestCaptureRequestRef and sourceNamespace were dropped from the spec (the originating
+		// request is short-lived and never resolved by ref; a namespace field does not fit future
+		// cluster-wide sources). Provenance is now carried solely by the source-request label.
 		checkpoint := &storagev1alpha1.ManifestCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "mcp-provenance",
@@ -1470,13 +1466,11 @@ var _ = Describe("Source provenance", func() {
 					"state-snapshotter.deckhouse.io/source-request": mcr.Name,
 				},
 			},
-			Spec: storagev1alpha1.ManifestCheckpointSpec{
-				SourceNamespace: mcr.Namespace,
-			},
+			Spec: storagev1alpha1.ManifestCheckpointSpec{},
 		}
 
-		Expect(checkpoint.Spec.SourceNamespace).To(Equal(mcr.Namespace))
 		Expect(checkpoint.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcr.Name))
+		Expect(checkpoint.Labels).ToNot(HaveKey("state-snapshotter.deckhouse.io/source-namespace"))
 	})
 })
 

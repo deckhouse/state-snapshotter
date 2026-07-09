@@ -223,9 +223,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 		checkpointName := namespacemanifest.GenerateManifestCheckpointNameFromUID(mcr.UID)
 		mcp := &storagev1alpha1.ManifestCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: checkpointName},
-			Spec: storagev1alpha1.ManifestCheckpointSpec{
-				SourceNamespace: mcr.Namespace,
-			},
+			Spec:       storagev1alpha1.ManifestCheckpointSpec{},
 		}
 		Expect(c.Create(ctx, mcp)).To(Succeed())
 		mcp.Status.Conditions = []metav1.Condition{{

@@ -24,12 +24,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestManifestCheckpoint_Spec verifies the ManifestCheckpoint spec surface after the
-// manifestCaptureRequestRef field was dropped (the originating request is short-lived; its name lives on
-// the source-request label instead).
+// TestManifestCheckpoint_Spec verifies the ManifestCheckpoint spec surface after both the
+// manifestCaptureRequestRef and sourceNamespace fields were dropped: the spec is now intentionally empty
+// and all source provenance lives on the source-request label (the originating request is short-lived).
 // Checks:
-// - SourceNamespace correctly serializes/deserializes
 // - the removed manifestCaptureRequestRef field is absent from the marshaled JSON
+// - the removed sourceNamespace field is absent from the marshaled JSON
 // - the source-request label carries the originating request name
 // - Ready condition works correctly (instead of deprecated Phase)
 func TestManifestCheckpoint_Spec(t *testing.T) {
@@ -40,9 +40,7 @@ func TestManifestCheckpoint_Spec(t *testing.T) {
 				"state-snapshotter.deckhouse.io/source-request": "test-mcr",
 			},
 		},
-		Spec: ManifestCheckpointSpec{
-			SourceNamespace: "test-namespace",
-		},
+		Spec: ManifestCheckpointSpec{},
 		Status: ManifestCheckpointStatus{
 			TotalObjects:   5,
 			TotalSizeBytes: 1024,
@@ -69,12 +67,7 @@ func TestManifestCheckpoint_Spec(t *testing.T) {
 		t.Fatalf("Failed to unmarshal ManifestCheckpoint: %v", err)
 	}
 
-	// Verify spec: SourceNamespace round-trips.
-	if unmarshaled.Spec.SourceNamespace != checkpoint.Spec.SourceNamespace {
-		t.Errorf("Expected SourceNamespace %s, got %s", checkpoint.Spec.SourceNamespace, unmarshaled.Spec.SourceNamespace)
-	}
-
-	// Verify the dropped field is not serialized under spec.
+	// Verify the dropped fields are not serialized under spec.
 	var raw map[string]interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("Failed to unmarshal into map: %v", err)
@@ -82,6 +75,9 @@ func TestManifestCheckpoint_Spec(t *testing.T) {
 	if spec, ok := raw["spec"].(map[string]interface{}); ok {
 		if _, exists := spec["manifestCaptureRequestRef"]; exists {
 			t.Error("manifestCaptureRequestRef should not exist in ManifestCheckpointSpec")
+		}
+		if _, exists := spec["sourceNamespace"]; exists {
+			t.Error("sourceNamespace should not exist in ManifestCheckpointSpec")
 		}
 	}
 

@@ -67,18 +67,17 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 		// These resources don't get deleted with namespace, so we need explicit cleanup
 		// to prevent test pollution between runs
 
-		// Delete all ManifestCheckpoints created in this test
+		// Delete all ManifestCheckpoints. They are cluster-scoped test artifacts — the spec no longer
+		// carries a source namespace to filter on, and every checkpoint in this isolated envtest was
+		// created by a spec here — so a blanket cleanup keeps runs independent.
 		checkpoints := &storagev1alpha1.ManifestCheckpointList{}
 		if err := k8sClient.List(ctx, checkpoints); err == nil {
 			for i := range checkpoints.Items {
 				cp := &checkpoints.Items[i]
-				// Only delete checkpoints sourced from this test namespace
-				if cp.Spec.SourceNamespace == testNS {
-					foreground := metav1.DeletePropagationForeground
-					_ = k8sClient.Delete(ctx, cp, &client.DeleteOptions{
-						PropagationPolicy: &foreground,
-					})
-				}
+				foreground := metav1.DeletePropagationForeground
+				_ = k8sClient.Delete(ctx, cp, &client.DeleteOptions{
+					PropagationPolicy: &foreground,
+				})
 			}
 		}
 
@@ -95,21 +94,11 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 					_ = k8sClient.Delete(ctx, ok)
 					continue
 				}
-				// Best-effort cleanup: delete stray ObjectKeepers named ret-{checkpointName} that are not ret-mcr-*.
+				// Best-effort cleanup: delete stray ObjectKeepers named ret-{checkpointName} that are not
+				// ret-mcr-*. Checkpoints no longer carry a source namespace to attribute them to a test, and
+				// these keepers are all envtest artifacts, so delete them unconditionally.
 				if strings.HasPrefix(ok.Name, "ret-") && !strings.HasPrefix(ok.Name, "ret-mcr-") {
-					// Extract checkpoint name from ObjectKeeper name: "ret-{checkpointName}"
-					checkpointName := strings.TrimPrefix(ok.Name, "ret-")
-					// Check if this checkpoint belongs to our test namespace
-					cp := &storagev1alpha1.ManifestCheckpoint{}
-					if err := k8sClient.Get(ctx, types.NamespacedName{Name: checkpointName}, cp); err == nil {
-						if cp.Spec.SourceNamespace == testNS {
-							// Stray ObjectKeeper for this namespace — delete for a clean test run
-							_ = k8sClient.Delete(ctx, ok)
-						}
-					} else {
-						// Checkpoint doesn't exist (already deleted), safe to delete ObjectKeeper
-						_ = k8sClient.Delete(ctx, ok)
-					}
+					_ = k8sClient.Delete(ctx, ok)
 				}
 			}
 		}
@@ -147,9 +136,10 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcp := getManifestCheckpoint(ctx, checkpointName)
 			verifyCheckpointIsClusterScoped(mcp)
 
-			// Verify source provenance: sourceNamespace on spec, originating request name on the label
-			Expect(mcp.Spec.SourceNamespace).To(Equal(testNS))
+			// Verify source provenance: the originating request name is carried on the source-request
+			// label, and the removed source-namespace label is absent.
 			Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", TestFixtures.TestMCRName))
+			Expect(mcp.Labels).ToNot(HaveKey("state-snapshotter.deckhouse.io/source-namespace"))
 
 			// Verify chunks are created and cluster-scoped
 			chunks := listManifestCheckpointContentChunks(ctx, checkpointName)
@@ -333,7 +323,6 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Verify checkpoint still exists and is the same
 			mcp := getManifestCheckpoint(ctx, checkpointName1)
 			Expect(mcp).NotTo(BeNil())
-			Expect(mcp.Spec.SourceNamespace).To(Equal(testNS))
 			Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", TestFixtures.TestMCRName))
 		})
 
@@ -400,8 +389,9 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(ready.Reason).NotTo(BeEmpty())
 			Expect(mcr.Status.CheckpointName).To(BeEmpty())
 
-			// Verify no checkpoint created for this MCR
-			// Filter by the source provenance: sourceNamespace + the source-request label name.
+			// Verify no checkpoint created for this MCR.
+			// Attribute checkpoints to the originating MCR via the source-request label (the only surviving
+			// provenance signal after the source namespace was removed).
 			checkpoints := &storagev1alpha1.ManifestCheckpointList{}
 			err := k8sClient.List(ctx, checkpoints)
 			Expect(err).NotTo(HaveOccurred())
@@ -409,8 +399,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			// Count checkpoints sourced from this MCR
 			matchingCheckpoints := 0
 			for _, cp := range checkpoints.Items {
-				if cp.Spec.SourceNamespace == testNS &&
-					cp.Labels["state-snapshotter.deckhouse.io/source-request"] == TestFixtures.TestMCRName {
+				if cp.Labels["state-snapshotter.deckhouse.io/source-request"] == TestFixtures.TestMCRName {
 					matchingCheckpoints++
 				}
 			}

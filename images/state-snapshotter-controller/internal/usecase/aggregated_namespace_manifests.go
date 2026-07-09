@@ -219,9 +219,8 @@ func (s *AggregatedNamespaceManifests) appendObjectsFromManifestCheckpoint(
 	}
 
 	req := &ArchiveRequest{
-		CheckpointName:  mcpName,
-		CheckpointUID:   string(mcp.UID),
-		SourceNamespace: mcp.Spec.SourceNamespace,
+		CheckpointName: mcpName,
+		CheckpointUID:  string(mcp.UID),
 	}
 	raw, _, err := s.archive.GetArchiveFromCheckpoint(ctx, mcp, req)
 	if err != nil {

@@ -134,7 +134,7 @@ func pr7InstallReadyChildSubtreeFixture(
 			},
 		}
 	}
-	aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, mcpName, nsName, objects)
+	aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, mcpName, objects)
 	Expect(pr7PatchSnapshotContent(ctx, childContentName, mcpName, dataRefs)).To(Succeed())
 }
 

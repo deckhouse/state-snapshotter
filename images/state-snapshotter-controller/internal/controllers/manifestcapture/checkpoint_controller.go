@@ -384,14 +384,11 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		ObjectMeta: metav1.ObjectMeta{
 			Name: checkpointName,
 			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/source-namespace": mcr.Namespace,
-				"state-snapshotter.deckhouse.io/source-request":   mcr.Name,
+				"state-snapshotter.deckhouse.io/source-request": mcr.Name,
 			},
 			OwnerReferences: mcpOwnerRefs,
 		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: mcr.Namespace,
-		},
+		Spec:   storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{},
 	}
 

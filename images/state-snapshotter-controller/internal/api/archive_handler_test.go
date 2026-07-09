@@ -69,9 +69,7 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 				"state-snapshotter.deckhouse.io/source-request": "test-mcr",
 			},
 		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "test-ns",
-		},
+		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{
 			Chunks: []storagev1alpha1.ChunkInfo{
 				{Name: "chunk-0", Index: 0, Checksum: "test-checksum-0"},

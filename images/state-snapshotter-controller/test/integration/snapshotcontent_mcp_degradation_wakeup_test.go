@@ -269,9 +269,7 @@ func ensureManifestCheckpointStatus(
 						Controller: &ctrlTrue,
 					}},
 				},
-				Spec: ssv1alpha1.ManifestCheckpointSpec{
-					SourceNamespace: "default",
-				},
+				Spec: ssv1alpha1.ManifestCheckpointSpec{},
 			}
 			if cErr := k8sClient.Create(ctx, m); cErr != nil {
 				return cErr

@@ -52,7 +52,7 @@ func subtreeCreateNode(ctx context.Context, t *testing.T, cl client.Client, cpNa
 	if err := cl.Create(ctx, ch); err != nil {
 		t.Fatalf("create chunk %s: %v", cpName, err)
 	}
-	mcp := aggManifestReadyMCP(cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, len(objs))
+	mcp := aggManifestReadyMCP(cpName, []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, len(objs))
 	if err := cl.Create(ctx, mcp); err != nil {
 		t.Fatalf("create mcp %s: %v", cpName, err)
 	}
@@ -144,7 +144,7 @@ func TestBuildSubtreeManifestIdentities_FailClosedNotReadyMCP(t *testing.T) {
 	if err := cl.Create(ctx, ch); err != nil {
 		t.Fatal(err)
 	}
-	notReady := aggManifestNotReadyMCP("mcp-child", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	notReady := aggManifestNotReadyMCP("mcp-child", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 	if err := cl.Create(ctx, notReady); err != nil {
 		t.Fatal(err)
 	}

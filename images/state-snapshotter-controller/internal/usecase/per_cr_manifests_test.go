@@ -50,7 +50,7 @@ func perCRNodeFixture(t *testing.T) *AggregatedNamespaceManifests {
 		})
 		ch := aggManifestCreateChunk("ch-"+tc.cpName, tc.cpName, d, cs)
 		_ = cl.Create(ctx, ch)
-		mcp := aggManifestReadyMCP(tc.cpName, "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+		mcp := aggManifestReadyMCP(tc.cpName, []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 		_ = cl.Create(ctx, mcp)
 	}
 	_ = cl.Create(ctx, aggManifestContent("child-content", "mcp-child"))
@@ -127,7 +127,7 @@ func TestBuildSingleNodeJSON_ImportReconstructedObjectsKept(t *testing.T) {
 	if err := cl.Create(ctx, ch); err != nil {
 		t.Fatal(err)
 	}
-	mcp := aggManifestReadyMCP("mcp-import", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	mcp := aggManifestReadyMCP("mcp-import", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 	if err := cl.Create(ctx, mcp); err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testin
 	if err := cl.Create(ctx, ch); err != nil {
 		t.Fatal(err)
 	}
-	mcp := aggManifestReadyMCP("mcp-capture", "ns1", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
+	mcp := aggManifestReadyMCP("mcp-capture", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)
 	if err := cl.Create(ctx, mcp); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testin
 	}
 
 	importMCPName := "mcp-import-roundtrip"
-	if err := ReconstructManifestCheckpoint(ctx, cl, importMCPName, "ns1", nil, downloaded); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, importMCPName, nil, downloaded); err != nil {
 		t.Fatalf("reconstruct import MCP: %v", err)
 	}
 	if err := cl.Create(ctx, aggManifestContent("import-content", importMCPName)); err != nil {

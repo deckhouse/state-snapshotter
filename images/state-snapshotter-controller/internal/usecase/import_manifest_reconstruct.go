@@ -94,7 +94,7 @@ func DeleteReconstructedManifestCheckpoint(ctx context.Context, c client.Client,
 func ReconstructManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,
-	checkpointName, sourceNamespace string,
+	checkpointName string,
 	ownerRefs []metav1.OwnerReference,
 	rawManifests []byte,
 ) error {
@@ -121,13 +121,10 @@ func ReconstructManifestCheckpoint(
 			Name:            checkpointName,
 			OwnerReferences: ownerRefs,
 			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/source-namespace": sourceNamespace,
-				ReconstructedManifestCheckpointLabelKey:           reconstructedManifestCheckpointLabelValue,
+				ReconstructedManifestCheckpointLabelKey: reconstructedManifestCheckpointLabelValue,
 			},
 		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: sourceNamespace,
-		},
+		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 	}
 	if err := c.Create(ctx, cp); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create ManifestCheckpoint %s: %w", checkpointName, err)

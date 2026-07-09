@@ -79,7 +79,7 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 	}
 	rootMCP := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcp-root", UID: types.UID("uid-mcp-root")},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: "chunk-root-0", Index: 0, Checksum: rootChecksum}},
 			TotalObjects: 1,
@@ -101,7 +101,7 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 	}
 	orphanMCP := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: "mcp-orphan", UID: types.UID("uid-mcp-orphan")},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: "chunk-orphan-0", Index: 0, Checksum: orphanChecksum}},
 			TotalObjects: 1,

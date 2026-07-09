@@ -64,7 +64,7 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
 	ownerRefs := []metav1.OwnerReference{{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "imp", UID: "import-uid"}}
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", ownerRefs, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, ownerRefs, sampleManifests(t)); err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
 
@@ -108,11 +108,11 @@ func TestReconstructManifestCheckpoint_Idempotent(t *testing.T) {
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--snap")
 	raw := sampleManifests(t)
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, raw); err != nil {
 		t.Fatalf("first reconstruct: %v", err)
 	}
 	// A second call on an already-Ready checkpoint is a no-op and must not error.
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, raw); err != nil {
 		t.Fatalf("second reconstruct: %v", err)
 	}
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -134,7 +134,7 @@ func TestReconstructManifestCheckpoint_AdoptsReadyUnanchoredCheckpoint(t *testin
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "unanchored")
 
 	// Seed a Ready checkpoint, then strip its reconstructed label to emulate the pre-§10.1 ownerless scheme.
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, sampleManifests(t)); err != nil {
 		t.Fatalf("seed reconstruct: %v", err)
 	}
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -149,7 +149,7 @@ func TestReconstructManifestCheckpoint_AdoptsReadyUnanchoredCheckpoint(t *testin
 
 	controllerTrue := true
 	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-x", UID: "ok-uid", Controller: &controllerTrue}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
 		t.Fatalf("adopt reconstruct: %v", err)
 	}
 
@@ -174,12 +174,12 @@ func TestReconstructManifestCheckpoint_DoesNotReanchorOwnedCheckpoint(t *testing
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "owned")
 	controllerTrue := true
 	contentRef := metav1.OwnerReference{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "SnapshotContent", Name: "content", UID: "content-uid", Controller: &controllerTrue}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{contentRef}, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, []metav1.OwnerReference{contentRef}, sampleManifests(t)); err != nil {
 		t.Fatalf("seed reconstruct: %v", err)
 	}
 
 	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-y", UID: "ok-uid", Controller: &controllerTrue}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
 		t.Fatalf("re-run: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestReconstructManifestCheckpoint_AnchorsNotReadyResumedCheckpoint(t *testi
 
 	controllerTrue := true
 	okRef := metav1.OwnerReference{APIVersion: "deckhouse.io/v1alpha1", Kind: "ObjectKeeper", Name: "nss-import-ok-z", UID: "ok-uid", Controller: &controllerTrue}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, []metav1.OwnerReference{okRef}, sampleManifests(t)); err != nil {
 		t.Fatalf("resume reconstruct: %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestReconstructManifestCheckpoint_EmptyObjectsSingleChunk(t *testing.T) {
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--empty")
 
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, []byte("[]")); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, []byte("[]")); err != nil {
 		t.Fatalf("reconstruct empty: %v", err)
 	}
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -256,7 +256,7 @@ func TestReconstructManifestCheckpoint_RejectsNonArray(t *testing.T) {
 	ctx := context.Background()
 	cl := newReconstructClient(t)
 	name := ReconstructedManifestCheckpointName(types.UID("import-uid"), "Snapshot--ns1--bad")
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, []byte(`{"not":"an array"}`)); err == nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, []byte(`{"not":"an array"}`)); err == nil {
 		t.Fatal("expected error for non-array manifests")
 	}
 }
@@ -275,7 +275,7 @@ func TestCollectReconstructedManifestObjects_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := ReconstructManifestCheckpoint(ctx, cl, name, "ns1", nil, raw); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, cl, name, nil, raw); err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
 

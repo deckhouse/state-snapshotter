@@ -335,7 +335,7 @@ func pr7ReactFoundationVSDomain(ctx context.Context, namespace string) {
 			continue // binder has not created+bound the content shell yet; retry next tick.
 		}
 		mcpName := "pr7-vsmcp-" + vs.GetName()
-		if err := pr7EnsureReadyMCPForPVC(ctx, dc, mcpName, namespace, pvc); err != nil {
+		if err := pr7EnsureReadyMCPForPVC(ctx, dc, mcpName, pvc); err != nil {
 			continue
 		}
 		_ = pr7SeedContentManifestLeg(ctx, dc, boundContent, mcpName)
@@ -363,7 +363,7 @@ func pr7ClaimOrphanVS(ctx context.Context, dc client.Client, vs *unstructured.Un
 // that archives the given PVC manifest — the residual PVC's manifest lives in its OWN child volume node's
 // ManifestCheckpoint, never in the root aggregator MCP (Variant A). AlreadyExists is tolerated so the
 // reactor can re-run every tick.
-func pr7EnsureReadyMCPForPVC(ctx context.Context, dc client.Client, mcpName, srcNS string, pvc *corev1.PersistentVolumeClaim) error {
+func pr7EnsureReadyMCPForPVC(ctx context.Context, dc client.Client, mcpName string, pvc *corev1.PersistentVolumeClaim) error {
 	objects := []map[string]interface{}{{
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
@@ -386,7 +386,7 @@ func pr7EnsureReadyMCPForPVC(ctx context.Context, dc client.Client, mcpName, src
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: mcpName},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: srcNS},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 	}
 	if err := dc.Create(ctx, mcp); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err

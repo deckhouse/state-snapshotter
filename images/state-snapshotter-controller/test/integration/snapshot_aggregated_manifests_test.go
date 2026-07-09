@@ -61,7 +61,7 @@ func aggregatedManifestsIntegrationEncodeChunk(objects []map[string]interface{})
 }
 
 // aggregatedManifestsIntegrationMustInstallReadyMCP creates chunk + ManifestCheckpoint and writes MCP status (Create ignores .Status).
-func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, name, srcNS string, objects []map[string]interface{}) *ssv1alpha1.ManifestCheckpoint {
+func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl client.Client, name string, objects []map[string]interface{}) *ssv1alpha1.ManifestCheckpoint {
 	d, cs := aggregatedManifestsIntegrationEncodeChunk(objects)
 	chName := name + "-chunk-0"
 	ch := &ssv1alpha1.ManifestCheckpointContentChunk{
@@ -76,9 +76,7 @@ func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl c
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec: ssv1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: srcNS,
-		},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 	}
 	Expect(cl.Create(ctx, ch)).To(Succeed())
 	Expect(cl.Create(ctx, mcp)).To(Succeed())
@@ -219,7 +217,7 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		child := "agg-extr-one-" + nsName
-		mcpChild := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-one-"+nsName, nsName, []map[string]interface{}{
+		mcpChild := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-one-"+nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-child", "namespace": nsName}},
 		})
 		aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx, k8sClient, child, nsName, "snap", mcpChild.Name)
@@ -294,10 +292,10 @@ var _ = Describe("Integration: Snapshot aggregated manifests subresource", func(
 		childA := "agg-extr-a-" + nsName
 		childB := "agg-extr-b-" + nsName
 
-		mcpA := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-a-"+nsName, nsName, []map[string]interface{}{
+		mcpA := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-a-"+nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-a", "namespace": nsName}},
 		})
-		mcpB := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-b-"+nsName, nsName, []map[string]interface{}{
+		mcpB := aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, "mcp-agg-b-"+nsName, []map[string]interface{}{
 			{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]interface{}{"name": "only-b", "namespace": nsName}},
 		})
 

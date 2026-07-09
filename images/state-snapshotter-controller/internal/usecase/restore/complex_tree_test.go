@@ -101,7 +101,7 @@ func materializeMCP(mcpName string, manifests []map[string]interface{}) []client
 	data, checksum := encodeChunk(manifests)
 	mcpObj := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: mcpName + "-chunk-0", Index: 0, Checksum: checksum}},
 			TotalObjects: len(manifests),
