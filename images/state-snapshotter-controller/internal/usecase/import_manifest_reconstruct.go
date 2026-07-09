@@ -116,6 +116,11 @@ func ReconstructManifestCheckpoint(
 		return fmt.Errorf("manifests for %s are not a JSON array: %w", checkpointName, err)
 	}
 
+	// Provenance note: unlike capture-path MCPs (which carry the source-request label pointing at the
+	// originating MCR), a reconstructed MCP is traceable only through its ownerRefs (import ObjectKeeper
+	// -> SnapshotContent) — the reconstructed label marks HOW it came to be, not WHERE from, and the
+	// name is a sha256 derivation. If the keeper is swept and ownerRefs stripped, nothing identifies the
+	// source; accepted with the spec.sourceNamespace removal (wave-2 Block E, cluster-wide sources).
 	cp := &storagev1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            checkpointName,

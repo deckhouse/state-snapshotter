@@ -37,13 +37,15 @@ GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/
 
 ## MCP-Level Endpoints
 
-MCP endpoints return only one `ManifestCheckpoint` local archive:
+The single-MCP read goes through the aggregated APIService subresource:
 
 ```text
-GET /api/v1/checkpoints/{mcp-name}/archive
-GET /api/v1/checkpoints/{mcp-name}/info
 GET /apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/manifestcheckpoints/{mcp-name}/manifests
 ```
+
+> The former raw HTTP endpoints `GET /api/v1/checkpoints/{mcp-name}/archive|info` were removed
+> (wave-2 Block E, 2026-07-09) together with `ManifestCheckpoint.spec.sourceNamespace` — a dead
+> surface with no callers (d8-cli uses only the aggregated APIService routes).
 
 Use the generic aggregated endpoint when the expected result is the full snapshot subtree.
 

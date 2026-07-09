@@ -1701,3 +1701,15 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
 - **d8-cli is out of scope** (separate plan): it keeps its own copy of the DataImport API
   (`ModePopulateVolume`) and unstructured mode literals, so d8-cli stays on the old names until its
   coordinated update — same follow-up as the wave-2 renames.
+
+### Wave-2 review follow-ups (Blocks E/F/G verification pass)
+
+- **Fix** (review, Block E) Pinned `UseExistingCluster: false` in the manifest-capture e2e envtest setup:
+  the AfterEach cleanup now blanket-deletes cluster-scoped ManifestCheckpoints/ret-* ObjectKeepers (the
+  empty MCP spec has no namespace to filter on), so the `USE_EXISTING_CLUSTER` env var must never point
+  that cleanup at a real cluster. Updated the stale `snapshot-read.md` internal API doc (raw
+  /api/v1/checkpoints endpoints removed) and added a provenance note in import_manifest_reconstruct.go
+  (reconstructed MCPs are traceable via ownerRefs only — accepted with the sourceNamespace removal).
+- **Verify** Full wave-2 gate pass at HEAD: grep-gates (StaticBind, VolumeReady, parentDeleted,
+  sourceNamespace, ProduceArtifact/PopulateVolume/scratchVolumeTemplate, snapshotSource) zero live hits;
+  go-lint.sh 15/15 PASSED; unit tests green across all modules; integration + e2e compile.
