@@ -172,6 +172,66 @@ func TestPlanNamespaceChildrenPendingLayer(t *testing.T) {
 	}
 }
 
+// TestPlanNamespaceChildren_TerminalChild_ChildrenFailed: a weight-layer child that surfaced a terminal
+// failure fails the root plan with the CANONICAL child-failure reason ChildrenFailed — the same reason the
+// content aggregation + Ready mirror produce when the failure lands post-Planned — never
+// GraphPlanningFailed (reserved for the root's OWN planning faults). Covers both terminal shapes
+// snapshotChildTerminalFailure recognizes: the domain-owned phase=Failed and the core-derived terminal
+// Ready (VolumeCaptureFailed, vcr-watch-core-terminal decision D2).
+func TestPlanNamespaceChildren_TerminalChild_ChildrenFailed(t *testing.T) {
+	f := newPlanTestFixture()
+	src := f.source("vm-1", "uid-vm-1")
+	childName := snapshotChildSnapshotName(types.UID("root-uid"), src.GetUID())
+
+	cases := map[string]*unstructured.Unstructured{
+		"domain phase=Failed":            demoSnapshotChildWithPhase(childName, storagev1alpha1.SnapshotCapturePhaseFailed),
+		"core terminal Ready (D2 shape)": demoSnapshotChildTerminalReady(childName),
+	}
+	for name, child := range cases {
+		t.Run(name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()
+			r := &SnapshotReconciler{Dynamic: f.dynamic(src), Client: cl, APIReader: cl}
+			nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+
+			plan, err := r.planNamespaceChildren(context.Background(), nsSnap, []csdregistry.EligibleResourceSnapshotMapping{f.mapping})
+			if err != nil {
+				t.Fatalf("planNamespaceChildren: %v", err)
+			}
+			if plan.outcome != namespaceChildrenTerminal {
+				t.Fatalf("want Terminal outcome, got %d", plan.outcome)
+			}
+			if plan.reason != snapshotpkg.ReasonChildrenFailed {
+				t.Fatalf("want canonical reason %q, got %q", snapshotpkg.ReasonChildrenFailed, plan.reason)
+			}
+			if plan.message == "" {
+				t.Fatalf("terminal plan must carry the child-naming message")
+			}
+		})
+	}
+}
+
+// demoSnapshotChildTerminalReady builds a child in the D2 core-terminal shape: phase=Planned (the domain
+// never Rejects for a core-owned leg failure), bound to a content, with a CURRENT (gen-stamped) terminal
+// Ready=False/VolumeCaptureFailed mirrored from its terminal content.
+func demoSnapshotChildTerminalReady(name string) *unstructured.Unstructured {
+	child := demoSnapshotChildWithPhase(name, storagev1alpha1.SnapshotCapturePhasePlanned)
+	child.SetGeneration(1)
+	if err := unstructured.SetNestedField(child.Object, "content-"+name, "status", "boundSnapshotContentName"); err != nil {
+		panic(err)
+	}
+	conds := []interface{}{map[string]interface{}{
+		"type":               "Ready",
+		"status":             "False",
+		"reason":             snapshotpkg.ReasonVolumeCaptureFailed,
+		"message":            "data-leg volume capture failed: simulated",
+		"observedGeneration": int64(1),
+	}}
+	if err := unstructured.SetNestedSlice(child.Object, conds, "status", "conditions"); err != nil {
+		panic(err)
+	}
+	return child
+}
+
 // planLostFixtureReconciler wires an AllPlanned single-source fixture (source vm-1 with its child present
 // at phase=Planned) and returns the reconciler plus the desired child name, so the lost-child tests can
 // stack extra PUBLISHED refs on nsSnap.Status.ChildrenSnapshotRefs. APIReader is the same fake as Client

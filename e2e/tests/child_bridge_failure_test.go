@@ -272,7 +272,7 @@ func childBridgeFailureSpecs() {
 			Expect(waitPodRunning(ctx, srcNS, cbProbePod, 10*time.Minute)).To(Succeed())
 		})
 
-		It("fails the root Snapshot closed (Ready=False/GraphPlanningFailed) when a domain child's volume capture fails terminally", func() {
+		It("fails the root Snapshot closed (Ready=False/ChildrenFailed) when a domain child's volume capture fails terminally", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+15*time.Minute)
 			defer cancel()
 
@@ -305,19 +305,22 @@ func childBridgeFailureSpecs() {
 			}).WithContext(ctx).WithTimeout(2*suiteCfg.captureReadyTO+5*time.Minute).WithPolling(pollInterval).
 				ShouldNot(BeEmpty(), "child DemoVirtualDiskSnapshot must report a terminal Ready=False reason")
 
-			// INV-FAIL-PROP: the root must fail closed over the lost child volume data. The settled terminal
-			// reason is GraphPlanningFailed (not ChildrenFailed). Mechanism (vcr-watch-core-terminal): the core
-			// is the sole writer of the terminal — a failed data-leg VCR makes the child's OWN SnapshotContent
-			// terminal (VolumeReady=False/VolumeCaptureFailed), which mirrors onto the child xxxSnapshot's Ready.
-			// The domain no longer drives phase=Failed for a core-owned leg failure. That child-content terminal
-			// DOES propagate up the content-aggregation tree as ChildrenFailed for intermediate content nodes,
-			// but at the ROOT the weight-layer capture-barrier gate (weightLayerCaptureReady ->
-			// snapshotChildTerminalFailure, which treats VolumeCaptureFailed as terminal) catches the child's
-			// terminal Ready DURING planning and short-circuits to Ready=False/GraphPlanningFailed before the
-			// content->Snapshot Ready mirror (which would say ChildrenFailed) can take over. So the root settles
-			// on GraphPlanningFailed naming the failed child.
-			By("Asserting the parent root Snapshot fails closed as Ready=False/GraphPlanningFailed over the child failure")
-			Expect(waitSnapshotReadyFalseReason(ctx, srcNS, cbRootSnapshotName, "GraphPlanningFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
+			// INV-FAIL-PROP: the root must fail closed over the lost child volume data with the CANONICAL
+			// child-failure reason ChildrenFailed — deterministic at ANY timing of the child failure relative
+			// to the root's MarkPlanned (vcr-watch-core-terminal). Mechanism: the core is the sole writer of
+			// the terminal — a failed data-leg VCR makes the child's OWN SnapshotContent terminal
+			// (VolumeReady=False/VolumeCaptureFailed), which mirrors onto the child xxxSnapshot's Ready. From
+			// there both root paths converge on the same reason:
+			//   - child failure lands while the root is still planning: the weight-layer gate
+			//     (weightLayerCaptureReady -> snapshotChildTerminalFailure) catches the child terminal and the
+			//     planner fails the root via sdk.Fail(ChildrenFailed) — phase=Failed is a terminal sink and the
+			//     content->Snapshot mirror bubbles the same reason, so the two writers agree (no flap);
+			//   - child failure lands after the root is Planned: the content aggregation propagates the child
+			//     content terminal up the tree as ChildrenFailed and the mirror reflects it onto the root.
+			// GraphPlanningFailed is reserved for the root's OWN planning faults (selector/list/coverage) and
+			// must NOT appear for a child failure.
+			By("Asserting the parent root Snapshot fails closed as Ready=False/ChildrenFailed over the child failure")
+			Expect(waitSnapshotReadyFalseReason(ctx, srcNS, cbRootSnapshotName, "ChildrenFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
 				To(Succeed(), "root Snapshot must fail closed over the lost child volume data (INV-FAIL-PROP)")
 
 			By("Asserting the parent failure message references the failed child")

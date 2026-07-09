@@ -123,8 +123,16 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			return ctrl.Result{}, err
 		}
 		if plan.outcome == namespaceChildrenTerminal {
-			// Terminal child-graph failure the content tree cannot express yet (binder still gated pre-Planned):
-			// surface it directly on Ready (matches the bespoke reconcileParentOwnedChildGraph terminal path).
+			// Terminal child-graph failure: route it through sdk.Fail (phase=Failed, the terminal SINK), not a
+			// bare Ready patch. The root content is created + bound EAGERLY (pre-Planned, genericbinder §9), so
+			// the content->Snapshot Ready mirror is already live for the root; a Ready-only write would
+			// ping-pong with the mirror's non-terminal content view (mirror overwrites, this gate re-asserts).
+			// With phase=Failed the mirror bubbles the SAME reason/message (ownerDomainCaptureFailed), so both
+			// writers agree and the terminal is stable at any timing. The local Ready patch below only
+			// fast-surfaces the value the mirror converges to in the same pass.
+			if ferr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(plan.reason), stderrors.New(plan.message)); ferr != nil {
+				return ctrl.Result{}, ferr
+			}
 			if perr := r.patchSnapshotNotReadyLocal(ctx, key, plan.reason, plan.message); perr != nil {
 				return ctrl.Result{}, perr
 			}
@@ -168,6 +176,14 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		if err := sdk.MarkPlanned(ctx, adapter); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// A Failed root is a terminal SINK (phaseCanAdvance never leaves Failed): planning never resumes and
+	// the post-bind legs below must not start/continue capture work (namespace MCR, barrier-2 outcome) for
+	// a failed point-in-time capture. The content->Snapshot mirror keeps Ready in sync off the bubbled
+	// phase=Failed reason/message; there is nothing left to drive, so stop without a requeue.
+	if adapter.GetDomainCaptureState().Phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return ctrl.Result{}, nil
 	}
 
 	// 6. The binder owns the SnapshotContent now: wait for it to create + bind before the linking/manifest

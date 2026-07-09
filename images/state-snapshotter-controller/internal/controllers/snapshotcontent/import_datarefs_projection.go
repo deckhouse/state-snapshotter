@@ -44,8 +44,11 @@ import (
 // boundVolumeSnapshotContentName, and that native-CSI branch projects the content data uniformly with
 // capture VS).
 //
-// Like the VCR branch it is latch-idempotent and NEVER surfaces a terminal reason: it publishes, or
-// requeues while pending; the binder owns the terminal Ready=False.
+// Like the VCR branch it is latch-idempotent. UNLIKE the VCR capture branch (which surfaces a failed VCR /
+// Variant-A fault as a terminal termReason the aggregation folds into content.Ready, decision D2), this
+// import branch never surfaces a terminal reason yet: it publishes, or requeues while pending, and the
+// import binder still owns the terminal Ready=False for import faults (cardinality, unsupported artifact).
+// The termReason/termMessage returns exist only for signature parity with the capture path.
 func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, termReason string, termMessage string, err error) {
 	if !r.GVKRegistry.RequiresDataArtifact(owner.GetObjectKind().GroupVersionKind().Kind) {
 		// Structural import node (root Snapshot, VM snapshot, ...): manifests + children only, no data leg.

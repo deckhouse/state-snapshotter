@@ -98,8 +98,10 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 			return false, false, err
 		}
 		if terminalMessage != "" {
+			// Canonical child-failure reason is ChildrenFailed (a terminal CHILD, not the root's own planning
+			// fault) — kept in sync with the active planner path (planNamespaceChildren).
 			sortSnapshotChildRefs(desiredRefs)
-			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, terminalMessage)
+			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonChildrenFailed, terminalMessage)
 			return changed, false, err
 		}
 		if !ready {
@@ -614,10 +616,13 @@ func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.G
 		}
 		return true, fmt.Sprintf("child snapshot %s/%s/%s failed capture (phase=Failed): %s", gvk.String(), namespace, name, detail)
 	}
-	// Core-derived terminal: a terminal Ready reason on the child. This is the load-bearing fail-closed path
-	// for a domain child's data-leg failure (vcr-watch-core-terminal): the core makes the child content
-	// terminal (VolumeCaptureFailed) and mirrors it onto the child's Ready, and this gate catches it during
-	// planning (e.g. VolumeCaptureFailed, GraphPlanningFailed, ChildrenFailed).
+	// Core-derived terminal: a terminal Ready reason on the child. This is the fail-closed path for a domain
+	// child's data-leg failure caught DURING root planning (vcr-watch-core-terminal): the core makes the
+	// child content terminal (VolumeCaptureFailed) and mirrors it onto the child's Ready, and this gate
+	// catches it (e.g. VolumeCaptureFailed, GraphPlanningFailed, ChildrenFailed). The consumer
+	// (planNamespaceChildren) surfaces it on the root as the CANONICAL ChildrenFailed — the same reason the
+	// content aggregation + Ready mirror produce when the failure lands post-Planned — so the root's
+	// terminal reason does not depend on the race between the child failure and MarkPlanned.
 	class, message := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, name)
 	if class == usecase.SnapshotChildReadyClassFailed && readyConditionIsCurrentTerminal(child) {
 		return true, message

@@ -137,11 +137,18 @@ func (r *SnapshotReconciler) planNamespaceChildren(ctx context.Context, nsSnap *
 			return namespaceChildrenPlan{}, err
 		}
 		if terminalMessage != "" {
+			// Canonical child-failure reason (vcr-watch-core-terminal): a TERMINAL CHILD fails the root as
+			// ChildrenFailed regardless of WHEN the failure lands. Post-Planned the content aggregation +
+			// Ready mirror already surface ChildrenFailed, so this pre-Planned weight-gate catch must agree —
+			// otherwise the root's terminal reason would depend on the race between the child failure and
+			// MarkPlanned. GraphPlanningFailed stays reserved for the root's OWN planning faults
+			// (resourceSelector/list/coverage errors); terminalMessage here comes exclusively from
+			// snapshotChildTerminalFailure, i.e. always a child.
 			return namespaceChildrenPlan{
 				desired:  desired,
 				excluded: topLevelDrops,
 				outcome:  namespaceChildrenTerminal,
-				reason:   snapshotpkg.ReasonGraphPlanningFailed,
+				reason:   snapshotpkg.ReasonChildrenFailed,
 				message:  terminalMessage,
 			}, nil
 		}

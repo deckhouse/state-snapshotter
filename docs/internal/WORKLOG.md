@@ -1525,3 +1525,27 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   `Ready=False/GraphPlanningFailed` before the content->Snapshot mirror (which would say `ChildrenFailed`) can
   take over — so the root settles on `GraphPlanningFailed` (assertion value unchanged). Rewrote the
   `child_bridge_failure_test.go` justification and synced the `parent_graph.go` core-derived-terminal comment.
+
+### Canonical root child-failure reason: ChildrenFailed at any timing (review follow-up)
+
+- **Bugfix** (state-snapshotter-controller snapshot) Review of the vcr-watch-core-terminal commit showed the
+  root's terminal reason for a failed child was the OUTCOME OF A RACE, not a contract: a child failure
+  landing pre-Planned hit the weight-layer gate (`Ready=False/GraphPlanningFailed`), post-Planned it came via
+  content aggregation + mirror (`ChildrenFailed`) — the child_bridge e2e pinned the pre-Planned outcome and
+  would flake on timing shifts. Worse, the pre-Planned path was a structural dual-writer: the gate patched
+  ONLY Ready (no `phase=Failed`) while the eagerly-bound root content's Ready mirror kept overwriting the
+  terminal with its non-terminal view. Canonicalized: `planNamespaceChildren`'s weight-gate terminal (always
+  a CHILD — the message comes from `snapshotChildTerminalFailure`) now surfaces reason `ChildrenFailed`
+  (`GraphPlanningFailed` stays reserved for the root's OWN planning faults: selector/list/coverage), and
+  `reconcileNamespaceCapture` routes the terminal outcome through `sdk.Fail` (phase=Failed, the terminal
+  sink) so the mirror bubbles the SAME reason — both writers agree, terminal stable at any timing. Added a
+  Failed-root early-out before the post-bind legs (no namespace MCR / barrier-2 work for a failed capture)
+  and kept the local Ready fast-patch with the identical value. Synced the dormant bespoke
+  `reconcileParentOwnedChildGraph` terminal to the same reason. Unit
+  `TestPlanNamespaceChildren_TerminalChild_ChildrenFailed` pins the canon for both terminal child shapes
+  (domain `phase=Failed` and the D2 core-terminal Ready=VolumeCaptureFailed). e2e
+  `child_bridge_failure_test` now strictly asserts `Ready=False/ChildrenFailed` with the two-path rationale
+  (needs an e2e re-run). Overview ADR: documented the canon in the Reason-taxonomy section and synced the
+  stale D3 statements (CoreCaptureOutcome tri-state "domain goes Fail/Reject" -> "domain stops", Failed as a
+  terminal SINK + ReportProgress verb rule, reason examples). gofmt + go vet (incl. -tags integration) +
+  snapshot package unit tests green.
