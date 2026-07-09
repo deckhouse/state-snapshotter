@@ -974,6 +974,46 @@ env knob is kept (default 1; the relay-latency win is real but harmless and does
 (8). Make the domain VMS/VDS concurrency env-configurable and sweep 4 → 8 → 16 (≥3 runs), judged on `phaseATotalMs`
 and wall.
 
+### Critical-path trace of a single N=20 run — the last serializer is the DISK layer (H4)
+
+Instead of another broad sweep, one N=20 run was reconstructed hop-by-hop from **server-side timestamps**
+(`creationTimestamp` + condition `lastTransitionTime`, 1 s) cross-checked against the ms `phaseA-trace`. Phase A is
+a **planning barrier**: root `ChildrenSnapshotReady=True` waits only for the domain snapshots to be *created* and
+publish CSReady (layer by layer, VM priority 100 → disk priority 10); it does **not** wait for MCR/VCR/VSC `Ready`.
+Every object in namespace `pa…-i` belongs to tree `i`, so per-tree correlation is by namespace. The path is five
+hops (`phaseA-critpath-N20.png`):
+
+| hop | p50 | share | gated by |
+|---|---|---|---|
+| H1 rootPlanVM | 1.0s | 6% | root(8) |
+| H2 vmReconcile | 2.0s | 12% | domain VMS(4) |
+| H3 rootPlanDisk (observe L100 → create L10) | 4.0s | 25% | relay(1)+root(8) |
+| **H4 diskReconcile (disk created → CSReady)** | **7.5s** | **47%** | **domain VDS(4)** |
+| H5 rootPublish | 1.5s | 9% | relay(1)+root(8) |
+
+phaseATotal p50 = 20.5s (server-side) / 21.2s (ms trace) — matches the baseline, so the single run is
+representative and the decomposition is structural, not A/B noise.
+
+**Staircase test (decisive):** the VM layer (`VMsnap.created`/`CSReady`) stays low and flat across all 20 trees —
+the VM layer does **not** serialize. The tree-to-tree staircase is entirely on the **disk layer**: the diverging
+gap `disk.created` → `disk.CSReady` (= H4) grows from ~0 to ~13 s. H4 owns 47% of the median path and is where the
+cross-tree delay accumulates.
+
+**Relay-sweep paradox resolved:** `relayLatencyMs` p50≈10s / `observeLagMs` p50≈8s are genuinely large, yet
+raising relay concurrency did not move the wall (previous section). The relay latency **overlaps behind** the VDS
+throughput floor: speeding the relay only makes roots wait on VDS workers instead. The **binding** floor is
+**H4 = the `DemoVirtualDiskSnapshot` reconcile throughput (`MaxConcurrentReconciles=4`)**. The harvest found ~0
+persisted MCR/VCR at Phase-A end, so H4 is dominated by **queue-wait for a free VDS worker**, not heavy per-reconcile
+work.
+
+**Verdict:** the last Phase-A serializer is domain **disk-snapshot** reconcile throughput (VDS pool = 4), with the
+relay/root layer transition (H3) second but proven non-binding. This is exactly the
+`DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES` lever (already committed). The domain sweep is now
+mechanistically justified with a prediction: 4 → 8 → 16 should shrink H4 and wall **iff** worker-bound; if H4 stays
+flat, it is intrinsic per-reconcile cost and the next step is profiling the disk reconcile itself.
+
+![Phase-A critical-path trace, N=20](phaseA-critpath-N20.png)
+
 ---
 
 ## 9. Application checklist
