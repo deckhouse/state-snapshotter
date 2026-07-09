@@ -41,11 +41,11 @@ import (
 // GVK the VCR's controller-ownerRef names).
 var snapshotOwnerGVK = storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
 
-func vcrWithOwner(namespace, name string, owner *metav1.OwnerReference) *unstructured.Unstructured {
+func vcrWithOwner(owner *metav1.OwnerReference) *unstructured.Unstructured {
 	vcr := &unstructured.Unstructured{}
 	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	vcr.SetNamespace(namespace)
-	vcr.SetName(name)
+	vcr.SetNamespace("ns1")
+	vcr.SetName("vcr-a")
 	if owner != nil {
 		vcr.SetOwnerReferences([]metav1.OwnerReference{*owner})
 	}
@@ -89,7 +89,7 @@ func TestMapVCRToOwningContent_RoutesViaOwnerSnapshot(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl}
 
 	owner := ownerRefToSnapshot("snap-a", true)
-	reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner("ns1", "vcr-a", &owner))
+	reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner(&owner))
 	if len(reqs) != 1 {
 		t.Fatalf("want 1 request, got %d (%v)", len(reqs), reqs)
 	}
@@ -108,7 +108,7 @@ func TestMapVCRToOwningContent_Negatives(t *testing.T) {
 		r := &SnapshotContentController{Client: cl, APIReader: cl}
 		// A non-controller ownerRef must be ignored (GetControllerOf returns nil).
 		owner := ownerRefToSnapshot("snap-a", false)
-		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner("ns1", "vcr-a", &owner)); reqs != nil {
+		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner(&owner)); reqs != nil {
 			t.Fatalf("want nil for non-controller owner, got %v", reqs)
 		}
 	})
@@ -117,7 +117,7 @@ func TestMapVCRToOwningContent_Negatives(t *testing.T) {
 		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 		r := &SnapshotContentController{Client: cl, APIReader: cl}
 		owner := ownerRefToSnapshot("ghost", true)
-		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner("ns1", "vcr-a", &owner)); reqs != nil {
+		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner(&owner)); reqs != nil {
 			t.Fatalf("want nil for missing owner snapshot, got %v", reqs)
 		}
 	})
@@ -127,7 +127,7 @@ func TestMapVCRToOwningContent_Negatives(t *testing.T) {
 			WithObjects(boundSnapshot("ns1", "snap-a", "")).Build()
 		r := &SnapshotContentController{Client: cl, APIReader: cl}
 		owner := ownerRefToSnapshot("snap-a", true)
-		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner("ns1", "vcr-a", &owner)); reqs != nil {
+		if reqs := r.mapVCRToOwningContent(context.Background(), vcrWithOwner(&owner)); reqs != nil {
 			t.Fatalf("want nil for unbound owner snapshot, got %v", reqs)
 		}
 	})
