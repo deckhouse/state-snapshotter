@@ -40,7 +40,10 @@ import (
 // Regression: root Snapshot must mirror SnapshotContent Ready after status-only content updates
 // (SnapshotContent watch -> Snapshot reconcile). Without the watch, a stale Snapshot Ready=False
 // can remain after bound content becomes Ready.
-var _ = Describe("Integration: SnapshotContent Ready propagates to bound Snapshot", func() {
+// Label("isolated"): this manager-driven Ready-propagation spec relies on a status-only SnapshotContent
+// update waking the bound Snapshot via watch; under the shared-manager parallel pass it flakes on
+// enqueue latency, so it runs serially in its own isolated pass (see Makefile test-integration).
+var _ = Describe("Integration: SnapshotContent Ready propagates to bound Snapshot", Serial, Label("isolated"), func() {
 	It("mirrors Ready=True when only SnapshotContent status changes", func() {
 		ctx := context.Background()
 
