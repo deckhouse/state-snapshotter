@@ -22,11 +22,11 @@ import (
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 )
 
-// Demo snapshot Ready=False reasons for source identity resolution.
-const (
-	demoReasonInvalidSourceRef = "InvalidSourceRef"
-	demoReasonSourceNotFound   = "SourceNotFound"
-)
+// demoReasonInvalidSourceRef is the terminal Ready=False reason for a malformed spec.sourceRef (nil in
+// capture mode, wrong apiVersion/kind, or empty name). A malformed ref cannot self-heal (the CRD makes it
+// immutable), so it is a genuine terminal failure. A source that merely does not EXIST yet is recoverable
+// and is handled by the callers as a Pending diagnostic (ReportProgress), not a terminal reason.
+const demoReasonInvalidSourceRef = "InvalidSourceRef"
 
 // demoSourceResolution is the outcome of resolving a demo snapshot's source identity from
 // spec.sourceRef (the single source-of-truth). On failure Reason is non-empty and the caller sets

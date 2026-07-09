@@ -28,11 +28,16 @@ import (
 )
 
 // The domain controllers call MarkPlanned on every reconcile before switching on the capture outcome
-// (see demo virtualmachine/virtualdisk controllers). Once a leaf reaches Finished, an unguarded
-// MarkPlanned would regress it back to Planned, so every reconcile would emit two status writes
-// (Planned then Finished). Because the domain watches its own object, that pair re-triggers the reconcile
-// — a self-sustaining phase write storm that starves the core binder's optimistic-lock Ready mirror and
-// wedges the tree at Ready=False/ContentMissing. These tests pin the monotonic guard that kills the storm.
+// (see demo virtualmachine/virtualdisk controllers). Without a guard this causes two phase write storms,
+// both of which flap the mirrored Ready and starve the core binder's optimistic-lock Ready mirror:
+//
+//   - Finished<->Planned: once a leaf reaches Finished, an unguarded MarkPlanned regresses it to Planned,
+//     then ConfirmConsistent re-Finishes it — killed by the forward-chain no-regress rule.
+//   - Failed<->Planned: once a leaf Fails, an unguarded MarkPlanned resurrects it to Planned, then the
+//     terminal outcome re-Fails it — killed by making Failed a TERMINAL SINK (it never resurrects).
+//
+// Because the domain watches its own object, either pair re-triggers the reconcile forever. These tests
+// pin both rules of phaseCanAdvance.
 
 func TestPhaseCanAdvance(t *testing.T) {
 	const (
@@ -55,10 +60,12 @@ func TestPhaseCanAdvance(t *testing.T) {
 		{finished, planned, false}, // the regression that causes the flap
 		{finished, planning, false},
 		{planned, planning, false},
-		{planned, failed, true},  // late error may always surface
-		{finished, failed, true}, // even after Finished
-		{failed, planned, true},  // recovery preserved (pre-guard behavior)
-		{failed, finished, true}, // recovery preserved
+		{planned, failed, true},   // late error may always surface
+		{finished, failed, true},  // even after Finished
+		{failed, failed, true},    // idempotent re-assert / terminal reason-message refresh
+		{failed, planned, false},  // Failed is a terminal sink: never resurrects (kills the flap)
+		{failed, finished, false}, // Failed is a terminal sink: never resurrects
+		{failed, planning, false}, // Failed is a terminal sink: never resurrects
 	}
 	for _, c := range cases {
 		if got := phaseCanAdvance(c.from, c.to); got != c.want {

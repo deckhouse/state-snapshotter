@@ -88,6 +88,9 @@ func (a demoVirtualDiskSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptu
 	return coreCaptureStateFrom(a.snap.Status.CaptureState)
 }
 
+func (a demoVirtualDiskSnapshotAdapter) ReadyStatus() metav1.ConditionStatus {
+	return readyStatus(a.snap.Status.Conditions)
+}
 func (a demoVirtualDiskSnapshotAdapter) ReadyReason() string {
 	return readyReason(a.snap.Status.Conditions)
 }
@@ -152,6 +155,9 @@ func (a demoVirtualMachineSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCa
 	return coreCaptureStateFrom(a.snap.Status.CaptureState)
 }
 
+func (a demoVirtualMachineSnapshotAdapter) ReadyStatus() metav1.ConditionStatus {
+	return readyStatus(a.snap.Status.Conditions)
+}
 func (a demoVirtualMachineSnapshotAdapter) ReadyReason() string {
 	return readyReason(a.snap.Status.Conditions)
 }
@@ -192,6 +198,13 @@ func coreCaptureStateFrom(cs *storagev1alpha1.CaptureStateStatus) snapshotsdk.Co
 		ManifestCaptured: cs.CommonController.ManifestCaptured,
 		DataCaptured:     cs.CommonController.DataCaptured,
 	}
+}
+
+func readyStatus(conditions []metav1.Condition) metav1.ConditionStatus {
+	if c := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionReady); c != nil {
+		return c.Status
+	}
+	return ""
 }
 
 func readyReason(conditions []metav1.Condition) string {

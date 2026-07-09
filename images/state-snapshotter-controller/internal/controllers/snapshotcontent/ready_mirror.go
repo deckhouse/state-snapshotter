@@ -50,16 +50,15 @@ import (
 // side-channel mirror (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
 // watch is not removed. The subtreeManifestsPersisted mirror moved to main (capture_legs.go, decision #10).
 //
-// legTermReason/legTermMessage carry a capture-leg terminal observed by reconcileOwnerCaptureLegs in the
-// SAME pass (a failed data-leg VCR, or a Variant-A >1-artifact domain fault; main-owned commonController,
-// decision #10). The bound content itself stays pending in that state (no dataRefs), so the pure content
-// mirror could not express the terminal — folding it here surfaces Ready=False with a terminal reason the
-// domain SDK observes (IsReasonTerminal) to go phase=Failed. Recomputed every pass while the failed VCR
-// exists, so it is stable across mirror passes (unlike a separate co-write this mirror would race).
+// vcr-watch-core-terminal (decision D2): a failed data-leg VCR (or a Variant-A >1-artifact fault) is now
+// made terminal on the CONTENT itself by reconcileDataLegProjection (VolumeReady=VolumeCaptureFailed), so
+// content.Ready already carries the terminal and this mirror reflects it verbatim onto the owning Snapshot
+// — no more special leg-terminal fold here. The content-level terminal also propagates up the content
+// aggregation tree as ChildrenFailed (which the former snapshot-only fold could not do).
 //
 // Best-effort: an owner that is gone or not yet bound, or content with no owning Snapshot (bucket
 // content), is a no-op; a transient API error is returned so the content reconcile requeues and retries.
-func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured, legTermReason, legTermMessage string) error {
+func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured) error {
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
@@ -104,14 +103,6 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 		status = readyCond.Status
 		reason = readyCond.Reason
 		message = readyCond.Message
-	}
-	// Capture-leg terminal (failed data-leg VCR / Variant-A fault) observed by the same-pass
-	// reconcileOwnerCaptureLegs: the content stays pending in this state, so fold the terminal here. The
-	// domain phase=Failed bubble below still overrides it (the domain's own report is the durable state).
-	if legTermReason != "" {
-		status = metav1.ConditionFalse
-		reason = legTermReason
-		message = legTermMessage
 	}
 	// Bubble a domain-reported terminal failure (captureState.domainSpecificController.phase=Failed) into
 	// the user-facing Ready: a content mirror cannot express a domain planning/consistency failure.

@@ -35,11 +35,13 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/api/names"
@@ -50,6 +52,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
+	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
 // SnapshotContentController reconciles generic XxxxSnapshotContent resources.
@@ -89,8 +92,10 @@ type SnapshotContentController struct {
 	SnapshotContentGVKs []schema.GroupVersionKind
 
 	watchMu                sync.RWMutex
-	activeContentWatchSet  map[string]struct{} // SnapshotContent GVK String()
-	activeSnapshotWatchSet map[string]struct{} // Snapshot GVK String() -> status watch registered with manager
+	activeContentWatchSet  map[string]struct{}              // SnapshotContent GVK String()
+	activeSnapshotWatchSet map[string]struct{}              // Snapshot GVK String() -> status watch registered with manager
+	contentControllers     map[string]controller.Controller // SnapshotContent GVK String() -> built controller handle (for dynamic Watch add)
+	vcrWatchAdded          bool                             // idempotent guard for AddVolumeCaptureRequestWatch
 
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
 	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). For these
@@ -429,7 +434,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads status.dataRefs. Like the
 	// child edges + manifest pointer above, this is a separate optimistic-locked status patch observed on
 	// the next pass; the 500 ms self-requeue while !ready drives convergence.
-	dataRequeue, err := r.reconcileDataLegProjection(ctx, obj, owner, ownerNamespace, ownerFound)
+	dataRequeue, dataTermReason, dataTermMessage, err := r.reconcileDataLegProjection(ctx, obj, owner, ownerNamespace, ownerFound)
 	if err != nil {
 		logger.Error(err, "Failed to project data leg")
 		return ctrl.Result{}, err
@@ -437,9 +442,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Pass dataRequeue as dataLegPending so the aggregation does NOT compute a premature Ready=True on a
 	// stale-empty status.data for a content whose data leg is still converging (the aggregator published
-	// it via a separate patch this pass, or the VCR/VSC is not ready yet). See
-	// reconcileCommonSnapshotContentStatus.
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue)
+	// it via a separate patch this pass, or the VCR/VSC is not ready yet). dataTermReason/Message carry a
+	// core-owned terminal data-leg failure (failed VCR / Variant-A fault, decision D2): the aggregation
+	// makes the CONTENT itself terminal (VolumeReady=VolumeCaptureFailed) so it propagates up the
+	// content-aggregation tree as ChildrenFailed. See reconcileCommonSnapshotContentStatus.
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
@@ -447,20 +454,21 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Main-owned capture legs (decision #10): eager-init + latch the owner's commonController legs and
 	// reap the domain MCR/VCR after a durable handoff — latch strictly before the delete, same pass, so
 	// the domain SDK's uncached latch read never observes a reaped request with a false latch (no
-	// re-creation churn). A leg-terminal (failed VCR / Variant-A fault) is folded into the owner Ready
-	// mirror below — the same-pass fold keeps the terminal stable across mirror passes (recomputed while
-	// the failed VCR exists) instead of a separate co-write the mirror would race.
-	legsRequeue, legTermReason, legTermMessage, err := r.reconcileOwnerCaptureLegs(ctx, obj)
+	// re-creation churn). A failed data-leg VCR (or Variant-A fault) is no longer folded here: core makes
+	// the CONTENT terminal (VolumeReady=VolumeCaptureFailed) in reconcileDataLegProjection above, so the
+	// mirror below reflects it verbatim onto the owning Snapshot and it also propagates up the content tree.
+	legsRequeue, err := r.reconcileOwnerCaptureLegs(ctx, obj)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile owner capture legs")
 		return ctrl.Result{}, err
 	}
 	// w7-main-split: mirror the just-computed content.Ready onto the owning Snapshot in the SAME pass
 	// (owner resolved from spec.snapshotRef; post-bind writer switch on status.boundSnapshotContentName).
-	// Runs regardless of `ready` so a content.Ready=False (e.g. ManifestCapturePending) is reflected on the
-	// Snapshot too. Removing the cross-controller hop is what closes the staleness window where the binder
-	// re-derived a stale Ready. On a transient API error, requeue and retry.
-	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj, legTermReason, legTermMessage); err != nil {
+	// Runs regardless of `ready` so a content.Ready=False (e.g. ManifestCapturePending or the now
+	// content-terminal VolumeCaptureFailed) is reflected on the Snapshot too. Removing the cross-controller
+	// hop is what closes the staleness window where the binder re-derived a stale Ready. On a transient API
+	// error, requeue and retry.
+	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj); err != nil {
 		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
 		return ctrl.Result{}, err
 	}
@@ -469,7 +477,14 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
 	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
-	if !ready || edgesRequeue || mcpRequeue || dataRequeue || legsRequeue {
+	//
+	// dataRequeue is deliberately NOT a requeue trigger anymore (vcr-watch-core-terminal Phase 3): a
+	// pending data leg keeps Ready=False, so the general !ready self-requeue already covers it, and the VCR
+	// is now event-driven (AddVolumeCaptureRequestWatch) — a VCR status flip enqueues this content directly
+	// instead of being polled. dataRequeue still feeds the aggregation as dataLegPending above. edges/mcp
+	// (separate optimistic patches observed next pass) and legs (subtreePlanned/subtree-manifests waves,
+	// only partially data-leg) stay as triggers.
+	if !ready || edgesRequeue || mcpRequeue || legsRequeue {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
@@ -521,7 +536,7 @@ type commonContentStatusPlan struct {
 // requeuing on !ready, which is what drives the child->parent archive wave to converge via active
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool) (ready bool, err error) {
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -551,6 +566,20 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		plan.volumeReason = snapshot.ReasonDataCapturePending
 		plan.volumeMessage = "waiting for the data leg to be published and the volume snapshot artifact to be ready"
 		plan.volumeFailed = false
+		deriveReadyStatus(&plan)
+	}
+
+	// Core-owned terminal data-leg failure (vcr-watch-core-terminal, decision D2): a failed VCR (or the
+	// Variant-A >1-artifact fault) surfaced by reconcileDataLegProjection makes the CONTENT itself terminal
+	// (VolumeReady=False/VolumeCaptureFailed, terminal wins over the pending downgrade above). Because the
+	// content is now terminal on its own Ready, validateCommonContentChildren treats it as ChildrenFailed on
+	// the parent content, so the failure propagates up the whole content-aggregation tree — the former hack
+	// folded the leg terminal only into the owning snapshot's Ready and never reached the parent contents.
+	if dataLegTermReason != "" {
+		plan.volumeReady = metav1.ConditionFalse
+		plan.volumeReason = dataLegTermReason
+		plan.volumeMessage = dataLegTermMessage
+		plan.volumeFailed = true
 		deriveReadyStatus(&plan)
 	}
 
@@ -652,10 +681,11 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 }
 
 // ReconcileCommonSnapshotContentStatus is the exported aggregation entry (tests/utility). It passes
-// dataLegPending=false: callers that do not run the data-leg projection this pass get the plain N/A
-// treatment for an empty status.data (the aggregator's own Reconcile threads the real pending signal).
+// dataLegPending=false and no terminal data-leg reason: callers that do not run the data-leg projection
+// this pass get the plain N/A treatment for an empty status.data (the aggregator's own Reconcile threads
+// the real pending/terminal signal).
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
-	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false)
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "")
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, VolumeReady, ChildrenReady, the
@@ -1038,6 +1068,7 @@ var terminalChildContentFailureReasons = map[string]struct{}{
 	snapshot.ReasonDataArtifactInvalid:      {},
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
+	snapshot.ReasonVolumeCaptureFailed:      {},
 	snapshot.ReasonChildrenFailed:           {},
 }
 
@@ -1877,7 +1908,10 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 		For(obj).
 		WithOptions(snapshotContentControllerOptions()).
 		Named(fmt.Sprintf("snapshotcontent-%s-%s", contentGVK.Group, contentGVK.Kind))
-	if err := builder.Complete(r); err != nil {
+	// Build (not Complete) so we keep the controller handle for a later dynamic Watch add (parity with
+	// SetupWithManager; e.g. AddVolumeCaptureRequestWatch on the common content GVK).
+	c, err := builder.Build(r)
+	if err != nil {
 		if needAppendMain {
 			r.SnapshotContentGVKs = r.SnapshotContentGVKs[:len(r.SnapshotContentGVKs)-1]
 		}
@@ -1893,6 +1927,10 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 		}
 		return fmt.Errorf("setup SnapshotContent watch for %s: %w", contentGVK.String(), err)
 	}
+	if r.contentControllers == nil {
+		r.contentControllers = make(map[string]controller.Controller)
+	}
+	r.contentControllers[key] = c
 	r.activeContentWatchSet[key] = struct{}{}
 	return nil
 }
@@ -1922,6 +1960,9 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	if r.activeContentWatchSet == nil {
 		r.activeContentWatchSet = make(map[string]struct{})
 	}
+	if r.contentControllers == nil {
+		r.contentControllers = make(map[string]controller.Controller)
+	}
 	for _, gvk := range r.SnapshotContentGVKs {
 		key := gvk.String()
 		if _, ok := r.activeContentWatchSet[key]; ok {
@@ -1939,9 +1980,14 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		// VolumeSnapshotContent under envtest) degrades to "no watch" instead of failing startup;
 		// revalidation on the next reconcile still recomputes state (INV-RECONCILE-TRUTH).
 		builder = r.addArtifactWakeUpWatches(builder)
-		if err := builder.Complete(r); err != nil {
+		// Build (not Complete) so we keep the controller handle: the VolumeCaptureRequest watch is added
+		// to THIS existing controller later (AddVolumeCaptureRequestWatch), once the forked VCR CRD is
+		// guaranteed RESTMappable, instead of a static Watches that would fail startup when it is not.
+		c, err := builder.Build(r)
+		if err != nil {
 			return fmt.Errorf("failed to setup watch for SnapshotContent GVK %s: %w", gvk.String(), err)
 		}
+		r.contentControllers[key] = c
 		r.activeContentWatchSet[key] = struct{}{}
 	}
 	return nil
@@ -1964,6 +2010,79 @@ func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder)
 		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
 	}
 	return b
+}
+
+// AddVolumeCaptureRequestWatch adds an event-driven VolumeCaptureRequest (VCR) watch to the EXISTING
+// common-content controller (the single content queue), so a VCR status flip enqueues the owning
+// SnapshotContent directly instead of relying on the 500 ms self-requeue poll. It routes each VCR to its
+// owning content via mapVCRToOwningContent (VCR controller-ownerRef -> owning xxxSnapshot ->
+// status.boundSnapshotContentName).
+//
+// It is added dynamically (not as a static builder.Watches) because the forked storage-foundation VCR CRD
+// may not be RESTMappable at manager boot; a static watch would then fail startup. main.go calls this once
+// a data-artifact snapshot kind is registered — i.e. the VCR CRD is deployed and RESTMappable now. The
+// RESTMapping guard keeps a still-absent CRD from erroring (degrades to "no watch", the !ready self-requeue
+// still converges), and the vcrWatchAdded flag makes it idempotent. It reuses the existing controller
+// handle so there is no second queue and no concurrent reconciles of the same content.
+func (r *SnapshotContentController) AddVolumeCaptureRequestWatch(mgr ctrl.Manager) error {
+	return r.addVolumeCaptureRequestWatch(mgr.GetCache())
+}
+
+// addVolumeCaptureRequestWatch is the cache-injected core of AddVolumeCaptureRequestWatch (split so unit
+// tests can drive it with a fake cache/RESTMapper/controller handle without a real manager).
+func (r *SnapshotContentController) addVolumeCaptureRequestWatch(c cache.Cache) error {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if r.vcrWatchAdded {
+		return nil
+	}
+	logger := ctrl.Log.WithName("snapshotcontent-controller")
+	gvk := vcpkg.VolumeCaptureRequestGVK
+	if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+		logger.Info("VolumeCaptureRequest watch skipped (GVK not RESTMappable yet); relying on the !ready self-requeue",
+			"gvk", gvk.String(), "reason", err.Error())
+		return nil
+	}
+	key := unifiedbootstrap.CommonSnapshotContentGVK().String()
+	handle, ok := r.contentControllers[key]
+	if !ok || handle == nil {
+		return fmt.Errorf("cannot add VolumeCaptureRequest watch: content controller handle for %s not built (SetupWithManager must run first)", key)
+	}
+	var vcrObj client.Object = &unstructured.Unstructured{}
+	vcrObj.(*unstructured.Unstructured).SetGroupVersionKind(gvk)
+	if err := handle.Watch(source.Kind(c, vcrObj, handler.EnqueueRequestsFromMapFunc(r.mapVCRToOwningContent))); err != nil {
+		return fmt.Errorf("add VolumeCaptureRequest watch on content controller %s: %w", key, err)
+	}
+	r.vcrWatchAdded = true
+	logger.Info("VolumeCaptureRequest watch added to content controller (event-driven data leg)", "gvk", gvk.String())
+	return nil
+}
+
+// mapVCRToOwningContent routes a VolumeCaptureRequest change to the SnapshotContent it feeds. The VCR is
+// created by the domain SDK (EnsureVolumeCapture) with a controller-ownerRef on the owning xxxSnapshot, so
+// the route is VCR.controllerOwnerRef -> owning snapshot (same namespace) -> status.boundSnapshotContentName
+// (the SAME resolution mapSnapshotStatusToBoundCommonContent performs). The snapshot is read from the cache
+// client. Returns nil for a VCR with no controller-owner, an unresolvable/unbound owner (best-effort; the
+// !ready self-requeue still converges).
+func (r *SnapshotContentController) mapVCRToOwningContent(ctx context.Context, obj client.Object) []reconcile.Request {
+	ownerRef := metav1.GetControllerOf(obj)
+	if ownerRef == nil || ownerRef.Name == "" {
+		return nil
+	}
+	gv, err := schema.ParseGroupVersion(ownerRef.APIVersion)
+	if err != nil {
+		return nil
+	}
+	snap := &unstructured.Unstructured{}
+	snap.SetGroupVersionKind(gv.WithKind(ownerRef.Kind))
+	if err := r.Get(ctx, client.ObjectKey{Namespace: obj.GetNamespace(), Name: ownerRef.Name}, snap); err != nil {
+		return nil
+	}
+	boundName, _, err := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+	if err != nil || boundName == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: boundName}}}
 }
 
 func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manager, snapshotGVK schema.GroupVersionKind) error {

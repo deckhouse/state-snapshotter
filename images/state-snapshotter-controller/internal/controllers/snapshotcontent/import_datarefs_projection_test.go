@@ -193,9 +193,12 @@ func TestReconcileDataLegProjection_GenericImportStructuralNodeSkips(t *testing.
 	// GVKRegistry with the leaf kind NOT marked as data-bearing (default reads false).
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a manifest-only import node must not be terminal, got %q", termReason)
 	}
 	if requeue {
 		t.Fatalf("a manifest-only import node must not requeue for a data leg")
@@ -231,9 +234,12 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	reg.MarkRequiresDataArtifact(importLeafKind, true)
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a successful import publish must not be terminal, got %q", termReason)
 	}
 	if !requeue {
 		t.Fatalf("a fresh import publish must requeue so the next pass re-reads the content with data")

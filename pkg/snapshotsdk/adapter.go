@@ -17,6 +17,7 @@ limitations under the License.
 package snapshotsdk
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -55,9 +56,13 @@ type SnapshotAdapter interface {
 	// SDK consults for suppression and for computing CoreCaptureOutcome. The SDK never writes it.
 	CoreCaptureState() CoreCaptureState
 
-	// ReadyReason / ReadyMessage return the reason/message of the core-written status.conditions[Ready].
-	// They are the domain's failure channel: a terminal Ready reason (IsReasonTerminal) drives
-	// CoreCaptureOutcome=Failed. Empty when no Ready condition is present yet.
+	// ReadyStatus / ReadyReason / ReadyMessage return the status/reason/message of the core-written
+	// status.conditions[Ready]. They are the domain's READ-ONLY view of its own capture outcome (the core
+	// is the sole writer of the terminal Ready): a terminal Ready reason (IsReasonTerminal) drives
+	// CoreCaptureOutcome=Failed, and ReadyStatus lets a domain observe True/False/Unknown directly when it
+	// builds its own Finished/wait/stop logic. All three are empty (ReadyStatus "") when no Ready condition
+	// is present yet.
+	ReadyStatus() metav1.ConditionStatus
 	ReadyReason() string
 	ReadyMessage() string
 }

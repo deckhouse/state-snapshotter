@@ -302,7 +302,7 @@ func TestMirrorReadyToOwnerSnapshot_LostChildrenFold(t *testing.T) {
 		owner := lostOwnerSnapshot(t, finished)
 		r := newLostChildrenController(t, owner) // child-1 missing
 		content := lostFrozenContent(t, "child-1")
-		if err := r.mirrorReadyToOwnerSnapshot(ctx, content, "", ""); err != nil {
+		if err := r.mirrorReadyToOwnerSnapshot(ctx, content); err != nil {
 			t.Fatalf("mirror: %v", err)
 		}
 		got := readOwnerReady(t, r)
@@ -315,7 +315,7 @@ func TestMirrorReadyToOwnerSnapshot_LostChildrenFold(t *testing.T) {
 		owner := lostOwnerSnapshot(t, finished)
 		r := newLostChildrenController(t, owner, lostChildContent("child-1", true)) // child CR deleted
 		content := lostFrozenContent(t, "child-1")
-		if err := r.mirrorReadyToOwnerSnapshot(ctx, content, "", ""); err != nil {
+		if err := r.mirrorReadyToOwnerSnapshot(ctx, content); err != nil {
 			t.Fatalf("mirror: %v", err)
 		}
 		got := readOwnerReady(t, r)
@@ -329,7 +329,7 @@ func TestMirrorReadyToOwnerSnapshot_LostChildrenFold(t *testing.T) {
 		// Content Ready + its owning child CR present again (restored via StaticBind) -> healthy.
 		r := newLostChildrenController(t, owner, lostChildContent("child-1", true), lostChildSnapshotCR(childCRName("child-1")))
 		content := lostFrozenContent(t, "child-1")
-		if err := r.mirrorReadyToOwnerSnapshot(ctx, content, "", ""); err != nil {
+		if err := r.mirrorReadyToOwnerSnapshot(ctx, content); err != nil {
 			t.Fatalf("mirror: %v", err)
 		}
 		got := readOwnerReady(t, r)

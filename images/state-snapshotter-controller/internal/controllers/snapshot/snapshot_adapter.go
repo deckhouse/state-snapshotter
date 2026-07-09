@@ -107,6 +107,10 @@ func (a NamespaceSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureStat
 	return coreCaptureStateFrom(a.snap.Status.CaptureState)
 }
 
+func (a NamespaceSnapshotAdapter) ReadyStatus() metav1.ConditionStatus {
+	return readyConditionStatus(a.snap.Status.Conditions)
+}
+
 func (a NamespaceSnapshotAdapter) ReadyReason() string {
 	return readyConditionReason(a.snap.Status.Conditions)
 }
@@ -147,6 +151,13 @@ func coreCaptureStateFrom(cs *storagev1alpha1.CaptureStateStatus) snapshotsdk.Co
 		ManifestCaptured: cs.CommonController.ManifestCaptured,
 		DataCaptured:     cs.CommonController.DataCaptured,
 	}
+}
+
+func readyConditionStatus(conditions []metav1.Condition) metav1.ConditionStatus {
+	if c := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionReady); c != nil {
+		return c.Status
+	}
+	return ""
 }
 
 func readyConditionReason(conditions []metav1.Condition) string {

@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
@@ -116,10 +115,14 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
-			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualDisk, resolution.Name),
-		})
+		// Recoverable, NOT terminal: the captured source may still appear. Surface it as a Pending
+		// diagnostic (message-only, phase preserved) and requeue — Fail/Reject would move to the terminal
+		// Failed SINK the SDK never leaves, so a source that shows up later could never be captured. This is
+		// the pod model: stay Pending with a "waiting for X" note instead of failing.
+		if perr := sdk.ReportProgress(ctx, adapter, fmt.Sprintf("waiting for %s %q to exist", controllercommon.KindDemoVirtualDisk, resolution.Name)); perr != nil {
+			return ctrl.Result{}, perr
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 
 	// Publish the captured live source's full reference (top-level status.snapshotSource). d8-cli reads it
@@ -135,21 +138,24 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	// Data leg (D3): resolve the source disk's single PVC into the data-leg target (domain decision). A
-	// missing PVC is an actionable, surfaced Ready=False (the PVC may still appear), not an endless raw
-	// requeue. A disk without spec.persistentVolumeClaimName is manifest-only (no data leg).
-	dataRef, terminalReason, terminalMessage, err := r.resolveDemoVirtualDiskDataRef(ctx, s, source)
+	// missing PVC is recoverable (the PVC may still appear), NOT terminal: surface it as a Pending
+	// diagnostic and requeue rather than entering the terminal Failed sink. A disk without
+	// spec.persistentVolumeClaimName is manifest-only (no data leg).
+	dataRef, pendingMessage, err := r.resolveDemoVirtualDiskDataRef(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if terminalReason != "" {
-		if perr := sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(terminalReason),
-			Message: terminalMessage,
-			Requeue: true,
-		}); perr != nil {
+	if pendingMessage != "" {
+		if perr := sdk.ReportProgress(ctx, adapter, pendingMessage); perr != nil {
 			return ctrl.Result{}, perr
 		}
 		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+
+	// All source/data preconditions resolved: clear any stale "waiting for X" diagnostic left by a prior
+	// reconcile so a recovered snapshot does not keep showing an obsolete Pending note.
+	if err := clearDemoProgress(ctx, sdk, adapter); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{DataRef: dataRef}); err != nil {
@@ -172,17 +178,19 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 	}
 
 	// Barrier 2 (Finished): switch on the SDK-derived capture outcome. The core flips the commonController
-	// leg latches as it captures; a terminal Ready reason means failure. A disk is a data-leaf: it confirms
-	// consistency immediately once all its declared legs (manifest + data) are captured — there is no
-	// freeze/unfreeze showcase to time on a single volume.
+	// leg latches as it captures. A disk is a data-leaf: it confirms consistency immediately once all its
+	// declared legs (manifest + data) are captured — there is no freeze/unfreeze showcase to time on a
+	// single volume.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeCaptured:
 		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
 	case snapshotsdk.CaptureOutcomeFailed:
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(outcome.Reason),
-			Message: outcome.Message,
-		})
+		// Core-owned terminal (a failed data/manifest leg) is surfaced by the CORE on the Ready condition
+		// — the core makes the SnapshotContent itself terminal (VolumeCaptureFailed) and mirrors it here
+		// (Variant A). The domain does NOT re-drive it into phase=Failed via Reject: turning a core-owned
+		// leg failure into a terminal is the core's job. Nothing left for the domain to do, so stop (the
+		// core owns the durable terminal state); requeuing would only spin.
+		return ctrl.Result{}, nil
 	default:
 		// Capturing: wait for the core to finish. The status watch wakes us on each leg latch flip; poll as
 		// a fallback in case a signal is missed.
@@ -191,25 +199,26 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 }
 
 // resolveDemoVirtualDiskDataRef resolves the source disk's single PVC into the SDK data-leg target. It
-// returns a nil ref for a manifest-only disk, or a non-empty terminalReason (ArtifactMissing) when the
-// configured PVC is not yet present.
+// returns a nil ref for a manifest-only disk, or a non-empty pendingMessage when the configured PVC is not
+// yet present. A missing PVC is recoverable (Pending), not terminal — the caller surfaces the message via
+// ReportProgress and requeues instead of failing.
 func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataRef(
 	ctx context.Context,
 	s *demov1alpha1.DemoVirtualDiskSnapshot,
 	source *demov1alpha1.DemoVirtualDisk,
-) (dataRef *snapshotsdk.Target, terminalReason string, terminalMessage string, err error) {
+) (dataRef *snapshotsdk.Target, pendingMessage string, err error) {
 	pvcName := source.Spec.PersistentVolumeClaimName
 	if pvcName == "" {
-		return nil, "", "", nil
+		return nil, "", nil
 	}
 
 	reader := demoReconcilerReader(r.APIReader, r.Client)
 	pvc := &corev1.PersistentVolumeClaim{}
 	if getErr := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); getErr != nil {
 		if apierrors.IsNotFound(getErr) {
-			return nil, storagev1alpha1.ReasonArtifactMissing, fmt.Sprintf("PersistentVolumeClaim %q not found for disk data leg", pvcName), nil
+			return nil, fmt.Sprintf("waiting for PersistentVolumeClaim %q (disk data leg) to exist", pvcName), nil
 		}
-		return nil, "", "", getErr
+		return nil, "", getErr
 	}
 
 	return &snapshotsdk.Target{
@@ -218,5 +227,17 @@ func (r *DemoVirtualDiskSnapshotReconciler) resolveDemoVirtualDiskDataRef(
 		Kind:       "PersistentVolumeClaim",
 		Name:       pvc.Name,
 		Namespace:  pvc.Namespace,
-	}, "", "", nil
+	}, "", nil
+}
+
+// clearDemoProgress clears a stale non-terminal Pending diagnostic
+// (captureState.domainSpecificController.message) once the domain's "waiting for X" precondition resolves,
+// so a recovered snapshot stops showing an obsolete note. It is a no-op when the message is already empty;
+// ReportProgress additionally refuses to touch a terminal (Failed) object, so this never disturbs a real
+// failure reason/message.
+func clearDemoProgress(ctx context.Context, sdk snapshotsdk.CaptureSDK, adapter snapshotsdk.SnapshotAdapter) error {
+	if adapter.GetDomainCaptureState().Message == "" {
+		return nil
+	}
+	return sdk.ReportProgress(ctx, adapter, "")
 }

@@ -68,6 +68,9 @@ var (
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
 	integrationGraphRegProvider *snapshotgraphregistry.Provider
+	// integrationContentController is the suite's SnapshotContentController, exposed so specs can drive its
+	// dynamic watch registration (AddVolumeCaptureRequestWatch) against the envtest-served VCR CRD.
+	integrationContentController *controllers.SnapshotContentController
 	// subtreeIdentitiesServer is the suite-scoped fake aggregated API service backing the root's
 	// manifest-exclude self-call (snapshotcontents/<name>/subtree-manifest-identities). envtest does not
 	// register the core APIService, so the reconciler's SDK cannot reach the real subresource; this
@@ -806,6 +809,7 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
+	integrationContentController = contentController
 	for _, snapshotGVK := range runtimeSnapGVKs {
 		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	}

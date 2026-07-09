@@ -1437,3 +1437,91 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   `domainSpecificController.phase`, which the VS CRD carries) and does NOT break the e2e `subtreePlanned`
   specs (both skip `VolumeSnapshot` nodes; the root-`subtreePlanned` assertion runs on the manifest-only tree
   with no VS). Left for a separate storage-foundation change.
+
+### E2E test fixes exposed by the built-in-VS / namespace-capture / child-bridge unblock
+
+- **Bugfix** (e2e) Three E2E specs failed after redeploy; all three are test-side (production behavior is
+  correct). (1) `child_bridge_failure_test` expected the root at `Ready=False/ChildrenFailed`, but a domain
+  DATA-leg terminal failure surfaces on the child xxxSnapshot as `domainSpecificController.phase=Failed`
+  while its bound content stays `VolumeReady=False/DataCapturePending` (non-terminal/retryable), so
+  `ChildrenFailed` (content aggregation, terminal reasons only) is UNREACHABLE. The load-bearing fail-closed
+  path is the root weight-layer capture-barrier gate (`weightLayerCaptureReady`), which catches phase=Failed
+  and publishes `Ready=False/GraphPlanningFailed` naming the failed child; test now asserts that (INV-FAIL-PROP
+  still verified). This `It` only ran now that the LocalStorageClass BeforeAll fix unblocked it. (2)
+  `backup_download_test.assertRawManifestsMatchLive` tripped on the cluster-scoped `Namespace` self-manifest
+  now present in the root own-manifests (namespace-capture feature) — it has no namespaced live-GVR mapping;
+  the compare skips it (validated verbatim by the dedicated namespace-capture spec). (3)
+  `backup_download_test.createDataExport` hardcoded `apiVersion: state-snapshotter.deckhouse.io/v1alpha1` while
+  DataExport is served under `storage-foundation.deckhouse.io/v1alpha1` (apiserver rejected the body/endpoint
+  mismatch); it now derives the apiVersion from `dataExportGVR`. gofmt + go vet green.
+
+### Make Failed a terminal sink (SDK) and rewrite demo controllers to match
+
+- **Bugfix** (snapshotsdk) Made the capture lifecycle phase `Failed` a TERMINAL SINK to kill the child-bridge
+  flap (root `GraphPlanningFailed ↔ ManifestCapturePending`, driven by a child `VolumeCaptureFailed ↔
+  DataCapturePending` phase storm). `phaseCanAdvance` now allows `*->Failed` and only `Failed->Failed` (an
+  idempotent re-assert / terminal reason-message refresh), so a domain's unconditional per-reconcile
+  `MarkPlanned` can no longer drag a `Failed` node back to `Planned` (where the terminal outcome immediately
+  re-`Failed` it). Guarded `ReportProgress` to refuse writing over a terminal `Failed` reason/message (the
+  Pending-only diagnostic channel must never resurrect or overwrite a real failure). `capture_phase_test.go`
+  pins both rules (`Failed` never resurrects to Planning/Planned/Finished; `Failed->Failed` stays a no-op).
+- **Refactor** (domain-controller demo) Rewrote the demo VM/disk snapshot controllers so `Failed` is reserved
+  for genuinely terminal failures now that the SDK never leaves it. RECOVERABLE "waiting for X" conditions
+  (source object not found, disk data-leg PVC not found) no longer `Reject`/`Fail` (which would strand the
+  snapshot in the terminal sink); they surface a Pending diagnostic via `sdk.ReportProgress` (message-only,
+  phase preserved) and requeue — the pod model. Added `clearDemoProgress` to drop the stale "waiting for X"
+  note once the precondition resolves. `resolveDemoVirtualDiskDataRef` now returns a `pendingMessage` instead
+  of a terminal `ArtifactMissing` reason (dropping the `storagev1alpha1` dep in the disk controller/its unit
+  test). `EnsureChildren` errors are split: a frozen-set growth (`ErrChildrenSetFrozen`) is terminal
+  (`Fail(GraphPlanningFailed)`), while a child-adoption conflict or transient API error is fail-closed but
+  NON-terminal (requeue via the returned error, phase stays pre-Planned). Terminal paths kept: malformed
+  `spec.sourceRef` (`Reject InvalidSourceRef`) and a data-leg terminal failure (`Reject` on
+  `CoreCaptureOutcome==Failed`). Removed the now-unused `demoReasonSourceNotFound` const. Updated
+  `source_ref_test.go` (source-not-found → Pending+message, conflict → non-terminal fail-closed) and
+  `disk_volume_capture_test.go` (missing PVC → pending message). gofmt + go vet + demo package tests +
+  snapshotsdk tests + domain-controller module build green.
+- **Update** (docs, ADR sync) Synced the domain-snapshot-sdk ADR
+  (`architecture-decision-records/dkp/storage/state-snapshotter/2026-06-29-domain-snapshot-sdk.md`) with the
+  above: documented `Failed` as a TERMINAL SINK (out-of-band from the monotonic Planning→Planned→Finished
+  chain; `phaseCanAdvance` allows only `*→Failed`/`Failed→Failed`) with the anti-flap rationale, added the
+  `ReportProgress`/CaptureProgress verb and the terminal-vs-recoverable verb-selection rule (recoverable
+  "waiting for X" → `ReportProgress`+requeue, pod model; only genuine terminal failures → `Fail`/`Reject`),
+  and fixed the two example snippets that showed the old anti-pattern (source-not-found and PVC-not-found used
+  `Fail(..., Requeue:true)` → now `ReportProgress`+requeue; `resolveDataRef` returns a `pendingMessage`).
+
+### Event-driven VCR + core-owned failure propagation (vcr-watch-core-terminal)
+
+- **Bugfix** (state-snapshotter-controller snapshotcontent) Made a failed data-leg VolumeCaptureRequest (or a
+  Variant-A cardinality>1 fault) turn the CONTENT itself terminal so it propagates up the content-aggregation
+  tree as `ChildrenFailed`. `reconcileDataLegProjection` now returns `(requeue, termReason, termMessage, err)`
+  and surfaces `VolumeCaptureFailed` on VCR failure; `reconcileCommonSnapshotContentStatus` consumes it and
+  makes `VolumeReady=False/VolumeCaptureFailed` win over any pending data-leg. Added
+  `snapshot.ReasonVolumeCaptureFailed` to `terminalChildContentFailureReasons`. Simplified
+  `reconcileOwnerCaptureLegs` (→ `(requeue, err)`) and `observeOwnerDataLegVCR` (→ `(done, err)`) — leg VCR
+  failures are no longer folded into the owner Snapshot mirror; `mirrorReadyToOwnerSnapshot` dropped its
+  `legTermReason/Message` params and mirrors the content-terminal Ready verbatim. Tests cover VCR-fail → content
+  terminal → parent `ChildrenFailed`.
+- **Add** (snapshotsdk) Core is now the sole writer of terminal conditions; domains observe via read-methods
+  instead of driving `Fail`/`Reject` on core-owned leg failures. Added `SnapshotAdapter.ReadyStatus()`, a
+  `ChildCaptureState` type, and a `CaptureInspection` interface (`ChildrenCaptureStates`) on `CaptureSDK`
+  (`inspect.go`). Demo VM/disk Barrier-2 dropped the `CaptureOutcomeFailed→Reject` branch (stop, don't
+  re-drive the terminal sink); the VM controller decides Finished via `ChildrenCaptureStates` + pure helpers
+  `childrenHaveTerminal`/`allChildrenLegsCaptured`. Synced the domain-snapshot-sdk ADR.
+- **Add** (state-snapshotter-controller snapshotcontent) Replaced the data-leg VCR poll with an event-driven
+  informer-watch on the existing content controller: `SetupWithManager`/`AddWatchForContent` now `Build(r)` and
+  store the controller handle; `AddVolumeCaptureRequestWatch` (RESTMapping-guarded, idempotent) adds a
+  `source.Kind` watch routed by `mapVCRToOwningContent` (VCR controller-ownerRef → owner snapshot →
+  `status.boundSnapshotContentName`), wired from `cmd/main.go` when a data-artifact kind is marked. VCR reads
+  switched to the cache (`r.Get`); the pre-reap safety read stays authoritative (`r.APIReader`). The dedicated
+  `dataRequeue` trigger was removed (the general `!ready` self-requeue still drives convergence). Unit tests
+  cover routing + guard/idempotency (fake RESTMapper/handle); an integration spec registers the watch against
+  the envtest-served VCR CRD.
+- **Update** (docs, review-loop comment sync) Corrected the now-stale rationale comments for the child_bridge
+  fail-closed path. After D2/D3 a domain child's data-leg VCR failure no longer surfaces as
+  `phase=Failed` with a `DataCapturePending` content; instead the core makes the child's own SnapshotContent
+  terminal (`VolumeReady=VolumeCaptureFailed`) and mirrors it onto the child snapshot's Ready. At the ROOT the
+  weight-layer capture-barrier gate (`weightLayerCaptureReady` -> `snapshotChildTerminalFailure`, which treats
+  `VolumeCaptureFailed` as terminal) catches that terminal Ready during planning and short-circuits to
+  `Ready=False/GraphPlanningFailed` before the content->Snapshot mirror (which would say `ChildrenFailed`) can
+  take over — so the root settles on `GraphPlanningFailed` (assertion value unchanged). Rewrote the
+  `child_bridge_failure_test.go` justification and synced the `parent_graph.go` core-derived-terminal comment.

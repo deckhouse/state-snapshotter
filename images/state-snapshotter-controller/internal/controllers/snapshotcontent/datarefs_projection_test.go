@@ -183,14 +183,70 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a successful publish must not be terminal, got %q", termReason)
 	}
 	if !requeue {
 		t.Fatalf("a fresh publish must requeue so the next pass re-reads the content with data")
 	}
 	projAssertPublishedAndHandedOff(t, cl)
+}
+
+// vcr-watch-core-terminal (decision D2): a FAILED data-leg VCR makes the CONTENT terminal — the projection
+// returns termReason=VolumeCaptureFailed (not a requeue, no publish), which the aggregation folds into
+// content.Ready and which then propagates up the content tree as ChildrenFailed.
+func TestReconcileDataLegProjection_VCRFailedIsContentTerminal(t *testing.T) {
+	ctx := context.Background()
+	scheme := projScheme(t)
+	content := projContentTyped()
+
+	owner := &unstructured.Unstructured{}
+	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
+	owner.SetNamespace(projTestNS)
+	owner.SetName("disk-snap")
+	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
+
+	failedVCR := projReadyVCR()
+	_ = unstructured.SetNestedSlice(failedVCR.Object, []interface{}{
+		map[string]interface{}{
+			"type":    vcpkg.ConditionTypeReady,
+			"status":  string(metav1.ConditionFalse),
+			"reason":  "SnapshotCreationFailed",
+			"message": "csi failed",
+		},
+	}, "status", "conditions")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
+		WithObjects(projSourcePVC(), content, failedVCR).
+		Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	requeue, termReason, termMsg, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != snapshot.ReasonVolumeCaptureFailed {
+		t.Fatalf("termReason = %q, want %q", termReason, snapshot.ReasonVolumeCaptureFailed)
+	}
+	if termMsg == "" {
+		t.Fatalf("a terminal data-leg failure must carry a diagnostic message")
+	}
+	if requeue {
+		t.Fatalf("a terminal data leg must not requeue (the content is already terminal)")
+	}
+	got := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: projTestContent}, got); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	if got.Status.Data != nil {
+		t.Fatalf("a failed VCR must not publish status.data, got %#v", *got.Status.Data)
+	}
 }
 
 // Native-CSI data leg (§11.4): a VolumeSnapshot owner has no VCR — the fork binds it to a
@@ -222,9 +278,12 @@ func TestReconcileDataLegProjection_NativeCSIPublishesFromBoundVSC(t *testing.T)
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a successful native-CSI publish must not be terminal, got %q", termReason)
 	}
 	if !requeue {
 		t.Fatalf("a fresh native-CSI publish must requeue so the next pass re-reads the content with data")

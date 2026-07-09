@@ -316,9 +316,24 @@ func main() {
 	// Carry CSD spec.requiresDataArtifact from the merged pairs onto BOTH controllers' GVK registries
 	// (they hold separate instances): the binder's import path and main's capture-leg eager-init
 	// (main-owned commonController, decision #10) read the same flag. Built-in/bootstrap pairs stay false.
+	anyDataArtifactKind := false
 	for _, p := range mergedPairs {
 		snapshotController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
 		contentController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
+		if p.RequiresDataArtifact {
+			anyDataArtifactKind = true
+		}
+	}
+	// Event-driven VCR (vcr-watch-core-terminal Phase 3): a registered data-artifact kind means the forked
+	// storage-foundation VolumeCaptureRequest CRD is deployed and RESTMappable now, so add the VCR watch to
+	// the existing content controller (single content queue). This replaces the data-leg 500 ms poll: a VCR
+	// status flip enqueues the owning SnapshotContent directly. Idempotent + RESTMapping-guarded internally.
+	if anyDataArtifactKind {
+		if err := contentController.AddVolumeCaptureRequestWatch(mgr); err != nil {
+			log.Error(err, "Failed to add VolumeCaptureRequest watch to SnapshotContentController")
+			cancel()
+			os.Exit(1)
+		}
 	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {

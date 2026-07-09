@@ -18,6 +18,7 @@ package snapshotcontent
 
 import (
 	"context"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,9 +36,15 @@ import (
 // (content-single-writer design §4 Slice 3 / §11.4). It replaces the binder's data-leg publish
 // (genericbinder/domain_content.go): the aggregator projects the owning snapshot's captured volume
 // artifact onto status.data, performs the VolumeSnapshotContent Retain + ownerRef handoff, and enriches
-// volume metadata. The binder keeps ownership of the VCR lifecycle (terminal-failure surfacing, the
-// dataCaptured latch, and VCR deletion after a durable handoff), so the aggregator here NEVER surfaces a
-// terminal reason — it only publishes, or requeues while the leg is pending.
+// volume metadata.
+//
+// Core is the single writer of the terminal Ready (vcr-watch-core-terminal, decision D2): on a failed
+// data-leg VCR (or the Variant-A >1-artifact fault) it returns a non-empty (termReason, termMessage) so
+// reconcileCommonSnapshotContentStatus makes the CONTENT itself terminal (VolumeReady=VolumeCaptureFailed).
+// The content-level terminal is what propagates up the content-aggregation tree as ChildrenFailed (the
+// former hack folded the leg terminal only into the owning snapshot's Ready, so it never reached the
+// parent contents). Otherwise it returns an empty termReason and only publishes, or requeues while the leg
+// is pending.
 //
 // Two data sources by owner kind:
 //   - VCR domains (demo disk, etc.): captureState.domainSpecificController.volumeCaptureRequestName ->
@@ -46,10 +53,10 @@ import (
 //     reads owner.status.boundVolumeSnapshotContentName. Active once the CSD registers the kind (Block 3c).
 //
 // It is latch-idempotent: once status.data covers the source, it is kept even after the VCR is reaped.
-func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, err error) {
+func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, termReason string, termMessage string, err error) {
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
-		return false, nil
+		return false, "", "", nil
 	}
 
 	if owner.GetObjectKind().GroupVersionKind().Kind == snapshot.KindVolumeSnapshot {
@@ -68,11 +75,11 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 
 	vcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
 	if vcrName == "" {
 		// Manifest-only leaf (no data leg) or pre-Planned: nothing to project this pass.
-		return false, nil
+		return false, "", "", nil
 	}
 	return r.projectContentDataLegFromVCR(ctx, contentObj, ownerNamespace, vcrName)
 }
@@ -80,65 +87,80 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 // projectContentDataLegFromVCR reads the domain-created VolumeCaptureRequest, and once it is Ready and its
 // dataRefs are consistent, enriches volume metadata, transfers VolumeSnapshotContent ownership to the
 // SnapshotContent (Retain + ownerRef), and publishes status.data. It requeues while the leg is pending and
-// keeps the published binding once the VCR is reaped (latch-idempotent). VCR failures and the >1-artifact
-// Variant-A fault are surfaced terminally by the binder (patchSnapshotReadyFromContent); here they only
-// hold the projection pending (no publish).
-func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Context, contentObj *unstructured.Unstructured, namespace, vcrName string) (requeue bool, err error) {
+// keeps the published binding once the VCR is reaped (latch-idempotent).
+//
+// Core-owned terminal (vcr-watch-core-terminal, decision D2): a failed VCR and the >1-artifact Variant-A
+// fault are surfaced here as a non-empty (termReason, termMessage). The caller makes the CONTENT terminal
+// (VolumeReady=VolumeCaptureFailed), which propagates up as ChildrenFailed — the former hack only folded
+// the leg terminal into the owning snapshot's Ready, so it never reached the parent contents.
+func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Context, contentObj *unstructured.Unstructured, namespace, vcrName string) (requeue bool, termReason string, termMessage string, err error) {
 	contentName := contentObj.GetName()
 
 	vcr := &unstructured.Unstructured{}
 	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	// Uncached direct read: the aggregator does not watch VCR (adding it to the per-GVK status-watch
-	// builder risks breaking setup when the foundation VCR CRD is not RESTMappable yet). The 500 ms
-	// self-requeue while !ready drives convergence (design §3.2).
-	if getErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vcrName}, vcr); getErr != nil {
+	// Cached read: the content controller now event-driven-watches VCR (AddVolumeCaptureRequestWatch,
+	// added once a data-artifact kind is registered — the VCR CRD is RESTMappable by then). A VCR status
+	// flip enqueues this content directly, so the informer cache is authoritative-enough here and we no
+	// longer pay an uncached read per pass. (If a VCR read ever happens before the watch was added, the
+	// cached Get lazily starts the informer — correct, just first-Get-blocks-on-sync.)
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vcrName}, vcr); getErr != nil {
 		if errors.IsNotFound(getErr) {
 			// Pre-publish: the domain has not (re)created the VCR yet -> requeue until it appears.
 			// Post-publish: the binder reaped the VCR after a durable handoff -> keep the latched
 			// status.data, no requeue. Distinguish by whether the content already carries data.
-			return !r.contentHasData(ctx, contentName), nil
+			return !r.contentHasData(ctx, contentName), "", "", nil
 		}
-		return false, getErr
+		return false, "", "", getErr
 	}
 
 	expectedTargets, parseErr := vcctrl.ParseVolumeCaptureTargets(vcr)
 	if parseErr != nil {
-		return false, parseErr
+		return false, "", "", parseErr
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, cErr
+		return false, "", "", cErr
 	}
 	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
 		// Already published and covering the targets: latched, nothing to do.
-		return false, nil
+		return false, "", "", nil
 	}
-	if failed, _, _ := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
-		// The binder surfaces the terminal Ready=False; the aggregator only waits.
-		return true, nil
+	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
+		// Core-owned terminal: make the content terminal on the failed VCR so it propagates upward.
+		detail := msg
+		if reason != "" {
+			detail = fmt.Sprintf("%s: %s", reason, msg)
+		}
+		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("data-leg volume capture failed: %s", detail), nil
 	}
 	if !vcctrl.VolumeCaptureRequestReady(vcr) {
-		return true, nil
+		return true, "", "", nil
 	}
 
 	vcrRefs, refErr := vcctrl.ParseVolumeCaptureDataRefs(vcr)
 	if refErr != nil {
-		return false, refErr
+		return false, "", "", refErr
 	}
 	if validateErr := vcctrl.ValidateDataRefsForPublish(expectedTargets, vcrRefs); validateErr != nil {
 		// Ready VCR whose dataRefs are not yet consistent: retry without publishing.
-		return true, nil
+		return true, "", "", nil
 	}
 
 	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
 	// Variant A (cardinality ≤1): a domain volume leaf owns exactly one PVC. A ready VCR returning >1 data
-	// artifact for one logical content is a domain decomposition fault; the binder fails it terminally.
-	// The aggregator declines to publish (holds pending) rather than dropping the extra bindings.
-	if len(bindings) != 1 {
-		return true, nil
+	// artifact for one logical content is a domain decomposition fault — make the content terminal instead
+	// of looping forever while the projection declines to publish.
+	if len(bindings) > 1 {
+		return false, snapshot.ReasonVolumeCaptureFailed,
+			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
 	}
-	return r.publishDataBindings(ctx, contentName, bindings)
+	if len(bindings) != 1 {
+		// Zero bindings on a ready+valid VCR: not representable yet, hold pending.
+		return true, "", "", nil
+	}
+	requeue, err = r.publishDataBindings(ctx, contentName, bindings)
+	return requeue, "", "", err
 }
 
 // projectContentDataLegFromBoundVSC projects the native-CSI data leg (§11.4): a VolumeSnapshot owner is
@@ -146,16 +168,16 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 // the aggregator builds the {source PVC, VSC artifact} binding from the owner status and performs the same
 // enrich + Retain/ownerRef handoff + publish as the VCR branch. The source PVC is published by the domain
 // reconciler at adoption (owner.status.snapshotSource). Active once the CSD registers the kind (Block 3c).
-func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, err error) {
+func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, termReason string, termMessage string, err error) {
 	contentName := contentObj.GetName()
 
 	vscName, _, err := unstructured.NestedString(owner.Object, "status", "boundVolumeSnapshotContentName")
 	if err != nil {
-		return false, err
+		return false, "", "", err
 	}
 	if vscName == "" {
 		// CSI has not bound the VolumeSnapshot to a VolumeSnapshotContent yet: nothing to project.
-		return true, nil
+		return true, "", "", nil
 	}
 
 	binding := storagev1alpha1.SnapshotDataBinding{
@@ -168,18 +190,19 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	}
 	if binding.Source.Name == "" {
 		// The domain reconciler has not published status.snapshotSource yet: wait.
-		return true, nil
+		return true, "", "", nil
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, cErr
+		return false, "", "", cErr
 	}
 	if content.Status.Data != nil && content.Status.Data.Artifact.Name == vscName {
 		// Already published and bound to the same VSC: latched.
-		return false, nil
+		return false, "", "", nil
 	}
-	return r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding})
+	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding})
+	return requeue, "", "", err
 }
 
 // publishDataBindings enriches the bindings with live volume metadata, transfers VolumeSnapshotContent

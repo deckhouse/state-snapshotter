@@ -385,6 +385,31 @@ func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	}
 }
 
+// vcr-watch-core-terminal (decision D2): a child content that went terminal on a failed data-leg VCR
+// (Ready=False/VolumeCaptureFailed) must propagate to the parent as ChildrenFailed (terminal), the same
+// way ArtifactMissing does. This is the end-to-end proof that a failed VCR now reaches the parent contents.
+func TestPropagationVolumeCaptureFailedToChildrenFailed(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	failed := contentWithReadyCond("disk-content", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed,
+		"data-leg volume capture failed: SnapshotCreationFailed: csi failed")
+	readySibling := contentWithReadyCond("logs-content", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(failed, readySibling).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	parent := parentContentWithChildRefs("vm-content", "disk-content", "logs-content")
+	ready, reason, msg, err := r.validateCommonContentChildren(ctx, parent)
+	if err != nil {
+		t.Fatalf("validate children: %v", err)
+	}
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("got ready=%v reason=%s, want false/ChildrenFailed", ready, reason)
+	}
+	if !strings.Contains(msg, "leaf=disk-content") || !strings.Contains(msg, "reason=VolumeCaptureFailed") {
+		t.Fatalf("message %q must pin the failed leaf and its VolumeCaptureFailed reason", msg)
+	}
+}
+
 // A leaf VolumeReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
 // not ChildrenFailed (a transient child must not fail the tree).
 func TestPropagationDataCapturePendingToChildrenPending(t *testing.T) {

@@ -357,6 +357,13 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 				obj.GetKind(), obj.GetName(), obj.GetKind(),
 			)
 		}
+		// The root's own-manifests now carry the namespace's own cluster-scoped Namespace object
+		// (namespace-capture feature). It is cluster-scoped (empty metadata.namespace) and validated verbatim
+		// by the dedicated namespace-capture spec, so it does not fit this namespaced raw-vs-live compare
+		// (which keys on ns + a namespaced GVR). Skip it rather than trip the missing-GVR guard below.
+		if obj.GetKind() == "Namespace" && obj.GetNamespace() == "" {
+			continue
+		}
 		gvr, ok := gvrForLiveKind(obj.GetKind())
 		if !ok {
 			return fmt.Errorf("downloaded manifest %s/%s has no live GVR mapping for raw comparison", obj.GetKind(), obj.GetName())
@@ -609,7 +616,10 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 
 func createDataExport(ctx context.Context, ns string, target dataExportTarget) error {
 	de := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
+		// DataExport is served by storage-foundation, not state-snapshotter: derive the apiVersion from
+		// dataExportGVR so the object body matches the resource endpoint (a mismatch is rejected by the
+		// apiserver as "the API version in the data ... does not match the expected API version").
+		"apiVersion": dataExportGVR.GroupVersion().String(),
 		"kind":       "DataExport",
 		"metadata": map[string]interface{}{
 			"name":      target.exportName,

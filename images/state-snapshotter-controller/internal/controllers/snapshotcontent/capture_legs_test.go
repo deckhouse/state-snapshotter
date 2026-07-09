@@ -210,12 +210,9 @@ func TestReconcileOwnerCaptureLegs_ManifestLatchAndReapAfterHandoff(t *testing.T
 		Build()
 	r := captureLegsController(cl, clSnapGVK, false)
 
-	requeue, treason, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("durable manifest handoff must not be terminal, got %q", treason)
 	}
 	if requeue {
 		t.Fatalf("durable manifest handoff must not requeue")
@@ -242,12 +239,9 @@ func TestReconcileOwnerCaptureLegs_DataLegVCRLatchAndReapAfterHandoff(t *testing
 		Build()
 	r := captureLegsController(cl, clSnapGVK, true)
 
-	requeue, treason, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("durable data handoff must not be terminal, got %q", treason)
 	}
 	if requeue {
 		t.Fatalf("durable data handoff must not requeue")
@@ -275,12 +269,9 @@ func TestReconcileOwnerCaptureLegs_DataLegVCRPendingRequeues(t *testing.T) {
 		Build()
 	r := captureLegsController(cl, clSnapGVK, true)
 
-	requeue, treason, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("pending data leg must not be terminal, got %q", treason)
 	}
 	if !requeue {
 		t.Fatalf("pending data leg should requeue")
@@ -294,9 +285,11 @@ func TestReconcileOwnerCaptureLegs_DataLegVCRPendingRequeues(t *testing.T) {
 	}
 }
 
-// A failed data-leg VCR surfaces a terminal VolumeCaptureFailed reason (folded into the owner Ready mirror
-// by the caller); no latch, no reap.
-func TestReconcileOwnerCaptureLegs_DataLegVCRFailedIsTerminal(t *testing.T) {
+// A failed data-leg VCR is no longer surfaced as a terminal by the capture-leg lifecycle
+// (vcr-watch-core-terminal, decision D2): core makes the CONTENT terminal in reconcileDataLegProjection
+// instead. reconcileOwnerCaptureLegs must simply not latch dataCaptured and not reap the VCR (the failure
+// path is covered end-to-end in datarefs_projection_test.go / content_aggregation_test.go).
+func TestReconcileOwnerCaptureLegs_DataLegVCRFailedDoesNotLatch(t *testing.T) {
 	ctx := context.Background()
 	scheme := captureLegsScheme(t)
 	owner := captureLegsOwner(clSnapGVK, projTestContent, "", projTestVCRName, string(storagev1alpha1.SnapshotCapturePhasePlanned))
@@ -318,12 +311,9 @@ func TestReconcileOwnerCaptureLegs_DataLegVCRFailedIsTerminal(t *testing.T) {
 		Build()
 	r := captureLegsController(cl, clSnapGVK, true)
 
-	_, treason, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	_, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
-	}
-	if treason != snapshot.ReasonVolumeCaptureFailed {
-		t.Fatalf("expected terminal %q, got %q", snapshot.ReasonVolumeCaptureFailed, treason)
 	}
 	if got, _ := captureLegsOwnerLatch(t, cl, clSnapGVK, "dataCaptured"); got {
 		t.Fatalf("failed data leg must not latch dataCaptured=true")
@@ -348,7 +338,7 @@ func TestReconcileOwnerCaptureLegs_NativeCSIDataCaptured(t *testing.T) {
 		Build()
 	r := captureLegsController(cl, projVSGVK, true)
 
-	requeue, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(projVSGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(projVSGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 	}
@@ -373,7 +363,7 @@ func TestReconcileOwnerCaptureLegs_NativeCSIPendingRequeues(t *testing.T) {
 		Build()
 	r := captureLegsController(cl, projVSGVK, true)
 
-	requeue, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(projVSGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(projVSGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 	}
@@ -411,7 +401,7 @@ func TestReconcileOwnerCaptureLegs_SubtreeManifestsPersistedMirror(t *testing.T)
 				Build()
 			r := captureLegsController(cl, clSnapGVK, false)
 
-			if _, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, tc.persisted)); err != nil {
+			if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, tc.persisted)); err != nil {
 				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 			}
 			got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "subtreeManifestsPersisted")
@@ -448,7 +438,7 @@ func TestReconcileOwnerCaptureLegs_EagerInitDeclaresLegs(t *testing.T) {
 				Build()
 			r := captureLegsController(cl, clSnapGVK, tc.requiresData)
 
-			if _, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+			if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
 				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 			}
 			// manifestCaptured leg is always declared (init false, no MCR to latch -> stays false).
@@ -508,7 +498,7 @@ func TestReconcileOwnerCaptureLegs_SubtreePlannedLeafLatches(t *testing.T) {
 		Build()
 	r := captureLegsController(cl, clSnapGVK, false)
 
-	requeue, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 	}
@@ -536,7 +526,7 @@ func TestReconcileOwnerCaptureLegs_SubtreePlannedLatchesWhenChildrenPlanned(t *t
 		Build()
 	r := captureLegsController(cl, clSnapGVK, false)
 
-	requeue, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 	if err != nil {
 		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 	}
@@ -575,7 +565,7 @@ func TestReconcileOwnerCaptureLegs_SubtreePlannedRequeuesWhilePending(t *testing
 				Build()
 			r := captureLegsController(cl, clSnapGVK, false)
 
-			requeue, _, _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+			requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
 			if err != nil {
 				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 			}
@@ -626,12 +616,12 @@ func TestReconcileOwnerCaptureLegs_Guards(t *testing.T) {
 				unstructured.RemoveNestedField(contentObj.Object, "spec", "snapshotRef")
 			}
 
-			requeue, treason, _, err := r.reconcileOwnerCaptureLegs(ctx, contentObj)
+			requeue, err := r.reconcileOwnerCaptureLegs(ctx, contentObj)
 			if err != nil {
 				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
 			}
-			if requeue || treason != "" {
-				t.Fatalf("guard %q must be a no-op, got requeue=%v treason=%q", tc.name, requeue, treason)
+			if requeue {
+				t.Fatalf("guard %q must be a no-op, got requeue=%v", tc.name, requeue)
 			}
 			if _, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "manifestCaptured"); found == tc.wantNoInitLeg && found {
 				t.Fatalf("guard %q must not eager-init any capture leg", tc.name)

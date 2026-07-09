@@ -46,10 +46,10 @@ import (
 //
 // Like the VCR branch it is latch-idempotent and NEVER surfaces a terminal reason: it publishes, or
 // requeues while pending; the binder owns the terminal Ready=False.
-func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, err error) {
+func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, termReason string, termMessage string, err error) {
 	if !r.GVKRegistry.RequiresDataArtifact(owner.GetObjectKind().GroupVersionKind().Kind) {
 		// Structural import node (root Snapshot, VM snapshot, ...): manifests + children only, no data leg.
-		return false, nil
+		return false, "", "", nil
 	}
 	contentName := contentObj.GetName()
 
@@ -57,32 +57,32 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// name). >=2 is a fail-closed fault the binder surfaces terminally; none means d8 has not created it yet.
 	di, treason, _, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, owner)
 	if lErr != nil {
-		return false, lErr
+		return false, "", "", lErr
 	}
 	if treason != "" {
 		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator only
 		// holds pending (keeps a prior latched publish if any, otherwise requeues until it resolves).
-		return !r.contentHasData(ctx, contentName), nil
+		return !r.contentHasData(ctx, contentName), "", "", nil
 	}
 	if di == nil {
 		// Pre-publish: DataImport not visible yet -> requeue. Post-publish: keep the latched status.data.
-		return !r.contentHasData(ctx, contentName), nil
+		return !r.contentHasData(ctx, contentName), "", "", nil
 	}
 
 	binding, ready, dtreason, _ := BuildImportDataBinding(di, owner)
 	if dtreason != "" {
 		// Non-retryable import fault (e.g. a non-VolumeSnapshotContent artifact): the binder surfaces it
 		// terminally on the leaf; the aggregator declines to publish (holds pending).
-		return !r.contentHasData(ctx, contentName), nil
+		return !r.contentHasData(ctx, contentName), "", "", nil
 	}
 	if !ready {
 		// DataImport has not produced its artifact yet -> pending.
-		return !r.contentHasData(ctx, contentName), nil
+		return !r.contentHasData(ctx, contentName), "", "", nil
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, cErr
+		return false, "", "", cErr
 	}
 	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches both the
 	// artifact and the (source-derived) volumeMode (matches the binder's former fast-path so a content bound
@@ -90,9 +90,10 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	if content.Status.Data != nil &&
 		content.Status.Data.Artifact == binding.Artifact &&
 		content.Status.Data.VolumeMode == binding.VolumeMode {
-		return false, nil
+		return false, "", "", nil
 	}
-	return r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding})
+	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding})
+	return requeue, "", "", err
 }
 
 // BuildImportDataBinding maps a DataImport's produced artifact (status.data.artifact) into the single

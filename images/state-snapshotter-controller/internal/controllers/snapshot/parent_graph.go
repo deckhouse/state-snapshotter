@@ -614,7 +614,10 @@ func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.G
 		}
 		return true, fmt.Sprintf("child snapshot %s/%s/%s failed capture (phase=Failed): %s", gvk.String(), namespace, name, detail)
 	}
-	// Core-derived terminal: a terminal Ready reason on the child (e.g. GraphPlanningFailed, ChildrenFailed).
+	// Core-derived terminal: a terminal Ready reason on the child. This is the load-bearing fail-closed path
+	// for a domain child's data-leg failure (vcr-watch-core-terminal): the core makes the child content
+	// terminal (VolumeCaptureFailed) and mirrors it onto the child's Ready, and this gate catches it during
+	// planning (e.g. VolumeCaptureFailed, GraphPlanningFailed, ChildrenFailed).
 	class, message := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, name)
 	if class == usecase.SnapshotChildReadyClassFailed && readyConditionIsCurrentTerminal(child) {
 		return true, message

@@ -17,6 +17,7 @@ limitations under the License.
 package snapshotsdk
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -182,6 +183,23 @@ type CaptureOutcomeResult struct {
 	Outcome CaptureOutcome
 	Reason  string
 	Message string
+}
+
+// ChildCaptureState is the read-only view of one declared child snapshot the domain inspects (via
+// ChildrenCaptureStates) to build its own Finished/wait/stop logic — for example a VM aggregator that
+// confirms consistency only once every child disk's data leg is latched, and that stops waiting once a
+// child has gone terminal (the core owns and bubbles that terminal; the domain must not re-drive it).
+type ChildCaptureState struct {
+	// Ref is the child snapshot's published ref (status.childrenSnapshotRefs entry).
+	Ref SnapshotChildRef
+	// ReadyStatus / ReadyReason / ReadyMessage are the child's core-written status.conditions[Ready].
+	// ReadyStatus is empty ("") when the child has no Ready condition yet (or is not found).
+	ReadyStatus  metav1.ConditionStatus
+	ReadyReason  string
+	ReadyMessage string
+	// AllLegsCaptured reports whether every declared (non-nil) capture leg of the child is latched captured
+	// (status.captureState.commonController). It is false for a not-yet-found or not-yet-latched child.
+	AllLegsCaptured bool
 }
 
 // VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at

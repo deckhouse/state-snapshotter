@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // The demo disk data capture is content-free (D3): the domain controller only resolves the source disk's PVC
@@ -62,18 +61,18 @@ func dataLegPVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-capture ref and no terminal reason,
-// so the SDK ensures no VolumeCaptureRequest.
+// A manifest-only disk (no spec.persistentVolumeClaimName) yields no data-capture ref and no pending
+// message, so the SDK ensures no VolumeCaptureRequest.
 func TestDiskDataRef_NoPVC(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(""))
+	dataRef, pendingMessage, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if dataRef != nil || reason != "" {
-		t.Fatalf("manifest-only disk: want nil ref/no-reason, got dataRef=%#v reason=%q", dataRef, reason)
+	if dataRef != nil || pendingMessage != "" {
+		t.Fatalf("manifest-only disk: want nil ref/no-message, got dataRef=%#v pendingMessage=%q", dataRef, pendingMessage)
 	}
 }
 
@@ -82,30 +81,31 @@ func TestDiskDataRef_ResolvesPVCTarget(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap(), dataLegPVC())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, pendingMessage, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != "" {
-		t.Fatalf("present PVC: want no terminal reason, got %q", reason)
+	if pendingMessage != "" {
+		t.Fatalf("present PVC: want no pending message, got %q", pendingMessage)
 	}
 	if dataRef == nil || dataRef.UID != dataLegPVCUID || dataRef.Name != dataLegPVCName || dataRef.Kind != "PersistentVolumeClaim" {
 		t.Fatalf("unexpected data-capture ref: %#v", dataRef)
 	}
 }
 
-// A missing PVC is an actionable ArtifactMissing terminal reason (config not yet present), not a raw
-// error, and yields no ref.
-func TestDiskDataRef_MissingPVCIsTerminal(t *testing.T) {
+// A missing PVC is RECOVERABLE (the config may still appear), not terminal: it yields a non-empty pending
+// message (surfaced by the caller via ReportProgress) and no ref, rather than a raw error or a terminal
+// reason. The caller keeps requeuing instead of entering the terminal Failed sink.
+func TestDiskDataRef_MissingPVCIsPending(t *testing.T) {
 	cl := newDemoSourceRefFakeClient(t, dataLegDiskSnap())
 	r := &DemoVirtualDiskSnapshotReconciler{Client: cl, APIReader: cl}
 
-	dataRef, reason, _, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
+	dataRef, pendingMessage, err := r.resolveDemoVirtualDiskDataRef(context.Background(), dataLegDiskSnap(), dataLegSource(dataLegPVCName))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if reason != storagev1alpha1.ReasonArtifactMissing {
-		t.Fatalf("want reason %q, got %q", storagev1alpha1.ReasonArtifactMissing, reason)
+	if pendingMessage == "" {
+		t.Fatalf("missing PVC: want a non-empty pending message, got empty")
 	}
 	if dataRef != nil {
 		t.Fatalf("missing PVC must not yield a ref, got %#v", dataRef)

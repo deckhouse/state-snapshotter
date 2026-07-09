@@ -131,6 +131,22 @@ type ManifestExclude interface {
 	SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error)
 }
 
+// CaptureInspection exposes read-only condition views the domain uses to build its own Finished/wait/stop
+// logic (Variant A): the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
+// owning snapshot, and it bubbles a failed leg up the content tree as ChildrenFailed. The domain never
+// turns a core-owned leg failure into a terminal itself — it only READS these to time its consistency
+// actions and to stop requeuing once the core has surfaced a terminal outcome. A snapshot's OWN Ready is
+// read directly off the adapter (ReadyStatus/ReadyReason/ReadyMessage); this capability adds the children.
+type CaptureInspection interface {
+	// ChildrenCaptureStates resolves the snapshot's declared child snapshot refs
+	// (status.childrenSnapshotRefs) and returns, for each, its Ready condition (status/reason/message) and
+	// whether all its declared capture legs are latched captured (status.captureState.commonController).
+	// Children are read as unstructured objects by the ref GVK, so it works across any domain child kind
+	// without the SDK importing the concrete types. A child not found yet is reported with an empty Ready
+	// (status "") and AllLegsCaptured=false so the caller treats it as still-pending.
+	ChildrenCaptureStates(ctx context.Context, t SnapshotAdapter) ([]ChildCaptureState, error)
+}
+
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
 // Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the
 // lifecycle phase) behind a small set of intent verbs.
@@ -141,6 +157,7 @@ type CaptureSDK interface {
 	CaptureProgress
 	SourcePublisher
 	ManifestExclude
+	CaptureInspection
 }
 
 // CoreCaptureOutcome derives the tri-state the domain switches its wait loop on, from the core's leg
@@ -444,6 +461,11 @@ func (s *sdk) ReportProgress(ctx context.Context, t SnapshotAdapter, message str
 	obj := t.Object()
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
+		// Failed is terminal: a non-terminal progress note must never overwrite the terminal
+		// reason/message (ReportProgress is the Pending-only diagnostic channel).
+		if st.Phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+			return false
+		}
 		if st.Message == message {
 			return false
 		}
@@ -493,12 +515,26 @@ func phaseRank(p storagev1alpha1.SnapshotCapturePhase) int {
 	}
 }
 
-// phaseCanAdvance reports whether a from->to phase transition is allowed. The forward chain
-// (Planning<Planned<Finished) must never regress — this is what stops MarkPlanned from dragging a
-// Finished snapshot back to Planned. Failed stays orthogonal: it may be entered from any phase (surface a
-// late error) and left again on a subsequent successful reconcile, preserving pre-guard failure behavior.
+// phaseCanAdvance reports whether a from->to phase transition is allowed. Two rules:
+//
+//   - the forward chain Planning<Planned<Finished must never regress — this is what stops MarkPlanned from
+//     dragging a Finished snapshot back to Planned;
+//   - Failed is a TERMINAL SINK: once a capture fails it can never leave Failed. A snapshot is a
+//     point-in-time capture with an immutable spec, so it never re-plans (the rest of the system already
+//     treats Failed as terminal — see childrenSetFrozen and ownerDomainCaptureAtLeastPlanned). Making it a
+//     sink here also kills the phase write storm where a domain's unconditional per-reconcile MarkPlanned
+//     dragged Failed->Planned and the terminal outcome immediately re-Failed it (flapping the mirrored
+//     Ready). Only Fail/Reject enter Failed; a NON-terminal, recoverable "waiting for X" state must NOT use
+//     them — it stays in its current phase and surfaces the reason via ReportProgress (message-only), the
+//     way a Pod stays Pending with a diagnostic instead of moving to a terminal phase.
+//
+// A Failed->Failed transition stays allowed so an idempotent re-assert (or a refined terminal
+// reason/message) is a harmless no-op/refresh via setPhase's equality check.
 func phaseCanAdvance(from, to storagev1alpha1.SnapshotCapturePhase) bool {
-	if from == storagev1alpha1.SnapshotCapturePhaseFailed || to == storagev1alpha1.SnapshotCapturePhaseFailed {
+	if from == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return to == storagev1alpha1.SnapshotCapturePhaseFailed
+	}
+	if to == storagev1alpha1.SnapshotCapturePhaseFailed {
 		return true
 	}
 	return phaseRank(to) >= phaseRank(from)

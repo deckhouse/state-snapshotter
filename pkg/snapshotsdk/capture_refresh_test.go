@@ -55,6 +55,7 @@ func (a *refreshTestAdapter) SetDomainCaptureState(s DomainCaptureState) { a.dom
 func (a *refreshTestAdapter) GetSnapshotSource() *SnapshotSource         { return nil }
 func (a *refreshTestAdapter) SetSnapshotSource(*SnapshotSource)          {}
 func (a *refreshTestAdapter) CoreCaptureState() CoreCaptureState         { return a.core }
+func (a *refreshTestAdapter) ReadyStatus() metav1.ConditionStatus        { return "" }
 func (a *refreshTestAdapter) ReadyReason() string                        { return "" }
 func (a *refreshTestAdapter) ReadyMessage() string                       { return "" }
 

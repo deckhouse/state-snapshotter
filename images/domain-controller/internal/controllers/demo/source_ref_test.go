@@ -107,11 +107,14 @@ func TestDemoVirtualDiskSnapshot_SourceNotFoundDoesNotCreateContentOrMCR(t *test
 	}
 
 	snap := getDemoDiskSnapshot(t, cl)
-	if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
-		t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+	// A not-yet-existing source is RECOVERABLE (the disk may still appear), so the domain must NOT enter the
+	// terminal Failed sink the SDK never leaves. It surfaces a Pending diagnostic (message-only, phase
+	// preserved) and requeues — the pod model. See the snapshotsdk Failed-is-terminal contract.
+	if phase := domainPhase(snap.Status.CaptureState); phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("source-not-found must stay Pending, got terminal phase=Failed")
 	}
-	if reason := domainReason(snap.Status.CaptureState); reason != demoReasonSourceNotFound {
-		t.Fatalf("expected domain reason %q, got %q", demoReasonSourceNotFound, reason)
+	if msg := domainMessage(snap.Status.CaptureState); msg == "" {
+		t.Fatalf("expected a Pending diagnostic message for the missing source, got empty")
 	}
 	assertNoDemoDiskContents(t, cl)
 	assertNoDemoMCRs(t, cl)
@@ -286,11 +289,14 @@ func TestDemoVirtualMachineSnapshot_SourceNotFoundDoesNotCreateMCR(t *testing.T)
 	}
 
 	snap := getDemoVMSnapshot(t, cl)
-	if phase := domainPhase(snap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
-		t.Fatalf("expected domainSpecificController.phase=Failed, got %q", phase)
+	// A not-yet-existing source is RECOVERABLE (the VM may still appear), so the domain must NOT enter the
+	// terminal Failed sink the SDK never leaves. It surfaces a Pending diagnostic (message-only, phase
+	// preserved) and requeues — the pod model. See the snapshotsdk Failed-is-terminal contract.
+	if phase := domainPhase(snap.Status.CaptureState); phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("source-not-found must stay Pending, got terminal phase=Failed")
 	}
-	if reason := domainReason(snap.Status.CaptureState); reason != demoReasonSourceNotFound {
-		t.Fatalf("expected domain reason %q, got %q", demoReasonSourceNotFound, reason)
+	if msg := domainMessage(snap.Status.CaptureState); msg == "" {
+		t.Fatalf("expected a Pending diagnostic message for the missing source, got empty")
 	}
 	assertNoDemoVMContents(t, cl)
 	assertNoDemoMCRs(t, cl)
@@ -450,11 +456,12 @@ func TestDemoVirtualMachineSnapshot_DoesNotStealConflictingDiskChildOwner(t *tes
 	}
 	assertDemoSnapshotOwnedBy(t, child, conflictingOwner.APIVersion, conflictingOwner.Kind, conflictingOwner.Name)
 	vmSnap := getDemoVMSnapshot(t, cl)
-	if phase := domainPhase(vmSnap.Status.CaptureState); phase != storagev1alpha1.SnapshotCapturePhaseFailed {
-		t.Fatalf("expected domainSpecificController.phase=Failed on child-create failure, got %q", phase)
-	}
-	if reason := domainReason(vmSnap.Status.CaptureState); reason != storagev1alpha1.ReasonCreateChildFailed {
-		t.Fatalf("expected domainSpecificController.reason=CreateChildFailed, got %q", reason)
+	// A child-adoption conflict is fail-closed (the reconcile returns an error to requeue, asserted above)
+	// but NOT terminal: unlike a frozen-set growth (ErrChildrenSetFrozen -> Fail), a conflict may clear, so
+	// the domain must NOT enter the terminal Failed sink the SDK never leaves. The load-bearing invariant is
+	// that the conflicting child is never stolen (asserted above); the phase stays pre-Planned.
+	if phase := domainPhase(vmSnap.Status.CaptureState); phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+		t.Fatalf("child-adoption conflict must stay pre-Planned (fail-closed requeue), got terminal phase=Failed")
 	}
 }
 
@@ -590,6 +597,15 @@ func domainReason(cs *storagev1alpha1.CaptureStateStatus) string {
 		return ""
 	}
 	return cs.DomainSpecificController.Reason
+}
+
+// domainMessage reads the domain-owned diagnostic message from captureState.domainSpecificController (the
+// non-terminal Pending note published via ReportProgress).
+func domainMessage(cs *storagev1alpha1.CaptureStateStatus) string {
+	if cs == nil || cs.DomainSpecificController == nil {
+		return ""
+	}
+	return cs.DomainSpecificController.Message
 }
 
 // setCommonManifestCaptured simulates the common controller stamping the manifest-leg latch on

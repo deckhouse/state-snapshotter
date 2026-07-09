@@ -43,10 +43,11 @@ import (
 //   - manifest leg: once the MCP handoff is durable (content.status.manifestCheckpointName published +
 //     MCP owned by the content), latch commonController.manifestCaptured=true on the owner and REAP the
 //     domain MCR — latch strictly BEFORE the delete, in the same pass (see below);
-//   - data leg (VCR domains): observe the domain VCR; surface a terminal capture failure via the
-//     returned termReason (folded into the owner Ready mirror by the caller); once the aggregator's
-//     published status.data covers the VCR targets and the VSC handoff is durable, latch
-//     commonController.dataCaptured=true and reap the VCR;
+//   - data leg (VCR domains): observe the domain VCR; once the aggregator's published status.data covers
+//     the VCR targets and the VSC handoff is durable, latch commonController.dataCaptured=true and reap
+//     the VCR. A FAILED VCR is NOT surfaced here anymore: core makes the CONTENT terminal in
+//     reconcileDataLegProjection (VolumeReady=VolumeCaptureFailed, decision D2), which the mirror reflects
+//     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
 //   - data leg (native-CSI VolumeSnapshot owners, design §11.4): no VCR — latch dataCaptured once the
 //     content carries a published status.data (the projection performs the VSC handoff first);
 //   - subtreeManifestsPersisted: mirror the content's monotonic recursive latch onto the owner's
@@ -65,23 +66,23 @@ import (
 func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 	ctx context.Context,
 	contentObj *unstructured.Unstructured,
-) (requeue bool, termReason string, termMessage string, err error) {
+) (requeue bool, err error) {
 	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
 	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
 	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
 	if apiVersion == "" || kind == "" || name == "" {
 		// Ownerless / bucket content: no owning snapshot, no legs to run.
-		return false, "", "", nil
+		return false, nil
 	}
 	gv, gvErr := schema.ParseGroupVersion(apiVersion)
 	if gvErr != nil {
-		return false, "", "", fmt.Errorf("parse snapshotRef.apiVersion %q: %w", apiVersion, gvErr)
+		return false, fmt.Errorf("parse snapshotRef.apiVersion %q: %w", apiVersion, gvErr)
 	}
 	ownerGVK := gv.WithKind(kind)
 	if !r.isDomainCaptureKind(ownerGVK) {
 		// Non-domain owners (import/static-bind handles, generic kinds) have no core-owned capture legs.
-		return false, "", "", nil
+		return false, nil
 	}
 
 	owner := &unstructured.Unstructured{}
@@ -89,25 +90,25 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 	if getErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); getErr != nil {
 		if errors.IsNotFound(getErr) {
 			// Recycle-bin content: the owner is gone; nothing to latch or reap.
-			return false, "", "", nil
+			return false, nil
 		}
-		return false, "", "", fmt.Errorf("get owner snapshot %s/%s: %w", namespace, name, getErr)
+		return false, fmt.Errorf("get owner snapshot %s/%s: %w", namespace, name, getErr)
 	}
 
 	// Writer switch (creator -> main): only touch the owner once it has adopted THIS content.
 	bound, _, _ := unstructured.NestedString(owner.Object, "status", "boundSnapshotContentName")
 	if bound != contentObj.GetName() {
-		return false, "", "", nil
+		return false, nil
 	}
 	// Projection barrier: before capture barrier 1 (phase>=Planned) there is nothing to init or reap —
 	// same gate the binder's eagerInitCaptureLegs + request lifecycle had.
 	if !ownerDomainCaptureAtLeastPlanned(owner) {
-		return false, "", "", nil
+		return false, nil
 	}
 
 	// Eager-init the applicable legs (presence declares the leg; value = captured or not).
 	if initErr := r.eagerInitOwnerCaptureLegs(ctx, owner); initErr != nil {
-		return false, "", "", initErr
+		return false, initErr
 	}
 
 	contentName := contentObj.GetName()
@@ -119,14 +120,14 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 			safe, sErr := manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.APIReader,
 				client.ObjectKey{Namespace: namespace, Name: mcrName}, contentName)
 			if sErr != nil {
-				return false, "", "", sErr
+				return false, sErr
 			}
 			if safe {
 				if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "manifestCaptured"); mErr != nil {
-					return false, "", "", mErr
+					return false, mErr
 				}
 				if dErr := r.reapManifestCaptureRequest(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}); dErr != nil {
-					return false, "", "", dErr
+					return false, dErr
 				}
 			}
 		}
@@ -137,31 +138,33 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		vcrName := ownerDomainCaptureStateString(owner, "volumeCaptureRequestName")
 		switch {
 		case vcrName != "":
-			done, treason, tmsg, dErr := r.observeOwnerDataLegVCR(ctx, namespace, vcrName, contentName)
+			done, dErr := r.observeOwnerDataLegVCR(ctx, namespace, vcrName, contentName)
 			if dErr != nil {
-				return false, "", "", dErr
-			}
-			if treason != "" {
-				return requeue, treason, tmsg, nil
+				return false, dErr
 			}
 			if !done {
+				// Not captured yet (pending, or a failed VCR that core surfaced as a terminal content in
+				// reconcileDataLegProjection): do not latch. The content stays Ready=False (terminal or
+				// pending), so the general !ready self-requeue keeps this converging.
 				requeue = true
 				break
 			}
 			vcrKey := client.ObjectKey{Namespace: namespace, Name: vcrName}
+			// Pre-reap safety read stays AUTHORITATIVE (uncached APIReader): it gates the VCR Delete
+			// (latch-before-reap), so it must observe the live handoff state, not a possibly-stale cache.
 			safe, sErr := vcctrl.VolumeCaptureRequestSafeToDeleteWithHandoff(ctx, r.APIReader, vcrKey, contentName)
 			if sErr != nil {
-				return false, "", "", sErr
+				return false, sErr
 			}
 			if !safe {
 				requeue = true
 				break
 			}
 			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "dataCaptured"); mErr != nil {
-				return false, "", "", mErr
+				return false, mErr
 			}
 			if delErr := r.reapVolumeCaptureRequest(ctx, vcrKey); delErr != nil {
-				return false, "", "", delErr
+				return false, delErr
 			}
 		case ownerGVK.Kind == snapshot.KindVolumeSnapshot:
 			// Native-CSI data leg (design §11.4): a VolumeSnapshot owner has NO VCR — the fork binds it to
@@ -169,11 +172,11 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 			// handoff, so data-present ⇒ handoff durable. No request to reap.
 			hasData, hErr := r.contentHasPublishedData(ctx, contentName)
 			if hErr != nil {
-				return false, "", "", hErr
+				return false, hErr
 			}
 			if hasData {
 				if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "dataCaptured"); mErr != nil {
-					return false, "", "", mErr
+					return false, mErr
 				}
 			} else {
 				requeue = true
@@ -185,7 +188,7 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 	if persisted, found, _ := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted"); found && persisted {
 		if !ownerCommonLegCaptured(owner, "subtreeManifestsPersisted") {
 			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "subtreeManifestsPersisted"); mErr != nil {
-				return false, "", "", mErr
+				return false, mErr
 			}
 		}
 	}
@@ -199,18 +202,18 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 	if !ownerCommonLegCaptured(owner, "subtreePlanned") {
 		allPlanned, spErr := r.allDirectChildrenSubtreePlanned(ctx, owner)
 		if spErr != nil {
-			return false, "", "", spErr
+			return false, spErr
 		}
 		if allPlanned {
 			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "subtreePlanned"); mErr != nil {
-				return false, "", "", mErr
+				return false, mErr
 			}
 		} else {
 			requeue = true
 		}
 	}
 
-	return requeue, "", "", nil
+	return requeue, nil
 }
 
 // allDirectChildrenSubtreePlanned reports whether every DIRECT child declared on the owner's
@@ -261,77 +264,50 @@ func (r *SnapshotContentController) allDirectChildrenSubtreePlanned(ctx context.
 
 // observeOwnerDataLegVCR observes the domain-created VolumeCaptureRequest to drive the main-owned VCR
 // lifecycle (moved off the binder, decision #10). It is READ-ONLY on the SnapshotContent — enrich + VSC
-// handoff + status.data publish live in the data-leg projection. It owns the two lifecycle decisions:
+// handoff + status.data publish live in the data-leg projection. Its ONLY job is the success latch: report
+// done=true once the published status.data covers the VCR targets, so the caller may latch dataCaptured
+// and reap the VCR. Otherwise it returns done=false (pending) and the caller requeues.
 //
-//   - surface a terminal capture failure (VCR failed, or a Variant-A >1-artifact domain decomposition
-//     fault) via a non-empty termReason — the caller folds it into the owner Ready mirror so the domain
-//     SDK observes IsReasonTerminal and goes phase=Failed;
-//   - report done=true once the published status.data covers the VCR targets, so the caller may latch
-//     dataCaptured and reap the VCR.
-//
-// Otherwise it returns done=false (pending) and the caller requeues while the projection publishes.
+// It no longer surfaces a terminal capture failure (vcr-watch-core-terminal, decision D2): a failed VCR
+// (and the Variant-A >1-artifact fault) is made terminal on the CONTENT itself by reconcileDataLegProjection
+// (VolumeReady=VolumeCaptureFailed), which the mirror reflects onto the owning snapshot and which propagates
+// up the content tree. On a failed VCR the leg simply stays not-captured (done=false) and never latches.
 func (r *SnapshotContentController) observeOwnerDataLegVCR(
 	ctx context.Context,
 	namespace string,
 	vcrName string,
 	contentName string,
-) (done bool, termReason string, termMessage string, err error) {
+) (done bool, err error) {
 	vcr := &unstructured.Unstructured{}
 	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if getErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vcrName}, vcr); getErr != nil {
+	// Cached read: the content controller event-driven-watches VCR (AddVolumeCaptureRequestWatch), so a VCR
+	// status change enqueues this content and the informer cache is authoritative-enough for the success
+	// latch. The pre-reap safety read below (VolumeCaptureRequestSafeToDeleteWithHandoff) stays uncached.
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vcrName}, vcr); getErr != nil {
 		if errors.IsNotFound(getErr) {
 			// Domain controller has not (re)created the VCR yet; wait for it.
-			return false, "", "", nil
+			return false, nil
 		}
-		return false, "", "", getErr
+		return false, getErr
 	}
 
 	expectedTargets, parseErr := vcctrl.ParseVolumeCaptureTargets(vcr)
 	if parseErr != nil {
-		return false, "", "", parseErr
+		return false, parseErr
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.APIReader.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
+		return false, cErr
 	}
 	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
 		// The projection has published status.data covering the targets: the leg is durable.
-		return true, "", "", nil
+		return true, nil
 	}
 
-	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
-		detail := msg
-		if reason != "" {
-			detail = fmt.Sprintf("%s: %s", reason, msg)
-		}
-		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("data-leg volume capture failed: %s", detail), nil
-	}
-	if !vcctrl.VolumeCaptureRequestReady(vcr) {
-		return false, "", "", nil
-	}
-
-	vcrRefs, refErr := vcctrl.ParseVolumeCaptureDataRefs(vcr)
-	if refErr != nil {
-		return false, "", "", refErr
-	}
-	if validateErr := vcctrl.ValidateDataRefsForPublish(expectedTargets, vcrRefs); validateErr != nil {
-		// Ready VCR whose dataRefs are not yet consistent: retry without a terminal condition.
-		return false, "", "", nil
-	}
-
-	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
-	// Variant A: a domain volume leaf owns exactly one PVC, so its content holds ≤1 dataRef. A ready VCR
-	// that returned >1 data artifact for this single logical content cannot be represented (status.data is
-	// singular) and is a domain decomposition fault — fail terminally instead of looping forever while the
-	// projection declines to publish. Real multi-volume scopes must fan out into child volume nodes.
-	if len(bindings) > 1 {
-		return false, snapshot.ReasonVolumeCaptureFailed,
-			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
-	}
-	// Ready + valid + single binding: the projection will publish status.data. Wait until it covers the
-	// targets (checked above), then latch on the next pass.
-	return false, "", "", nil
+	// Not covered yet: pending. A failed/inconsistent VCR is handled terminally on the content by the
+	// projection, so there is nothing to latch here — just report not-captured.
+	return false, nil
 }
 
 // contentHasPublishedData reports whether the content carries a published status.data binding (the

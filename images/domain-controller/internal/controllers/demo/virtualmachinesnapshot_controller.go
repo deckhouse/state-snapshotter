@@ -18,6 +18,7 @@ package demo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -125,10 +126,20 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
-			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, resolution.Name),
-		})
+		// Recoverable, NOT terminal: the captured source may still appear. Surface it as a Pending
+		// diagnostic (message-only, phase preserved) and requeue — Fail/Reject would move to the terminal
+		// Failed SINK the SDK never leaves, so a VM that shows up later could never be captured. This is the
+		// pod model: stay Pending with a "waiting for X" note instead of failing.
+		if perr := sdk.ReportProgress(ctx, adapter, fmt.Sprintf("waiting for %s %q to exist", controllercommon.KindDemoVirtualMachine, resolution.Name)); perr != nil {
+			return ctrl.Result{}, perr
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+
+	// Source resolved: clear any stale "waiting for X" diagnostic left by a prior reconcile so a recovered
+	// snapshot does not keep showing an obsolete Pending note.
+	if err := clearDemoProgress(ctx, sdk, adapter); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Publish the captured live source's full reference (top-level status.snapshotSource). d8-cli reads it
@@ -152,9 +163,16 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, err
 	}
 	if err := sdk.EnsureChildren(ctx, adapter, children, excluded); err != nil {
-		if perr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed), err); perr != nil {
-			return ctrl.Result{}, perr
+		// TERMINAL: the declared child set was frozen at barrier 1 (phase>=Planned) and a re-plan tried to
+		// GROW it. A snapshot is a point-in-time capture with an immutable membership, so a late-added edge
+		// would wedge the node at ChildrenLinkPending forever — move to the terminal Failed sink with the
+		// recommended GraphPlanningFailed reason (see snapshotsdk.ErrChildrenSetFrozen).
+		if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) {
+			return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
 		}
+		// Recoverable / fail-closed: a child-adoption conflict or a transient API error. Do NOT enter the
+		// terminal Failed sink (it never recovers, and MarkPlanned below would then be a no-op forever) —
+		// requeue with backoff via the returned error, leaving the phase pre-Planned so the parent waits.
 		return ctrl.Result{}, err
 	}
 
@@ -176,20 +194,29 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	// Barrier 2 (Finished): switch on the SDK-derived capture outcome for the VM's own (manifest-only) leg.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeFailed:
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(outcome.Reason),
-			Message: outcome.Message,
-		})
+		// Core-owned terminal, surfaced by the CORE on the Ready condition (Variant A): either the VM's own
+		// manifest leg failed, or a child disk's data leg failed and the core bubbled it up the content tree
+		// as ChildrenFailed and mirrored it onto this snapshot's Ready. The domain does NOT re-drive it into
+		// phase=Failed via Reject — turning a core-owned leg failure into a terminal is the core's job. Stop
+		// (the core owns the durable terminal state); requeuing would only spin.
+		return ctrl.Result{}, nil
 	case snapshotsdk.CaptureOutcomeCaptured:
 		// The VM's own manifest leg is captured. A VM aggregator additionally waits for every child disk's
 		// data leg to be captured before confirming consistency: this showcases fs freeze/unfreeze — the
 		// guest is unfrozen only after the disk snapshots are actually taken. Timing is driven off the
-		// fine-grained per-child dataCaptured latch, not a coarse child Ready rollup.
-		allCaptured, err := r.allChildrenCaptured(ctx, s)
+		// fine-grained per-child dataCaptured latch (AllLegsCaptured), not a coarse child Ready rollup.
+		children, err := sdk.ChildrenCaptureStates(ctx, adapter)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		if !allCaptured {
+		// A terminally-failed child never latches its data leg, so waiting on AllLegsCaptured alone would
+		// spin forever. The core will bubble that child terminal up as ChildrenFailed onto this snapshot's
+		// Ready (flipping the outcome to Failed on a later reconcile), but stop waiting immediately here to
+		// avoid the requeue churn until it propagates — the domain never re-drives the child terminal itself.
+		if childrenHaveTerminal(children) {
+			return ctrl.Result{}, nil
+		}
+		if !allChildrenLegsCaptured(children) {
 			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 		}
 		// (Showcase) the VM filesystem would be unfrozen here now that all disk data is captured.
@@ -200,33 +227,28 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 	}
 }
 
-// allChildrenCaptured reports whether every child disk snapshot has all its declared capture legs
-// captured (per-child captureState.commonController). It reads the fine-grained latch rather than the
-// child's Ready rollup, so the VM can time consistency (fs unfreeze) precisely against disk data capture.
-// A missing/unstamped child counts as not-yet-captured to avoid a premature confirm.
-func (r *DemoVirtualMachineSnapshotReconciler) allChildrenCaptured(ctx context.Context, s *demov1alpha1.DemoVirtualMachineSnapshot) (bool, error) {
-	for i := range s.Status.ChildrenSnapshotRefs {
-		ref := s.Status.ChildrenSnapshotRefs[i]
-		if ref.APIVersion != demov1alpha1.SchemeGroupVersion.String() || ref.Kind != controllercommon.KindDemoVirtualDisk {
-			continue
-		}
-		child := &demov1alpha1.DemoVirtualDiskSnapshot{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: ref.Name}, child); err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, nil
-			}
-			return false, err
-		}
-		if !childCoreCaptureState(child).AllLegsCaptured() {
-			return false, nil
+// childrenHaveTerminal reports whether any child snapshot carries a terminal Ready reason
+// (IsReasonTerminal). The core owns and bubbles that terminal; the domain uses it only to stop waiting.
+func childrenHaveTerminal(children []snapshotsdk.ChildCaptureState) bool {
+	for i := range children {
+		if storagev1alpha1.IsReasonTerminal(children[i].ReadyReason) {
+			return true
 		}
 	}
-	return true, nil
+	return false
 }
 
-// childCoreCaptureState reads a child disk snapshot's core-written leg latches into the SDK view.
-func childCoreCaptureState(child *demov1alpha1.DemoVirtualDiskSnapshot) snapshotsdk.CoreCaptureState {
-	return coreCaptureStateFrom(child.Status.CaptureState)
+// allChildrenLegsCaptured reports whether every child snapshot has all its declared capture legs latched
+// (per-child captureState.commonController). It reads the fine-grained latch rather than the child's Ready
+// rollup, so the VM can time consistency (fs unfreeze) precisely against disk data capture. An empty set
+// (no children) is vacuously captured.
+func allChildrenLegsCaptured(children []snapshotsdk.ChildCaptureState) bool {
+	for i := range children {
+		if !children[i].AllLegsCaptured {
+			return false
+		}
+	}
+	return true
 }
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the

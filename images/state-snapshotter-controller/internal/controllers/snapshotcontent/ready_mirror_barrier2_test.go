@@ -144,7 +144,7 @@ func TestMirrorReadyToOwnerSnapshot_Barrier2FinishedGate(t *testing.T) {
 			r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 			contentObj := barrier2OwnedContent(t)
-			if err := r.mirrorReadyToOwnerSnapshot(ctx, contentObj, "", ""); err != nil {
+			if err := r.mirrorReadyToOwnerSnapshot(ctx, contentObj); err != nil {
 				t.Fatalf("mirrorReadyToOwnerSnapshot: %v", err)
 			}
 
