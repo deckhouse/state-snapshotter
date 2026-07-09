@@ -227,9 +227,10 @@ func main() {
 	// burst those requests queue behind the 5 QPS limiter, inflating a single reconcile to 4-15s and
 	// serializing the whole tree-Ready tail regardless of MaxConcurrentReconciles. (The capture path in
 	// the Snapshot controller already copies the config to QPS 100 / Burst 200 for the same reason.)
-	// Defaults 50/100; overridable via STATE_SNAPSHOTTER_KUBE_QPS / _BURST (read once at start; changing
-	// requires a pod/rollout restart, not a hot reload).
-	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 50, 100)
+	// Defaults 200/400 (QPS→Ready saturation knee; see design/snapshot-creation-latency.md, "QPS/Burst saturation
+	// sweep"); overridable via STATE_SNAPSHOTTER_KUBE_QPS / _BURST (read once at start; changing requires a
+	// pod/rollout restart, not a hot reload).
+	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 200, 400)
 	if rlErr != nil {
 		log.Error(rlErr, "[main] invalid manager client rate-limit env")
 		cancel()

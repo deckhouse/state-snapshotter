@@ -113,9 +113,10 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 	// rate limiter (QPS 5 / Burst 10) serializes those List calls to ~25s regardless of fan-out, so raise
 	// QPS/Burst on a dedicated rest.Config copy used only by the capture dynamic/discovery clients. This
 	// keeps the single sweep to ~1-2s and does not touch the manager's shared client/informer config.
-	// Defaults 100/200; overridable via STATE_SNAPSHOTTER_CAPTURE_QPS / _BURST (read once at start;
-	// changing requires a pod/rollout restart, not a hot reload).
-	captureQPS, captureBurst, rlErr := config.ParseClientRateLimit(config.EnvCaptureQPS, config.EnvCaptureBurst, 100, 200)
+	// Defaults 200/400 (QPS→Ready saturation knee; see design/snapshot-creation-latency.md, "QPS/Burst saturation
+	// sweep"); overridable via STATE_SNAPSHOTTER_CAPTURE_QPS / _BURST (read once at start; changing requires a
+	// pod/rollout restart, not a hot reload).
+	captureQPS, captureBurst, rlErr := config.ParseClientRateLimit(config.EnvCaptureQPS, config.EnvCaptureBurst, 200, 400)
 	if rlErr != nil {
 		return fmt.Errorf("snapshot controller: capture client rate limit: %w", rlErr)
 	}
