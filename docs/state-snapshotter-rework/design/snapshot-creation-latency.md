@@ -950,6 +950,30 @@ each per-child-GVK relay controller (`nss-chw-*`, `dynamic_watch.go`) runs at th
 Judge on `phaseATotalMs` distribution and wall (≥3 runs per point), not single-run A/B. The staircase proves a
 serializing bottleneck **exists**; *where* it sits is the hypothesis these sweeps isolate.
 
+### Relay `nss-chw` concurrency sweep 1 → 4 → 8 (N=20, 3 runs each) — hypothesis DROPPED
+
+The relay is a real controller-runtime Controller (`ctrl.NewControllerManagedBy(...).Complete(relay)`, its own
+workqueue + reconcile loop; one per child GVK), so `MaxConcurrentReconciles` applies directly. Verified with the
+env knob above; means over 3 runs per point:
+
+| relay conc. | wall (mean) | phaseATotalMs p50 (mean) | phaseATotalMs max (mean) | relayLatMs p50 | relayLatMs p90 | backstop |
+|---|---|---|---|---|---|---|
+| 1 | 36.4s | 19.5s | 26.7s | 9.1s | **19.8s** | 0 |
+| 4 | 37.2s | 19.8s | 26.5s | 5.4s | 14.2s | 0 |
+| 8 | 39.0s | 15.9s | 24.3s | 6.4s | 14.0s | 0 |
+
+**Verdict: the relay funnel is NOT the binding constraint.** Raising relay concurrency measurably cut the relay's
+*own* queue latency (`relayLatP90` ~20s → ~14s, `relayLatP50` ~9s → ~5-6s) — proving the extra workers do drain the
+relay queue — **but the wall did not drop** (36→39s, flat/within noise) and `phaseATotalMs` barely moved (p50
+19.5→15.9s, max flat, all inside the run-to-run spread already seen at relay=1). So reducing the child→parent wake
+latency does **not** advance Phase-A completion: the serializing bottleneck sits **downstream** of the relay. The
+env knob is kept (default 1; the relay-latency win is real but harmless and does not justify a new default).
+
+**Next (unchanged ladder):** the remaining suspects are the demo `DemoVirtualMachineSnapshot` /
+`DemoVirtualDiskSnapshot` reconcilers (`MaxConcurrentReconciles: 4`, hardcoded) and the root `Snapshot` controller
+(8). Make the domain VMS/VDS concurrency env-configurable and sweep 4 → 8 → 16 (≥3 runs), judged on `phaseATotalMs`
+and wall.
+
 ---
 
 ## 9. Application checklist
