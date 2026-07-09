@@ -1340,3 +1340,16 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   (`refactor(api): rename API group storage.deckhouse.io -> state-snapshotter.deckhouse.io`) but this one
   assertion was missed, so the core built-in Snapshot pair itself tripped the "no hardcoded domain pair"
   guard. Production code (`gvk.go`) was already correct; test-only fix.
+- **Bugfix** (snapshot) Namespace child planner no longer expands a `PVC -> native CSI VolumeSnapshot` CSD
+  mapping (the storage-foundation-volumesnapshot shape) into a domain child. `buildNamespaceChildSpec` only
+  emits the unified `spec.sourceRef`, but a native `snapshot.storage.k8s.io/VolumeSnapshot` requires
+  `spec.source.persistentVolumeClaimName`, so the planner was POSTing an invalid VolumeSnapshot
+  (`spec.source: Required value`) every reconcile — the child never got conditions and the root Snapshot
+  stalled with no `captureState` (e2e Phase 3b `resourceSelector over PVC volume data` timed out). PVC volume
+  capture is owned end-to-end by the root's residual/orphan wave (`ensureOrphanVolumeSnapshotsPrePlanned` ->
+  `ensureOrphanPVCVolumeSnapshots`), which builds the correct `spec.source` + resolves the VolumeSnapshotClass
+  and honors `resourceSelector`. New `isNativeCSIVolumeSnapshotMapping` gate in `planParentOwnedChildGraphLayer`
+  skips only the child-spec build (and coverage seeding) for such mappings while STILL recording a veto-labeled
+  PVC in `excludedRefs` (same treatment as a vetoed domain source). Unit tests: native VS mapping is not
+  expanded (layer + end-to-end plan stays AllPlanned with no children) and a vetoed PVC is still recorded in
+  `excludedRefs`. gofmt + go vet + tests green; golangci-lint adds no new findings; bugbot clean.

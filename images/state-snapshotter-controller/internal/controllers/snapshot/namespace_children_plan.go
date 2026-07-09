@@ -266,6 +266,16 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	var specs []snapshotsdk.ChildSpec
 	var refs []storagev1alpha1.SnapshotChildRef
 	var excluded []storagev1alpha1.ExcludedObjectRef
+	// A CSD that maps a source (a PVC) directly onto the NATIVE CSI VolumeSnapshot kind is NOT expanded into
+	// a domain child here. PVC volume capture is owned end-to-end by the root's residual/orphan wave
+	// (ensureOrphanVolumeSnapshotsPrePlanned -> ensureOrphanPVCVolumeSnapshots), which builds the correct
+	// spec.source.persistentVolumeClaimName, resolves the VolumeSnapshotClass, and honors resourceSelector.
+	// buildNamespaceChildSpec only emits the unified spec.sourceRef shape, so expanding a native VolumeSnapshot
+	// mapping would POST an invalid VolumeSnapshot ("spec.source: Required value") and wedge the root capture
+	// (the child never gets conditions). We still enumerate the source objects below so a veto-labeled PVC is
+	// recorded in excludedRefs (same treatment as a vetoed domain source) — only the child-spec build is
+	// skipped; coverage is left untouched so the residual/orphan wave picks the PVCs up.
+	expandsToOrphanWave := isNativeCSIVolumeSnapshotMapping(mapping)
 	resources, err := r.Dynamic.Resource(mapping.SourceGVR).Namespace(nsSnap.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
@@ -302,6 +312,11 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 				Name:       resource.GetName(),
 			})
 		}
+		// Native CSI VolumeSnapshot mapping: the veto above is still recorded, but the source object is NOT
+		// expanded into a child (nor marked covered) — the residual/orphan wave owns its VolumeSnapshot.
+		if expandsToOrphanWave {
+			continue
+		}
 		// User-provided resourceSelector narrows expansion: a source object whose labels do not match is not
 		// expanded into a child snapshot (nil selector = expand all).
 		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
@@ -332,4 +347,14 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	}
 	sortSnapshotChildRefs(refs)
 	return specs, refs, excluded, nil
+}
+
+// isNativeCSIVolumeSnapshotMapping reports whether a CSD maps its source onto the native CSI VolumeSnapshot
+// kind (snapshot.storage.k8s.io/VolumeSnapshot). Such mappings must not be expanded into domain children by
+// the namespace planner: the native VolumeSnapshot has no spec.sourceRef (it requires
+// spec.source.persistentVolumeClaimName), and PVC volume capture is owned by the root's residual/orphan wave.
+// Group+Kind (not the pinned version) is matched so a future served version still routes to the orphan wave.
+func isNativeCSIVolumeSnapshotMapping(mapping csdregistry.EligibleResourceSnapshotMapping) bool {
+	return mapping.SnapshotGVK.Group == snapshotpkg.CSISnapshotGroup &&
+		mapping.SnapshotGVK.Kind == snapshotpkg.KindVolumeSnapshot
 }

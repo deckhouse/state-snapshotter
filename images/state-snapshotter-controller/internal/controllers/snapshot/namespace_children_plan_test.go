@@ -263,6 +263,90 @@ func TestPlanNamespaceChildren_LostChildPostPlanned_GateOff(t *testing.T) {
 	}
 }
 
+// nativeCSIVolumeSnapshotMapping builds a CSD mapping PVC -> native CSI VolumeSnapshot (the
+// storage-foundation-volumesnapshot shape), plus a dynamic fake seeded with a plain PVC and a veto-labeled
+// PVC. Without the planner skip the layer would build an invalid VolumeSnapshot child (spec.sourceRef
+// instead of the required spec.source.persistentVolumeClaimName), so seeding a plain PVC makes the skip
+// tests real guards; the veto-labeled PVC guards that exclusion recording is preserved.
+func nativeCSIVolumeSnapshotMapping(t *testing.T) (csdregistry.EligibleResourceSnapshotMapping, *dynamicfake.FakeDynamicClient) {
+	t.Helper()
+	pvcGVK := schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"}
+	pvcGVR := schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
+	mapping := csdregistry.EligibleResourceSnapshotMapping{
+		SourceGVR:            pvcGVR,
+		SourceGVK:            pvcGVK,
+		SnapshotGVR:          schema.GroupVersionResource{Group: snapshotpkg.CSISnapshotGroup, Version: snapshotpkg.CSISnapshotVersion, Resource: "volumesnapshots"},
+		SnapshotGVK:          schema.GroupVersionKind{Group: snapshotpkg.CSISnapshotGroup, Version: snapshotpkg.CSISnapshotVersion, Kind: snapshotpkg.KindVolumeSnapshot},
+		RequiresDataArtifact: true,
+	}
+	pvc := &unstructured.Unstructured{}
+	pvc.SetGroupVersionKind(pvcGVK)
+	pvc.SetNamespace("ns1")
+	pvc.SetName("data-pvc")
+	pvc.SetUID(types.UID("uid-pvc"))
+	vetoedPVC := &unstructured.Unstructured{}
+	vetoedPVC.SetGroupVersionKind(pvcGVK)
+	vetoedPVC.SetNamespace("ns1")
+	vetoedPVC.SetName("vetoed-pvc")
+	vetoedPVC.SetUID(types.UID("uid-vetoed-pvc"))
+	vetoedPVC.SetLabels(map[string]string{storagev1alpha1.ExcludeLabelKey: ""})
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{pvcGVR: "PersistentVolumeClaimList"},
+		pvc, vetoedPVC,
+	)
+	return mapping, dyn
+}
+
+// TestPlanParentOwnedChildGraphLayer_SkipsNativeCSIVolumeSnapshotMapping: a PVC -> native CSI VolumeSnapshot
+// mapping is NOT expanded into a child by the planner (PVC volume capture is owned by the residual/orphan
+// wave, which builds the correct spec.source), yet a veto-labeled PVC is still recorded in excludedRefs.
+func TestPlanParentOwnedChildGraphLayer_SkipsNativeCSIVolumeSnapshotMapping(t *testing.T) {
+	mapping, dyn := nativeCSIVolumeSnapshotMapping(t)
+	if !isNativeCSIVolumeSnapshotMapping(mapping) {
+		t.Fatalf("expected the PVC -> native CSI VolumeSnapshot mapping to be recognized")
+	}
+	r := &SnapshotReconciler{Dynamic: dyn, Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+	selector, err := nsSnap.ResolveResourceSelector()
+	if err != nil {
+		t.Fatalf("ResolveResourceSelector: %v", err)
+	}
+	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
+	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, coverage, selector)
+	if err != nil {
+		t.Fatalf("planParentOwnedChildGraphLayer: %v", err)
+	}
+	if len(specs) != 0 || len(refs) != 0 {
+		t.Fatalf("native CSI VolumeSnapshot mapping must not expand into children: specs=%d refs=%d", len(specs), len(refs))
+	}
+	// The veto-labeled PVC must still be recorded as a top-level exclusion (same as a vetoed domain source).
+	if len(excluded) != 1 || excluded[0].Name != "vetoed-pvc" || excluded[0].Kind != "PersistentVolumeClaim" {
+		t.Fatalf("vetoed PVC must be recorded in excludedRefs, got %+v", excluded)
+	}
+}
+
+// TestPlanNamespaceChildren_NativeCSIVolumeSnapshotMapping_NotExpanded: end-to-end, a plan whose only
+// mapping is PVC -> native CSI VolumeSnapshot yields AllPlanned with no children (the orphan wave owns it),
+// instead of stalling or building an invalid child.
+func TestPlanNamespaceChildren_NativeCSIVolumeSnapshotMapping_NotExpanded(t *testing.T) {
+	mapping, dyn := nativeCSIVolumeSnapshotMapping(t)
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
+	r := &SnapshotReconciler{Dynamic: dyn, Client: cl, APIReader: cl}
+	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
+
+	plan, err := r.planNamespaceChildren(context.Background(), nsSnap, []csdregistry.EligibleResourceSnapshotMapping{mapping})
+	if err != nil {
+		t.Fatalf("planNamespaceChildren: %v", err)
+	}
+	if plan.outcome != namespaceChildrenAllPlanned {
+		t.Fatalf("native VS mapping must not stall planning; want AllPlanned, got %d (reason=%q)", plan.outcome, plan.reason)
+	}
+	if len(plan.desired) != 0 {
+		t.Fatalf("native VS mapping must not expand into children; got %d desired", len(plan.desired))
+	}
+}
+
 // TestPlanNamespaceChildrenAllPlanned: with the layer's child snapshot present at phase=Planned, the
 // planner advances past the layer and returns AllPlanned.
 func TestPlanNamespaceChildrenAllPlanned(t *testing.T) {
