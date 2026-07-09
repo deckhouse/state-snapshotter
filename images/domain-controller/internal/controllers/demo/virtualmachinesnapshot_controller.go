@@ -61,10 +61,18 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. The core
 	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind.
 	// The child DemoVirtualDiskSnapshot watch stays so the parent re-plans when a child changes.
+	//
+	// Default 4; overridable via DOMAIN_CONTROLLER_SNAPSHOT_MAX_CONCURRENT_RECONCILES (read once at start).
+	// Probes whether the domain planning layer serializes the snapshot Phase A (creation -> ChildrenSnapshotReady).
+	maxConcurrent, err := config.ParseMaxConcurrentReconciles(config.EnvSnapshotMaxConcurrentReconciles, 4)
+	if err != nil {
+		return fmt.Errorf("DemoVirtualMachineSnapshot controller: %w", err)
+	}
+	mgr.GetLogger().Info("DemoVirtualMachineSnapshot controller concurrency", "maxConcurrentReconciles", maxConcurrent, "env", config.EnvSnapshotMaxConcurrentReconciles)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualMachineSnapshot{}).
 		Watches(&demov1alpha1.DemoVirtualDiskSnapshot{}, handler.EnqueueRequestsFromMapFunc(mapDemoDiskSnapshotToParentVM)).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrent}).
 		Complete(&DemoVirtualMachineSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
