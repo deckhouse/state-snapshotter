@@ -1629,3 +1629,15 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
 - **d8-cli is out of scope** (separate plan): it still reads the cluster snapshot's `status.snapshotSource`
   (internal/snapshot/source/tree.go) and will need a coordinated update — same follow-up as the DataImport
   rename. Build + vet + unit tests green in both repos; integration/e2e compile.
+
+### Block D — rename status.parentDeleted to status.boundSnapshotDeleted
+
+- **Rename** the recycle-bin latch `SnapshotContent.status.parentDeleted` ->
+  `status.boundSnapshotDeleted` (leadership wave-2: "parent" was ambiguous — the latch means the bound
+  namespaced Snapshot was deleted while this cluster-scoped content survives). Go field
+  `SnapshotContentStatus.ParentDeleted` -> `BoundSnapshotDeleted` (json `boundSnapshotDeleted`); the
+  object-level snapshotRef-immutable CEL now reads `self.status.boundSnapshotDeleted`; writer
+  (genericbinder) and readers (snapshotcontent controller, lost_children) use the renamed unstructured
+  path; comments, tests, CRD (+ hand-curated doc-ru) updated. Build + vet + unit tests green;
+  integration compiles. The `snapshot.deckhouse.io/parent-deleted` legacy annotation name (already dead)
+  is untouched — it is unrelated to the field.

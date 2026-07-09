@@ -55,7 +55,7 @@ const (
 
 	// ReasonChildSnapshotDeleted: Ready=False (NON-terminal, recoverable) — a declared child snapshot CR
 	// of an already-captured snapshot was deleted while its child SnapshotContent survives in the recycle
-	// bin (the child content is alive, its status.parentDeleted=true, and the parent snapshot is
+	// bin (the child content is alive, its status.boundSnapshotDeleted=true, and the parent snapshot is
 	// still alive). The captured data is intact — only the namespaced user surface (d8 download, which
 	// reads namespaced CRs) degrades, while the durable SnapshotContent tree stays Ready. The message names
 	// the deleted child and notes its content survives; the automated restore path is not yet defined

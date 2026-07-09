@@ -302,7 +302,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Step 1: Ensure finalizer (manual deletion protection)
 	if obj.GetDeletionTimestamp().IsZero() {
-		if parentDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "parentDeleted"); parentDeleted {
+		if boundSnapshotDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "boundSnapshotDeleted"); boundSnapshotDeleted {
 			// Parent Snapshot is gone; don't re-add finalizer.
 			return ctrl.Result{}, nil
 		}
@@ -648,7 +648,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	snapshot.SyncConditionsToUnstructured(obj, contentLike.GetStatusConditions())
 	// Condition-only MergeFrom patch (not a full Status().Update). base vs obj differ only in
 	// status.conditions, so the JSON merge patch is {"status":{"conditions":[...]}} and leaves sibling
-	// status fields written by the snapshot reconciler (data, parentDeleted, ...) untouched.
+	// status fields written by the snapshot reconciler (data, boundSnapshotDeleted, ...) untouched.
 	// conditions are the aggregator's exclusive domain (INV-COND2, single writer) and reconcile of one
 	// object is serialized, so no optimistic lock is needed: MergeFrom sends no resourceVersion, so a
 	// concurrent sibling-field write does not turn into a 409 (which the previous Status().Update would

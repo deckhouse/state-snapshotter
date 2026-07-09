@@ -33,11 +33,11 @@ import (
 )
 
 // The SnapshotContent spec is frozen by root-level CEL transition rules, with a single recycle-bin
-// carve-out: spec.snapshotRef may be re-pointed (restore) only once status.parentDeleted latched true,
+// carve-out: spec.snapshotRef may be re-pointed (restore) only once status.boundSnapshotDeleted latched true,
 // while spec.deletionPolicy stays immutable in all cases. These admission contract tests pin that
 // behaviour so the anti-spoofing handshake (alive parent) and the wave4B restore path cannot regress.
 var _ = Describe("Integration: SnapshotContent spec immutability", func() {
-	It("freezes spec while the parent is alive and allows only a snapshotRef re-point once parentDeleted latches", func() {
+	It("freezes spec while the parent is alive and allows only a snapshotRef re-point once boundSnapshotDeleted latches", func() {
 		ctx := context.Background()
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{GenerateName: "spec-immutable-content-"},
@@ -63,7 +63,7 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 
 		// Each mutation re-Gets a fresh object inside Eventually so a concurrent SnapshotContent-controller
 		// status write surfaces as a retryable conflict rather than masking the CEL admission result.
-		By("rejecting a snapshotRef re-point while the parent Snapshot is alive (parentDeleted=false)")
+		By("rejecting a snapshotRef re-point while the parent Snapshot is alive (boundSnapshotDeleted=false)")
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
@@ -79,15 +79,15 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 			g.Expect(apierrors.IsInvalid(k8sClient.Update(ctx, fresh))).To(BeTrue())
 		}).Should(Succeed())
 
-		By("latching status.parentDeleted=true (the recycle-bin gate)")
+		By("latching status.boundSnapshotDeleted=true (the recycle-bin gate)")
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
-			fresh.Status.ParentDeleted = true
+			fresh.Status.BoundSnapshotDeleted = true
 			g.Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
 		}).Should(Succeed())
 
-		By("allowing a snapshotRef re-point once parentDeleted latched true")
+		By("allowing a snapshotRef re-point once boundSnapshotDeleted latched true")
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
@@ -96,7 +96,7 @@ var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 			g.Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
 		}).Should(Succeed())
 
-		By("still rejecting a deletionPolicy change even after parentDeleted latched")
+		By("still rejecting a deletionPolicy change even after boundSnapshotDeleted latched")
 		Eventually(func(g Gomega) {
 			fresh := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())

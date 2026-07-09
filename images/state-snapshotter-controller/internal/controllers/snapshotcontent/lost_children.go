@@ -50,7 +50,7 @@ import (
 //     content, so inspect the child SnapshotContents directly. A missing child content is Lost (terminal:
 //     content names are UID-derived, a recreated child cannot relink into the immutable frozen edge set).
 //     A surviving child content whose owning child CR is currently ABSENT (checked live via the content's
-//     own spec.snapshotRef, NOT the monotonic status.parentDeleted latch, so a manual restore of the child
+//     own spec.snapshotRef, NOT the monotonic status.boundSnapshotDeleted latch, so a manual restore of the child
 //     CR heals it) is ChildSnapshotDeleted when that content is Ready (capture complete, its data survives
 //     in the recycle bin) and ChildSnapshotLost when it is not (an incomplete capture cannot be resumed).
 //
@@ -118,7 +118,7 @@ func (r *SnapshotContentController) detectLostFromFrozenEdges(
 		}
 		if crPresent {
 			// The child CR is alive (or was manually restored): this edge is healthy. Checking the
-			// CR live — instead of the monotonic status.parentDeleted latch — is what lets a restore
+			// CR live — instead of the monotonic status.boundSnapshotDeleted latch — is what lets a restore
 			// self-heal the owner mirror back to Ready.
 			continue
 		}
@@ -188,7 +188,7 @@ func (r *SnapshotContentController) detectLostFromDeclaredRefs(
 
 // childOwningSnapshotExists reports whether the child SnapshotContent's owning child snapshot CR (resolved
 // live via the content's own spec.snapshotRef) currently exists. It is the authoritative "is the child CR
-// present?" signal for the frozen-edge fold: unlike the monotonic status.parentDeleted latch it flips back
+// present?" signal for the frozen-edge fold: unlike the monotonic status.boundSnapshotDeleted latch it flips back
 // to true after a manual restore recreates the (deterministically-named) child CR, so the owner mirror
 // self-heals. A content with no resolvable snapshotRef is treated as present (fail-open — never a false
 // terminal). Namespace comes from the ref (child snapshots are namespaced); the CR is read UNCACHED.

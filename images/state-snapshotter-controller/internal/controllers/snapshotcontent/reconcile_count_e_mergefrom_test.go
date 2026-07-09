@@ -34,7 +34,7 @@ import (
 // Swap E: reconcileCommonSnapshotContentStatus writes conditions via a condition-only MergeFrom patch
 // instead of a full Status().Update. This test pins the two guarantees of that change:
 //
-//  1. CLOBBER-SAFETY: a sibling status field written by the snapshot reconciler (parentDeleted) AFTER
+//  1. CLOBBER-SAFETY: a sibling status field written by the snapshot reconciler (boundSnapshotDeleted) AFTER
 //     the aggregator's read survives the aggregator's write. A full Status().Update would either clobber the
 //     field (if its resourceVersion still matched) or 409 on the bumped resourceVersion; the condition-only
 //     MergeFrom touches only status.conditions and sends no resourceVersion.
@@ -69,7 +69,7 @@ func TestConditionsMergeFromPatchPreservesWriterStatusFields(t *testing.T) {
 	if err := base.Get(ctx, client.ObjectKey{Name: "parent"}, writer); err != nil {
 		t.Fatalf("writer read: %v", err)
 	}
-	if err := unstructured.SetNestedField(writer.Object, true, "status", "parentDeleted"); err != nil {
+	if err := unstructured.SetNestedField(writer.Object, true, "status", "boundSnapshotDeleted"); err != nil {
 		t.Fatalf("set writer field: %v", err)
 	}
 	if err := base.Status().Update(ctx, writer); err != nil {
@@ -104,9 +104,9 @@ func TestConditionsMergeFromPatchPreservesWriterStatusFields(t *testing.T) {
 	if err := base.Get(ctx, client.ObjectKey{Name: "parent"}, fresh); err != nil {
 		t.Fatalf("post-write read: %v", err)
 	}
-	parentDeleted, _, _ := unstructured.NestedBool(fresh.Object, "status", "parentDeleted")
-	if !parentDeleted {
-		t.Fatalf("writer field status.parentDeleted clobbered: got %v, want true", parentDeleted)
+	boundSnapshotDeleted, _, _ := unstructured.NestedBool(fresh.Object, "status", "boundSnapshotDeleted")
+	if !boundSnapshotDeleted {
+		t.Fatalf("writer field status.boundSnapshotDeleted clobbered: got %v, want true", boundSnapshotDeleted)
 	}
 	contentLike, err := snapshot.ExtractSnapshotContentLike(fresh)
 	if err != nil {

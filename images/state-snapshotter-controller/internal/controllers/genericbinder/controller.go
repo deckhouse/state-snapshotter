@@ -494,10 +494,10 @@ func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 		return err
 	}
 
-	// Latch status.parentDeleted=true (status subresource) so the SnapshotContent controller stops
+	// Latch status.boundSnapshotDeleted=true (status subresource) so the SnapshotContent controller stops
 	// re-adding the parent-protect finalizer once the parent Snapshot is gone. Idempotent (false->true).
-	if latched, _, _ := unstructured.NestedBool(contentObj.Object, "status", "parentDeleted"); !latched {
-		if err := unstructured.SetNestedField(contentObj.Object, true, "status", "parentDeleted"); err != nil {
+	if latched, _, _ := unstructured.NestedBool(contentObj.Object, "status", "boundSnapshotDeleted"); !latched {
+		if err := unstructured.SetNestedField(contentObj.Object, true, "status", "boundSnapshotDeleted"); err != nil {
 			return err
 		}
 		if err := r.Status().Update(ctx, contentObj); err != nil {

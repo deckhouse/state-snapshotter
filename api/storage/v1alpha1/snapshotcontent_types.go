@@ -41,13 +41,13 @@ const (
 //
 // The spec is immutable EXCEPT for the snapshotRef back-reference, which may be re-pointed onto a freshly
 // re-created snapshot subject when recovering a content from the recycle bin. That single carve-out is
-// gated on the recycle-bin latch status.parentDeleted: while the owning Snapshot is alive the ref is
+// gated on the recycle-bin latch status.boundSnapshotDeleted: while the owning Snapshot is alive the ref is
 // frozen (the anti-spoofing handshake), and it becomes re-pointable only after the parent was deleted and
 // this cluster-scoped content survives in the TTL bin. It is the escape hatch that keeps recovery possible
 // (the automated restore flow is not yet defined; recovery is done by manual intervention).
 // deletionPolicy stays immutable in all cases. The rules live on the root object (not the spec field) so
 // CEL can read both self.spec and self.status.
-// +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.parentDeleted) && self.status.parentDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the parent Snapshot is deleted (recycle-bin restore)"
+// +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the bound Snapshot is deleted (recycle-bin restore)"
 // +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
 type SnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -77,7 +77,7 @@ type SnapshotContentSpec struct {
 	// path accepts a content only when this ref points back at the very snapshot that referenced it, so a
 	// user cannot attach a foreign content by pointing status.boundSnapshotContentName at it. It is
 	// immutable while the owning Snapshot is alive; it may be re-pointed onto a freshly re-created subject
-	// only once status.parentDeleted latched true (see the object-level XValidation rules). The
+	// only once status.boundSnapshotDeleted latched true (see the object-level XValidation rules). The
 	// anti-spoofing check is not weakened by this: recovery proceeds by re-pointing the ref onto the new
 	// subject's identity, not by bypassing the handshake.
 	// +kubebuilder:validation:Required
@@ -195,12 +195,13 @@ type SnapshotContentStatus struct {
 	// +optional
 	Data *SnapshotDataBinding `json:"data,omitempty"`
 
-	// ParentDeleted is a one-shot internal latch set by the binder when the parent Snapshot is deleted
-	// while this cluster-scoped SnapshotContent survives. Once true, the SnapshotContent controller no
-	// longer re-adds the parent-protect finalizer (the parent is gone) and GC may proceed. Monotonic
-	// (false -> true only); it replaces the former snapshot.deckhouse.io/parent-deleted annotation.
+	// BoundSnapshotDeleted is a one-shot internal latch set by the binder when the bound namespaced
+	// Snapshot is deleted while this cluster-scoped SnapshotContent survives (the recycle bin). Once true,
+	// the SnapshotContent controller no longer re-adds the parent-protect finalizer (the snapshot is gone)
+	// and GC may proceed. Monotonic (false -> true only); it replaces the former
+	// snapshot.deckhouse.io/parent-deleted annotation.
 	// +optional
-	ParentDeleted bool `json:"parentDeleted,omitempty"`
+	BoundSnapshotDeleted bool `json:"boundSnapshotDeleted,omitempty"`
 
 	// SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
 	// ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
