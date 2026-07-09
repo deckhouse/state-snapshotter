@@ -204,7 +204,7 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 	dumpObjectConditions(obj)
 
 	// Resolve target leaf boundSnapshotContentName when DataImport waits on it. Only a
-	// ProduceArtifact DataImport carries snapshotRef; PopulateVolume ones leave targetName empty.
+	// PopulateData DataImport carries snapshotRef; CreatePVC ones leave targetName empty.
 	if targetName == "" {
 		return
 	}

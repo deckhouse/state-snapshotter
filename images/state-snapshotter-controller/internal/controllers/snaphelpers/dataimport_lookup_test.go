@@ -40,7 +40,7 @@ func lookupScheme() *runtime.Scheme {
 	return scheme
 }
 
-// dataImportTargeting builds a ProduceArtifact DataImport whose spec.snapshotRef points at a leaf by
+// dataImportTargeting builds a PopulateData DataImport whose spec.snapshotRef points at a leaf by
 // GroupKind+name (apiVersion carries the group as "group/version").
 func dataImportTargeting(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
 	apiVersion := group + "/v1"
@@ -52,7 +52,7 @@ func dataImportTargeting(name, namespace, group, kind, targetName string) *unstr
 		"kind":       "DataImport",
 		"metadata":   map[string]interface{}{"name": name, "namespace": namespace},
 		"spec": map[string]interface{}{
-			"mode": "ProduceArtifact",
+			"mode": "PopulateData",
 			"snapshotRef": map[string]interface{}{
 				"apiVersion": apiVersion,
 				"kind":       kind,

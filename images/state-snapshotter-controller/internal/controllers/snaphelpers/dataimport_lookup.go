@@ -33,11 +33,11 @@ import (
 var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
 
 // FindDataImportForLeaf reverse-looks-up the DataImport that materializes the data leg for an import-mode
-// snapshot leaf. The leaf↔DataImport link is single-directional: only a ProduceArtifact DataImport's
+// snapshot leaf. The leaf↔DataImport link is single-directional: only a PopulateData DataImport's
 // spec.snapshotRef points at the leaf (apiVersion/kind/name; namespace implicit = leaf namespace), so the
 // binder lists DataImports in the leaf namespace and matches snapshotRef against the leaf identity. Matching
 // is by GroupKind — the leaf's own GVK carries its group and kind, and snapshotRef.apiVersion carries the
-// referenced group/version, so no RESTMapping is needed. PopulateVolume DataImports carry no snapshotRef and
+// referenced group/version, so no RESTMapping is needed. CreatePVC DataImports carry no snapshotRef and
 // never match. It is the single source of the list+match+fail-closed semantics shared by the generic binder
 // (domain data leaves) and the VolumeSnapshot import binder (F2).
 //
@@ -85,7 +85,7 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 	case 0:
 		// Help diagnose a producer/consumer version skew: if there are candidate DataImports in the
 		// namespace but none matched by GroupKind, the producer may still be writing the legacy
-		// spec.targetRef instead of the ProduceArtifact spec.snapshotRef. A leaf with zero candidates is
+		// spec.targetRef instead of the PopulateData spec.snapshotRef. A leaf with zero candidates is
 		// the normal not-yet-created (pending) case and stays quiet.
 		if len(list.Items) > 0 {
 			log.FromContext(ctx).V(1).Info("no DataImport matched leaf by GroupKind",

@@ -199,22 +199,22 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs 
 }
 
 func createDataImport(ctx context.Context, ns, name, apiVersion, kind, leafName, storageClassName, size, volumeMode string) error {
-	scratchVolumeTemplate := map[string]interface{}{
+	storageParams := map[string]interface{}{
 		"storageClassName": storageClassName,
 		"size":             size,
 	}
 	if volumeMode != "" {
-		scratchVolumeTemplate["volumeMode"] = volumeMode
+		storageParams["volumeMode"] = volumeMode
 	}
 	spec := map[string]interface{}{
 		"ttl":  bkDataImportTTL,
-		"mode": "ProduceArtifact",
+		"mode": "PopulateData",
 		"snapshotRef": map[string]interface{}{
 			"apiVersion": apiVersion,
 			"kind":       kind,
 			"name":       leafName,
 		},
-		"scratchVolumeTemplate": scratchVolumeTemplate,
+		"storageParams": storageParams,
 	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
