@@ -918,6 +918,31 @@ Decision rule for the N=20 harvest: if roots/layers wake via `viaBackstop=true` 
 are large (seconds) → fix the relay/index/watch; if relay latency is small but Phase A is still large → the shared
 reconcile queue is the ceiling → domain VMS/VDS `MaxConcurrentReconciles` sweep with 3–5 runs per point.
 
+### Result (N=20, trace ON): Phase A is serialized on reconcile-worker concurrency, not poll-paced — CLOSED (diagnosis)
+
+Single N=20 run, 20 root Snapshots fired simultaneously (stand pre-Ready), 794 `phaseA-trace` lines harvested:
+
+| signal | value | reading |
+|---|---|---|
+| `viaBackstop=true` entries | **0 / 545** | the 30s child-graph poll is **never** on the critical path — the relay wakes parents |
+| `finalObserveLagMs` (last child ready → root publishes) | p50 **1.68s**, max 2.27s (flat) | the completing hop is healthy and does **not** grow with load — relay/index/watch are fine |
+| `phaseATotalMs` (creation → `ChildrenSnapshotReady`) per root | **1.3s → 28.6s** linear staircase, p50 23.3s | roots created at the same instant complete in strict rank order = **serialization**, not per-root cost (rank-1 root finishes its Phase A in 1.3s) |
+| `relayLatencyMs` (triggering child ready → parent reconcile) | p50 5.4s, **p90 33.5s** | deep **queue backlog**: child events wait a long time before their parent reconcile runs |
+
+![Phase A serialization staircase, N=20](phaseA-serialization-N20.png)
+
+**Verdict — decision-rule branch (b): throughput-bound on reconcile-worker concurrency.** Phase A is *not*
+poll/backstop-bound (0 backstop wakes) and the relay mechanism is *correct* (flat ~1.5s final-hop lag); the residual
+is pure **serialization** — 20 simultaneously-created roots drain through concurrency-limited reconcile workers in a
+1.3→28.6s staircase, and the relay path shows a p90 33s queue backlog. Relevant ceilings: demo `DemoVirtualMachineSnapshot`
+/ `DemoVirtualDiskSnapshot` reconcilers run at `MaxConcurrentReconciles: 4`; the root `Snapshot` controller at 8; and
+each per-child-GVK relay controller (`nss-chw-*`, `dynamic_watch.go`) runs at the controller-runtime **default of 1**
+(no `WithOptions`), funnelling every namespace's child-snapshot events through a single goroutine per GVK.
+
+**Next (per branch b):** sweep domain VMS/VDS `MaxConcurrentReconciles` (env-configurable, 4 → 8 → 16) with 3–5 runs
+per point, and evaluate raising the `nss-chw-*` relay concurrency above 1. Judge on `phaseATotalMs` distribution and
+wall, not single-run A/B.
+
 ---
 
 ## 9. Application checklist
