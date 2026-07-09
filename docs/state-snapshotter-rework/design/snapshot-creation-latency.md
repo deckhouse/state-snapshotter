@@ -106,7 +106,9 @@ Validated: TREES=5 57s→6s; TREES=1 15s→3s; reconcile durMs mean 4491→125ms
 
 Caveat: **QPS=50/100 is capacity tuning, not proof of low work.** It does not reduce work; it stops the default
 limiter from serializing it. Validated by flat reconciles-per-tree and no post-Ready storm — not by showing the
-work is small. Pick a production value deliberately.
+work is small. Pick a production value deliberately. **UPDATE:** the deliberate value is now chosen — a QPS→Ready
+saturation sweep sets the **production default at 200/400** (knee; 500/1000 no gain) and the value is
+env-configurable; see section 8, "QPS/Burst saturation sweep — production default 200/400 (CLOSED)".
 
 ### FIX 2 — MCR controller: watch ManifestCheckpoint
 
@@ -457,7 +459,8 @@ Fixes, one variable at a time, guided by the numbers:
   semantics (a debounce can hide a lost event) is not worth the risk for the remaining latency.
 
 Adjacent future work: choose the production manager client QPS/Burst deliberately (50/100 was capacity tuning, not
-proof of low work — see FIX 1 caveat).
+proof of low work — see FIX 1 caveat). **RESOLVED:** the QPS→Ready sweep (section 8, "QPS/Burst saturation sweep")
+sets the production default at **200/400** (the saturation knee; 500/1000 gives no gain). Now env-configurable.
 
 ### H4 — root manifest leg (`ChildrenSnapshotReady` → `Ready` ≈10s) — CLOSED by H4.1
 
@@ -752,6 +755,89 @@ registry refreshed, but derived mappings forgotten / non-atomically swapped / St
 - new derived planning structures appear that are naturally computed once per refresh.
 
 Until one of these applies, the cached-CSD planning fix is considered sufficient.
+
+### QPS/Burst saturation sweep — production default 200/400 (CLOSED)
+
+**Status: measured and closed.** The client-go rate limit is now **env-configurable** (defaults preserved, fail-fast
+on invalid values, startup logging unchanged) and a QPS→Ready sweep resolved the open "pick a production QPS/Burst
+deliberately" item (FIX 1 caveat / "Adjacent future work"). **Verdict: production default = `200/400`.** `500/1000`
+gives **no** additional gain over `200/400` — it only adds apiserver pressure for free.
+
+**Env knobs (override at runtime; defaults are the documented production values).**
+
+| component | client | env QPS | env Burst |
+|---|---|---|---|
+| state-snapshotter controller | manager | `STATE_SNAPSHOTTER_KUBE_QPS` | `STATE_SNAPSHOTTER_KUBE_BURST` |
+| state-snapshotter controller | capture dynamic | `STATE_SNAPSHOTTER_CAPTURE_QPS` | `STATE_SNAPSHOTTER_CAPTURE_BURST` |
+| domain-controller | manager | `DOMAIN_CONTROLLER_KUBE_QPS` | `DOMAIN_CONTROLLER_KUBE_BURST` |
+
+Invalid (non-numeric / non-positive) values fail fast at startup rather than silently falling back to the client-go
+default (5/10). `storage-foundation` was **not** part of this experiment and is intentionally untouched.
+
+**Experiment 1 — lift 50/100 → 500/1000, N=10/20/50 (does the limiter bind at all?).** Server-side per-tree phase
+means (`lastTransitionTime`; single run per N; 0 errors / 0 restarts / 0×429):
+
+| N | phase | 50/100 | 500/1000 | Δ |
+|---|---|---|---|---|
+| 10 | A cre→CSR | 8.2 | 7.0 | −15% |
+| 10 | B CSR→Arch | 9.6 | 4.6 | **−52%** |
+| 10 | C Arch→Rdy | 0.3 | 1.2 | noise |
+| 10 | **total** | 18.1 | 12.8 | −29% |
+| 20 | A cre→CSR | 17.9 | 18.3 | ~0 |
+| 20 | B CSR→Arch | 16.5 | 5.0 | **−70%** |
+| 20 | C Arch→Rdy | 3.5 | 0.1 | −97% |
+| 20 | **total** | 37.9 | 23.4 | −38% |
+| 50 | A cre→CSR | 47.2 | 35.0 | −26% |
+| 50 | B CSR→Arch | 41.4 | 34.1 | −18% |
+| 50 | C Arch→Rdy | 13.5 | 0.8 | −94% |
+| 50 | **total** | 102.1 | 69.9 | −32% |
+
+![Phase decomposition, default 50/100 vs 500/1000, N=10/20/50](./qps-phase-overlay.png)
+
+The per-tree total slope drops from **2.11 → 1.46 s/tree (~31% flatter)** but the line does **not** go flat: raising
+QPS is a downward shift + slope reduction, not a switch to a flat regime.
+
+**Experiment 2 — QPS sweep at N=20 (pick the minimal production value).** Same harness, N=20 only, one run per
+point:
+
+| QPS/Burst | A | B | C | **total** | wall |
+|---|---|---|---|---|---|
+| 50/100 | 17.9 | 16.5 | 3.5 | **37.9** | 62s |
+| 100/200 | 18.1 | 8.0 | 0.1 | **26.2** | 45s |
+| 200/400 | 17.4 | 5.8 | 0.1 | **23.4** | 36s |
+| 500/1000 | 18.3 | 5.0 | 0.1 | **23.4** | 40s |
+
+![QPS→Ready saturation curve at N=20](./qps-saturation-curve.png)
+
+Classic saturation knee at **200**: 50→100 = **−31%**, 100→200 = **−11%**, **200→500 = 0%**. `200/400` captures the
+entire win (total 23.4 = same as 500/1000).
+
+**Per-phase verdicts (this is the more valuable result than the QPS number itself).**
+
+- **Phase C (`ManifestsArchived → Ready`) — CLOSED, was API-limiter-bound.** Collapsed 13.5 → 0.8s (N=50) and
+  effectively vanishes by QPS 100 (3.5 → 0.1 at N=20). There is almost no real work in C (tree already archived,
+  children ready, only the final Ready mirror) — the time was purely waiting for a limiter token before a
+  GET/PATCH. Further optimization of C is pointless.
+- **Phase B (`ChildrenSnapshotReady → ManifestsArchived`) — partly QPS-bound.** Saturates by ~200 (16.5 → 8.0 →
+  5.8 → 5.0 at N=20); the residual ~5–6s is the content-controller's **own** throughput, not the limiter. **But at
+  N=50 B re-inflates (5.0 at N=20 → 34.1 at N=50)** — a second ceiling that QPS 500 does not lift. That ceiling is
+  reconcile/worker-saturation + requeue churn (content controller N=50: ~5465 reconciles, ~4599 `requeue_after`,
+  0.145 s/rec), not REST QPS.
+- **Phase A (`creation → ChildrenSnapshotReady`) — QPS-independent.** Flat across the entire sweep at N=20
+  (17.9 / 18.1 / 17.4 / 18.3) and still ~linear in N (7 → 18 → 35). This is **not** on the API limiter at all — it
+  is the genuine reconcile-throughput limit of child-graph planning + child materialization + child readiness,
+  exactly the residual the earlier API-load track (D.3/H4.1/CSD/H5/relay-index) cleaned the noise away from. **Phase
+  A is now the dominant remaining term and the next candidate is `MaxConcurrentReconciles`, not QPS.**
+
+**Why this validates the whole prior sequence.** With API-load noise removed (five closed load fixes) and the
+artificial limiter lifted, the pipeline splits cleanly into a QPS-bound tail (B/C, now handled) and a
+reconcile-throughput term (A, and B at high N). The architecture was sound; it was throttled by a stack of overhead,
+not by a fundamental design flaw.
+
+**Priority reset.** Phase C is **closed**. Focus is A (primary) and B-at-high-N (secondary), both pointing at
+`MaxConcurrentReconciles` / worker saturation / informer propagation — a local, easily-measured experiment to run
+**after** fixing the QPS default (so only one variable changes at a time). `requeue_after` semantics are touched
+last (they carry correctness), per the agreed order QPS → default → concurrency → requeue.
 
 ---
 
