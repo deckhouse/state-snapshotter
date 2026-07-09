@@ -1392,3 +1392,17 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   VolumeSnapshot CRD before the manager). Build + unit + `go vet -tags integration` + gofmt + golangci-lint
   green. e2e Phase 3b (`resourceSelector over PVC volume data`) fix already landed via the planner guard
   (`56ecb5f`); this change removes the dead CSD mapping that caused it.
+
+### Demo CSD weight ordering — VM before disk (fix DuplicateCoveredPVCUID)
+
+- **Bugfix** (demo-csd) Swapped the demo CustomSnapshotDefinition weights so the aggregate `demo-virtual-machine`
+  (weight 10) plans BEFORE the leaf `demo-virtual-disk` (weight 100); previously inverted (disk 10 < VM 100,
+  since `ce822c9` wave4C). The root namespace planner covers a source only via already-planned children of an
+  EARLIER weight layer (parent_graph coverage walk: VM snapshot -> status.childrenSnapshotRefs -> disk snapshot
+  -> spec.sourceRef). A VM owns its disks by reference (`spec.virtualDiskName`, no ownerRef), so with the disk
+  layer running first, a VM-owned disk (`disk-vm`) was enumerated standalone at the root BEFORE the VM claimed
+  it — the same PVC UID ended up captured by two data legs (root-direct + VM-subtree DemoVirtualDiskSnapshot)
+  and the root wedged at Ready=False/DuplicateCoveredPVCUID (e2e Phase 3 full volume-data). With VM first, the
+  disk layer sees `disk-vm` covered and skips it; a truly standalone disk (`disk-standalone`) is still captured
+  at the root. Pure weight reorder in the demo CSD manifest + a load-bearing comment so it is not re-inverted;
+  the Phase 3 full volume-data e2e is the regression guard. Unrelated to the built-in-VolumeSnapshot change.
