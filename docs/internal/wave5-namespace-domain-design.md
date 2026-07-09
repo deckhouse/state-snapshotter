@@ -6,6 +6,14 @@ change — see §2; the third is the reusable manifest-exclude capability they d
 attended, behind the envtest integration gate (`snapshot_root_lifecycle` / `snapshot_recreate` /
 `snapshot_n1_boundary`). Companion execution log: `.cursor/plans/wave5_notes.md`.
 
+> **SUPERSEDED detail (2026-07-09, wave7 `80647b9`).** This design predates the removal of the
+> `residualVolumeCapture` latch. Every mention below of `residualVolumeCapture.phase=Complete`,
+> `orphanWaveComplete(...)`, or the latch being "preserved/unchanged" describes a mechanism that **no
+> longer exists**: the orphan/residual-PVC wave is now gated structurally by `ChildrenReady` (the
+> declared child set is complete at `phase=Planned`; the finish gate waits on every direct domain child
+> reaching `subtreePlanned`, not on a wave-completion latch), and the ref lists are append-only. Read the
+> latch references as historical context, not current behavior.
+
 > **Design pivot (2026-07-06).** An earlier draft put `sdk.EnsureManifestCapture` in the root's
 > *planning* block (§4.2), symmetric with the demo aggregator. That is **wrong on timing**: the root's
 > namespace MCR is **exclude-ordering-dependent** — its target set is «the whole namespace **minus**

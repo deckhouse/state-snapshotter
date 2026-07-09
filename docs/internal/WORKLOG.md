@@ -1549,3 +1549,20 @@ Spec redesign of the two service resources onto the suffix convention: `...Templ
   stale D3 statements (CoreCaptureOutcome tri-state "domain goes Fail/Reject" -> "domain stops", Failed as a
   terminal SINK + ReportProgress verb rule, reason examples). gofmt + go vet (incl. -tags integration) +
   snapshot package unit tests green.
+
+## Leadership review — wave 2 fixes
+
+Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
+`_projects/unified-snapshots/plans/2026-07-09-1056-wave2-leadership-review-fixes.plan.md`.
+
+### Block 0 — residualVolumeCapture doc tails (docs-only)
+
+- **Docs** The `residualVolumeCapture` latch / `ResidualVolumeCapturePending` gate were already removed
+  from code+CRD in wave7 (`80647b9`, replaced by the `ChildrenReady` / `ChildrenLinkPending` gate;
+  ref lists are append-only, no separate wave-completion barrier). Cleaned the stale design docs that
+  still described the latch as the LIVE mechanism: added SUPERSEDED banners to
+  `snapshot-rework/2026-06-03-snapshot-conditions-model.md` §2.3 and
+  `snapshot-rework/2026-06-09-orphan-pvc-csi-volumesnapshot.md` (Ready-gate addendum + INV-ORPHAN6), and
+  a top-of-doc SUPERSEDED note to `docs/internal/wave5-namespace-domain-design.md` covering its inline
+  `residualVolumeCapture.phase=Complete` / `orphanWaveComplete(...)` / "latch preserved" mentions.
+  Overview ADR already describes the latch as removed/redundant (no change). Historical reasoning kept.

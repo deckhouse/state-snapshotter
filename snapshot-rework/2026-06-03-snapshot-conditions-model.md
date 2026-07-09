@@ -48,6 +48,15 @@ Snapshot.Ready        = mirror(SnapshotContent.Ready)   // НЕ локальны
 
 ### 2.3. Residual-gate первого `Ready=True` (Update 2026-06-28)
 
+> **SUPERSEDED (2026-07-09, wave7 `80647b9`).** Латч-поле `residualVolumeCapture` и отдельный gate
+> `ResidualVolumeCapturePending` **удалены**. Их роль (fail-closed-барьер первого `Ready=True` против
+> преждевременной готовности с необъявленными/неслинкованными orphan-детьми) поглощена гейтом
+> `ChildrenReady` / reason `ChildrenLinkPending`: набор детей полон к `phase=Planned`, списки
+> `childrenSnapshotRefs`/`childrenSnapshotContentRefs` дополняются монотонно (append-only, без
+> отдельного барьера завершения волны). Символы `ResidualVolumeCaptureStatus` и
+> `computeResidualSweepGate` в `api`/коде больше не существуют. Раздел ниже сохранён как исторический
+> контекст решения — он **не** описывает текущий механизм.
+
 Для namespace-root `SnapshotContent` со смешанным деревом (доменные дети + orphan-PVC) три ноги формулы (`ManifestsReady && VolumesReady && ChildrenReady`) могли стать `True` **после** готовности доменных детей, но **до** запуска финальной residual/orphan-PVC-волны (волна стартует только когда все доменные дети готовы, затем линкует orphan child-node в дерево). Это давало флап `Ready` True→False→True (линковка orphan-ребёнка роняет `ChildrenReady`), а потребитель, увидевший первый `True`, получал на `manifests-with-data-restoration` `ErrNotReady`/409.
 
 Контракт: корневой content (и зеркало `Snapshot.Ready`) не имеет права **впервые** выдать `Ready=True`, пока residual-волна не завершена (нет orphan-таргетов **или** все orphan child-nodes слинкованы и готовы). Реализовано **fail-closed**-гейтом — дополнительной **низшей по приоритету** ногой `Ready`:
