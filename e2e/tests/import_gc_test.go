@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
@@ -237,7 +238,14 @@ func waitControllerSnapshotRootOkTtlRolledOut(ctx context.Context, want *string,
 // re-aligns the OK TTL to the live config on every reconcile, so this confirms the new snapshotRootOkTtl
 // has actually propagated to a running controller before the GC timing assertions run.
 func waitRootOkTTL(ctx context.Context, ns, snap string, want, timeout time.Duration) error {
-	okName := fmt.Sprintf("ret-snap-%s-%s", ns, snap)
+	// The root ObjectKeeper name is UID-derived (nss-ok-<h16(snapshotUID)>, api/names.ObjectKeeperName),
+	// not a ns/name slug — resolve the live Snapshot's UID to address it. The UID is immutable, so a
+	// single lookup before the poll loop is sufficient.
+	snapObj, err := getResource(ctx, snapshotGVR, ns, snap)
+	if err != nil {
+		return fmt.Errorf("get root Snapshot %s/%s to resolve its ObjectKeeper name: %w", ns, snap, err)
+	}
+	okName := names.ObjectKeeperName(snapObj.GetUID())
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {

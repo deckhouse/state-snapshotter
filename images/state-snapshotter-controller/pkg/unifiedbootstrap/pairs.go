@@ -125,6 +125,20 @@ func IsDomainCaptureSnapshotKind(kind string) bool {
 	return false
 }
 
+// IsOutOfProcessDomainSnapshotKind reports whether kind is owned by a SEPARATE, out-of-process domain
+// controller that serves its own aggregated restore apiserver, so the core restore compiler must
+// DELEGATE that node's subtree to the domain apiserver instead of compiling it in-process.
+//
+// This is the domain-capture set (IsDomainCaptureSnapshotKind) MINUS the built-in root "Snapshot".
+// Since wave5 the namespace-root "Snapshot" is a domain-CAPTURE kind (planned via the in-process SDK,
+// its content owned by the generic binder), but its RESTORE is served by THIS core apiserver. Treating
+// the root as an out-of-process domain node makes the restore compiler delegate it back to core's own
+// manifests-with-data-restoration endpoint — an unbounded self-call that surfaces as a 500. Only the
+// demo/external kinds are genuinely out-of-process for restore, so the root is excluded here.
+func IsOutOfProcessDomainSnapshotKind(kind string) bool {
+	return kind != DefaultSnapshotPair().Snapshot.Kind && IsDomainCaptureSnapshotKind(kind)
+}
+
 // FilterGenericSnapshotGVKPairs returns parallel slices with dedicated snapshot kinds removed.
 func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKind) (snapOut, contentOut []schema.GroupVersionKind) {
 	if len(snapGVKs) != len(contentGVKs) {

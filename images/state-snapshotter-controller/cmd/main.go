@@ -440,7 +440,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
+	// The restore delegate predicate must be the OUT-OF-PROCESS domain set, NOT the domain-CAPTURE set:
+	// since wave5 the root "Snapshot" is a domain-capture kind, but its restore is served in-process by
+	// this very apiserver. Passing the capture set would make the compiler delegate the root back to core's
+	// own manifests-with-data-restoration endpoint (self-recursion, HTTP 500). Only demo/external kinds
+	// are truly out-of-process for restore.
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsOutOfProcessDomainSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

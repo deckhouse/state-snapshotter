@@ -210,7 +210,12 @@ func captureRBACHookSpecs() {
 				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata":   map[string]interface{}{"name": "e1-static", "namespace": ns},
-				"spec":       map[string]interface{}{"source": map[string]interface{}{"snapshotContentName": "no-such-content"}},
+				// mode: StaticBind is required for spec.source.snapshotContentName — the spec-level CEL rule
+				// requires the two to co-occur (snapshotContentName is forbidden in the default Capture mode).
+				"spec": map[string]interface{}{
+					"mode":   "StaticBind",
+					"source": map[string]interface{}{"snapshotContentName": "no-such-content"},
+				},
 			}}
 			_, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, importSnap, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
