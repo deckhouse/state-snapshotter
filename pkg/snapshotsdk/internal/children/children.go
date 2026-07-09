@@ -22,7 +22,7 @@ limitations under the License.
 // drift and fails closed rather than reconciling the difference. Reclaiming any detached leftover object
 // is left to ownerRef garbage collection (the parent owns each child) or a future cleanup component. This
 // keeps the contract delete-free — no List, no orphan diff, no unstructured delete, no risk of removing a
-// foreign object on the strength of a stale status (see design Р23/Р29).
+// foreign object on the strength of a stale status (see design R23/R29).
 package children
 
 import (
