@@ -36,40 +36,40 @@ import (
 )
 
 var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", func() {
-	// PHASE 2.2: Integration: SnapshotContentController - Cascade Finalizers Removal
+	// PHASE 2.2: Integration: SnapshotContentController - Ensure Child Finalizers For Cascade
 	//
-	// This test verifies that SnapshotContentController correctly handles cascade deletion:
-	// - When parent SnapshotContent is deleted, children finalizers are removed first
-	// - Then parent finalizer is removed
-	// - GC can proceed with deletion through ownerRef
+	// Corrected teardown contract: parent teardown must ENSURE parent-protect on every live direct child and
+	// remove ONLY the parent's own finalizer. It must NOT reclaim a child or strip a child finalizer: each
+	// child is a durable node that runs its OWN deletion handler once ownerRef GC reaches it after the parent
+	// is gone (recursively finalizing its subtree). Stripping a child finalizer here would let a deeper
+	// descendant be GC'd without ever running its handler (the depth-N teardown race this change fixes).
 	//
-	// INTERFACE: controllers.SnapshotContentController.Reconcile + cascadeRemoveFinalizersFromChildren
+	// INTERFACE: controllers.SnapshotContentController.Reconcile + ensureFinalizersOnChildrenForCascade
 	//
 	// PRECONDITION:
-	// - Parent SnapshotContent exists
-	// - Parent SnapshotContent.deletionTimestamp != nil
-	// - Parent has children (status.childrenSnapshotContentRefs)
-	// - Children have finalizers
+	// - Parent SnapshotContent exists, deletionTimestamp != nil
+	// - Parent has children (status.childrenSnapshotContentRefs); children have finalizers
 	//
 	// ACTIONS:
 	// 1. Set deletionTimestamp on parent SnapshotContent
 	// 2. SnapshotContentController.Reconcile(ctx, req)
-	// 3. Check children finalizers
-	// 4. Check parent finalizer
+	// 3. Check children finalizers RETAINED (ensured, not removed)
+	// 4. Check parent's own finalizer removed
 	//
 	// EXPECTED BEHAVIOR:
-	// - All children finalizers removed
-	// - Parent finalizer removed
-	// - GC can proceed with deletion
+	// - Every live child RETAINS parent-protect (the parent never strips it)
+	// - Parent's own finalizer removed -> parent unblocked for GC
+	// - Each child is later GC'd via ownerRef and runs its own teardown (not observable in envtest, which
+	//   does not run the garbage collector, so the child simply survives here with its finalizer intact)
 	//
 	// POSTCONDITION:
-	// - Children finalizers removed
+	// - Children keep parent-protect (await their own ownerRef-driven teardown)
 	// - Parent finalizer removed
 	//
 	// INVARIANT:
 	// - See GLOBAL INVARIANTS G1 (Controllers MUST NOT delete objects directly, ONLY remove finalizers)
-	// - Controller does NOT call Delete() - only removes finalizers
-	// - GC handles physical deletion through ownerRef
+	// - Controller does NOT call Delete() on children - only ensures/removes its OWN finalizer
+	// - GC handles physical child deletion through ownerRef; each child self-finalizes
 
 	var (
 		ctx         context.Context
@@ -93,8 +93,8 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 		}
 	})
 
-	Describe("Cascade Finalizers Removal", func() {
-		It("should remove finalizers from children before parent", func() {
+	Describe("Ensure Child Finalizers For Cascade", func() {
+		It("should ensure/retain child finalizers and remove only the parent's own finalizer", func() {
 			// PRECONDITION: Create Snapshots (required for controllers to add finalizers)
 			// Controller checks Snapshot existence before adding finalizer (prevents infinite loop)
 			parentSnapshotObj := &unstructured.Unstructured{}
@@ -263,76 +263,43 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 				return parentContentObj.GetDeletionTimestamp() != nil
 			}, "15s", "200ms").Should(BeTrue(), "Parent should have deletionTimestamp set")
 
-			// ACTIONS Step 2-4: SnapshotContentController.Reconcile + Check finalizers
-			// Use APIReader for live read and reconcile inside Eventually for stability
-			// Use fresh objects in each poll to avoid stale pointers
+			// ACTIONS Step 2-4: SnapshotContentController.Reconcile + check finalizers. One deletion-path
+			// reconcile ensures the child finalizer AND removes only the parent's own finalizer
+			// (ensure-children runs before the parent's own removal within the same pass). Use the APIReader
+			// for live reads and reconcile inside Eventually for stability.
 
-			// ACTIONS Step 3: Check children finalizers (cascade happens first)
+			// ACTIONS Step 4: the parent's OWN finalizer is removed -> parent unblocked for GC / gone.
 			Eventually(func() bool {
-				// Trigger reconcile to ensure cascade happens
 				_, _ = contentCtrl.Reconcile(ctx, parentReq)
 
-				// Read fresh child object from live apiserver (not cache)
-				freshChild := &unstructured.Unstructured{}
-				freshChild.SetGroupVersionKind(contentGVK)
-				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
-					Name: childContentName,
-				}, freshChild)
-				if err != nil {
-					return false
-				}
-				return !contains(freshChild.GetFinalizers(), snapshot.FinalizerParentProtect)
-			}, "10s", "100ms").Should(BeTrue(), "Child finalizer should be removed first (cascade)")
-
-			// ACTIONS Step 4: Check parent finalizer (removed after cascade)
-			// Note: Parent finalizer is removed in the same reconcile as cascade,
-			// but we need to wait for the Update to complete
-			Eventually(func() bool {
-				// Trigger reconcile to ensure parent finalizer removal
-				_, _ = contentCtrl.Reconcile(ctx, parentReq)
-
-				// Read fresh parent object from live apiserver (not cache)
 				freshParent := &unstructured.Unstructured{}
 				freshParent.SetGroupVersionKind(contentGVK)
 				err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 					Name: parentContentName,
 				}, freshParent)
 				if err != nil {
-					// Object might be deleted by GC - that's OK, finalizer was removed
+					// Removed once its last finalizer went (deletionTimestamp + no finalizers).
 					return apierrors.IsNotFound(err)
 				}
 				return !contains(freshParent.GetFinalizers(), snapshot.FinalizerParentProtect)
-			}, "20s", "100ms").Should(BeTrue(), "Parent finalizer should be removed after cascade")
+			}, "20s", "100ms").Should(BeTrue(), "Parent's own finalizer should be removed")
 
-			// EXPECTED BEHAVIOR: All finalizers removed
-			// Re-read to verify final state (objects might be deleted by GC, which is OK)
-			freshChildForCheck := &unstructured.Unstructured{}
-			freshChildForCheck.SetGroupVersionKind(contentGVK)
-			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
+			// ACTIONS Step 3: the child finalizer is RETAINED (ensured, never stripped by the parent). The
+			// child awaits its own ownerRef-driven teardown; envtest runs no GC, so it simply survives here
+			// with its finalizer and no deletionTimestamp.
+			freshChild := &unstructured.Unstructured{}
+			freshChild.SetGroupVersionKind(contentGVK)
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: childContentName,
-			}, freshChildForCheck)
-			if err == nil {
-				// Object still exists - verify finalizer is removed
-				Expect(freshChildForCheck.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Child finalizer should be removed")
-			} else {
-				// Object deleted by GC - that's OK, finalizer was removed
-				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Child should be deleted by GC after finalizer removal")
-			}
+			}, freshChild)).To(Succeed(), "child must survive the parent teardown (no GC in envtest)")
+			Expect(freshChild.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect), "child parent-protect must be RETAINED by parent teardown, never stripped")
+			Expect(freshChild.GetDeletionTimestamp()).To(BeNil(), "parent teardown must not delete the child directly")
 
-			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
-				Name: parentContentName,
-			}, parentContentObj)
-			if err == nil {
-				// Object still exists - verify finalizer is removed
-				Expect(parentContentObj.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Parent finalizer should be removed")
-			} else {
-				// Object deleted by GC - that's OK, finalizer was removed
-				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Parent should be deleted by GC after finalizer removal")
-			}
-
-			// EXPECTED BEHAVIOR: GC can proceed (no finalizers blocking deletion)
-			// Note: We don't verify physical deletion here - that's GC's responsibility
-			// This test only verifies that finalizers are removed, unlocking GC
+			// Cleanup: strip the child finalizer and delete it (no GC in envtest to reclaim it via ownerRef).
+			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: childContentName}, freshChild)).To(Succeed())
+			freshChild.SetFinalizers(nil)
+			Expect(k8sClient.Update(ctx, freshChild)).To(Succeed())
+			_ = k8sClient.Delete(ctx, freshChild)
 		})
 	})
 })

@@ -56,11 +56,21 @@ func (r *SnapshotContentController) reclaimDataArtifactsFromContentObj(ctx conte
 	return nil
 }
 
-// reclaimVolumeSnapshotContent flips a VolumeSnapshotContent's spec.deletionPolicy Retain->Delete and
-// issues a delete so the CSI external-snapshotter reclaims the underlying physical snapshot. The VSC also
-// carries our artifact-protect finalizer (removed by the caller) and, on the import path, a second
-// non-controller ownerRef to the DataImport keeper (C4) — neither blocks this explicit, deterministic
-// reclaim. NotFound / already-deleting is success.
+// reclaimVolumeSnapshotContent makes a VolumeSnapshotContent's physical reclaim self-sufficient at teardown:
+// it flips spec.deletionPolicy Retain->Delete AND stamps the CSI deletion annotation
+// snapshot.storage.kubernetes.io/volumesnapshot-being-deleted=yes, then issues a delete so the CSI
+// external-snapshotter reclaims the underlying physical snapshot. For a dynamically-provisioned VSC still
+// bi-directionally bound to its VolumeSnapshot, the legacy external-snapshotter delete rule fires ONLY when
+// that annotation is present; it is normally stamped by the common controller during the bound-VS deletion
+// lifecycle, but once the bound VolumeSnapshot is already gone that stamp can be lost (content lookup miss,
+// binding mismatch, force-stripped VS finalizers, or a non-deletion-candidate VS), permanently wedging the
+// VSC + physical snapshot. Stamping it ourselves — state-snapshotter is the authority for these VSCs, having
+// pinned them to Retain and now intentionally reclaiming them — removes the dependency on that
+// lifecycle-window stamp entirely. The VSC also carries our artifact-protect finalizer (removed by the
+// caller) and, on the import path, a second non-controller ownerRef to the DataImport keeper (C4) — neither
+// blocks this explicit, deterministic reclaim. NotFound / already-deleting is success; the annotation has no
+// effect until a deletionTimestamp exists and deletionPolicy still gates the physical delete, so it is inert
+// (and, for VCR-leg VSC-only contents, redundant-but-harmless) outside this teardown path.
 func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Context, vscName string) error {
 	logger := log.FromContext(ctx)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -76,16 +86,32 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 		if perr != nil {
 			return fmt.Errorf("read VolumeSnapshotContent %s deletionPolicy: %w", vscName, perr)
 		}
-		if policy == volumeSnapshotContentDeletePolicy {
+		// Two independent repairs. needsAnnotation also recovers a VSC previously flipped to Delete but left
+		// unannotated (the old code returned early on Delete-policy and never stamped it). Return early ONLY
+		// when both are already satisfied so the no-op path issues zero Patch calls.
+		annotations := vsc.GetAnnotations()
+		needsPolicy := policy != volumeSnapshotContentDeletePolicy
+		needsAnnotation := annotations[volumeSnapshotBeingDeletedAnnotation] != volumeSnapshotBeingDeletedValue
+		if !needsPolicy && !needsAnnotation {
 			return nil
 		}
 		base := vsc.DeepCopy()
-		if serr := unstructured.SetNestedField(vsc.Object, volumeSnapshotContentDeletePolicy, "spec", "deletionPolicy"); serr != nil {
-			return fmt.Errorf("set VolumeSnapshotContent %s deletionPolicy=Delete: %w", vscName, serr)
+		if needsPolicy {
+			if serr := unstructured.SetNestedField(vsc.Object, volumeSnapshotContentDeletePolicy, "spec", "deletionPolicy"); serr != nil {
+				return fmt.Errorf("set VolumeSnapshotContent %s deletionPolicy=Delete: %w", vscName, serr)
+			}
+		}
+		if needsAnnotation {
+			// Preserve unrelated annotations: GetAnnotations returned every existing key; canonicalize only ours.
+			if annotations == nil {
+				annotations = map[string]string{}
+			}
+			annotations[volumeSnapshotBeingDeletedAnnotation] = volumeSnapshotBeingDeletedValue
+			vsc.SetAnnotations(annotations)
 		}
 		return r.Patch(ctx, vsc, client.MergeFrom(base))
 	}); err != nil {
-		return fmt.Errorf("reclaim VolumeSnapshotContent %s (flip to Delete): %w", vscName, err)
+		return fmt.Errorf("reclaim VolumeSnapshotContent %s (flip to Delete + stamp being-deleted): %w", vscName, err)
 	}
 
 	vsc := &unstructured.Unstructured{}
@@ -94,10 +120,20 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 	if err := r.Delete(ctx, vsc); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("reclaim VolumeSnapshotContent %s (delete): %w", vscName, err)
 	}
-	logger.Info("Reclaiming data artifact on SnapshotContent teardown (flipped Retain->Delete + delete)", "vsc", vscName)
+	logger.Info("Reclaiming data artifact on SnapshotContent teardown (flipped Retain->Delete + stamped being-deleted + delete)", "vsc", vscName)
 	return nil
 }
 
 // volumeSnapshotContentDeletePolicy is the CSI deletionPolicy that makes deleting the VSC reclaim the
 // physical snapshot (the inverse of volumeSnapshotContentRetainPolicy used to pin durability).
 const volumeSnapshotContentDeletePolicy = "Delete"
+
+// volumeSnapshotBeingDeletedAnnotation / volumeSnapshotBeingDeletedValue are the CSI external-snapshotter
+// deletion gate for a bound, Delete-policy VolumeSnapshotContent. The sidecar's legacy shouldDelete rule
+// deletes such a VSC only when this annotation is present with the canonical value; the common controller
+// normally stamps it during the bound VolumeSnapshot deletion lifecycle. reclaimVolumeSnapshotContent stamps
+// it directly so the reclaim completes even when the bound VolumeSnapshot is already gone (lost-stamp wedge).
+const (
+	volumeSnapshotBeingDeletedAnnotation = "snapshot.storage.kubernetes.io/volumesnapshot-being-deleted"
+	volumeSnapshotBeingDeletedValue      = "yes"
+)

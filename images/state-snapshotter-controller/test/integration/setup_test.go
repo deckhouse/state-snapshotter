@@ -403,6 +403,7 @@ var _ = BeforeSuite(func() {
 										"data":                      snapshotContentDataRefSchema(),
 										"captureState":              snapshotStatusCaptureStateSchema(),
 										"subtreeManifestsPersisted": {Type: "boolean"},
+										"boundSnapshotDeleted":      {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -535,6 +536,7 @@ var _ = BeforeSuite(func() {
 										"data":                      snapshotContentDataRefSchema(),
 										"captureState":              snapshotStatusCaptureStateSchema(),
 										"subtreeManifestsPersisted": {Type: "boolean"},
+										"boundSnapshotDeleted":      {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

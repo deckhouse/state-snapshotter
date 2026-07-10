@@ -201,6 +201,19 @@ var (
 	dataImportGVR = schema.GroupVersionResource{
 		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
 	}
+	// lvmLogicalVolumeSnapshotGVR is the physical sds-local-volume snapshot object (llvs) the CSI
+	// external-snapshotter creates for a VolumeSnapshotContent's snapshotHandle. It exists ONLY on
+	// sds-local-volume; the volume-data GC e2e reads get llvs/<snapshotHandle> to prove the physical
+	// snapshot survives source-namespace deletion and is reclaimed when the root ObjectKeeper is deleted.
+	lvmLogicalVolumeSnapshotGVR = schema.GroupVersionResource{
+		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "lvmlogicalvolumesnapshots",
+	}
+	// manifestCheckpointContentChunkGVR is the chunk object that carries a ManifestCheckpoint's archived
+	// content payload (controller ownerRef -> MCP). The volume-data GC e2e records each MCP's
+	// status.chunks[].name and asserts they are reclaimed with the whole tree.
+	manifestCheckpointContentChunkGVR = schema.GroupVersionResource{
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcheckpointcontentchunks",
+	}
 )
 
 // backupFixture holds phase-4 capture/download state shared with phase-5 restore/import.

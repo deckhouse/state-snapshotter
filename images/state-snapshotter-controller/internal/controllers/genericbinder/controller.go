@@ -225,9 +225,15 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
 			}
 		}
-		// Remove finalizer from SnapshotContent on parent deletion (watch-driven, no reverse content ref).
-		if err := r.removeSnapshotContentFinalizer(ctx, snapshotLike, obj); err != nil {
-			logger.Error(err, "Failed to remove SnapshotContent finalizer on snapshot deletion")
+		// Mark the bound SnapshotContent boundSnapshotDeleted on parent Snapshot deletion (watch-driven, no
+		// reverse content ref). We deliberately do NOT remove the content's parent-protect finalizer here: in
+		// the durable-content tree the content's Kubernetes GC owner is its root ObjectKeeper (root content)
+		// or its parent SnapshotContent (child content), NOT this namespaced bound Snapshot. spec.snapshotRef
+		// is a logical bound-snapshot back-reference, not the GC parent, so the content must keep parent-protect
+		// until its OWN teardown handler runs; boundSnapshotDeleted only records that the logical bound Snapshot
+		// is gone (and gates future restore/re-point).
+		if err := r.markBoundSnapshotDeletedOnContent(ctx, snapshotLike, obj); err != nil {
+			logger.Error(err, "Failed to mark bound SnapshotContent boundSnapshotDeleted on snapshot deletion")
 			// Non-fatal: continue with deletion
 		}
 		// Snapshot is being deleted - no need to continue create-path
@@ -465,7 +471,14 @@ func contentSnapshotRefMatchesSnapshot(content *unstructured.Unstructured, snaps
 		getStr("namespace") == obj.GetNamespace()
 }
 
-func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
+// markBoundSnapshotDeletedOnContent latches status.boundSnapshotDeleted=true on the bound SnapshotContent
+// when its logical bound Snapshot is deleted. It does NOT remove the content's parent-protect finalizer: the
+// content is a durable tree node whose Kubernetes GC owner is its root ObjectKeeper (root content) or parent
+// SnapshotContent (child content), never this namespaced bound Snapshot. parent-protect must stay until the
+// content's OWN deletion handler completes its reclaim; boundSnapshotDeleted only records that the logical
+// bound Snapshot is gone — it stops the live SnapshotContent reconcile from aggregating status against a gone
+// owner and gates future restore/re-point. Idempotent (false->true).
+func (r *GenericSnapshotBinderController) markBoundSnapshotDeletedOnContent(
 	ctx context.Context,
 	snapshotLike snapshot.SnapshotLike,
 	obj *unstructured.Unstructured,
@@ -494,8 +507,9 @@ func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 		return err
 	}
 
-	// Latch status.boundSnapshotDeleted=true (status subresource) so the SnapshotContent controller stops
-	// re-adding the parent-protect finalizer once the parent Snapshot is gone. Idempotent (false->true).
+	// Latch status.boundSnapshotDeleted=true (status subresource) so the live SnapshotContent controller
+	// stops aggregating status against a gone owner (it still keeps/ensures parent-protect). Idempotent
+	// (false->true). The parent-protect finalizer is intentionally NOT removed here — see the doc comment.
 	if latched, _, _ := unstructured.NestedBool(contentObj.Object, "status", "boundSnapshotDeleted"); !latched {
 		if err := unstructured.SetNestedField(contentObj.Object, true, "status", "boundSnapshotDeleted"); err != nil {
 			return err
@@ -503,14 +517,7 @@ func (r *GenericSnapshotBinderController) removeSnapshotContentFinalizer(
 		if err := r.Status().Update(ctx, contentObj); err != nil {
 			return err
 		}
-	}
-
-	// Remove the parent-protect finalizer via a separate metadata update.
-	if snapshot.RemoveFinalizer(contentObj, snapshot.FinalizerParentProtect) {
-		if err := r.Update(ctx, contentObj); err != nil {
-			return err
-		}
-		log.FromContext(ctx).Info("Removed finalizer from SnapshotContent after Snapshot deletion", "content", contentName)
+		log.FromContext(ctx).Info("Marked SnapshotContent boundSnapshotDeleted after Snapshot deletion", "content", contentName)
 	}
 
 	return nil

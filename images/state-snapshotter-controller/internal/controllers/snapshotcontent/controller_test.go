@@ -40,20 +40,29 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-func TestSnapshotContentControllerCascadeRemoveFinalizersFromCommonChildren(t *testing.T) {
+// Parent teardown must ENSURE parent-protect on every live direct child and NEVER remove it: each child is a
+// durable node that must run its own deletion handler once ownerRef GC reaches it. This is the corrected
+// contract (the pre-fix code stripped the child finalizer here, letting a deeper descendant skip its
+// handler). A child that already carries the finalizer keeps it (idempotent); a child missing it gains it.
+func TestSnapshotContentControllerEnsuresChildFinalizersForCascade(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
 	}
 
-	child := &storagev1alpha1.SnapshotContent{
+	childWith := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "child-content",
+			Name:       "child-with-finalizer",
 			Finalizers: []string{snapshot.FinalizerParentProtect},
 		},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(child).Build()
+	childWithout := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child-without-finalizer",
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(childWith, childWithout).Build()
 	r := &SnapshotContentController{
 		Client:      cl,
 		APIReader:   cl,
@@ -69,7 +78,8 @@ func TestSnapshotContentControllerCascadeRemoveFinalizersFromCommonChildren(t *t
 			},
 			"status": map[string]interface{}{
 				"childrenSnapshotContentRefs": []interface{}{
-					map[string]interface{}{"name": "child-content"},
+					map[string]interface{}{"name": "child-with-finalizer"},
+					map[string]interface{}{"name": "child-without-finalizer"},
 				},
 			},
 		},
@@ -80,17 +90,17 @@ func TestSnapshotContentControllerCascadeRemoveFinalizersFromCommonChildren(t *t
 		t.Fatalf("extract content like: %v", err)
 	}
 
-	if err := r.cascadeRemoveFinalizersFromChildren(ctx, contentLike, rootObj); err != nil {
-		t.Fatalf("cascade finalizers: %v", err)
+	if err := r.ensureFinalizersOnChildrenForCascade(ctx, contentLike, rootObj); err != nil {
+		t.Fatalf("ensure child finalizers: %v", err)
 	}
 
-	freshChild := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: "child-content"}, freshChild); err != nil {
-		t.Fatalf("get child: %v", err)
-	}
-	for _, finalizer := range freshChild.Finalizers {
-		if finalizer == snapshot.FinalizerParentProtect {
-			t.Fatalf("child parent-protect finalizer was not removed: %v", freshChild.Finalizers)
+	for _, name := range []string{"child-with-finalizer", "child-without-finalizer"} {
+		freshChild := &storagev1alpha1.SnapshotContent{}
+		if err := cl.Get(ctx, client.ObjectKey{Name: name}, freshChild); err != nil {
+			t.Fatalf("get child %s: %v", name, err)
+		}
+		if !snapshot.HasFinalizer(freshChild, snapshot.FinalizerParentProtect) {
+			t.Fatalf("child %s must retain/gain parent-protect after cascade ensure: %v", name, freshChild.Finalizers)
 		}
 	}
 }
