@@ -1882,3 +1882,33 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   legacy, no fork fields). Fork patch 003 comments regenerated (apply-check passes); SS fixtures
   (e2e createImportVolumeSnapshot, vs-connector, volumesnapshotimport predicate table) now create
   import VS without source.
+
+## capture-leg reap — idempotent recovery when the latch is already set (VCR/MCR orphan fix)
+
+- **Bugfix (core)** `snapshotcontent/capture_legs.go` `reconcileOwnerCaptureLegs`: the per-leg
+  latch-and-reap (manifest MCR, data VCR) was ENTIRELY gated on `!ownerCommonLegCaptured(owner, <leg>)`, so
+  the latch write (`setOwnerCaptureLegCaptured`) and the request `Delete` had to complete in the SAME pass.
+  If a pass crashed, was requeued, or hit a transient API error in the window BETWEEN the latch write and
+  the delete, the gate `!latched` was false on every later pass and the request was orphaned forever —
+  swept only by its 10m TTL, and a leftover VCR also wedges namespace deletion (`Terminating`). This is the
+  Phase-3 e2e failure "reaps the VCR with no churn": `nss-vcr-…` survived with `dataCaptured=true` already
+  latched, original `creationTimestamp` (not churn/re-create), no finalizer, no `deletionTimestamp` — i.e.
+  the delete simply never ran after the latch.
+- **Fix**: each request leg now ALSO reaps its request when the leg latch is already true (an `else if
+  <requestName> != ""` recovery branch). Safe and NOT churn: the domain SDK suppresses request re-creation
+  whenever the leg latch is true (`EnsureVolumeCapture` / `EnsureManifestCapture` short-circuit on
+  `dataCaptured`/`manifestCaptured`), so latch-before-reap still holds (the latch happened in the earlier
+  pass). Applied symmetrically to both the VCR and MCR legs.
+- **Perf detail**: the domain never clears the request name, so this recovery branch runs on EVERY reconcile
+  of a completed content. The branch therefore does a CACHED existence probe first (`r.Get`; both MCR and VCR
+  are watched by this controller — `Watches(&ManifestCaptureRequest{})` and `AddVolumeCaptureRequestWatch`),
+  so an already-reaped leg is a cheap cache hit with no API round-trip; only a still-present leftover pays a
+  Delete.
+- **Cleanup**: `reapManifestCaptureRequest`/`reapVolumeCaptureRequest` now delete BY KEY (construct the
+  object from GVK+namespace+name and `Delete`) instead of doing an uncached `APIReader.Get` first. The
+  pre-read was pointless — `Delete` needs only the key and carries no resourceVersion/UID precondition, so a
+  prior Get added neither safety nor re-created-object protection, it was just a redundant (and uncached)
+  round-trip on both the latch path and the recovery path. NotFound on Delete is still treated as success.
+- **Test** `capture_legs_test.go`: added `TestReconcileOwnerCaptureLegs_DataLegVCRRecoveryReapWhenAlreadyLatched`
+  and `…_ManifestLegMCRRecoveryReapWhenAlreadyLatched` — owner pre-latched captured with a leftover
+  request; reconcile must reap the request while keeping the latch true and not requeue.

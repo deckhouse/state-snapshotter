@@ -323,6 +323,76 @@ func TestReconcileOwnerCaptureLegs_DataLegVCRFailedDoesNotLatch(t *testing.T) {
 	}
 }
 
+// Recovery reap (data leg): if a PRIOR pass latched commonController.dataCaptured=true but crashed, was
+// requeued, or hit a transient API error before deleting the VCR, the latch-and-reap block (gated on
+// !dataCaptured) never runs again and the VCR would be orphaned forever — swept only by its TTL, and a
+// leftover VCR also blocks namespace deletion (the exact Phase-3 e2e failure this guards). A subsequent
+// reconcile MUST reap the leftover VCR idempotently while keeping the latch true (safe / not churn: the
+// domain SDK suppresses VCR re-creation whenever dataCaptured is true, EnsureVolumeCapture).
+func TestReconcileOwnerCaptureLegs_DataLegVCRRecoveryReapWhenAlreadyLatched(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsOwner(clSnapGVK, projTestContent, "", projTestVCRName, string(storagev1alpha1.SnapshotCapturePhasePlanned))
+	// Simulate the prior pass: dataCaptured already latched true, but its VCR was never deleted.
+	if err := unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "dataCaptured"); err != nil {
+		t.Fatalf("preset dataCaptured latch: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", captureLegsData()), projReadyVCR(), captureLegsOwnedVSC(), projSourcePVC()).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, true)
+
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	if err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if requeue {
+		t.Fatalf("an already-latched data leg with a leftover VCR must not requeue")
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "dataCaptured"); !found || !got {
+		t.Fatalf("dataCaptured latch must remain true, got found=%v value=%v", found, got)
+	}
+	if captureLegsVCRExists(t, cl) {
+		t.Fatalf("the leftover VCR must be reaped when dataCaptured is already latched")
+	}
+}
+
+// Recovery reap (manifest leg): symmetric to the data-leg recovery above — an already-latched
+// manifestCaptured with a leftover MCR (a prior pass latched but did not finish the delete) must be reaped
+// idempotently, keeping the latch true (the domain SDK suppresses MCR re-creation while the latch is true).
+func TestReconcileOwnerCaptureLegs_ManifestLegMCRRecoveryReapWhenAlreadyLatched(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsOwner(clSnapGVK, projTestContent, clMCRName, "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
+	if err := unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "manifestCaptured"); err != nil {
+		t.Fatalf("preset manifestCaptured latch: %v", err)
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped(clMCPName, nil), captureLegsReadyOwnedMCP(), captureLegsMCR()).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	if err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if requeue {
+		t.Fatalf("an already-latched manifest leg with a leftover MCR must not requeue")
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "manifestCaptured"); !found || !got {
+		t.Fatalf("manifestCaptured latch must remain true, got found=%v value=%v", found, got)
+	}
+	if captureLegsMCRExists(t, cl) {
+		t.Fatalf("the leftover MCR must be reaped when manifestCaptured is already latched")
+	}
+}
+
 // Native-CSI data leg (§11.4): a VolumeSnapshot owner has no VCR — the aggregator latches dataCaptured
 // once the content carries a published status.data (the projection performs the VSC handoff first). No
 // request to reap.

@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
@@ -52,6 +53,20 @@ import (
 //     content carries a published status.data (the projection performs the VSC handoff first);
 //   - subtreeManifestsPersisted: mirror the content's monotonic recursive latch onto the owner's
 //     commonController (true-only), so parent domains read the manifest-exclude pre-gate namespaced.
+//
+// Recovery reap (idempotent): the latch-and-reap for each request leg is gated on the leg latch being
+// false, so once the latch is written that block never runs again. If a pass crashes, requeues, or hits a
+// transient API error in the window BETWEEN the latch write and the request delete, the request would be
+// orphaned forever (swept only by its TTL, and a leftover VCR also blocks namespace deletion). Each
+// request leg therefore ALSO reaps its request when the latch is already true (a prior pass latched but
+// did not finish the delete): this is safe and NOT churn because the domain SDK suppresses request
+// re-creation whenever the leg latch is true (EnsureVolumeCapture/EnsureManifestCapture), so
+// latch-before-reap still holds (the latch happened in the earlier pass). The domain never clears the
+// request name, so this recovery path runs on every reconcile of a completed content — it therefore
+// probes existence via the CACHE first (both MCR and VCR are watched by this controller) and only a
+// still-present leftover pays a Delete; an already-reaped leg is a cheap cache hit with no API round-trip.
+// (The reap helpers delete by key without a pre-read: Delete needs only the GVK+name and carries no
+// resourceVersion precondition, so a Get before it would add no safety — see reapVolumeCaptureRequest.)
 //
 // Latch-before-reap invariant: the domain SDK, when it finds an MCR/VCR absent, does an authoritative
 // UNCACHED read of the leg latch on the snapshot and re-creates the request if the latch is false
@@ -131,6 +146,31 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 				}
 			}
 		}
+	} else if mcrName := ownerDomainCaptureStateString(owner, "manifestCaptureRequestName"); mcrName != "" {
+		// Recovery reap (idempotent): manifestCaptured was latched in a PRIOR pass, but the domain MCR still
+		// exists. The latch-and-reap above is gated on !manifestCaptured, so once the latch is set it never
+		// runs again — a crash, requeue, or transient API error in the window between the latch write and the
+		// MCR delete would otherwise orphan the MCR forever (swept only by its TTL, and it also blocks
+		// namespace deletion). Reaping here is safe and NOT churn: the domain SDK suppresses MCR re-creation
+		// whenever manifestCaptured is true (EnsureManifestCapture), so latch-before-reap still holds (the
+		// latch happened in the earlier pass).
+		//
+		// CACHED existence probe first: the domain never clears the MCR name, so this branch runs on every
+		// reconcile of a completed content. The content controller watches ManifestCaptureRequest, so an
+		// already-reaped leg is a cheap cache hit with NO API round-trip; only a still-present leftover pays
+		// the Delete inside reapManifestCaptureRequest.
+		key := client.ObjectKey{Namespace: namespace, Name: mcrName}
+		cachedMCR := &ssv1alpha1.ManifestCaptureRequest{}
+		switch err := r.Get(ctx, key, cachedMCR); {
+		case errors.IsNotFound(err):
+			// Already reaped: no-op.
+		case err != nil:
+			return false, err
+		default:
+			if dErr := r.reapManifestCaptureRequest(ctx, key); dErr != nil {
+				return false, dErr
+			}
+		}
 	}
 
 	// Data leg.
@@ -180,6 +220,33 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 				}
 			} else {
 				requeue = true
+			}
+		}
+	} else if vcrName := ownerDomainCaptureStateString(owner, "volumeCaptureRequestName"); vcrName != "" {
+		// Recovery reap (idempotent): dataCaptured was latched in a PRIOR pass, but the domain VCR still
+		// exists. The latch-and-reap above is gated on !dataCaptured, so once the latch is set it never runs
+		// again — a crash, requeue, or transient API error in the window between the latch write and the VCR
+		// delete would otherwise orphan the VCR forever (swept only by its 10m TTL, and it also blocks
+		// namespace deletion). Reaping here is safe and NOT churn: the domain SDK suppresses VCR re-creation
+		// whenever dataCaptured is true (EnsureVolumeCapture), so latch-before-reap still holds (the latch
+		// happened in the earlier pass).
+		//
+		// CACHED existence probe first: the domain never clears the VCR name, so this branch runs on every
+		// reconcile of a completed content. The content controller event-driven-watches VCR
+		// (AddVolumeCaptureRequestWatch, same cache observeOwnerDataLegVCR reads), so an already-reaped leg
+		// is a cheap cache hit with NO API round-trip; only a still-present leftover pays the Delete inside
+		// reapVolumeCaptureRequest.
+		key := client.ObjectKey{Namespace: namespace, Name: vcrName}
+		cachedVCR := &unstructured.Unstructured{}
+		cachedVCR.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
+		switch err := r.Get(ctx, key, cachedVCR); {
+		case errors.IsNotFound(err):
+			// Already reaped: no-op.
+		case err != nil:
+			return false, err
+		default:
+			if delErr := r.reapVolumeCaptureRequest(ctx, key); delErr != nil {
+				return false, delErr
 			}
 		}
 	}
@@ -387,15 +454,15 @@ func (r *SnapshotContentController) setOwnerCaptureLegCaptured(ctx context.Conte
 	})
 }
 
-// reapManifestCaptureRequest deletes the domain MCR after its leg latch is set (latch-before-reap).
-// NotFound is success (already reaped).
+// reapManifestCaptureRequest deletes the domain MCR by key after its leg latch is set (latch-before-reap).
+// It deletes by name WITHOUT a pre-read: the caller has already established the MCR should go (the
+// authoritative uncached safety check in the latch path, or the cached existence probe in the recovery
+// path), and Delete carries no resourceVersion/UID precondition — so a prior Get would neither add safety
+// nor guard against a re-created same-name object, it would only be a redundant API round-trip. NotFound is
+// success (already reaped).
 func (r *SnapshotContentController) reapManifestCaptureRequest(ctx context.Context, key client.ObjectKey) error {
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.APIReader.Get(ctx, key, mcr); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
+	mcr := &ssv1alpha1.ManifestCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name},
 	}
 	if err := r.Delete(ctx, mcr); err != nil && !errors.IsNotFound(err) {
 		return err
@@ -403,17 +470,13 @@ func (r *SnapshotContentController) reapManifestCaptureRequest(ctx context.Conte
 	return nil
 }
 
-// reapVolumeCaptureRequest deletes the domain VCR after its leg latch is set (latch-before-reap).
-// NotFound is success (already reaped).
+// reapVolumeCaptureRequest deletes the domain VCR by key after its leg latch is set (latch-before-reap).
+// Delete-by-name, no pre-read — same rationale as reapManifestCaptureRequest. NotFound is success.
 func (r *SnapshotContentController) reapVolumeCaptureRequest(ctx context.Context, key client.ObjectKey) error {
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := r.APIReader.Get(ctx, key, obj); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
+	obj.SetNamespace(key.Namespace)
+	obj.SetName(key.Name)
 	if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
 		return err
 	}
