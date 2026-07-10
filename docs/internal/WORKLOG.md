@@ -1870,3 +1870,15 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   (ginkgo `v2.23.3`→`v2.28.2`, gomega `v1.37.0`→`v1.39.1`, `Masterminds/semver`→`v3.5.0`, plus pprof,
   spdystream, spf13/pflag, golang.org/x/crypto|oauth2, protobuf, k8s.io/utils). The `state-snapshotter/api`
   replace is unchanged (it is a sibling module in this repo). `go build ./...` + `go vet ./tests/` green.
+
+### VolumeSnapshot spec.mode follow-up: source required only when mode != Import
+
+- **Symmetry fix** (user review): the VS fork CRD required `spec.source` unconditionally, forcing an
+  ugly `source: {}` on import VolumeSnapshots while every other snapshot kind's Import carries no
+  source fields at all. Now `source` is required only when `mode != Import` (spec-level CEL replaces
+  `required: [source]` on v1): an import VS omits source entirely; `source: {}` from a typed client
+  stays legal (the fork Go type keeps the non-pointer `source` field, upstream-compatible), and the
+  empty-source restore intent under Capture is unchanged. v1beta1 untouched (still requires source —
+  legacy, no fork fields). Fork patch 003 comments regenerated (apply-check passes); SS fixtures
+  (e2e createImportVolumeSnapshot, vs-connector, volumesnapshotimport predicate table) now create
+  import VS without source.

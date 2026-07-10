@@ -182,14 +182,14 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs 
 		meta["ownerReferences"] = ownerReferencesField(ownerRefs)
 	}
 	// Import is the same enum spec.mode: Import as on every other snapshot kind (the fork CRD hosts the
-	// field); the CSI source stays empty — the data artifact comes from the owning DataImport.
+	// field); source is omitted entirely — it is required only when mode != Import (symmetry: the data
+	// artifact comes from the owning DataImport, there is no CSI source).
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": vsAPIVersion,
 		"kind":       "VolumeSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"mode":   "Import",
-			"source": map[string]interface{}{},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(volumeSnapshotGVR).Namespace(ns).Create(ctx, vs, metav1.CreateOptions{})

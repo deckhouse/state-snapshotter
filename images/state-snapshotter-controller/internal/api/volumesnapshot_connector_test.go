@@ -75,7 +75,7 @@ func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMo
 		"status":     status,
 	}
 	if importMode {
-		obj["spec"] = map[string]interface{}{"mode": "Import", "source": map[string]interface{}{}}
+		obj["spec"] = map[string]interface{}{"mode": "Import"} // source omitted: required only when mode != Import
 	}
 	return &unstructured.Unstructured{Object: obj}
 }

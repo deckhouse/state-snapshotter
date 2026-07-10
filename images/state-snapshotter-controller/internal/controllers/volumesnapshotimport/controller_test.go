@@ -64,7 +64,8 @@ func TestIsImportModeVolumeSnapshot(t *testing.T) {
 		source map[string]interface{}
 		want   bool
 	}{
-		{name: "mode Import (empty source)", mode: "Import", source: map[string]interface{}{}, want: true},
+		{name: "mode Import (source omitted — canonical)", mode: "Import", source: nil, want: true},
+		{name: "mode Import (empty source from a typed client)", mode: "Import", source: map[string]interface{}{}, want: true},
 		{name: "mode Capture (persistentVolumeClaimName)", mode: "Capture", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
 		{name: "mode absent (CRD default Capture)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
 		{name: "pre-provisioned (volumeSnapshotContentName)", mode: "Capture", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
