@@ -35,12 +35,12 @@ write_obj() {
 	cat >"${FIXTURE_DIR}/${resource}/${name}.json"
 }
 
-write_obj snapshots.storage.deckhouse.io snap <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"snap","uid":"snap-uid"},"status":{"boundSnapshotContentName":"sc-1",${ready_condition}}}
+write_obj snapshots.state-snapshotter.deckhouse.io snap <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"snap","uid":"snap-uid"},"status":{"boundSnapshotContentName":"sc-1",${ready_condition}}}
 EOF
 
-write_obj snapshotcontents.storage.deckhouse.io sc-1 <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-1","uid":"sc-1-uid"},"status":{"manifestCheckpointName":"mcp-1",${ready_condition}}}
+write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-1 <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-1","uid":"sc-1-uid"},"status":{"manifestCheckpointName":"mcp-1",${ready_condition}}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-1 <<EOF

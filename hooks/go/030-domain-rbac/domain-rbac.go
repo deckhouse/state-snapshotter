@@ -20,14 +20,13 @@ import (
 	"context"
 	"fmt"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/deckhouse/module-sdk/pkg"
 	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
 	"github.com/deckhouse/module-sdk/pkg/registry"
 	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = registry.RegisterFunc(
@@ -53,7 +52,7 @@ var _ = registry.RegisterFunc(
 //     ownerRef-patches one child snapshot per source), get + list on the source GVRs (list to enumerate
 //     sources during planning, get to capture each target's manifest), and get on the domain
 //     /manifests-with-data-restoration subresource.
-//  4. Writes RBACReady (True / Pending / ApplyFailed) on each eligible CSD.
+//  4. Writes AccessGranted (True / Pending / ApplyFailed) on each eligible CSD.
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
 
@@ -69,9 +68,11 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	resolver := restMapperResolver(cl.RESTMapper())
 	sourceGVRs, snapshotGVRs, pendingByName := resolveEligibleGVRs(eligible, resolver)
 
-	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's per-CR /manifests-download subresource.
+	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's per-CR /manifests-download subresource
+	// + get on core's fixed snapshotcontents/subtree-manifest-identities subresource (SDK ManifestExclude).
 	domainRules := buildRules(sourceGVRs, snapshotGVRs)
 	domainRules = append(domainRules, coreManifestsSubresourceRules(snapshotGVRs)...)
+	domainRules = append(domainRules, coreSubtreeManifestIdentitiesRule(snapshotGVRs)...)
 
 	// CORE SA: read + create + patch + status-write on the dynamic demo snapshot GVRs (the core
 	// SnapshotReconciler is the parent-graph planner: it creates one child snapshot per source and patches
@@ -93,20 +94,20 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 		var cond metav1.Condition
 		switch {
 		case pendingByName[csd.Name] != "":
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionFalse, consts.RBACReadyReasonPending,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.AccessGrantedReasonPending,
 				pendingByName[csd.Name])
 		case applyErr != nil:
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionFalse, consts.RBACReadyReasonApplyFailed,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionFalse, consts.AccessGrantedReasonApplyFailed,
 				applyErr.Error())
 		default:
-			cond = desiredRBACReadyCondition(csd.Generation,
-				metav1.ConditionTrue, consts.RBACReadyReasonApplied,
+			cond = desiredAccessGrantedCondition(csd.Generation,
+				metav1.ConditionTrue, consts.AccessGrantedReasonApplied,
 				"domain RBAC applied for all source and snapshot GVRs")
 		}
-		if err := patchCSDRBACReady(ctx, cl, csd.Name, cond); err != nil {
-			input.Logger.Error("patch RBACReady on CSD", "name", csd.Name, "err", err)
+		if err := patchCSDAccessGranted(ctx, cl, csd.Name, cond); err != nil {
+			input.Logger.Error("patch AccessGranted on CSD", "name", csd.Name, "err", err)
 		}
 	}
 

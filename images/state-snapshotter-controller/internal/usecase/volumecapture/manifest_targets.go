@@ -31,8 +31,9 @@ func OwnedPVCManifestTargetsForSnapshot(
 	c client.Reader,
 	snap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
+	dataBearing DataBearingKindFunc,
 ) ([]namespacemanifest.ManifestTarget, error) {
-	vol, err := ListOwnedPVCTargetsForLogicalContent(ctx, c, snap, content)
+	vol, err := ListOwnedPVCTargetsForLogicalContent(ctx, c, snap, content, dataBearing)
 	if err != nil {
 		return nil, err
 	}

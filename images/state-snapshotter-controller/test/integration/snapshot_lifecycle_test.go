@@ -87,7 +87,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		//
 		// PRECONDITION:
 		// - Snapshot created by user
-		// - Snapshot has ChildrenSnapshotReady=True (simulated)
+		// - Snapshot has domain phase=Planned (simulated)
 		//
 		// ACTIONS:
 		// 1. GenericSnapshotBinderController.Reconcile creates SnapshotContent
@@ -109,7 +109,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 		// - Snapshot.status.boundSnapshotContentName → SnapshotContent.name
 		// - SnapshotContent has no reverse runtime dependency on Snapshot
 		// - SnapshotContent.ownerRef is correct
-		// - SnapshotContent.finalizers contains "snapshot.deckhouse.io/parent-protect"
+		// - SnapshotContent.finalizers contains "state-snapshotter.deckhouse.io/parent-protect"
 
 		It("should establish stable Snapshot ↔ SnapshotContent linkage", func() {
 			// Create controllers for this test (without registering with manager to avoid conflicts)
@@ -145,8 +145,8 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Planned.
+			setSnapshotDomainPlannedCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			// Use Eventually to wait for the controller to process the snapshot
@@ -256,64 +256,19 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// INVARIANT: No orphans - root ObjectKeeper follows Snapshot and owns retained root SnapshotContent.
 		})
 
-		It("should NOT create SnapshotContent while ChildrenSnapshotReady is stale (observedGeneration < generation)", func() {
-			// The generic binder barrier is generation-gated: a ChildrenSnapshotReady=True whose observedGeneration
-			// is behind metadata.generation must not let the binder proceed (no SnapshotContent created).
-			snapshotCtrl, err := controllers.NewGenericSnapshotBinderController(
-				k8sClient,
-				mgr.GetAPIReader(),
-				scheme,
-				testCfg,
-				[]schema.GroupVersionKind{snapshotGVK},
-			)
-			Expect(err).NotTo(HaveOccurred())
-
-			snapshotObj := &unstructured.Unstructured{}
-			snapshotObj.SetGroupVersionKind(snapshotGVK)
-			snapshotObj.SetName("test-lifecycle-stale-domainready")
-			snapshotObj.SetNamespace("default")
-			snapshotObj.Object["spec"] = map[string]interface{}{}
-			Expect(k8sClient.Create(ctx, snapshotObj)).To(Succeed())
-			Expect(snapshotObj.GetGeneration()).To(BeNumerically(">", int64(0)))
-
-			// Publish ChildrenSnapshotReady=True but for an older generation than the live spec.
-			setSnapshotChildrenSnapshotReady(ctx, snapshotObj, metav1.ConditionTrue, snapshotObj.GetGeneration()-1)
-
-			req := ctrl.Request{NamespacedName: types.NamespacedName{
-				Name:      snapshotObj.GetName(),
-				Namespace: snapshotObj.GetNamespace(),
-			}}
-
-			// Reconcile must be a no-op at the barrier: no boundSnapshotContentName, no SnapshotContent.
-			Consistently(func() string {
-				_, reconcileErr := snapshotCtrl.Reconcile(ctx, req)
-				Expect(reconcileErr).NotTo(HaveOccurred())
-				fresh := &unstructured.Unstructured{}
-				fresh.SetGroupVersionKind(snapshotGVK)
-				if getErr := k8sClient.Get(ctx, req.NamespacedName, fresh); getErr != nil {
-					return "get-failed"
-				}
-				like, extractErr := snapshot.ExtractSnapshotLike(fresh)
-				if extractErr != nil {
-					return "extract-failed"
-				}
-				return like.GetStatusContentName()
-			}, "2s", "200ms").Should(BeEmpty(), "stale ChildrenSnapshotReady must not pass the generic binder barrier")
-		})
-
 		It("should set Snapshot Ready=True automatically when SnapshotContent becomes Ready=True", func() {
 			// Current contract: the bound common SnapshotContent is driven Ready=True by its controller
 			// (source of truth) and Snapshot.Ready is a verbatim mirror of it. This previously could not
-			// converge in envtest: the binder self-asserted ChildrenSnapshotReady with observedGeneration=0 inside the
+			// converge in envtest: the binder self-asserted PlanningReady with observedGeneration=0 inside the
 			// mirror step, which its own generation-gated Step-1 barrier then rejected on every subsequent
 			// reconcile, so the mirror never re-ran after the content became Ready. Fixed by no longer
-			// writing ChildrenSnapshotReady in the mirror step (genericbinder.checkConsistencyAndSetReady): ChildrenSnapshotReady
+			// writing PlanningReady in the mirror step (genericbinder.checkConsistencyAndSetReady): PlanningReady
 			// is owned upstream (bind-time publish for childless generic snapshots / the domain controller for
 			// subtree snapshots) and the Step-1 barrier already guarantees it before the mirror runs.
 			// INTERFACE: GenericSnapshotBinderController.checkConsistencyAndSetReady
 			//
 			// PRECONDITION:
-			// - Snapshot created with ChildrenSnapshotReady=True
+			// - Snapshot created with domain phase=Planned
 			// - SnapshotContent created and has finalizer
 			//
 			// ACTIONS:
@@ -383,8 +338,12 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			err = k8sClient.Create(ctx, snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Simulate domain controller: publish ChildrenSnapshotReady=True for the current generation.
-			setSnapshotChildrenSnapshotReadyCurrent(ctx, snapshotObj)
+			// Simulate domain controller: publish phase=Finished (capture barrier 2). Planned alone clears
+			// only barrier 1 (the binder may bind the content); the post-bind Ready mirror
+			// (snapshotcontent.mirrorReadyToOwnerSnapshot) additionally holds a domain-capture Snapshot's
+			// Ready=True until phase=Finished, and this TestSnapshot has no real domain controller to advance
+			// it. Finished still passes the binder's >=Planned barrier.
+			setSnapshotDomainFinishedCurrent(ctx, snapshotObj)
 
 			// ACTIONS Step 1: GenericSnapshotBinderController creates SnapshotContent
 			req := ctrl.Request{
@@ -446,9 +405,9 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 			// ACTIONS Step 4: drive the bound (common) SnapshotContent genuinely Ready. The controller owns
 			// Ready, so the test must not force-write it: publish a Ready ManifestCheckpoint and link it via
 			// status.manifestCheckpointName, then let the SnapshotContentController compute
-			// ManifestsReady=True/VolumesReady=True/Ready=True (the content has no children and no data refs). The generic binder
+			// ManifestsReady=True/DataReady=True/Ready=True (the content has no children and no data refs). The generic binder
 			// does not build a root MCR and does not touch manifestCheckpointName while
-			// status.manifestCaptureRequestName is empty, so this link is stable.
+			// status.captureState.domainSpecificController.manifestCaptureRequestName is empty, so this link is stable.
 			boundContent := &storagev1alpha1.SnapshotContent{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: contentName}, boundContent)).To(Succeed())
 			contentUID := string(boundContent.GetUID())
@@ -483,11 +442,17 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				g.Expect(meta.IsStatusConditionTrue(fresh.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
 			}, "60s", "200ms").Should(Succeed(), "bound SnapshotContent should become Ready=True")
 
-			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. Keep
-			// reconciling the binder (there is no reverse Snapshot watch) until the mirror converges, then
-			// assert the Snapshot is Ready=True with the same (Completed) reason as the content.
+			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. wave7
+			// moved the post-bind Ready mirror out of the binder into the SnapshotContentController
+			// (mirrorReadyToOwnerSnapshot, resolved via content.spec.snapshotRef + the boundSnapshotContentName
+			// writer-switch), so drive the CONTENT controller to run the mirror; the binder reconcile is kept
+			// (it still owns pre-bind / content-missing degradation) but no longer writes the steady-state
+			// Ready. Keep reconciling until the mirror converges, then assert Ready=True with the content's
+			// (Completed) reason.
 			Eventually(func(g Gomega) {
 				_, recErr := snapshotCtrl.Reconcile(ctx, req)
+				g.Expect(recErr).NotTo(HaveOccurred())
+				_, recErr = contentCtrl.Reconcile(ctx, contentReq)
 				g.Expect(recErr).NotTo(HaveOccurred())
 
 				freshSnapshot := &unstructured.Unstructured{}

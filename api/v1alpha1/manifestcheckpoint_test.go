@@ -24,27 +24,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TestManifestCheckpoint_ManifestCaptureRequestRef verifies that ManifestCheckpoint correctly uses
-// the new ManifestCaptureRequestRef field instead of the deprecated sourceCaptureRequestName.
+// TestManifestCheckpoint_Spec verifies the ManifestCheckpoint spec surface after both the
+// manifestCaptureRequestRef and sourceNamespace fields were dropped: the spec is now intentionally empty
+// and all source provenance lives on the source-request label (the originating request is short-lived).
 // Checks:
-// - ManifestCaptureRequestRef correctly serializes and deserializes
-// - All ManifestCaptureRequestRef fields (Name, Namespace, UID) are preserved
-// - SourceNamespace is preserved
+// - the removed manifestCaptureRequestRef field is absent from the marshaled JSON
+// - the removed sourceNamespace field is absent from the marshaled JSON
+// - the source-request label carries the originating request name
 // - Ready condition works correctly (instead of deprecated Phase)
-// - Status does not contain Phase and Message fields
-func TestManifestCheckpoint_ManifestCaptureRequestRef(t *testing.T) {
+func TestManifestCheckpoint_Spec(t *testing.T) {
 	checkpoint := &ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-checkpoint",
-		},
-		Spec: ManifestCheckpointSpec{
-			SourceNamespace: "test-namespace",
-			ManifestCaptureRequestRef: &ObjectReference{
-				Name:      "test-mcr",
-				Namespace: "test-namespace",
-				UID:       "test-uid-123",
+			Labels: map[string]string{
+				"state-snapshotter.deckhouse.io/source-request": "test-mcr",
 			},
 		},
+		Spec: ManifestCheckpointSpec{},
 		Status: ManifestCheckpointStatus{
 			TotalObjects:   5,
 			TotalSizeBytes: 1024,
@@ -71,31 +67,26 @@ func TestManifestCheckpoint_ManifestCaptureRequestRef(t *testing.T) {
 		t.Fatalf("Failed to unmarshal ManifestCheckpoint: %v", err)
 	}
 
-	// Verify spec: SourceNamespace and ManifestCaptureRequestRef
-	if unmarshaled.Spec.SourceNamespace != checkpoint.Spec.SourceNamespace {
-		t.Errorf("Expected SourceNamespace %s, got %s", checkpoint.Spec.SourceNamespace, unmarshaled.Spec.SourceNamespace)
+	// Verify the dropped fields are not serialized under spec.
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Failed to unmarshal into map: %v", err)
+	}
+	if spec, ok := raw["spec"].(map[string]interface{}); ok {
+		if _, exists := spec["manifestCaptureRequestRef"]; exists {
+			t.Error("manifestCaptureRequestRef should not exist in ManifestCheckpointSpec")
+		}
+		if _, exists := spec["sourceNamespace"]; exists {
+			t.Error("sourceNamespace should not exist in ManifestCheckpointSpec")
+		}
 	}
 
-	if unmarshaled.Spec.ManifestCaptureRequestRef == nil {
-		t.Fatal("Expected ManifestCaptureRequestRef to be set, got nil")
+	// Verify the originating request name is carried on the source-request label.
+	if got := unmarshaled.Labels["state-snapshotter.deckhouse.io/source-request"]; got != "test-mcr" {
+		t.Errorf("Expected source-request label %q, got %q", "test-mcr", got)
 	}
 
-	if unmarshaled.Spec.ManifestCaptureRequestRef.Name != checkpoint.Spec.ManifestCaptureRequestRef.Name {
-		t.Errorf("Expected ManifestCaptureRequestRef.Name %s, got %s",
-			checkpoint.Spec.ManifestCaptureRequestRef.Name, unmarshaled.Spec.ManifestCaptureRequestRef.Name)
-	}
-
-	if unmarshaled.Spec.ManifestCaptureRequestRef.Namespace != checkpoint.Spec.ManifestCaptureRequestRef.Namespace {
-		t.Errorf("Expected ManifestCaptureRequestRef.Namespace %s, got %s",
-			checkpoint.Spec.ManifestCaptureRequestRef.Namespace, unmarshaled.Spec.ManifestCaptureRequestRef.Namespace)
-	}
-
-	if unmarshaled.Spec.ManifestCaptureRequestRef.UID != checkpoint.Spec.ManifestCaptureRequestRef.UID {
-		t.Errorf("Expected ManifestCaptureRequestRef.UID %s, got %s",
-			checkpoint.Spec.ManifestCaptureRequestRef.UID, unmarshaled.Spec.ManifestCaptureRequestRef.UID)
-	}
-
-	// Verify status: TotalObjects is preserved, Phase and Message are absent
+	// Verify status: TotalObjects is preserved.
 	if unmarshaled.Status.TotalObjects != checkpoint.Status.TotalObjects {
 		t.Errorf("Expected TotalObjects %d, got %d", checkpoint.Status.TotalObjects, unmarshaled.Status.TotalObjects)
 	}

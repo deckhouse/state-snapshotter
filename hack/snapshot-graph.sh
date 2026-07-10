@@ -252,12 +252,12 @@ group_from_api() {
 kind_to_resource() {
 	local api="$1" kind="$2" group cache_key cached name
 	case "${api}|${kind}" in
-	storage.deckhouse.io/*\|Snapshot)
-		printf '%s\n' "snapshots.storage.deckhouse.io"
+	state-snapshotter.deckhouse.io/*\|Snapshot)
+		printf '%s\n' "snapshots.state-snapshotter.deckhouse.io"
 		return
 		;;
-	storage.deckhouse.io/*\|SnapshotContent)
-		printf '%s\n' "snapshotcontents.storage.deckhouse.io"
+	state-snapshotter.deckhouse.io/*\|SnapshotContent)
+		printf '%s\n' "snapshotcontents.state-snapshotter.deckhouse.io"
 		return
 		;;
 	state-snapshotter.deckhouse.io/*\|CustomSnapshotDefinition)
@@ -276,8 +276,8 @@ kind_to_resource() {
 		printf '%s\n' "manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
 		return
 		;;
-	storage.deckhouse.io/*\|VolumeCaptureRequest)
-		printf '%s\n' "volumecapturerequests.storage.deckhouse.io"
+	storage-foundation.deckhouse.io/*\|VolumeCaptureRequest)
+		printf '%s\n' "volumecapturerequests.storage-foundation.deckhouse.io"
 		return
 		;;
 	snapshot.storage.k8s.io/*\|VolumeSnapshotContent)
@@ -422,7 +422,7 @@ csd_ready_status() {
 	jq -r '
 		(.status.conditions // []) as $conditions
 		| ($conditions | map(select(.type == "Accepted")) | last | .status // "Unknown") as $accepted
-		| ($conditions | map(select(.type == "RBACReady")) | last | .status // "Unknown") as $rbac
+		| ($conditions | map(select(.type == "AccessGranted")) | last | .status // "Unknown") as $rbac
 		| if $accepted == "True" and $rbac == "True" then "True"
 		  elif $accepted == "False" or $rbac == "False" then "False"
 		  else "Unknown"
@@ -442,8 +442,8 @@ csd_condition_reason() {
 	jq -r '
 		(.status.conditions // []) as $conditions
 		| ($conditions | map(select(.type == "Accepted")) | last | .status // "Unknown") as $accepted
-		| ($conditions | map(select(.type == "RBACReady")) | last | .status // "Unknown") as $rbac
-		| "Accepted=" + $accepted + "/RBACReady=" + $rbac
+		| ($conditions | map(select(.type == "AccessGranted")) | last | .status // "Unknown") as $rbac
+		| "Accepted=" + $accepted + "/AccessGranted=" + $rbac
 	'
 }
 
@@ -1009,7 +1009,7 @@ visit_chunk() {
 
 visit_vcr() {
 	local ns="$1" name="$2" depth="$3" json key api kind
-	api="storage.deckhouse.io/v1alpha1"
+	api="storage-foundation.deckhouse.io/v1alpha1"
 	kind="VolumeCaptureRequest"
 	key=$(key_for "$api" "$kind" "$ns" "$name")
 	if visited "$key"; then
@@ -1084,7 +1084,7 @@ visit_source_ref() {
 
 visit_content() {
 	local name="$1" depth="$2" parent_content="$3" json key api kind ns ready mcp child data_api data_kind data_name data_key owner_tmp
-	api="storage.deckhouse.io/v1alpha1"
+	api="state-snapshotter.deckhouse.io/v1alpha1"
 	kind="SnapshotContent"
 	ns=""
 	key=$(key_for "$api" "$kind" "$ns" "$name")
@@ -1190,7 +1190,7 @@ visit_snapshot() {
 	content=$(printf '%s' "$json" | jq -r '.status.boundSnapshotContentName // ""')
 	if [[ -n "$content" ]]; then
 		local content_key
-		content_key=$(key_for "storage.deckhouse.io/v1alpha1" "SnapshotContent" "" "$content")
+		content_key=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "SnapshotContent" "" "$content")
 		if [[ "$depth" == "0" ]]; then
 			ROOT_CONTENT_NAME="$content"
 			ROOT_CONTENT_KEY="$content_key"
@@ -1211,7 +1211,7 @@ visit_snapshot() {
 	vcr=$(printf '%s' "$json" | jq -r '.status.volumeCaptureRequestName // ""')
 	if [[ -n "$vcr" ]]; then
 		local vcr_key
-		vcr_key=$(key_for "storage.deckhouse.io/v1alpha1" "VolumeCaptureRequest" "$ns" "$vcr")
+		vcr_key=$(key_for "storage-foundation.deckhouse.io/v1alpha1" "VolumeCaptureRequest" "$ns" "$vcr")
 		EXPECT_VCR_EDGE_IN_GRAPH=1
 		add_edge "$key" "$vcr_key" "status.volumeCaptureRequestName" "orange" "solid" "1"
 		visit_vcr "$ns" "$vcr" $((depth + 1))
@@ -1346,10 +1346,10 @@ finalize_chunk_verification() {
 ensure_chunk_get_permission
 
 if [[ -n "$SNAPSHOT" ]]; then
-	ROOT_KEY=$(key_for "storage.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT")
-	visit_snapshot "storage.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT" 0 ""
+	ROOT_KEY=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT")
+	visit_snapshot "state-snapshotter.deckhouse.io/v1alpha1" "Snapshot" "$NS" "$SNAPSHOT" 0 ""
 elif [[ -n "$SNAPSHOTCONTENT" ]]; then
-	ROOT_KEY=$(key_for "storage.deckhouse.io/v1alpha1" "SnapshotContent" "" "$SNAPSHOTCONTENT")
+	ROOT_KEY=$(key_for "state-snapshotter.deckhouse.io/v1alpha1" "SnapshotContent" "" "$SNAPSHOTCONTENT")
 	ROOT_CONTENT_NAME="$SNAPSHOTCONTENT"
 	ROOT_CONTENT_KEY="$ROOT_KEY"
 	visit_content "$SNAPSHOTCONTENT" 0 ""
@@ -1376,7 +1376,7 @@ if [[ -n "$ROOT_OK_NAME" ]]; then
 	fi
 fi
 if [[ -n "$ROOT_CONTENT_NAME" && -n "$ROOT_OK_NAME" ]]; then
-	if content_json=$(get_json "storage.deckhouse.io/v1alpha1" "SnapshotContent" "" "$ROOT_CONTENT_NAME"); then
+	if content_json=$(get_json "state-snapshotter.deckhouse.io/v1alpha1" "SnapshotContent" "" "$ROOT_CONTENT_NAME"); then
 		check_owner_ref "$content_json" "ObjectKeeper" "$ROOT_OK_NAME" "Root SnapshotContent ownerRef -> ObjectKeeper/${ROOT_OK_NAME}"
 	fi
 fi

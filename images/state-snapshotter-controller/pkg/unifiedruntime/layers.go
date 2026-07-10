@@ -34,7 +34,7 @@ import (
 type LayeredGVKState struct {
 	// BootstrapDesired is a copy of the static bootstrap list passed into the syncer.
 	BootstrapDesired []unifiedbootstrap.UnifiedGVKPair
-	// EligibleFromCSD is csdregistry.EligibleUnifiedGVKPairs (Accepted+RBACReady+generation; CRD-valid rows only).
+	// EligibleFromCSD is csdregistry.EligibleUnifiedGVKPairs (Accepted+AccessGranted+generation; CRD-valid rows only).
 	EligibleFromCSD []unifiedbootstrap.UnifiedGVKPair
 	// CSDEligibleError is set when List/parse of CSD failed; merge then uses bootstrap only.
 	CSDEligibleError error

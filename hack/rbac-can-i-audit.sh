@@ -43,18 +43,18 @@ can_i "${SA}" delete objectkeepers.deckhouse.io
 can_i "${SA}" create manifestcapturerequests.state-snapshotter.deckhouse.io -n "${NS}"
 can_i "${SA}" delete manifestcapturerequests.state-snapshotter.deckhouse.io -n "${NS}"
 can_i "${SA}" create manifestcheckpoints.state-snapshotter.deckhouse.io
-can_i "${SA}" patch snapshotcontents.storage.deckhouse.io/status
-can_i "${SA}" create volumecapturerequests.storage.deckhouse.io -n "${NS}"
-can_i "${SA}" delete volumecapturerequests.storage.deckhouse.io -n "${NS}"
+can_i "${SA}" patch snapshotcontents.state-snapshotter.deckhouse.io/status
+can_i "${SA}" create volumecapturerequests.storage-foundation.deckhouse.io -n "${NS}"
+can_i "${SA}" delete volumecapturerequests.storage-foundation.deckhouse.io -n "${NS}"
 can_i "${SA}" patch volumesnapshotcontents.snapshot.storage.k8s.io
 can_i "${SA}" list manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io
 
 log ""
 log "== Current kubectl user (admin-kubeconfig path) =="
-can_i "" create snapshots.storage.deckhouse.io -n "${NS}"
-can_i "" get snapshots.storage.deckhouse.io -n "${NS}"
-can_i "" patch snapshotcontents.storage.deckhouse.io/status
-can_i "" patch snapshotcontents.storage.deckhouse.io
+can_i "" create snapshots.state-snapshotter.deckhouse.io -n "${NS}"
+can_i "" get snapshots.state-snapshotter.deckhouse.io -n "${NS}"
+can_i "" patch snapshotcontents.state-snapshotter.deckhouse.io/status
+can_i "" patch snapshotcontents.state-snapshotter.deckhouse.io
 can_i "" get snapshots/manifests.subresources.state-snapshotter.deckhouse.io -n "${NS}"
 can_i "" get manifestcheckpoints/manifests.subresources.state-snapshotter.deckhouse.io
 can_i "" get manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io

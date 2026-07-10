@@ -28,7 +28,10 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-func TestPublishSnapshotContentChildrenFromSnapshotRefsSkipsVolumeSnapshotVisibilityLeaf(t *testing.T) {
+// Under the content-single-writer model an orphan CSI VolumeSnapshot is an ordinary domain child (no longer
+// a skipped "visibility leaf"): a brand-new edge to a VolumeSnapshot whose bound SnapshotContent is not
+// visible yet must REQUEUE (ok=false) rather than publish a dangling edge — exactly like any other child.
+func TestPublishSnapshotContentChildrenFromSnapshotRefsRequeuesUnboundVolumeSnapshotChild(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -47,15 +50,71 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsSkipsVolumeSnapshotVisibi
 	if err != nil {
 		t.Fatalf("publish children: %v", err)
 	}
-	if !ok {
-		t.Fatal("VolumeSnapshot visibility leaf must not block content child publication")
+	if ok {
+		t.Fatal("an unbound VolumeSnapshot child must requeue (ok=false), not publish a dangling edge")
 	}
 	got := &storagev1alpha1.SnapshotContent{}
 	if err := cl.Get(ctx, client.ObjectKey{Name: parent.Name}, got); err != nil {
 		t.Fatalf("get parent content: %v", err)
 	}
 	if len(got.Status.ChildrenSnapshotContentRefs) != 0 {
-		t.Fatalf("VolumeSnapshot visibility leaf must not become content child, got %#v", got.Status.ChildrenSnapshotContentRefs)
+		t.Fatalf("no child edge must be published while the VolumeSnapshot child is unbound, got %#v", got.Status.ChildrenSnapshotContentRefs)
+	}
+}
+
+// TestPublishSnapshotContentChildrenRefsHoldsFrozenSet asserts the Block 4 frozen-set writer guard
+// (INV-CONTENT-CHILDREN-2, Option A CEL): once status.childrenSnapshotContentRefs is non-empty the writer
+// MUST NOT try to grow/replace it. The empty -> complete first write lands; a later attempt to add a child
+// to an already-populated set is held as-is (no patch), so the apiserver CEL never has to reject anything
+// and the reconcile never wedges. (The fake client does not enforce CEL, so this pins the WRITER guard; the
+// apiserver-level rejection is covered by the snapshotcontent_children_frozen integration test.)
+func TestPublishSnapshotContentChildrenRefsHoldsFrozenSet(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+	content := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "frozen-content"}}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(content).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).Build()
+	refs := func(names ...string) []storagev1alpha1.SnapshotContentChildRef {
+		out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(names))
+		for _, n := range names {
+			out = append(out, storagev1alpha1.SnapshotContentChildRef{Name: n})
+		}
+		return out
+	}
+	read := func() []storagev1alpha1.SnapshotContentChildRef {
+		got := &storagev1alpha1.SnapshotContent{}
+		if err := cl.Get(ctx, client.ObjectKey{Name: content.Name}, got); err != nil {
+			t.Fatalf("get content: %v", err)
+		}
+		return got.Status.ChildrenSnapshotContentRefs
+	}
+
+	// Empty -> complete first write lands.
+	if err := PublishSnapshotContentChildrenRefs(ctx, cl, cl, content.Name, refs("child-a", "child-b")); err != nil {
+		t.Fatalf("empty -> complete publish: %v", err)
+	}
+	if got := read(); len(got) != 2 {
+		t.Fatalf("expected the complete 2-child set after the first write, got %#v", got)
+	}
+
+	// Attempt to grow the now-frozen set: the writer must hold it as-is (no error, no growth).
+	if err := PublishSnapshotContentChildrenRefs(ctx, cl, cl, content.Name, refs("child-a", "child-b", "child-c")); err != nil {
+		t.Fatalf("frozen-set hold must not error: %v", err)
+	}
+	if got := read(); len(got) != 2 {
+		t.Fatalf("the frozen set must NOT grow to 3 children, got %#v", got)
+	}
+
+	// Idempotent re-publish of the identical set is a clean no-op.
+	if err := PublishSnapshotContentChildrenRefs(ctx, cl, cl, content.Name, refs("child-b", "child-a")); err != nil {
+		t.Fatalf("idempotent re-publish must not error: %v", err)
+	}
+	if got := read(); len(got) != 2 {
+		t.Fatalf("idempotent re-publish must keep the 2-child set, got %#v", got)
 	}
 }
 
@@ -88,7 +147,7 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsKeepsDegradedChildWhenCon
 			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content-missing"}},
 		},
 	}
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content-missing")
+	childSnap := boundChildSnapshot("child-content-missing")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, childSnap).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).Build()
 
@@ -123,7 +182,7 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsDoesNotPublishNewDangling
 		t.Fatalf("add scheme: %v", err)
 	}
 	parent := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root-content"}}
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content-pending")
+	childSnap := boundChildSnapshot("child-content-pending")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, childSnap).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).Build()
 

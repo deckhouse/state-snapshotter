@@ -74,7 +74,7 @@ func TestSummarizeChildSnapshotTerminalFailures_TerminalChildFailed(t *testing.T
 	ctx := context.Background()
 	ns := "ns1"
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
-	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "c1", metav1.ConditionFalse, "CapturePlanDrift")
+	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "c1", metav1.ConditionFalse, "VolumeCaptureFailed")
 	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-a"),
@@ -146,7 +146,7 @@ func TestSummarizeChildSnapshotTerminalFailures_DoesNotReadOtherNamespace(t *tes
 	nsOther := "ns-other"
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	// A terminally-failed child living only in another namespace must be invisible to the parent.
-	other := demoSnapshotUnstructuredReady(nsOther, "disk-a", gvk, "c1", metav1.ConditionFalse, "CapturePlanDrift")
+	other := demoSnapshotUnstructuredReady(nsOther, "disk-a", gvk, "c1", metav1.ConditionFalse, "VolumeCaptureFailed")
 	cl := fake.NewClientBuilder().WithRuntimeObjects(other).Build()
 	ref := storagev1alpha1.SnapshotChildRef{APIVersion: "demo.example.com/v1", Kind: "DemoDiskSnapshot", Name: "disk-a"}
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{ref}, nsParent)
@@ -173,7 +173,7 @@ func TestSummarizeChildSnapshotTerminalFailures_GetErrorPropagates(t *testing.T)
 func TestClassifyGenericChildSnapshotReady_TerminalVsPending(t *testing.T) {
 	t.Parallel()
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
-	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "content", metav1.ConditionFalse, "CapturePlanDrift")
+	u := demoSnapshotUnstructuredReady("ns", "x", gvk, "content", metav1.ConditionFalse, "VolumeCaptureFailed")
 	c, msg := ClassifyGenericChildSnapshotReady(u, gvk, "ns", "x")
 	if c != SnapshotChildReadyClassFailed || msg == "" {
 		t.Fatalf("got %v %q", c, msg)
@@ -215,7 +215,6 @@ func TestChildSnapshotTerminalReadyReasons_IncludesVolumeCaptureTerminals(t *tes
 	t.Parallel()
 	for _, reason := range []string{
 		snapshot.ReasonVolumeCaptureFailed,
-		"VolumeCaptureTargetsFailed",
 		"DuplicateCoveredPVCUID",
 	} {
 		if !IsSnapshotChildTerminalReadyFailure(reason) {

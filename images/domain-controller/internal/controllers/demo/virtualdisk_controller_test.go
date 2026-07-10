@@ -32,7 +32,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
 )
 
@@ -93,8 +93,8 @@ func TestDemoVirtualDiskRestoreRejectsCrossNamespace(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: "other-ns", Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: "other-ns", Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",
@@ -151,8 +151,8 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",
@@ -170,7 +170,7 @@ func TestDemoVirtualDiskRestoreVRRHasNoSize(t *testing.T) {
 	}
 
 	vrr := &unstructured.Unstructured{}
-	vrr.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: vrrKind})
+	vrr.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: vrrKind})
 	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: matNS, Name: demoDiskVRRName(disk.UID)}, vrr); err != nil {
 		t.Fatalf("get vrr: %v", err)
 	}
@@ -209,8 +209,8 @@ func TestDemoVirtualDiskRestoreDeniedOnSnapshotRefSpoof(t *testing.T) {
 			},
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				Target: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{Namespace: matNS, Name: "orig-pvc"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					Kind: vscKind,
 					Name: "vsc-1",

@@ -48,7 +48,7 @@ func TestResolveDataReadinessEmptyDataRefs(t *testing.T) {
 }
 
 func TestResolveDataReadinessVSCMissing(t *testing.T) {
-	r, content := dataReadinessFixture(t, dataBinding("pvc-1", "missing-vsc", true))
+	r, content := dataReadinessFixture(t, dataBinding("missing-vsc"))
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
 	if err != nil {
 		t.Fatalf("resolveDataReadiness: %v", err)
@@ -63,7 +63,7 @@ func TestResolveDataReadinessVSCMissing(t *testing.T) {
 
 func TestResolveDataReadinessVSCNotReadyToUse(t *testing.T) {
 	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-pending", true),
+		dataBinding("vsc-pending"),
 		withVSC("vsc-pending", false),
 	)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -82,7 +82,7 @@ func TestResolveDataReadinessVSCNotReadyToUse(t *testing.T) {
 // as readyToUse=false -> DataCapturePending (pending, never terminal).
 func TestResolveDataReadinessVSCReadyToUseMissing(t *testing.T) {
 	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-noready", true),
+		dataBinding("vsc-noready"),
 		withVSCNoReadyToUse("vsc-noready"),
 	)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -99,7 +99,7 @@ func TestResolveDataReadinessVSCReadyToUseMissing(t *testing.T) {
 
 func TestResolveDataReadinessOneVSCReady(t *testing.T) {
 	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-ready", true),
+		dataBinding("vsc-ready"),
 		withVSC("vsc-ready", true),
 	)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -119,7 +119,7 @@ func TestResolveDataReadinessOneVSCReady(t *testing.T) {
 // it still exists and reports readyToUse=true. Classified terminal ArtifactMissing (INV-FAIL-PROP).
 func TestResolveDataReadinessVSCDeleting(t *testing.T) {
 	r, content := dataReadinessFixture(t,
-		dataBinding("pvc-1", "vsc-deleting", true),
+		dataBinding("vsc-deleting"),
 		withVSCDeleting("vsc-deleting"),
 	)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -135,7 +135,7 @@ func TestResolveDataReadinessVSCDeleting(t *testing.T) {
 }
 
 func TestResolveDataReadinessUnknownArtifactKind(t *testing.T) {
-	binding := dataBinding("pvc-1", "other-artifact", true)
+	binding := dataBinding("other-artifact")
 	binding.Artifact.Kind = "UnknownVolumeBackend"
 	r, content := dataReadinessFixture(t, binding)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -151,7 +151,7 @@ func TestResolveDataReadinessUnknownArtifactKind(t *testing.T) {
 }
 
 func TestResolveDataReadinessInvalidArtifactRef(t *testing.T) {
-	binding := dataBinding("pvc-1", "", true)
+	binding := dataBinding("")
 	binding.Artifact.Name = ""
 	r, content := dataReadinessFixture(t, binding)
 	ready, reason, msg, err := r.resolveDataReadiness(context.Background(), content)
@@ -164,7 +164,7 @@ func TestResolveDataReadinessInvalidArtifactRef(t *testing.T) {
 }
 
 func TestResolveDataReadinessRejectsVolumeCaptureRequest(t *testing.T) {
-	binding := dataBinding("pvc-1", "vcr-1", true)
+	binding := dataBinding("vcr-1")
 	binding.Artifact.Kind = "VolumeCaptureRequest"
 	r, content := dataReadinessFixture(t, binding)
 	ready, reason, _, err := r.resolveDataReadiness(context.Background(), content)
@@ -209,23 +209,22 @@ func withVSCNoReadyToUse(name string) dataReadinessOption {
 func withVSCDeleting(name string) dataReadinessOption {
 	return func(s *dataReadinessFixtureState) {
 		obj := volumeSnapshotContentObject(name, true)
-		obj.SetFinalizers([]string{"state-snapshotter.deckhouse.io/artifact-protect"})
+		obj.SetFinalizers([]string{snapshot.FinalizerArtifactProtect})
 		now := metav1.NewTime(time.Now())
 		obj.SetDeletionTimestamp(&now)
 		s.vscs = append(s.vscs, obj)
 	}
 }
 
-func dataBinding(targetUID, vscName string, includeArtifact bool) snapshot.DataBindingRef { //nolint:unparam // test fixture keeps uniform signature
-	b := snapshot.DataBindingRef{TargetUID: targetUID}
-	if includeArtifact {
-		b.Artifact = snapshot.ObjectRef{
+func dataBinding(vscName string) snapshot.DataBindingRef {
+	return snapshot.DataBindingRef{
+		TargetUID: "pvc-1",
+		Artifact: snapshot.ObjectRef{
 			APIVersion: vscAPIVersion,
 			Kind:       kindVolumeSnapshotContent,
 			Name:       vscName,
-		}
+		},
 	}
-	return b
 }
 
 func dataReadinessFixture(t *testing.T, opts ...interface{}) (*SnapshotContentController, *unstructured.Unstructured) {
@@ -262,13 +261,13 @@ func commonSnapshotContentWithDataRef(bindings []snapshot.DataBindingRef) *unstr
 	status := map[string]interface{}{}
 	if len(bindings) > 0 {
 		b := bindings[0]
-		status["dataRef"] = map[string]interface{}{
-			"targetUID": b.TargetUID,
-			"target": map[string]interface{}{
+		status["data"] = map[string]interface{}{
+			"source": map[string]interface{}{
 				"apiVersion": "v1",
 				"kind":       "PersistentVolumeClaim",
 				"name":       "pvc",
 				"namespace":  "default",
+				"uid":        b.TargetUID,
 			},
 			"artifact": map[string]interface{}{
 				"apiVersion": b.Artifact.APIVersion,

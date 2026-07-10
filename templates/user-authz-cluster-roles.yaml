@@ -36,9 +36,9 @@ rules:
   - deletecollection
   - patch
   - update
-# storage.deckhouse.io unified Snapshot API (cluster editor; mirrors admin-kubeconfig / controller)
+# state-snapshotter.deckhouse.io unified Snapshot API (cluster editor; mirrors admin-kubeconfig / controller)
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshots
   - snapshotcontents
@@ -51,7 +51,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshots/status
   - snapshotcontents/status

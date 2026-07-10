@@ -32,7 +32,7 @@ func assertEqualSliceLens(t *testing.T, snaps, contents []schema.GroupVersionKin
 }
 
 func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
@@ -59,10 +59,10 @@ func TestResolveAvailableUnifiedGVKPairs_keepsOnlyPairsWithBothMappings(t *testi
 }
 
 func TestResolveAvailableUnifiedGVKPairs_emptyWhenNothingMaps(t *testing.T) {
-	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "storage.deckhouse.io", Version: "v1alpha1"}})
+	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}})
 	pair := UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		SnapshotContent: schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		Snapshot:        schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		SnapshotContent: schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	snaps, contents := ResolveAvailableUnifiedGVKPairs(mapper, []UnifiedGVKPair{pair}, logr.Discard())
 	assertEqualSliceLens(t, snaps, contents)
@@ -72,7 +72,7 @@ func TestResolveAvailableUnifiedGVKPairs_emptyWhenNothingMaps(t *testing.T) {
 }
 
 func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}
@@ -93,7 +93,7 @@ func TestFilterGenericSnapshotGVKPairs_skipsDedicatedKinds(t *testing.T) {
 	snapGVKs := []schema.GroupVersionKind{
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
 		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		genericSnap,
 	}
 	commonContent := CommonSnapshotContentGVK()
@@ -113,12 +113,12 @@ func TestFilterGenericSnapshotContentGVKs_skipsDedicatedSnapshotPairs(t *testing
 	// Root Snapshot is dedicated (SnapshotReconciler), so its content side must be
 	// dropped; only the non-dedicated kind's content survives.
 	snapGVKs := []schema.GroupVersionKind{
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
 		{Group: "example.deckhouse.io", Version: "v1alpha1", Kind: "ExampleDomainSnapshot"},
 	}
 	contentGVKs := []schema.GroupVersionKind{
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
-		{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 	}
 	out := FilterGenericSnapshotContentGVKs(snapGVKs, contentGVKs)
 	if len(out) != 1 || out[0].Kind != "SnapshotContent" {
@@ -134,34 +134,57 @@ func TestAppendGVKIfMissing_DoesNotDuplicateCommonSnapshotContent(t *testing.T) 
 	}
 }
 
-func TestDefaultGraphRegistryBuiltInPairs_containsOnlySnapshot(t *testing.T) {
+func TestDefaultGraphRegistryBuiltInPairs_containsSnapshotAndVolumeSnapshot(t *testing.T) {
 	pairs := DefaultGraphRegistryBuiltInPairs()
-	if len(pairs) != 1 {
-		t.Fatalf("expected one graph built-in pair, got %d: %v", len(pairs), pairs)
+	if len(pairs) != 2 {
+		t.Fatalf("expected two graph built-in pairs (Snapshot + VolumeSnapshot), got %d: %v", len(pairs), pairs)
 	}
-	if pairs[0].Snapshot.Kind != "Snapshot" || pairs[0].SnapshotContent.Kind != "SnapshotContent" {
-		t.Fatalf("expected Snapshot graph built-in, got %v", pairs[0])
-	}
+
+	var sawSnapshot, sawVolumeSnapshot bool
 	for _, p := range pairs {
+		if p.SnapshotContent != CommonSnapshotContentGVK() {
+			t.Fatalf("built-in pair %v must use the common SnapshotContent", p)
+		}
+		switch {
+		case p.Snapshot.Group == "state-snapshotter.deckhouse.io" && p.Snapshot.Kind == "Snapshot":
+			sawSnapshot = true
+			if p.RequiresDataArtifact {
+				t.Fatalf("root Snapshot must not require a data artifact: %v", p)
+			}
+		case p.Snapshot.Group == "snapshot.storage.k8s.io" && p.Snapshot.Kind == "VolumeSnapshot":
+			sawVolumeSnapshot = true
+			if !p.RequiresDataArtifact {
+				t.Fatalf("built-in VolumeSnapshot must require a data artifact: %v", p)
+			}
+		default:
+			t.Fatalf("unexpected built-in pair (only Snapshot + VolumeSnapshot are built in): %v", p)
+		}
+	}
+	if !sawSnapshot || !sawVolumeSnapshot {
+		t.Fatalf("expected both the root Snapshot and the CSI VolumeSnapshot built-in pairs, got %v", pairs)
+	}
+}
+
+func TestDefaultGraphRegistryBuiltInPairs_hasNoCSDGatedDomainPairs(t *testing.T) {
+	// The built-in list carries only kinds whose RBAC contract is met by the controller's static
+	// rbac-for-us.yaml: the core Snapshot and the CSI VolumeSnapshot (PVC/VS/VSC/VSClass). It must NEVER
+	// carry a CSD-gated domain kind (e.g. virtualization/demo), which has no static RBAC contract and would
+	// widen the watch surface into forbidden list/watch loops.
+	for _, p := range DefaultGraphRegistryBuiltInPairs() {
 		switch p.Snapshot.Kind {
 		case "DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot":
 			t.Fatalf("demo pair must be CSD-gated, found graph built-in: %v", p)
 		}
-	}
-}
-
-func TestDefaultGraphRegistryBuiltInPairs_hasNoDomainPairs(t *testing.T) {
-	// The single built-in list must never carry a hardcoded domain kind (e.g. virtualization/demo):
-	// those have no static RBAC contract and would widen the watch surface into forbidden loops.
-	for _, p := range DefaultGraphRegistryBuiltInPairs() {
-		if p.Snapshot.Group != "storage.deckhouse.io" || p.Snapshot.Kind != "Snapshot" {
-			t.Fatalf("built-in pairs must contain only the core Snapshot pair, found domain pair: %v", p)
+		isRootSnapshot := p.Snapshot.Group == "state-snapshotter.deckhouse.io" && p.Snapshot.Kind == "Snapshot"
+		isVolumeSnapshot := p.Snapshot.Group == "snapshot.storage.k8s.io" && p.Snapshot.Kind == "VolumeSnapshot"
+		if !isRootSnapshot && !isVolumeSnapshot {
+			t.Fatalf("built-in pairs must contain only the core Snapshot + CSI VolumeSnapshot, found: %v", p)
 		}
 	}
 }
 
 func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotContentMaps(t *testing.T) {
-	gv := schema.GroupVersion{Group: "storage.deckhouse.io", Version: "v1alpha1"}
+	gv := schema.GroupVersion{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1"}
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{gv})
 	snap := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "Snapshot"}
 	content := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: "SnapshotContent"}

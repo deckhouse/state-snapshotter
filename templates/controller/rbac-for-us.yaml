@@ -50,12 +50,16 @@ rules:
   resources: ["manifestcheckpointcontentchunks"]
   verbs: ["create", "get", "delete"]
 
-# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef); never deletes.
-# Deletion is Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained content/MCP.
+# ObjectKeeper (cluster-scoped): controller creates/patches spec (drift/TTL/followRef).
+# Deletion is normally the Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained
+# content/MCP. The controller deletes ObjectKeepers in exactly one case: the dedicated import-MCP keeper
+# (names.ImportManifestCheckpointObjectKeeperName) is removed after the reconstructed ManifestCheckpoint is
+# handed off to its SnapshotContent (content-single-writer design §10.1) — that keeper FollowObjects the
+# still-live import snapshot, so nothing else would ever reclaim it.
 # No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
 - apiGroups: ["deckhouse.io"]
   resources: ["objectkeepers"]
-  verbs: ["get", "list", "watch", "create", "update", "patch"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Allow controller-runtime to watch namespaces
 - apiGroups: [""]
@@ -100,31 +104,41 @@ rules:
 # Note: Kubernetes RBAC does NOT support wildcards in resource names
 # We need to list all snapshot resource types explicitly
 
-# storage.deckhouse.io group (Snapshot, SnapshotContent)
-- apiGroups: ["storage.deckhouse.io"]
+# state-snapshotter.deckhouse.io group (Snapshot, SnapshotContent)
+- apiGroups: ["state-snapshotter.deckhouse.io"]
   resources:
   - "snapshots"                    # Snapshot kind
   - "snapshotcontents"            # SnapshotContent kind
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-# Unified Snapshots status subresources for storage.deckhouse.io
-- apiGroups: ["storage.deckhouse.io"]
+# Unified Snapshots status subresources for state-snapshotter.deckhouse.io
+- apiGroups: ["state-snapshotter.deckhouse.io"]
   resources:
   - "snapshots/status"
   - "snapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
+# SnapshotContent subtree-manifest-identities: the controller both SERVES this aggregated subresource
+# (group subresources.state-snapshotter.deckhouse.io) and CONSUMES it — the root Namespace reconciler uses
+# the SDK ManifestExclude capability, whose REST call loops back through kube-apiserver -> APIService ->
+# this controller, authenticated as this SA. Read-only get; the reconciler stays content-free (it reads
+# captured identities, never SnapshotContent objects). Fail-closed 409 while any subtree checkpoint is not
+# Ready.
+- apiGroups: ["subresources.state-snapshotter.deckhouse.io"]
+  resources: ["snapshotcontents/subtree-manifest-identities"]
+  verbs: ["get"]
+
 # VolumeCaptureRequest (storage-foundation): N5 PR-4 ensure/publish/delete per SnapshotContent
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
 # DataImport (storage-foundation): the import binder (C5) reads a leaf's DataImport
 # status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
 # writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["dataimports"]
   verbs: ["get", "list", "watch"]
 
@@ -137,7 +151,10 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
-# binder (C5) binds extended VS carrying the spec.source.import marker.
+# binder (C5) binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
+# (unifiedbootstrap.BuiltInVolumeSnapshotPair) — this static grant is its RBAC source of truth and does NOT
+# depend on any CustomSnapshotDefinition / the dynamic domain-RBAC hook (which grants the out-of-process
+# storage-foundation domain SA, not this controller SA).
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -164,17 +181,17 @@ rules:
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
-# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD/DSC
-# condition RBACReady=True. See docs/state-snapshotter-rework/operations/project-status.md for the
+# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD
+# condition AccessGranted=True. See docs/state-snapshotter-rework/operations/project-status.md for the
 # rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
-# until the RBACReady hook lands).
+# until the AccessGranted hook lands).
 
 ---
 # Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with
 # the module but is NOT bound by any binding here: the 040-namespace-capture-rbac hook creates a namespaced
 # RoleBinding to it (subjects = controller SA + webhooks SA) ONLY in namespaces that currently host a
-# Snapshot still capturing the live namespace (ManifestsArchived != Archived/Failed), and deletes it once
-# capture is done. The webhooks SA is included so the MCR-validation admission webhook can resolve arbitrary
+# Snapshot still capturing the live namespace (root captureState.commonController.manifestCaptured != true
+# and Ready reason not terminal), and deletes it once capture is done. The webhooks SA is included so the MCR-validation admission webhook can resolve arbitrary
 # (non-allowlisted) namespaced CR targets via a dynamic Get during the capture window.
 # A RoleBinding to a cluster-scoped ClusterRole confines the rules to its own namespace, so this is NOT a
 # cluster-wide grant of "*" and does NOT reach cluster-scoped ManifestCheckpointContentChunk payloads.
@@ -244,7 +261,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Chart.Name }}-controller-auth-reader
+  name: d8:{{ .Chart.Name }}:controller-auth-reader
   namespace: kube-system
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 roleRef:

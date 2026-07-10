@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 )
 
 func TestResolveDemoSnapshotSource_Valid(t *testing.T) {

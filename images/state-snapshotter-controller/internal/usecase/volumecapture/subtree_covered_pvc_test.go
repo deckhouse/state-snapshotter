@@ -36,7 +36,7 @@ func TestCollectSubtreeCoveredPVCUIDs_emptySubtree(t *testing.T) {
 	t.Parallel()
 	root := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root"}}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root).Build()
-	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -56,9 +56,9 @@ func TestCollectSubtreeCoveredPVCUIDs_oneChildDataRef(t *testing.T) {
 	child := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "uid-a",
-				Target: storagev1alpha1.SnapshotSubjectRef{
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{
+					UID:        "uid-a",
 					APIVersion: corev1.SchemeGroupVersion.String(),
 					Kind:       "PersistentVolumeClaim",
 					Name:       "pvc-a",
@@ -68,7 +68,7 @@ func TestCollectSubtreeCoveredPVCUIDs_oneChildDataRef(t *testing.T) {
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child).Build()
-	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -88,17 +88,17 @@ func TestCollectSubtreeCoveredPVCUIDs_twoChildrenDifferentUIDs(t *testing.T) {
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "uid-1"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-1"}},
 		},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "uid-2"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-2"}},
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, c1, c2).Build()
-	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,17 +118,17 @@ func TestCollectSubtreeCoveredPVCUIDs_duplicateUIDFailsClosed(t *testing.T) {
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "dup"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
 		},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "dup"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, c1, c2).Build()
-	_, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	_, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
 	if err == nil {
 		t.Fatal("expected duplicate covered PVC UID error")
 	}
@@ -146,13 +146,65 @@ func TestCollectSubtreeCoveredPVCUIDs_missingChildContent(t *testing.T) {
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root).Build()
-	_, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	_, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
 	if err == nil {
 		t.Fatal("expected error for missing child SnapshotContent")
 	}
 }
 
-func TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets(t *testing.T) {
+// TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback exercises the Block 5 A->B coverage window: a
+// data-bearing child whose status.data is not published yet is covered via its OWNING snapshot
+// (content.spec.snapshotRef), not a content-UID-derived VCR. The owner publishes the in-flight VCR name on
+// status.captureState.domainSpecificController.volumeCaptureRequestName; that VCR's spec.targets[].uid are
+// the covered PVC UIDs (design §8.5/§11.7).
+func TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback(t *testing.T) {
+	t.Parallel()
+	root := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "root"},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child"}},
+		},
+	}
+	// Data-bearing child content, no status.data yet, back-referencing its owning Snapshot.
+	child := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "child", UID: types.UID("child-uid")},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "Snapshot",
+				Name:       "child-owner",
+				Namespace:  "ns",
+			},
+		},
+	}
+	// Owner publishes the in-flight VCR name on captureState.
+	owner := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-owner", Namespace: "ns"},
+		Status: storagev1alpha1.SnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
+					VolumeCaptureRequestName: "vcr-child",
+				},
+			},
+		},
+	}
+	vcr := vcctrl.NewVolumeCaptureRequestObject("ns", "vcr-child", metav1.OwnerReference{}, []vcpkg.Target{{
+		UID: "uid-vcr", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: "ns",
+	}})
+	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child, owner, vcr).Build()
+	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, allKindsDataBearing)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := got[types.UID("uid-vcr")]; !ok {
+		t.Fatalf("expected owner VCR target UID in covered set, got %v", got)
+	}
+}
+
+// TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips pins the authoritative CSD decision: a child whose
+// kind is NOT data-bearing contributes no covered PVC UID even though it has children (Block 5 dropped the
+// old `if hasChildren { return nil }` heuristic in favor of RequiresDataArtifact).
+func TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips(t *testing.T) {
 	t.Parallel()
 	root := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "root"},
@@ -161,18 +213,19 @@ func TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets(t *testing.T) {
 		},
 	}
 	child := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "child", UID: types.UID("child-uid")},
+		ObjectMeta: metav1.ObjectMeta{Name: "child"},
+		Spec:       storagev1alpha1.SnapshotContentSpec{SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{Kind: "ManifestOnly"}},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"}},
+		},
 	}
-	vcr := vcctrl.NewVolumeCaptureRequestObject("ns", vcpkg.SnapshotContentVCRName(child.UID), metav1.OwnerReference{}, []vcpkg.Target{{
-		UID: "uid-vcr", APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a", Namespace: "ns",
-	}})
-	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child, vcr).Build()
-	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root)
+	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child).Build()
+	got, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, "ns", root, func(kind string) bool { return kind != "ManifestOnly" })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := got[types.UID("uid-vcr")]; !ok {
-		t.Fatalf("expected VCR target UID in covered set, got %v", got)
+	if len(got) != 0 {
+		t.Fatalf("expected a non-data-bearing kind to contribute nothing, got %v", got)
 	}
 }
 
@@ -181,21 +234,32 @@ func TestListOwnedPVCTargets_residualExcludesSubtreeCovered(t *testing.T) {
 	ns := "ns"
 	pvcRoot := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "root-pvc", Namespace: ns, UID: types.UID("uid-root")}}
 	pvcChild := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "child-pvc", Namespace: ns, UID: types.UID("uid-child")}}
-	root := &storagev1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "root"},
-		Status: storagev1alpha1.SnapshotContentStatus{
-			ChildrenSnapshotContentRefs: []storagev1alpha1.SnapshotContentChildRef{{Name: "child-content"}},
-		},
-	}
-	child := &storagev1alpha1.SnapshotContent{
+	// wave7 root-content-free coverage: the covered child is discovered through the Snapshot child graph — a
+	// child Snapshot node bound to its OWN content, whose data binding covers uid-child — NOT the root's
+	// SnapshotContent subtree.
+	childContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "uid-child"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-child"}},
 		},
 	}
-	snap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns}}
-	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(pvcRoot, pvcChild, root, child, snap).Build()
-	got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, root)
+	childSnap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-snap", Namespace: ns},
+		Status: storagev1alpha1.SnapshotStatus{
+			BoundSnapshotContentName: "child-content",
+		},
+	}
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: ns},
+		Status: storagev1alpha1.SnapshotStatus{
+			ChildrenSnapshotRefs: []storagev1alpha1.SnapshotChildRef{
+				{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child-snap"},
+			},
+		},
+	}
+	root := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "root"}}
+	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(pvcRoot, pvcChild, childContent, childSnap, snap, root).Build()
+	got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -211,3 +275,10 @@ func testSubtreeScheme(t *testing.T) *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	return s
 }
+
+// allKindsDataBearing is the permissive coverage data-bearing predicate for unit tests that exercise the
+// dataRefs (A) path or the owner fallback (B) directly: every kind carries a data leg, so the covered-UID
+// derivation is driven purely by the fixtures (status.data / owner captureState), not by the CSD registry
+// (which is not wired in these package-level tests). Production sources the predicate from
+// GVKRegistry.RequiresDataArtifact.
+func allKindsDataBearing(string) bool { return true }

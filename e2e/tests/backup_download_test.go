@@ -357,6 +357,13 @@ func assertRawManifestsMatchLive(ctx context.Context, ns string, downloaded []un
 				obj.GetKind(), obj.GetName(), obj.GetKind(),
 			)
 		}
+		// The root's own-manifests now carry the namespace's own cluster-scoped Namespace object
+		// (namespace-capture feature). It is cluster-scoped (empty metadata.namespace) and validated verbatim
+		// by the dedicated namespace-capture spec, so it does not fit this namespaced raw-vs-live compare
+		// (which keys on ns + a namespaced GVR). Skip it rather than trip the missing-GVR guard below.
+		if obj.GetKind() == "Namespace" && obj.GetNamespace() == "" {
+			continue
+		}
 		gvr, ok := gvrForLiveKind(obj.GetKind())
 		if !ok {
 			return fmt.Errorf("downloaded manifest %s/%s has no live GVR mapping for raw comparison", obj.GetKind(), obj.GetName())
@@ -570,7 +577,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 			if gerr != nil {
 				continue
 			}
-			targetName, _, _ := unstructured.NestedString(content.Object, "status", "dataRef", "target", "name")
+			targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
 			if targetName == "" {
 				continue
 			}
@@ -609,7 +616,10 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 
 func createDataExport(ctx context.Context, ns string, target dataExportTarget) error {
 	de := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		// DataExport is served by storage-foundation, not state-snapshotter: derive the apiVersion from
+		// dataExportGVR so the object body matches the resource endpoint (a mismatch is rejected by the
+		// apiserver as "the API version in the data ... does not match the expected API version").
+		"apiVersion": dataExportGVR.GroupVersion().String(),
 		"kind":       "DataExport",
 		"metadata": map[string]interface{}{
 			"name":      target.exportName,
@@ -673,8 +683,12 @@ func ensureBackupClientRBAC(ctx context.Context, ns string) error {
 	}
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: ns},
+		// The data-exporter authorizes the download via a SubjectAccessReview against the DataExport's
+		// own API group (storage-foundation.deckhouse.io) + the "download" subresource; the granted group
+		// must match dataExportGVR.Group or the SAR denies and the exporter returns 403 (which curl -f
+		// turns into an empty body).
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"storage.deckhouse.io"},
+			APIGroups: []string{dataExportGVR.Group},
 			Resources: []string{"dataexports/download"},
 			Verbs:     []string{"create"},
 		}},
@@ -785,7 +799,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 		if gerr != nil {
 			continue
 		}
-		targetName, _, _ := unstructured.NestedString(content.Object, "status", "dataRef", "target", "name")
+		targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
 		if targetName == bkPVCName {
 			orphanVS = vs.GetName()
 			break
@@ -961,8 +975,10 @@ func backupDownloadSpecs() {
 		It("downloads volume bytes via DataExport and matches source checksums", func() {
 			Expect(backup.rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
 
-			// Budget: 3 legs x (15m DataExport Ready + download) + 5m backup-pod start, with headroom.
-			ctx, cancel := context.WithTimeout(context.Background(), 75*time.Minute)
+			// Budget: 3 legs x (dataTransferTO DataExport Ready + download) + 5m backup-pod start, with
+			// headroom. A wedged DataExport fails on its own dataTransferTO deadline rather than dragging
+			// the whole spec to a giant fixed cap.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.dataTransferTO+15*time.Minute)
 			defer cancel()
 
 			By("Checking the extended-VS data surface is available (skip if the fork is absent)")
@@ -998,7 +1014,7 @@ func backupDownloadSpecs() {
 					}
 				}(target))
 
-				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, 15*time.Minute)
+				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
 				Expect(werr).NotTo(HaveOccurred(), "DataExport %s Ready", target.exportName)
 				GinkgoWriter.Printf("  DataExport %s url=%s\n", target.exportName, url)
 

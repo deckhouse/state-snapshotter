@@ -19,9 +19,9 @@
 # Goal: validate the current architecture end-to-end on a real cluster, from CSD priority
 # planning to Phase 2a / Slice 3 status propagation:
 #   - GVK/priority registration and priority-driven tree shape (+ inversion);
-#   - ChildrenSnapshotReady planning barrier (domain-owned, generation-gated);
+#   - domain capture-phase planning barrier (status.captureState.domainSpecificController.phase, domain-owned);
 #   - artifacts born under execution ObjectKeeper and handed off to SnapshotContent;
-#   - ManifestsReady / VolumesReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
+#   - ManifestsReady / VolumeReady / ChildrenReady / Ready aggregation on the SnapshotContent tree;
 #   - damaged-leaf Ready=False propagation to root and recovery back to Ready=True;
 #   - sibling isolation;
 #   - both volume-capture data paths: an orphan/standalone PVC (demo-pvc) captured via a CSI
@@ -191,16 +191,16 @@ RUN_ARTIFACT_DIR="${ARTIFACTS_ROOT}/tree-demo-${RUN_ID}"
 
 # API groups / resources.
 DEMO_API="demo.state-snapshotter.deckhouse.io/v1alpha1"
-STORAGE_API="storage.deckhouse.io/v1alpha1"
+STORAGE_API="state-snapshotter.deckhouse.io/v1alpha1"
 SS_API="state-snapshotter.deckhouse.io/v1alpha1"
 
-SNAP_RES="snapshots.storage.deckhouse.io"
-CONTENT_RES="snapshotcontents.storage.deckhouse.io"
+SNAP_RES="snapshots.state-snapshotter.deckhouse.io"
+CONTENT_RES="snapshotcontents.state-snapshotter.deckhouse.io"
 MCR_RES="manifestcapturerequests.state-snapshotter.deckhouse.io"
 MCP_RES="manifestcheckpoints.state-snapshotter.deckhouse.io"
 CHUNK_RES="manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io"
 CSD_RES="customsnapshotdefinitions.state-snapshotter.deckhouse.io"
-VCR_RES="volumecapturerequests.storage.deckhouse.io"
+VCR_RES="volumecapturerequests.storage-foundation.deckhouse.io"
 VS_RES="volumesnapshots.snapshot.storage.k8s.io"
 VSC_RES="volumesnapshotcontents.snapshot.storage.k8s.io"
 VSCLASS_RES="volumesnapshotclasses.snapshot.storage.k8s.io"
@@ -678,14 +678,14 @@ csd_accepted() {
 		| jq -e '[.status.conditions[]? | select(.type == "Accepted" and .status == "True")] | length >= 1' >/dev/null
 }
 
-# RBACReady is set by an external Deckhouse hook in production; demo/smoke sets it manually.
-patch_csd_rbac_ready() {
+# AccessGranted is set by an external Deckhouse hook in production; demo/smoke sets it manually.
+patch_csd_source_access_granted() {
 	local gen body
 	gen="$(kubectl get "${CSD_RES}" "${CSD_NAME}" -o jsonpath='{.metadata.generation}' 2>/dev/null || echo 0)"
 	body="$(get_json "${CSD_RES}" "" "${CSD_NAME}" | jq \
 		--arg now "$(now_rfc3339)" --argjson gen "${gen:-0}" \
-		'.status.conditions = ((.status.conditions // []) | map(select(.type != "RBACReady")) + [{
-			type: "RBACReady", status: "True", reason: "TreeDemoE2E",
+		'.status.conditions = ((.status.conditions // []) | map(select(.type != "AccessGranted")) + [{
+			type: "AccessGranted", status: "True", reason: "TreeDemoE2E",
 			message: "manual tree-demo approval", lastTransitionTime: $now, observedGeneration: $gen
 		}])')"
 	[[ -n "${body}" ]] || return 0
@@ -695,10 +695,10 @@ patch_csd_rbac_ready() {
 
 ensure_csd_eligible() {
 	wait_until "CSD ${CSD_NAME} Accepted=True" csd_accepted || die "CSD ${CSD_NAME} never Accepted"
-	patch_csd_rbac_ready
-	wait_until "CSD ${CSD_NAME} RBACReady=True" \
-		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"RBACReady\" and .status==\"True\")]|length>=1' >/dev/null" \
-		|| require "CSD ${CSD_NAME} RBACReady not True (manual patch did not stick / external hook owns it); tree cannot build"
+	patch_csd_source_access_granted
+	wait_until "CSD ${CSD_NAME} AccessGranted=True" \
+		bash -c "kubectl get '${CSD_RES}' '${CSD_NAME}' -o json | jq -e '[.status.conditions[]?|select(.type==\"AccessGranted\" and .status==\"True\")]|length>=1' >/dev/null" \
+		|| require "CSD ${CSD_NAME} AccessGranted not True (manual patch did not stick / external hook owns it); tree cannot build"
 }
 
 # inversion_safe: priority inversion mutates the GLOBAL CSD priority, which affects every namespace
@@ -767,10 +767,11 @@ save_artifacts() {
 	printf 'namespace=%s\nrun_id=%s\nstage=%s\ncsd=%s\n' "${ns}" "${RUN_ID}" "${stage}" "${CSD_NAME}" >"${dir}/run-context.txt"
 }
 
-# condition_table <ns>: Ready/ManifestsReady/VolumesReady/ChildrenReady/ChildrenSnapshotReady for snapshots + contents.
+# condition_table <ns>: Ready/ManifestsReady/VolumeReady/ChildrenReady for snapshots + contents, plus the
+# domain-owned capture phase (status.captureState.domainSpecificController.phase) for snapshots.
 condition_table() {
 	local ns="$1"
-	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumesReady|ChildrenReady|ChildrenSnapshotReady(obsGen/gen)"
+	printf '%-22s %-34s %-60s\n' "KIND" "NAME" "Ready|ManifestsReady|VolumeReady|ChildrenReady|phase"
 	local res
 	for res in "${SNAP_RES}" "${VMSNAP_RES}" "${DISKSNAP_RES}"; do
 		kubectl -n "${ns}" get "${res}" -o json 2>/dev/null | jq -r '
@@ -778,11 +779,9 @@ condition_table() {
 				.kind, .metadata.name,
 				(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
+				(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
 				(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-				(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-") + "(" +
-				((([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0)|tostring) + "/" +
-				((.metadata.generation//0)|tostring) + ")"
+				((.status.captureState.domainSpecificController.phase)//"-")
 			] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 			| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 	done
@@ -791,9 +790,8 @@ condition_table() {
 			"SnapshotContent", .metadata.name,
 			(([.status.conditions[]?|select(.type=="Ready")][0].status)//"-") + "|" +
 			(([.status.conditions[]?|select(.type=="ManifestsReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="VolumesReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|" +
-			(([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].status)//"-")
+			(([.status.conditions[]?|select(.type=="VolumeReady")][0].status)//"-") + "|" +
+			(([.status.conditions[]?|select(.type=="ChildrenReady")][0].status)//"-") + "|-"
 		] | "\(.[0])\t\(.[1])\t\(.[2])"' 2>/dev/null \
 		| while IFS=$'\t' read -r k n c; do printf '%-22s %-34s %-60s\n' "${k}" "${n}" "${c}"; done
 }
@@ -961,10 +959,10 @@ Immediate | WaitForFirstConsumer)
 	;;
 esac
 kubectl get crd \
-	snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io \
+	snapshots.state-snapshotter.deckhouse.io snapshotcontents.state-snapshotter.deckhouse.io \
 	manifestcheckpoints.state-snapshotter.deckhouse.io manifestcapturerequests.state-snapshotter.deckhouse.io \
 	customsnapshotdefinitions.state-snapshotter.deckhouse.io \
-	volumecapturerequests.storage.deckhouse.io \
+	volumecapturerequests.storage-foundation.deckhouse.io \
 	volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io \
 	volumesnapshotclasses.snapshot.storage.k8s.io \
 	demovirtualmachines.demo.state-snapshotter.deckhouse.io \
@@ -1062,7 +1060,7 @@ DISK_ONLY_CHILD_NAMES="$(echo "${DISK_ONLY_ROOT_JSON}" | jq -r '.status.children
 DISK_ONLY_SOURCES="$(
 	for child in ${DISK_ONLY_CHILD_NAMES}; do
 		kubectl -n "${NS_TOPO_DISK_ONLY}" get "${DISKSNAP_RES}" "${child}" -o json 2>/dev/null \
-			| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+			| jq -r '.spec.sourceRef.name // empty'
 	done | sort
 )"
 printf '%s\n' "${DISK_ONLY_SOURCES}" >"$(stage_dir topology-disk-only)/disk-child-source-names.txt"
@@ -1164,7 +1162,7 @@ if need_main_tree; then
 # 01-priority-vm-first  (GVK/priority registration)
 # ---------------------------------------------------------------------------
 begin_stage "01-priority-vm-first"
-apply_csd 100 10
+apply_csd 10 100
 ensure_csd_eligible
 CSD_JSON="$(get_json "${CSD_RES}" "" "${CSD_NAME}")"
 echo "${CSD_JSON}" | jq '.' >"$(stage_dir 01-priority-vm-first)/csd.json"
@@ -1174,11 +1172,11 @@ echo "${CSD_JSON}" | jq -r '
 	(.spec.snapshotResourceMapping[]? | "  source=\(.source.kind) snapshot=\(.snapshot.kind) priority=\(.priority)"),
 	"== status (resolved) ==",
 	(.status // {} | tojson)' >"$(stage_dir 01-priority-vm-first)/priority-order.txt"
-# Assert VM priority strictly higher than Disk in the registered spec.
+# Assert VM priority strictly lower than Disk in the registered spec (lower number = planned first).
 VMP="$(echo "${CSD_JSON}" | jq -r '[.spec.snapshotResourceMapping[]?|select(.source.kind=="DemoVirtualMachine")][0].priority // 0')"
 DISKP="$(echo "${CSD_JSON}" | jq -r '[.spec.snapshotResourceMapping[]?|select(.source.kind=="DemoVirtualDisk")][0].priority // 0')"
-[[ "${VMP}" -gt "${DISKP}" ]] || die "expected VM priority > Disk priority, got VM=${VMP} Disk=${DISKP}"
-note "registered priority VM=${VMP} > Disk=${DISKP}"
+[[ "${VMP}" -lt "${DISKP}" ]] || die "expected VM priority < Disk priority, got VM=${VMP} Disk=${DISKP}"
+note "registered priority VM=${VMP} < Disk=${DISKP}"
 save_artifacts "01-priority-vm-first" "${NS}"
 log "01-priority-vm-first: PASS"
 
@@ -1243,13 +1241,13 @@ note "contents: root=${ROOT_CONTENT} vm=${VM_CONTENT} leaf=${LEAF_CONTENT} sibli
 	echo "sibling_snapshot=${SIBLING_SNAP}"; echo "sibling_content=${SIBLING_CONTENT}"
 } >"$(stage_dir 02-tree-ready)/tree-handles.txt"
 
-# Happy-path conditions: every content ManifestsReady=VolumesReady=ChildrenReady=Ready=True.
+# Happy-path conditions: every content ManifestsReady=VolumeReady=ChildrenReady=Ready=True.
 for c in "${LEAF_CONTENT}" "${SIBLING_CONTENT}" "${VM_CONTENT}" "${ROOT_CONTENT}"; do
 	[[ -n "${c}" ]] || continue
 	wait_until "SnapshotContent ${c} Ready=True" content_ready_true "${c}" || die "content ${c} not Ready"
 	cj="$(get_json "${CONTENT_RES}" "" "${c}")"
 	[[ "$(cond_field "${cj}" ManifestsReady status)" == "True" ]] || die "content ${c} ManifestsReady != True while Ready=True (inconsistent aggregation)"
-	[[ "$(cond_field "${cj}" VolumesReady status)" == "True" ]] || die "content ${c} VolumesReady != True while Ready=True (inconsistent aggregation)"
+	[[ "$(cond_field "${cj}" VolumeReady status)" == "True" ]] || die "content ${c} VolumeReady != True while Ready=True (inconsistent aggregation)"
 	[[ "$(cond_field "${cj}" ChildrenReady status)" == "True" ]] || die "content ${c} ChildrenReady != True while Ready=True (inconsistent aggregation)"
 done
 
@@ -1265,9 +1263,9 @@ done
 #      Any of those failing means the core binder never took ownership of a demo content.
 #  (b) no two demo snapshots share a content name — a clean 1:1 snapshot->content mapping (the tree-shape
 #      assertions above already pin the kind/count of each child).
-#  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot has the domain
-#      ChildrenSnapshotReady barrier condition (only the domain reconciler sets it). The well-formed
-#      VM->disk subtree resolved above is itself proof the single domain reconciler ran.
+#  (c) the demo planning output exists on the domain-owned snapshots: VM snapshot carries the domain
+#      capture phase (status.captureState.domainSpecificController.phase; only the domain reconciler sets
+#      it). The well-formed VM->disk subtree resolved above is itself proof the single domain reconciler ran.
 # Note: a same-snapshot duplicate content is impossible by construction — the binder mints a deterministic
 # name (snapshotContentName: "ns-<uid>") and create-or-adopts on AlreadyExists — so (a)+(b) cannot be
 # defeated by a second binder racing the same snapshot.
@@ -1286,9 +1284,9 @@ while read -r ndr_c; do
 	kubectl get "${CONTENT_RES}" "${ndr_c}" >/dev/null 2>&1 \
 		|| die "no-double-reconcile: bound SnapshotContent ${ndr_c} does not exist (dangling binding / content not owned by the core binder)"
 done <<<"${NDR_BOUND}"
-VM_CSR="$(cond_field "$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")" ChildrenSnapshotReady status)"
-[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no ChildrenSnapshotReady condition (domain reconciler did not handle it)"
-note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot ChildrenSnapshotReady=${VM_CSR} (domain reconciler)"
+VM_CSR="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")")"
+[[ -n "${VM_CSR}" ]] || die "no-double-reconcile: VM snapshot ${VM_SNAP} has no domain capture phase (domain reconciler did not handle it)"
+note "no-double-reconcile: ${NDR_DISTINCT} distinct SnapshotContent, all present (single common owner); VM snapshot phase=${VM_CSR} (domain reconciler)"
 
 # --- two-PVC capture paths -------------------------------------------------
 # demo-pvc       : orphan/standalone at root  -> CSI VolumeSnapshot visibility leaf + VSC in ROOT content dataRefs.
@@ -1375,11 +1373,11 @@ VM_JSON="$(get_json "${VMSNAP_RES}" "${NS}" "${VM_SNAP}")"
 	|| die "vm+disk topology: root must contain only standalone DemoVirtualDiskSnapshot"
 ROOT_DISK_SOURCE="$(
 	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${SIBLING_SNAP}" -o json 2>/dev/null \
-		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+		| jq -r '.spec.sourceRef.name // empty'
 )"
 VM_DISK_SOURCE="$(
 	kubectl -n "${NS}" get "${DISKSNAP_RES}" "${LEAF_SNAP}" -o json 2>/dev/null \
-		| jq -r --arg k 'state-snapshotter.deckhouse.io/source-ref' '.metadata.annotations[$k] | fromjson? | .name // empty'
+		| jq -r '.spec.sourceRef.name // empty'
 )"
 [[ "${ROOT_DISK_SOURCE}" == "disk-standalone" ]] || die "vm+disk topology: root disk child source=${ROOT_DISK_SOURCE}, expected disk-standalone"
 [[ "${VM_DISK_SOURCE}" == "disk-vm" ]] || die "vm+disk topology: VM disk child source=${VM_DISK_SOURCE}, expected disk-vm"
@@ -1452,10 +1450,9 @@ echo "${ROOT_CONTENT_JSON}" | jq -e --arg vs "${ORPHAN_VS}" \
 	'([.status.childrenSnapshotContentRefs[]?|select(.name==$vs)]|length)==0' >/dev/null \
 	|| die "orphan-pvc-vs: childrenSnapshotContentRefs must not reference the orphan VolumeSnapshot"
 kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
-	| jq -e --arg vs "${ORPHAN_VS}" --arg ns "${NS}" '
+	| jq -e --arg vs "${ORPHAN_VS}" '
 		[.items[]?|select(
 			(any(.metadata.ownerReferences[]?; .kind=="VolumeSnapshot" and .name==$vs))
-			or ((.metadata.annotations["state-snapshotter.deckhouse.io/source-ref"] // "{}" | fromjson?) as $src | $src.kind == "VolumeSnapshot" and $src.name == $vs and $src.namespace == $ns)
 		)]|length==0' >/dev/null \
 	|| die "orphan-pvc-vs: no SnapshotContent may be materialized for the VolumeSnapshot visibility leaf"
 note "orphan-pvc-vs: demo-pvc uses CSI VolumeSnapshot visibility leaf + root dataRefs, with no namespace VCR"
@@ -1848,7 +1845,7 @@ elif ! inversion_safe; then
 	kubectl get "${VMSNAP_RES},${DISKSNAP_RES}" -A -o wide >"$(stage_dir 03-priority-inverted)/demo-snapshots-all-namespaces.txt" 2>/dev/null || true
 	kubectl get "${CSD_RES}" -o yaml >"$(stage_dir 03-priority-inverted)/customsnapshotdefinitions.yaml" 2>/dev/null || true
 else
-	apply_csd 10 100
+	apply_csd 100 10
 	ensure_csd_eligible
 	apply_source_namespace "${NS_PRIORITY_INV}"
 	wait_until "demo-pvc Bound in ${NS_PRIORITY_INV}" pvc_bound "${NS_PRIORITY_INV}" demo-pvc || require "inverted demo-pvc never Bound within ${WAIT_SEC}s"
@@ -1863,7 +1860,7 @@ else
 		echo "  EITHER root child set changes (covered VM disk no longer hidden under VM:"
 		echo "         root Disksnap increases, or VM disk-child count changes),"
 		echo "  OR controller publishes an explicit fail-closed reason"
-		echo "         (PriorityLayerPending / GraphPlanningFailed / ChildGraphPending / SourceIdentity*)"
+		echo "         (ChildrenPending / GraphPlanningFailed / ChildGraphPending / SourceIdentity*)"
 		echo "         explaining the ambiguous/invalid coverage order."
 	} >"${EXP}"
 	if wait_until "inverted root Snapshot bound" snap_bound "${NS_PRIORITY_INV}" "${SNAP}"; then
@@ -1893,7 +1890,7 @@ else
 		[[ "${INV_VM_DISK}" != "-" && "${INV_VM_DISK}" != "${N_VM_DISK}" ]] && shape_changed=1
 		if [[ "${shape_changed}" == "1" ]]; then
 			note "PASS: disk-first changed planned tree vs vm-first (root VM=${N_ROOT_VMSNAP}->${INV_VM}, Disk=${N_ROOT_DISKSNAP}->${INV_DISK}, VMdisk=${N_VM_DISK}->${INV_VM_DISK}); priority influences the planner"
-		elif echo "${INV_READY}" | grep -qE 'PriorityLayerPending|GraphPlanningFailed|ChildGraphPending|SourceIdentity'; then
+		elif echo "${INV_READY}" | grep -qE 'ChildrenPending|GraphPlanningFailed|ChildGraphPending|SourceIdentity'; then
 			note "PASS (fail-closed): inverted priority produced explicit planner refusal: [${INV_READY}]"
 		else
 			die "priority inversion did NOT change the planner decision and gave no fail-closed reason: baseline root(VM=${N_ROOT_VMSNAP},Disk=${N_ROOT_DISKSNAP}) VMdisk=${N_VM_DISK} == inverted root(VM=${INV_VM},Disk=${INV_DISK}) VMdisk=${INV_VM_DISK} (priority does NOT affect planning — see expected-vs-actual.txt)"
@@ -1905,7 +1902,7 @@ else
 	save_graph "03-priority-inverted" "${NS_PRIORITY_INV}" "${SNAP}" "inverted" "logical"
 	save_artifacts "03-priority-inverted" "${NS_PRIORITY_INV}"
 	# Restore vm-first priority so the main tree (case 02) stays consistent for later stages.
-	apply_csd 100 10
+	apply_csd 10 100
 	ensure_csd_eligible
 	wait_snapshot_ready "${NS}" "${SNAP}" || die "main tree did not reconverge to Ready after CSD priority restore"
 fi
@@ -1915,29 +1912,28 @@ fi # end GROUP priority
 # ===== GROUP domain (part 2/2): 04-domainready-barrier + 05-ownership-handoff =====
 if grp domain; then
 # ---------------------------------------------------------------------------
-# 04-domainready-barrier (domain-owned, generation-gated planning handoff)
+# 04-domainready-barrier (domain-owned planning handoff via capture phase)
 # ---------------------------------------------------------------------------
 begin_stage "04-domainready-barrier"
-# HARD final assertion: every domain snapshot is ChildrenSnapshotReady=True at its current generation.
+# HARD final assertion: every domain snapshot has published the domain capture phase (Planned/Finished)
+# at status.captureState.domainSpecificController.phase. The spec is immutable, so there is no
+# observedGeneration gate.
 for pair in "${SNAP_RES}|${SNAP}" "${VMSNAP_RES}|${VM_SNAP}" "${DISKSNAP_RES}|${LEAF_SNAP}" "${DISKSNAP_RES}|${SIBLING_SNAP}"; do
 	res="${pair%%|*}"; name="${pair##*|}"
 	[[ -n "${name}" ]] || die "domain snapshot handle empty (${res}); tree not resolved"
 	j="$(get_json "${res}" "${NS}" "${name}")"
-	dr_status="$(cond_field "${j}" ChildrenSnapshotReady status)"
-	[[ "${dr_status}" == "True" ]] || die "${res}/${name} ChildrenSnapshotReady=${dr_status:-<none>} (every domain snapshot must publish ChildrenSnapshotReady=True)"
-	obs="$(jq -r '([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0' <<<"${j}")"
-	gen="$(jq -r '.metadata.generation//0' <<<"${j}")"
-	[[ "${obs}" == "${gen}" ]] || die "${res}/${name} ChildrenSnapshotReady observedGeneration(${obs}) != generation(${gen}) (stale barrier)"
-	note "${res}/${name} ChildrenSnapshotReady=True observedGeneration=${obs}==generation"
+	dr_phase="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"${j}")"
+	[[ "${dr_phase}" == "Planned" || "${dr_phase}" == "Finished" ]] || die "${res}/${name} domain phase=${dr_phase:-<none>} (every domain snapshot must reach phase=Planned)"
+	note "${res}/${name} domain phase=${dr_phase}"
 done
-# HARD: ChildrenSnapshotReady is a Snapshot-like planning barrier only and must NEVER appear on a
-# SnapshotContent. A ChildrenSnapshotReady on content means the common/generic layer self-published it
-# (regression of the Slice 2 / snapshotbinding contract: ChildrenSnapshotReady is domain-owned).
+# HARD: the domain capture phase is a Snapshot-owned planning barrier only and must NEVER appear on a
+# SnapshotContent. A domainSpecificController.phase on content means the common/generic layer
+# self-published it (regression of the snapshotbinding contract: the phase is domain-owned).
 DR_ON_CONTENT="$(kubectl get "${CONTENT_RES}" -o json 2>/dev/null \
-	| jq -r '[.items[]?|select(any(.status.conditions[]?; .type=="ChildrenSnapshotReady"))|.metadata.name]|join(",")' 2>/dev/null || true)"
-[[ -z "${DR_ON_CONTENT}" ]] || die "ChildrenSnapshotReady found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
-note "no SnapshotContent carries ChildrenSnapshotReady (barrier remains domain/Snapshot-owned)"
-# Timeline probe: confirm content is not bound before current-gen ChildrenSnapshotReady on a fresh node.
+	| jq -r '[.items[]?|select((.status.captureState.domainSpecificController.phase // "")!="")|.metadata.name]|join(",")' 2>/dev/null || true)"
+[[ -z "${DR_ON_CONTENT}" ]] || die "domain phase found on SnapshotContent(s) [${DR_ON_CONTENT}] — common-layer self-publication regression"
+note "no SnapshotContent carries a domain capture phase (barrier remains domain/Snapshot-owned)"
+# Timeline probe: confirm content is not bound before the domain reaches phase=Planned on a fresh node.
 apply_source_namespace "${NS_DOMAIN_BARRIER}"
 wait_until "barrier demo-pvc Bound" pvc_bound "${NS_DOMAIN_BARRIER}" demo-pvc || true
 apply_root_snapshot "${NS_DOMAIN_BARRIER}"
@@ -1947,18 +1943,16 @@ deadline=$((SECONDS + 120)); dr_seen=0; bound_before_dr=0
 while ((SECONDS < deadline)); do
 	bj="$(get_json "${SNAP_RES}" "${NS_DOMAIN_BARRIER}" "${SNAP}")"
 	bound="$(jq -r '.status.boundSnapshotContentName // ""' <<<"${bj}")"
-	drs="$(cond_field "${bj}" ChildrenSnapshotReady status)"
-	dro="$(jq -r '([.status.conditions[]?|select(.type=="ChildrenSnapshotReady")][0].observedGeneration)//0' <<<"${bj}")"
+	drp="$(jq -r '.status.captureState.domainSpecificController.phase // ""' <<<"${bj}")"
 	bgen="$(jq -r '.metadata.generation//0' <<<"${bj}")"
-	printf '%s bound=%s ChildrenSnapshotReady=%s(obs=%s/gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drs:-<none>}" "${dro}" "${bgen}" >>"${TL}"
-	if [[ -n "${bound}" && "${dr_seen}" == "0" && "${drs}" != "True" ]]; then bound_before_dr=1; fi
-	if [[ "${drs}" == "True" && "${dro}" == "${bgen}" ]]; then dr_seen=1; fi
+	printf '%s bound=%s phase=%s(gen=%s)\n' "$(now_rfc3339)" "${bound:-<none>}" "${drp:-<none>}" "${bgen}" >>"${TL}"
+	if [[ -n "${bound}" && "${dr_seen}" == "0" && "${drp}" != "Planned" && "${drp}" != "Finished" ]]; then bound_before_dr=1; fi
+	if [[ "${drp}" == "Planned" || "${drp}" == "Finished" ]]; then dr_seen=1; fi
 	[[ "${dr_seen}" == "1" && -n "${bound}" ]] && break
 	sleep 2
 done
-[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE current-gen ChildrenSnapshotReady=True (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
-[[ "${dr_seen}" == "1" ]] && note "barrier: ChildrenSnapshotReady=True reached current generation" || die "barrier: ChildrenSnapshotReady=True at current generation not observed within 120s (barrier never satisfied; see timeline.txt)"
-note "stale-ChildrenSnapshotReady injection not performed (out of scope; documented limitation)"
+[[ "${bound_before_dr}" == "0" ]] || die "barrier: SnapshotContent bound BEFORE domain phase=Planned (planning barrier violated — content must not bind until domain is ready; see timeline.txt)"
+[[ "${dr_seen}" == "1" ]] && note "barrier: domain phase reached Planned" || die "barrier: domain phase=Planned not observed within 120s (barrier never satisfied; see timeline.txt)"
 save_artifacts "04-domainready-barrier" "${NS_DOMAIN_BARRIER}"
 kubectl delete namespace "${NS_DOMAIN_BARRIER}" --ignore-not-found=true --wait=false 2>/dev/null || true
 log "04-domainready-barrier: done"
@@ -2123,10 +2117,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 else
 	if patch_vsc_ready_to_use "${DATA_VSC}" false; then
 		VSC_PENDING_DONE=1
-		wait_until "content ${DATA_CONTENT} VolumesReady=False (data pending)" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-			|| die "content ${DATA_CONTENT} VolumesReady did not flip False on VSC readyToUse=false"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
+		wait_until "content ${DATA_CONTENT} VolumeReady=False (data pending)" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+			|| die "content ${DATA_CONTENT} VolumeReady did not flip False on VSC readyToUse=false"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumeReady reason)"
 		[[ "${RR_REASON}" == "DataCapturePending" ]] || die "data pending reason=${RR_REASON} (expected DataCapturePending)"
 		wait_until "root Snapshot Ready=False mirror" \
 			bash -c "[[ \$(kubectl -n '${NS}' get '${SNAP_RES}' '${SNAP}' -o json | jq -r '([.status.conditions[]?|select(.type==\"Ready\")][0].status)//\"\"') == False ]]" \
@@ -2468,7 +2462,7 @@ log "15-chunk-deleted: done"
 # ---------------------------------------------------------------------------
 # The orphan demo-pvc data leg is durable via a retained VolumeSnapshotContent referenced by the root
 # content dataRefs[]; the CSI VolumeSnapshot is only a visibility leaf. Deleting the retained VSC is a
-# real data loss: the root content must flip VolumesReady=False/ArtifactMissing (no stale Ready=True
+# real data loss: the root content must flip VolumeReady=False/ArtifactMissing (no stale Ready=True
 # over a missing data artifact). Non-recoverable (Retain means CSI will not recreate it).
 begin_stage "16-orphan-vsc-deleted"
 resolve_main_tree_handles
@@ -2485,10 +2479,10 @@ else
 	VSC_DEL_OUT="$(kubectl delete "${VSC_RES}" "${ORPHAN_VSC}" --wait=false 2>&1)"; VSC_DEL_RC=$?
 	printf '%s\n' "${VSC_DEL_OUT}" >"${CDIR}/delete-stderr.txt"
 	if [[ "${VSC_DEL_RC}" -eq 0 ]]; then
-		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} VolumesReady=False after orphan VSC delete" \
-			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-			|| die "16: root content VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
-		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" VolumesReady reason)"
+		wait_until_to "${INVALIDATION_WAIT_SEC}" "root content ${ROOT_CONTENT} VolumeReady=False after orphan VSC delete" \
+			bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${ROOT_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+			|| die "16: root content VolumeReady did not flip False within ${INVALIDATION_WAIT_SEC}s after orphan VSC delete (artifact wake-up + revalidation both failed to fire)"
+		RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${ROOT_CONTENT}")" VolumeReady reason)"
 		[[ "${RR_REASON}" == "ArtifactMissing" ]] && note "16: orphan VSC deletion surfaced ArtifactMissing at root" \
 			|| die "16: orphan VSC missing reason=${RR_REASON} (expected ArtifactMissing)"
 		wait_until_to "${INVALIDATION_WAIT_SEC}" "root Snapshot ${SNAP} Ready=False after orphan VSC delete" \
@@ -2518,10 +2512,10 @@ elif [[ -z "${DATA_VSC}" ]]; then
 	note "no VSC dataRef to delete; skipped"
 	save_artifacts "10-vsc-missing" "${NS}"
 elif kubectl delete "${VSC_RES}" "${DATA_VSC}" --wait=false 2>/dev/null; then
-	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} VolumesReady=False (artifact missing)" \
-		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumesReady\")][0].status)//\"\"') == False ]]" \
-		|| die "content ${DATA_CONTENT} VolumesReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
-	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumesReady reason)"
+	wait_until_to "${INVALIDATION_WAIT_SEC}" "content ${DATA_CONTENT} VolumeReady=False (artifact missing)" \
+		bash -c "[[ \$(kubectl get '${CONTENT_RES}' '${DATA_CONTENT}' -o json | jq -r '([.status.conditions[]?|select(.type==\"VolumeReady\")][0].status)//\"\"') == False ]]" \
+		|| die "content ${DATA_CONTENT} VolumeReady did not flip False within ${INVALIDATION_WAIT_SEC}s after VSC delete (artifact-missing not detected)"
+	RR_REASON="$(cond_field "$(get_json "${CONTENT_RES}" "" "${DATA_CONTENT}")" VolumeReady reason)"
 	[[ "${RR_REASON}" == "ArtifactMissing" ]] || die "missing-artifact reason=${RR_REASON} (expected ArtifactMissing)"
 	[[ -n "${SIBLING_CONTENT}" && "${SIBLING_CONTENT}" != "${DATA_CONTENT}" ]] && { content_ready_true "${SIBLING_CONTENT}" \
 		&& note "sibling isolation held under VSC delete" || die "sibling content ${SIBLING_CONTENT} not Ready under VSC delete (isolation broken)"; }

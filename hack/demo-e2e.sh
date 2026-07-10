@@ -81,16 +81,15 @@ PVC_A="pvc-a"
 PVC_B="pvc-b"
 BIND_IMAGE="${DEMO_E2E_BIND_IMAGE:-registry.k8s.io/pause:3.9}"
 
-SNAP_RES="snapshots.storage.deckhouse.io"
-CONTENT_RES="snapshotcontents.storage.deckhouse.io"
-VCR_RES="volumecapturerequests.storage.deckhouse.io"
+SNAP_RES="snapshots.state-snapshotter.deckhouse.io"
+CONTENT_RES="snapshotcontents.state-snapshotter.deckhouse.io"
+VCR_RES="volumecapturerequests.storage-foundation.deckhouse.io"
 VSC_RES="volumesnapshotcontents.snapshot.storage.k8s.io"
 CSI_VS_RES="volumesnapshots.snapshot.storage.k8s.io"
 MCR_RES="manifestcapturerequests.state-snapshotter.deckhouse.io"
 MCP_RES="manifestcheckpoints.state-snapshotter.deckhouse.io"
 OK_RES="objectkeepers.deckhouse.io"
-STORAGE_API="storage.deckhouse.io/v1alpha1"
-STUB_ANN="state-snapshotter.deckhouse.io/volume-capture-stub-pvcs"
+STORAGE_API="state-snapshotter.deckhouse.io/v1alpha1"
 SUBAPI="subresources.state-snapshotter.deckhouse.io"
 SUBVER="v1alpha1"
 
@@ -585,19 +584,12 @@ assert_at_most_one_vcr() {
 	fi
 }
 
-assert_no_stub_annotation() {
-	if kubectl -n "${NS}" get "${SNAP_RES}" "$1" -o json | jq -e --arg k "${STUB_ANN}" '.metadata.annotations[$k] != null' >/dev/null 2>&1; then
-		log "ERROR: Snapshot $1 must not use stub ${STUB_ANN}"
-		exit 1
-	fi
-}
-
 assert_vsc_owned_by_content() {
 	local cuid
 	cuid="$(content_uid "$2")"
 	kubectl get "${VSC_RES}" "$1" -o json | jq -e --arg cn "$2" --arg cu "${cuid}" \
 		'[.metadata.ownerReferences[]?
-			| select(.apiVersion == "storage.deckhouse.io/v1alpha1" and .kind == "SnapshotContent"
+			| select(.apiVersion == "state-snapshotter.deckhouse.io/v1alpha1" and .kind == "SnapshotContent"
 				and .name == $cn and .uid == $cu)] | length >= 1' >/dev/null
 }
 
@@ -830,8 +822,8 @@ log "Artifacts: ${RUN_ARTIFACT_DIR}"
 # --- 00-preflight ---
 begin_stage "00-preflight"
 kubectl get storageclass "${STORAGE_CLASS}" >/dev/null
-kubectl get crd snapshots.storage.deckhouse.io snapshotcontents.storage.deckhouse.io >/dev/null
-kubectl get crd volumecapturerequests.storage.deckhouse.io >/dev/null
+kubectl get crd snapshots.state-snapshotter.deckhouse.io snapshotcontents.state-snapshotter.deckhouse.io >/dev/null
+kubectl get crd volumecapturerequests.storage-foundation.deckhouse.io >/dev/null
 kubectl get crd volumesnapshots.snapshot.storage.k8s.io volumesnapshotcontents.snapshot.storage.k8s.io >/dev/null
 if kubectl get crd objectkeepers.deckhouse.io >/dev/null 2>&1; then
 	HAS_OBJECTKEEPER=1
@@ -914,7 +906,6 @@ spec: {}
 EOF
 wait_until "child Snapshot bound" snapshot_bound "${CHILD_SNAP}"
 CHILD_CONTENT="$(kubectl -n "${NS}" get "${SNAP_RES}" "${CHILD_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}')"
-assert_no_stub_annotation "${CHILD_SNAP}"
 log "child content=${CHILD_CONTENT}"
 finish_stage "02-child-created" "PASS" "child Snapshot applied and bound" "SnapshotContent exists" "child-created" "lifecycle" "${CHILD_SNAP}"
 
@@ -975,7 +966,6 @@ wait_until "root Snapshot bound" snapshot_bound "${ROOT_SNAP}"
 ROOT_CONTENT="$(kubectl -n "${NS}" get "${SNAP_RES}" "${ROOT_SNAP}" -o jsonpath='{.status.boundSnapshotContentName}')"
 ROOT_SNAP_UID="$(kubectl -n "${NS}" get "${SNAP_RES}" "${ROOT_SNAP}" -o jsonpath='{.metadata.uid}')"
 merge_child_graph_into_root "${ROOT_SNAP}" "${CHILD_SNAP}" "${CHILD_CONTENT}"
-assert_no_stub_annotation "${ROOT_SNAP}"
 ROOT_VCR="$(vcr_name_for_content "${ROOT_CONTENT}")"
 if vcr_exists "${ROOT_VCR}" && vcr_json "${ROOT_VCR}" | jq -r '.spec.targets[]?.uid // empty' | grep -qx "${PVC_A_UID}"; then
 	log "WARN: deleting premature root VCR ${ROOT_VCR} (child-covered pvc-a before residual pvc-b)"

@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -94,6 +95,12 @@ var _ = BeforeSuite(func() {
 		ErrorIfCRDPathMissing: false, // Will be set to true once CRDs are verified
 		// BinaryAssetsDirectory can be set via KUBEBUILDER_ASSETS env var
 		// or will be downloaded automatically by envtest
+		//
+		// This suite assumes an ISOLATED envtest apiserver: the AfterEach cleanup blanket-deletes
+		// cluster-scoped ManifestCheckpoints and ret-* ObjectKeepers (the empty MCP spec no longer
+		// carries a namespace to filter on). Pin UseExistingCluster=false so the USE_EXISTING_CLUSTER
+		// env var can never point that destructive cleanup at a real, shared cluster.
+		UseExistingCluster: ptr.To(false),
 	}
 
 	var err error

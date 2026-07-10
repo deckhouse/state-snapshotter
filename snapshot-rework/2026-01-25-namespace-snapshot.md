@@ -1,10 +1,10 @@
 # Полный флоу NamespaceSnapshot: создание, экспорт, импорт, восстановление
 
-> **Продуктовое ТЗ (полный сценарий):** этот документ — описание целевого end-to-end потока, включая **`NamespaceSnapshotContent`**, дочерние снимки, экспорт/импорт и ObjectKeeper. В дереве [`docs/state-snapshotter-rework/`](../docs/state-snapshotter-rework/) может параллельно вестись **суженный** инженерный трек (MVP); при расхождении приоритет определяется явным ADR/обновлением спеки, а не «тихой» подменой ТЗ снизу.
+> **Продуктовое ТЗ (полный сценарий):** этот документ — описание целевого end-to-end потока, включая **`NamespaceSnapshotContent`**, дочерние снимки, экспорт/импорт и ObjectKeeper. В дереве [`docs/internal/state-snapshotter-rework/`](../docs/internal/state-snapshotter-rework/) может параллельно вестись **суженный** инженерный трек (MVP); при расхождении приоритет определяется явным ADR/обновлением спеки, а не «тихой» подменой ТЗ снизу.
 >
-> Ссылки на модуль: [`spec/system-spec.md`](../docs/state-snapshotter-rework/spec/system-spec.md), [`design/implementation-plan.md`](../docs/state-snapshotter-rework/design/implementation-plan.md). Диаграмма связей: [`unified-snapshot-detailed.png`](unified-snapshot-detailed.png).
+> Ссылки на модуль: [`spec/system-spec.md`](../docs/internal/state-snapshotter-rework/spec/system-spec.md), [`design/implementation-plan.md`](../docs/internal/state-snapshotter-rework/design/implementation-plan.md). Диаграмма связей: [`unified-snapshot-detailed.png`](unified-snapshot-detailed.png).
 >
-> **Transition note:** CSD examples in this historical draft may use `resourceCRDName` / `snapshotCRDName`. The current implementable CSD contract is GVK-only (`source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind`, `priority`) and is defined in `docs/state-snapshotter-rework/spec/system-spec.md`.
+> **Transition note:** CSD examples in this historical draft may use `resourceCRDName` / `snapshotCRDName`. The current implementable CSD contract is GVK-only (`source.apiVersion/source.kind`, `snapshot.apiVersion/snapshot.kind`, `priority`) and is defined in `docs/internal/state-snapshotter-rework/spec/system-spec.md`.
 
 Этот документ описывает жизненный цикл снимка namespace на примере namespace `demo`, содержащего различные типы ресурсов.
 В документе опущены детали реализации ownerReferences и ObjectKeeper как удержания артефактов. Общее правило такое:

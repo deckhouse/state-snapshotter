@@ -30,12 +30,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// condManifestsArchived is the subtree-latch contract condition (Commit 3), mirrored onto Snapshot.
-const condManifestsArchived = storagev1alpha1.ConditionManifestsArchived
+// rootManifestCaptured reads the root Snapshot's manifest-leg latch
+// (status.captureState.commonController.manifestCaptured), the core-internal monotonic bool that replaced
+// the former ManifestsArchived condition. Returns (value, found).
+func rootManifestCaptured(obj *unstructured.Unstructured) (captured bool, found bool) {
+	return snapshotCommonControllerLatch(obj, "manifestCaptured")
+}
 
 // Hook-managed capture RBAC identifiers — MUST match hooks/go/040-namespace-capture-rbac and
 // templates/controller/rbac-for-us.yaml.
@@ -71,9 +73,29 @@ func getRootOwnManifests(ctx context.Context, ns, snap string) ([]unstructured.U
 	return decodeManifestArray(body)
 }
 
-// waitRootArchived waits until the root Snapshot mirrors ManifestsArchived=True.
+// waitRootArchived waits until the root Snapshot's manifest-leg latch
+// (status.captureState.commonController.manifestCaptured) flips to true.
 func waitRootArchived(ctx context.Context, ns, snap string, timeout time.Duration) error {
-	return waitObjectCondition(ctx, snapshotGVR, ns, snap, condManifestsArchived, "True", timeout)
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, err := getResource(ctx, snapshotGVR, ns, snap)
+		if err == nil {
+			if captured, found := rootManifestCaptured(obj); found && captured {
+				return nil
+			} else {
+				last = fmt.Sprintf("found=%v captured=%v", found, captured)
+			}
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for Snapshot %s/%s manifestCaptured=true; last: %s", ns, snap, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // applyConfigMap returns a simple namespaced ConfigMap (a guaranteed-included root manifest target).
@@ -90,12 +112,43 @@ func configMapObject(ns, name string, data map[string]interface{}) *unstructured
 // transient RBAC hook lifecycle, discovery inclusion/exclusion, raw secret capture, spec immutability,
 // and (env-gated) arbitrary-CR discovery and child degradation with the ManifestsArchived latch.
 func namespaceCaptureReworkSpecs() {
-	captureRBACHookSpecs()  // E1
-	rawSecretsSpecs()       // E4
-	inclusionRuleSpecs()    // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
-	specImmutabilitySpecs() // E6
-	arbitraryCRSpecs()      // E2 (env-gated)
-	childDegradationSpecs() // E3 (env-gated)
+	captureRBACHookSpecs()    // E1
+	rawSecretsSpecs()         // E4
+	inclusionRuleSpecs()      // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
+	specImmutabilitySpecs()   // E6
+	eagerShellDeletionSpecs() // Block 0 (eager shell / pre-Planned deletion no-wedge)
+	arbitraryCRSpecs()        // E2 (env-gated)
+	childDegradationSpecs()   // E3 (env-gated)
+}
+
+// Block 0 — eager content shell / pre-Planned deletion. With the eager-shell fix (content-single-writer
+// design §9) the SnapshotContent object is created AND bound as soon as the Snapshot exists, decoupled from
+// the domain phase>=Planned barrier. A Snapshot deleted while still pre-Planned must NOT wedge on the
+// eager shell's parent-protect finalizer: the binder deletion path removes it regardless of capture phase.
+// The deterministic pre-Planned timing is pinned by the controller integration test
+// (test/integration/snapshot_deletion_test.go); on a live cluster the Planned transition is too fast to
+// pin, so this spec asserts the timing-robust no-wedge invariant (create -> immediate delete -> fully GC'd).
+func eagerShellDeletionSpecs() {
+	Context("Block 0: eager content shell / pre-Planned deletion", func() {
+		It("does not wedge a root Snapshot deleted immediately after creation (no finalizer wedge)", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+
+			ns := uniqueNS("eager-del")
+			Expect(ensureNamespace(ctx, ns)).To(Succeed())
+			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
+
+			By("Applying a capturable ConfigMap")
+			Expect(applyObjects(ctx, []*unstructured.Unstructured{configMapObject(ns, "b0-cm", map[string]interface{}{"a": "b"})}, ns)).To(Succeed())
+
+			By("Creating and immediately deleting the root Snapshot (best-effort before Planned)")
+			Expect(createRootSnapshot(ctx, ns, "b0-del")).To(Succeed())
+			Expect(suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(ctx, "b0-del", metav1.DeleteOptions{})).To(Succeed())
+
+			By("Asserting the Snapshot is fully removed (the eager content shell's finalizer never wedges deletion)")
+			assertResourceGone(ctx, snapshotGVR, ns, "b0-del", 2*time.Minute)
+		})
+	})
 }
 
 // E1 — transient per-namespace RBAC hook (040-namespace-capture-rbac).
@@ -139,7 +192,7 @@ func captureRBACHookSpecs() {
 			assertResourceGone(ctx, roleBindingGVR, ns, captureRoleBindingName, suiteCfg.captureReadyTO)
 		})
 
-		It("does not create a capture RoleBinding for import- or static-bind snapshots", func() {
+		It("does not create a capture RoleBinding for import snapshots", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
@@ -148,20 +201,12 @@ func captureRBACHookSpecs() {
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
 			importSnap := &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "storage.deckhouse.io/v1alpha1",
+				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata":   map[string]interface{}{"name": "e1-import", "namespace": ns},
-				"spec":       map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}},
-			}}
-			staticSnap := &unstructured.Unstructured{Object: map[string]interface{}{
-				"apiVersion": "storage.deckhouse.io/v1alpha1",
-				"kind":       "Snapshot",
-				"metadata":   map[string]interface{}{"name": "e1-static", "namespace": ns},
-				"spec":       map[string]interface{}{"source": map[string]interface{}{"snapshotContentName": "no-such-content"}},
+				"spec":       map[string]interface{}{"mode": "Import"},
 			}}
 			_, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, importSnap, metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			_, err = suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, staticSnap, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
 
 			By("Asserting no capture RoleBinding ever appears in the namespace")
@@ -449,11 +494,11 @@ func specImmutabilitySpecs() {
 
 			Expect(createRootSnapshot(ctx, ns, "e6-snap")).To(Succeed())
 
-			By("Attempting to mutate spec.snapshotClassName -> rejected by the CEL immutability rule")
+			By("Attempting to mutate spec.resourceSelector -> rejected by the CEL immutability rule")
 			Eventually(func(g Gomega) {
 				cur, err := getResource(ctx, snapshotGVR, ns, "e6-snap")
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(unstructured.SetNestedField(cur.Object, "some-class", "spec", "snapshotClassName")).To(Succeed())
+				g.Expect(unstructured.SetNestedStringMap(cur.Object, map[string]string{"app": "mutated"}, "spec", "resourceSelector", "matchLabels")).To(Succeed())
 				_, updErr := suiteDyn.Resource(snapshotGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
 				g.Expect(updErr).To(HaveOccurred(), "spec update must be rejected (immutable)")
 			}).WithTimeout(30 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
@@ -573,9 +618,9 @@ func childDegradationSpecs() {
 			Consistently(func(g Gomega) {
 				root, err := getResource(ctx, snapshotGVR, ns, "e3-snap")
 				g.Expect(err).NotTo(HaveOccurred())
-				st, _, found := conditionStatus(root, condManifestsArchived)
+				captured, found := rootManifestCaptured(root)
 				g.Expect(found).To(BeTrue())
-				g.Expect(st).To(Equal("True"), "ManifestsArchived must remain latched True through degradation")
+				g.Expect(captured).To(BeTrue(), "manifestCaptured must remain latched true through degradation")
 			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
 
 			By("Asserting the capture RoleBinding is NOT re-created (RBAC keyed on the latch, not Ready)")

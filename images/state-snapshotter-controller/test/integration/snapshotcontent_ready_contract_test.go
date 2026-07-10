@@ -41,7 +41,7 @@ import (
 )
 
 // Ready Contract on the current condition model: SnapshotContent owns Ready, derived from
-// ManifestsReady (its own ManifestCheckpoint) AND VolumesReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
+// ManifestsReady (its own ManifestCheckpoint) AND DataReady (its own data refs) AND ChildrenReady (direct child SnapshotContents).
 // The controller only manages the common SnapshotContent GVK, so these specs operate on the common type and
 // drive readiness through a real Ready ManifestCheckpoint (never force-writing the content Ready condition).
 var _ = Describe("Integration: SnapshotContentController - Ready Contract", Serial, func() {
@@ -83,6 +83,21 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 			uid = string(fresh.UID)
 			g.Expect(uid).NotTo(BeEmpty())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// retainContentSpec's spec.snapshotRef is a core Snapshot, so every content here is a namespace-root
+		// content subject to the monotonic, lowest-priority subtreeManifestsPersisted gate that only the
+		// (absent) snapshot reconciler latches. Seed it to its satisfied value so readiness is driven purely
+		// by the ManifestsReady/ChildrenReady legs under test; without it the gate pins Ready=False forever.
+		// (The orphan-link ChildrenReady gate is vacuously open here: the owning Snapshot is never created, so
+		// it declares no orphan VolumeSnapshot leaves — the former residualVolumeCapture seed is gone.)
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &storagev1alpha1.SnapshotContent{}
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: name}, c); err != nil {
+				return err
+			}
+			c.Status.SubtreeManifestsPersisted = true
+			return k8sClient.Status().Update(ctx, c)
+		})).To(Succeed())
 		return name, uid
 	}
 
@@ -138,7 +153,7 @@ var _ = Describe("Integration: SnapshotContentController - Ready Contract", Seri
 		})).To(Succeed())
 
 		// ChildrenReady gate: parent must stay Ready=False while the child is not Ready, even though the
-		// parent's own ManifestsReady/VolumesReady are satisfied.
+		// parent's own ManifestsReady/DataReady are satisfied.
 		Consistently(func(g Gomega) {
 			reconcile(childName)
 			reconcile(parentName)

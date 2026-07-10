@@ -1,0 +1,412 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
+  name: snapshots.state-snapshotter.deckhouse.io
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: Snapshot
+    listKind: SnapshotList
+    plural: snapshots
+    shortNames:
+    - snap
+    singular: snapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.boundSnapshotContentName
+      name: Content
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: 'Snapshot requests a namespace state/configuration snapshot (MVP:
+          design snapshot-controller.md).'
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A
+              snapshot is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the
+              spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
+              UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
+              no recapture (a new capture requires a new Snapshot).
+            properties:
+              mode:
+                default: Capture
+                description: |-
+                  Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
+                    - Capture (default): dynamic namespace capture from the live cluster.
+                    - Import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
+                      plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
+                enum:
+                - Capture
+                - Import
+                type: string
+              resourceSelector:
+                description: |-
+                  ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
+                  dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded via
+                  CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of the built-in
+                  capture exclusions and can only narrow the capture, never force-capture controller/own machinery.
+
+                  Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together, so a single
+                  selector can both include and exclude - e.g. matchLabels {app: myapp} together with a NotIn/DoesNotExist
+                  matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
+                  When omitted, all resources are captured (no filtering).
+
+                  Ignored for non-Capture modes (Import): those do not list the live namespace.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+          status:
+            properties:
+              boundSnapshotContentName:
+                description: |-
+                  BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
+                  The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
+                type: string
+              captureState:
+                description: |-
+                  CaptureState collects internal capture signals. On the namespace-root Snapshot the core-written
+                  commonController.manifestCaptured is present (read by the RBAC hook); the root ALSO carries
+                  domainSpecificController, written by the in-process namespace-domain (SDK): manifestCaptureRequestName
+                  (the namespace MCR) and phase, plus the core-published excludedRefs aggregate input. There is no
+                  volumeCaptureRequestName on the root (a namespace has no data leg of its own).
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
+                      subtreePlanned:
+                        description: |-
+                          SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
+                          barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
+                          true — i.e. the whole subtree has finished planning (objects + refs published, not necessarily
+                          captured/Ready). It is snapshot-native and main-written (the aggregator computes it by resolving the
+                          owner's direct children from status.childrenSnapshotRefs and reading each child's latch, then writes
+                          it SIDEWAYS onto this snapshot; content has no phase, so this cannot live on the SnapshotContent).
+                          The root's orphan/residual-PVC wave gates on its direct children's SubtreePlanned so an orphan PVC is
+                          evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
+                          It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
+                          planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      excludedRefs:
+                        description: |-
+                          ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+                          (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+                          folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+                          aggregate or the top-level mirror (both are core-owned).
+
+                          Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+                          distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
+                          (no live capture happens).
+                        items:
+                          description: |-
+                            ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                            status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                            the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                            state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                            snapshot. Namespace is implicit (the snapshot's namespace).
+
+                            Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                            excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                            created for it, so it cannot be descended into to recover a per-node view later.
+                          properties:
+                            apiVersion:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
+              childrenSnapshotRefs:
+                description: |-
+                  ChildrenSnapshotRefs lists child snapshot objects (strict ref with apiVersion/kind/name)
+                  in the N2b run tree. Generic reconcile resolves each child with one Get by ref GVK (no demo-kind
+                  branching and no registry scan for child selection); it is not limited to Snapshot.
+                  Child namespace is implicit and always equals parent Snapshot namespace.
+                  Populated by domain controllers or merge helpers that own graph edges.
+                items:
+                  description: |-
+                    SnapshotChildRef identifies one child snapshot object in the run tree (element of
+                    status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
+                    generic code resolves the object with a single client Get — no registry scan and no ambiguity.
+
+                    Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
+                    in the same namespace as that parent. Namespace is implicit and always taken from parent
+                    Snapshot namespace. Cross-namespace refs are not part of this model.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+              conditions:
+                description: Conditions represent the latest observations (Ready,
+                  Bound, Failed, etc.).
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              excludedRefs:
+                description: |-
+                  ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+                  (the whole-subtree set of source objects vetoed out of this snapshot). It is written ONLY by the
+                  core, exactly as it mirrors Ready from the bound content. It is a user-facing audit view — the
+                  durable truth lives on the cluster-scoped SnapshotContent (which outlives this namespaced object).
+                items:
+                  description: |-
+                    ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                    status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                    the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                    state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                    snapshot. Namespace is implicit (the snapshot's namespace).
+
+                    Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                    excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                    created for it, so it cannot be descended into to recover a per-node view later.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              sourceRef:
+                description: |-
+                  SourceRef is the provenance of what this root Snapshot captured. On the namespace-root Snapshot
+                  it is the captured Namespace (kind=Namespace), written by the in-process namespace-domain via the SDK
+                  (PublishSnapshotSource). It is a self-contained provenance block (read by d8-cli without joining spec
+                  and a separate uid); it is NOT a restore directive — the import target namespace comes from
+                  spec/targetNamespace, not from this field. (This is the status-side source reference, present on every
+                  snapshot kind; the optional spec.sourceRef on domain snapshots is a distinct lighter ref.)
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the source object (namespaced sources
+                      only).
+                    type: string
+                  uid:
+                    description: UID of the captured live source object (best-effort;
+                      used by d8-cli for import-mode recreation).
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

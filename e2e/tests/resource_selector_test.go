@@ -112,7 +112,7 @@ func createRootSnapshotWithSelector(ctx context.Context, ns, name string, matchL
 		selector["matchExpressions"] = matchExpressions
 	}
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"name":      name,
@@ -466,7 +466,7 @@ func resourceSelectorVolumeDataSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 
 			// The dropped PVC's absence is a negative: a single point-in-time read could miss a dataRef that
-			// a broken controller publishes a beat after the kept one. Content is already Ready (VolumesReady
+			// a broken controller publishes a beat after the kept one. Content is already Ready (DataReady
 			// gated above), so assert the dropped PVC stays absent across a short window rather than once.
 			By("Asserting the dropped PVC is captured nowhere (no dataRef), and stays absent")
 			Consistently(func(g Gomega) {

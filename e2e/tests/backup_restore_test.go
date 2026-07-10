@@ -137,9 +137,7 @@ func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []me
 		"kind":       "DemoVirtualMachineSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(demoVMSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -150,8 +148,8 @@ func createImportVMSnapshot(ctx context.Context, ns, name string, ownerRefs []me
 }
 
 // createImportDiskSnapshot creates an import-mode DemoVirtualDiskSnapshot. Import is signalled by the
-// unified empty marker spec.source.import: {} — no sourceRef (the live disk is absent on import) and no
-// DataImport name on the leaf: the binder finds the DataImport by reverse-lookup on spec.targetRef.
+// enum marker spec.mode: Import — no sourceRef (the live disk is absent on import) and no DataImport name
+// on the leaf: the binder finds the DataImport by reverse-lookup on spec.snapshotRef.
 func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []metav1.OwnerReference) error {
 	meta := map[string]interface{}{
 		"name":      name,
@@ -165,9 +163,7 @@ func createImportDiskSnapshot(ctx context.Context, ns, name string, ownerRefs []
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(demoDiskSnapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -185,14 +181,15 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs 
 	if len(ownerRefs) > 0 {
 		meta["ownerReferences"] = ownerReferencesField(ownerRefs)
 	}
+	// Import is the same enum spec.mode: Import as on every other snapshot kind (the fork CRD hosts the
+	// field); source is omitted entirely — it is required only when mode != Import (symmetry: the data
+	// artifact comes from the owning DataImport, there is no CSI source).
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": vsAPIVersion,
 		"kind":       "VolumeSnapshot",
 		"metadata":   meta,
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(volumeSnapshotGVR).Namespace(ns).Create(ctx, vs, metav1.CreateOptions{})
@@ -202,22 +199,26 @@ func createImportVolumeSnapshot(ctx context.Context, ns, name string, ownerRefs 
 	return nil
 }
 
-func createDataImport(ctx context.Context, ns, name, group, kind, leafName, storageClassName, size, volumeMode string) error {
-	spec := map[string]interface{}{
-		"ttl":              bkDataImportTTL,
+func createDataImport(ctx context.Context, ns, name, apiVersion, kind, leafName, storageClassName, size, volumeMode string) error {
+	storageParams := map[string]interface{}{
 		"storageClassName": storageClassName,
 		"size":             size,
-		"targetRef": map[string]interface{}{
-			"group": group,
-			"kind":  kind,
-			"name":  leafName,
-		},
 	}
 	if volumeMode != "" {
-		spec["volumeMode"] = volumeMode
+		storageParams["volumeMode"] = volumeMode
+	}
+	spec := map[string]interface{}{
+		"ttl":  bkDataImportTTL,
+		"mode": "PopulateData",
+		"snapshotRef": map[string]interface{}{
+			"apiVersion": apiVersion,
+			"kind":       kind,
+			"name":       leafName,
+		},
+		"storageParams": storageParams,
 	}
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
 		"kind":       "DataImport",
 		"metadata": map[string]interface{}{
 			"name":      name,
@@ -298,7 +299,7 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 		obj, gerr := getResource(ctx, dataImportGVR, ns, name)
 		if gerr == nil {
 			st, reason, found := conditionStatus(obj, "Completed")
-			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "dataArtifactRef")
+			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
 			if found && st == "True" && artFound && len(artifact) > 0 {
 				return nil
 			}
@@ -318,8 +319,11 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 func ensureUploadRBAC(ctx context.Context, importNS, clientSANamespace, clientSAName string) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: bkBackupClientSA, Namespace: importNS},
+		// The data-importer authorizes the upload via a SubjectAccessReview against the DataImport's own
+		// API group (storage-foundation.deckhouse.io) + the "download" subresource; the granted group must
+		// match dataImportGVR.Group or the SAR denies and the importer returns 403 on the PUT.
 		Rules: []rbacv1.PolicyRule{{
-			APIGroups: []string{"storage.deckhouse.io"},
+			APIGroups: []string{dataImportGVR.Group},
 			Resources: []string{"dataimports/download"},
 			Verbs:     []string{"create"},
 		}},
@@ -547,7 +551,7 @@ func materializeImportNode(ctx context.Context, ns string, node *importNode, par
 		if perr != nil {
 			return perr
 		}
-		if err := createDataImport(ctx, ns, node.name, node.group, node.kind, node.name, scName, scSize, scMode); err != nil {
+		if err := createDataImport(ctx, ns, node.name, node.apiVersion, node.kind, node.name, scName, scSize, scMode); err != nil {
 			return err
 		}
 	}
@@ -562,7 +566,7 @@ func materializeImportNode(ctx context.Context, ns string, node *importNode, par
 
 func materializeImportTree(ctx context.Context, ns, rootName string, rootUID types.UID, children []*importNode) error {
 	for _, child := range children {
-		parentRef := importNodeOwnerRef("storage.deckhouse.io/v1alpha1", "Snapshot", rootName, rootUID, child.kind == "VolumeSnapshot")
+		parentRef := importNodeOwnerRef("state-snapshotter.deckhouse.io/v1alpha1", "Snapshot", rootName, rootUID, child.kind == "VolumeSnapshot")
 		if err := materializeImportNode(ctx, ns, child, &parentRef); err != nil {
 			return err
 		}
@@ -620,7 +624,7 @@ func collectDataLeaves(nodes []*importNode) []*importNode {
 
 func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode) error {
 	for _, leaf := range leaves {
-		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, 15*time.Minute)
+		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
 		if werr != nil {
 			return fmt.Errorf("DataImport %s Ready: %w", leaf.name, werr)
 		}
@@ -628,7 +632,7 @@ func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode
 		if err := uploadBlockData(ctx, importNS, url, srcFile); err != nil {
 			return err
 		}
-		if err := waitDataImportCompleted(ctx, importNS, leaf.name, 15*time.Minute); err != nil {
+		if err := waitDataImportCompleted(ctx, importNS, leaf.name, suiteCfg.dataTransferTO); err != nil {
 			return err
 		}
 	}
@@ -919,7 +923,12 @@ func importVariantsSpecs() {
 		})
 
 		It("imports VolumeSnapshot, DemoVirtualDiskSnapshot, DemoVirtualMachineSnapshot, and full ns in parallel", func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Minute)
+			// The four variants run in parallel; the longest (full namespace) streams three data leaves
+			// sequentially, each bounded by two dataTransferTO waits (Ready + Completed), then does the
+			// restore-path Snapshot/content/children readiness at snapshotReadyTO. Budget the parent for
+			// that worst-case single-variant path plus setup/upload overhead so a wedged DataImport fails on
+			// its own dataTransferTO deadline rather than dragging on a giant fixed cap.
+			ctx, cancel := context.WithTimeout(context.Background(), 6*suiteCfg.dataTransferTO+3*suiteCfg.snapshotReadyTO+10*time.Minute)
 			defer cancel()
 
 			specs := []importVariantSpec{

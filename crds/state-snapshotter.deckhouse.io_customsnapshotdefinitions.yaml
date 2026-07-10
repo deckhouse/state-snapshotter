@@ -2,10 +2,10 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  labels:
-    module: state-snapshotter
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
   name: customsnapshotdefinitions.state-snapshotter.deckhouse.io
 spec:
   group: state-snapshotter.deckhouse.io
@@ -19,8 +19,17 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.weight
+      name: Weight
+      type: integer
     - jsonPath: .status.conditions[?(@.type=="Accepted")].status
       name: Accepted
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="AccessGranted")].status
+      name: AccessGranted
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
     name: v1alpha1
     schema:
@@ -57,23 +66,18 @@ spec:
                   that materializes Source.
                 minLength: 1
                 type: string
-              dataBacked:
-                description: |-
-                  DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
-                  wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
-                  kinds (no volume data) set false.
-                type: boolean
               kind:
                 description: Kind is the kind of the snapshot resource that materializes
                   Source.
                 minLength: 1
                 type: string
-              priority:
-                description: Priority orders universal traversal across snapshot kinds.
-                  Higher values run first.
-                format: int32
-                minimum: 0
-                type: integer
+              requiresDataArtifact:
+                description: |-
+                  RequiresDataArtifact marks that this snapshot kind carries a volume data leg: the generic
+                  controller must wait for the data artifact (capture, SnapshotContent.status.data.artifact) or the
+                  matching DataImport (import) before it reports Ready. Manifest-only snapshot kinds (no volume
+                  data) set false.
+                type: boolean
               source:
                 description: Source is the GVK of the domain resource being snapshotted.
                 properties:
@@ -87,6 +91,15 @@ spec:
                 - apiVersion
                 - kind
                 type: object
+              weight:
+                description: |-
+                  Weight orders universal traversal across snapshot kinds by ascending value: lower weights run
+                  first (earlier traversal wave), like FlowSchema.spec.matchingPrecedence and the Deckhouse-native
+                  NodeGroupConfiguration.spec.weight. It is NOT a Kubernetes PriorityClass value (where a higher
+                  number wins) — the ordering here is the opposite.
+                format: int32
+                minimum: 0
+                type: integer
             required:
             - apiVersion
             - kind
@@ -95,7 +108,13 @@ spec:
           status:
             properties:
               conditions:
-                description: Conditions include Accepted, RBACReady, Ready (see ADR).
+                description: |-
+                  Conditions carry three distinct signals, each with a single writer:
+                    - Accepted — the spec is valid and registrable (written by the CSD reconciler);
+                    - AccessGranted — the domain RBAC has been applied (written by the 030-domain-rbac hook);
+                    - Ready — the aggregate Ready = Accepted && AccessGranted.
+                  Accepted and Ready diverge when Accepted=True but AccessGranted=False (spec accepted, RBAC not yet
+                  applied) → Ready=False; the printer columns surface all three so this is visible at a glance.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

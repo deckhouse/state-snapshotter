@@ -17,7 +17,6 @@ limitations under the License.
 package snapshot
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -26,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
 const (
@@ -33,14 +34,12 @@ const (
 	// while a parent Snapshot exists. This ensures that SnapshotContent
 	// cannot be manually deleted (via kubectl delete) while the parent
 	// Snapshot is still alive.
-	FinalizerParentProtect = "snapshot.deckhouse.io/parent-protect"
+	FinalizerParentProtect = "state-snapshotter.deckhouse.io/parent-protect"
 	// FinalizerArtifactProtect prevents deletion of artifacts (MCP/VSC)
 	// while they are linked from SnapshotContent.
-	FinalizerArtifactProtect = "snapshot.deckhouse.io/artifact-protect"
+	FinalizerArtifactProtect = "state-snapshotter.deckhouse.io/artifact-protect"
 	// FinalizerSnapshot blocks Snapshot deletion until cleanup completes.
-	FinalizerSnapshot = "snapshot.finalizers.deckhouse.io"
-	// AnnotationParentDeleted marks SnapshotContent as detached from parent Snapshot.
-	AnnotationParentDeleted = "snapshot.deckhouse.io/parent-deleted"
+	FinalizerSnapshot = "state-snapshotter.deckhouse.io/snapshot-protection"
 )
 
 // ExtractSnapshotLike converts an unstructured object to SnapshotLike interface
@@ -518,18 +517,18 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 	if !ok {
 		return nil
 	}
-	// Variant A: status.dataRef is a single object (cardinality <=1), not a list. Return it as a
-	// 0/1-length slice so slice-based readiness/coverage helpers stay generic.
-	entry, ok := status["dataRef"].(map[string]interface{})
+	// Variant A: status.data is a single object (cardinality <=1), not a list. Return it as a
+	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The wave5 rename moved the
+	// binding under status.data and the source PVC under data.source (the standalone targetUID was dropped;
+	// the volume identity is data.source.uid). The internal DataBindingRef keeps its field names.
+	entry, ok := status["data"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
 	binding := DataBindingRef{}
-	if uid, ok := entry["targetUID"].(string); ok {
-		binding.TargetUID = uid
-	}
-	if targetRaw, ok := entry["target"].(map[string]interface{}); ok {
-		binding.Target = objectRefFromMap(targetRaw)
+	if sourceRaw, ok := entry["source"].(map[string]interface{}); ok {
+		binding.Target = objectRefFromMap(sourceRaw)
+		binding.TargetUID = binding.Target.UID
 	}
 	if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
 		binding.Artifact = objectRefFromMap(artifactRaw)
@@ -686,21 +685,18 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataSnapshotMethod() strin
 	return ""
 }
 
-// GenerateSnapshotContentName generates a deterministic name for SnapshotContent
-// based on Snapshot name and UID
+// GenerateSnapshotContentName returns the deterministic SnapshotContent name for a snapshot object, keyed
+// by its UID (unified wave4C scheme, see api/names). The snapshotName argument is retained for signature
+// compatibility but no longer part of the name (names are opaque; connectivity is via refs).
 func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
-	// Use first 8 characters of UID for uniqueness
-	uidSuffix := snapshotUID
-	if len(uidSuffix) > 8 {
-		uidSuffix = uidSuffix[:8]
-	}
-	return fmt.Sprintf("%s-content-%s", snapshotName, strings.ToLower(uidSuffix))
+	_ = snapshotName
+	return names.ContentName(types.UID(snapshotUID))
 }
 
-// GenerateObjectKeeperName generates a deterministic name for ObjectKeeper
-// for root snapshots
-func GenerateObjectKeeperName(snapshotKind, snapshotName string) string {
-	return fmt.Sprintf("ret-%s-%s", strings.ToLower(snapshotKind), snapshotName)
+// GenerateObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed
+// by its UID (unified wave4C scheme, see api/names).
+func GenerateObjectKeeperName(snapshotUID types.UID) string {
+	return names.ObjectKeeperName(snapshotUID)
 }
 
 // IsRootSnapshot checks if a snapshot is a root (has no parent ownerRef)

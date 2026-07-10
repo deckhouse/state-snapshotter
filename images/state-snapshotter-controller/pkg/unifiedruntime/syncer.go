@@ -39,7 +39,7 @@ import (
 // DedicatedControllerActivator registers a dedicated snapshot controller (one that reconciles a
 // specific snapshot kind outside GenericSnapshotBinderController, e.g. the demo domain controllers)
 // on an already-running manager. It is invoked at most once per kind, only after the kind's CSD is
-// watch-eligible (Accepted=True && RBACReady=True), so the controller's informers start with the
+// watch-eligible (Accepted=True && AccessGranted=True), so the controller's informers start with the
 // domain RBAC already granted by the Deckhouse hook — never at boot, which would deadlock cache sync.
 type DedicatedControllerActivator func(ctrl.Manager) error
 
@@ -151,16 +151,20 @@ func (s *Syncer) Sync(ctx context.Context) error {
 	// (see activateDedicatedControllersLocked). Generic watches are wired in the loop below.
 	s.activateDedicatedControllersLocked(state.ResolvedSnapshotGVKs)
 
-	// CSD spec.dataBacked is carried on the merged pairs (lost by the parallel resolved slices); index
-	// it by snapshot Kind so the binder's registry learns which kinds expect a DataImport/data artifact.
-	dataBackedByKind := make(map[string]bool, len(state.DesiredMerged))
+	// CSD spec.requiresDataArtifact is carried on the merged pairs (lost by the parallel resolved
+	// slices); index it by snapshot Kind so the binder's registry learns which kinds expect a
+	// DataImport/data artifact.
+	requiresDataArtifactByKind := make(map[string]bool, len(state.DesiredMerged))
 	for _, p := range state.DesiredMerged {
-		dataBackedByKind[p.Snapshot.Kind] = p.DataBacked
+		requiresDataArtifactByKind[p.Snapshot.Kind] = p.RequiresDataArtifact
 	}
 
 	for i := range state.ResolvedSnapshotGVKs {
 		snapGVK, contentGVK := state.ResolvedSnapshotGVKs[i], state.ResolvedContentGVKs[i]
-		s.snap.MarkDataBacked(snapGVK.Kind, dataBackedByKind[snapGVK.Kind])
+		// Both controllers hold separate GVK registries; mark them in lockstep — the binder's import path
+		// and main's capture-leg eager-init (main-owned commonController, decision #10) read the same flag.
+		s.snap.MarkRequiresDataArtifact(snapGVK.Kind, requiresDataArtifactByKind[snapGVK.Kind])
+		s.content.MarkRequiresDataArtifact(snapGVK.Kind, requiresDataArtifactByKind[snapGVK.Kind])
 		if err := s.content.AddSnapshotStatusWatch(s.mgr, snapGVK); err != nil {
 			s.log.Error(err, "add SnapshotContent snapshot status watch failed", "snapshot", snapGVK.String())
 			continue
@@ -177,7 +181,7 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				continue
 			}
 			// Domain-capture kind (demo): the dedicated planning controller owns MCR/VCR/children +
-			// ChildrenSnapshotReady, while the generic binder owns its SnapshotContent. The binder uses
+			// PlanningReady, while the generic binder owns its SnapshotContent. The binder uses
 			// its own unstructured informer and registers no field index, so it can be wired
 			// independently of the planning controller — EXCEPT in a single manager that runs both: there
 			// the planning controller's typed informer + field index must be registered first to avoid an
@@ -193,7 +197,20 @@ func (s *Syncer) Sync(ctx context.Context) error {
 					continue
 				}
 			}
+			// Mark BOTH controllers: the binder gates eager shell creation on the domain claim; main runs
+			// the capture-leg lifecycle (latches + MCR/VCR reap, decision #10) for these kinds.
 			s.snap.MarkDomainCaptureKind(snapGVK)
+			s.content.MarkDomainCaptureKind(snapGVK)
+		} else {
+			// CSD-derived kind outside the SS-internal dedicated lists (e.g. storage-foundation's
+			// VolumeSnapshot, content-single-writer design §11.5): domain-capture BY DEFINITION. Its
+			// planning controller lives out-of-process (the domain owner's manager), so no in-process
+			// activator/ordering gate applies — mark it domain-capture directly so the generic binder
+			// runs the eager capture-leg init + request lifecycle for it just like the demo domains.
+			// The kind is intentionally NOT added to DedicatedSnapshotControllerKinds (that list is
+			// SS-internal in-process activation ordering).
+			s.snap.MarkDomainCaptureKind(snapGVK)
+			s.content.MarkDomainCaptureKind(snapGVK)
 		}
 		if err := s.snap.AddWatchForPair(s.mgr, snapGVK, contentGVK); err != nil {
 			s.log.Error(err, "add Snapshot watch failed", "snapshot", snapGVK.String())

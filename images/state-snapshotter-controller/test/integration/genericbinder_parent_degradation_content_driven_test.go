@@ -89,7 +89,11 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		parent.Object["spec"] = map[string]interface{}{}
 		Expect(k8sClient.Create(ctx, parent)).To(Succeed())
 		DeferCleanup(func() { _ = client.IgnoreNotFound(k8sClient.Delete(ctx, parent)) })
-		setSnapshotChildrenSnapshotReadyCurrent(ctx, parent)
+		// phase=Finished (capture barrier 2), not just Planned: the parent has no real domain controller, and
+		// the post-bind Ready mirror holds a domain-capture Snapshot's Ready=False until Finished. The
+		// False/True flips below are driven by the child content's MCP; barrier 2 only gates the True
+		// direction, so a single Finished holds across all phases.
+		setSnapshotDomainFinishedCurrent(ctx, parent)
 
 		parentKey := types.NamespacedName{Namespace: "default", Name: "gen-parent-degrade"}
 		var parentContentName, parentContentUID string
@@ -114,6 +118,15 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		// 2. Child common SnapshotContent owned by the parent content. The SnapshotContent ownerRef is the
 		// wake-up route (mapSnapshotContentToParentContent) used by the manager's content controller; it is
 		// set non-controller so it does not collide with the parent's own controller ownerRef.
+		//
+		// spec.snapshotRef points at the already-created parent Snapshot (an existence anchor, not a real
+		// child-snapshot graph). The vanished-declared-children fold (detectLostDeclaredChildren /
+		// childOwningSnapshotExists, feat c53b390) resolves each frozen child edge's owning child snapshot
+		// live: with the default retainContentSpec() ref (a Snapshot that this fabricated test never creates)
+		// the fold would read it as DELETED and downgrade the parent mirror to Ready=False(ChildSnapshotDeleted),
+		// masking the ChildrenReady degradation this spec exercises. Pointing at a live snapshot keeps the
+		// fold inert; the child's own projections stay no-ops because that owner declares no
+		// childrenSnapshotRefs / MCR / VCR, so the seeded child status below survives.
 		childContentName := parentContentName + "-child"
 		child := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
@@ -126,6 +139,12 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 				}},
 			},
 			Spec: retainContentSpec(),
+		}
+		child.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: snapshotGVK.GroupVersion().String(),
+			Kind:       snapshotGVK.Kind,
+			Namespace:  "default",
+			Name:       "gen-parent-degrade",
 		}
 		Expect(k8sClient.Create(ctx, child)).To(Succeed())
 		DeferCleanup(func() {
@@ -141,7 +160,18 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 
 		// 3. Truth refs: parent content references the child (childrenSnapshotContentRefs) and its own MCP;
 		// child content references its own MCP. The generic binder leaves manifestCheckpointName untouched
-		// while manifestCaptureRequestName is empty, so these links are stable across the flips below.
+		// while captureState.domainSpecificController.manifestCaptureRequestName is empty, so these links are stable across the flips below.
+		//
+		// This content-driven test fabricates the content tree directly, without a real owning Snapshot
+		// graph (the child content's spec.snapshotRef points at a Snapshot that is never created here). Two
+		// core-internal, lowest-priority Ready legs therefore cannot latch on their own and must be seeded:
+		//   - subtreeManifestsPersisted: the monotonic recursive manifest latch. Its declared-vs-linked
+		//     fail-closed check resolves the owning Snapshot's childrenSnapshotRefs, which is absent here, so
+		//     it would pin Ready=False (SubtreeManifestCapturePending) forever.
+		// The orphan-link ChildrenReady gate is vacuously open here: the owning Snapshot is never created, so
+		// it declares no orphan VolumeSnapshot leaves (the former residualVolumeCapture seed is gone).
+		// This spec exercises Ready mirror/degradation via child ChildrenReady, not that gate, so we seed
+		// subtreeManifestsPersisted to its satisfied (monotonic) value; the reconciler then holds it.
 		parentMCP := "mcp-parent-degrade"
 		childMCP := "mcp-child-degrade"
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -151,6 +181,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 			}
 			c.Status.ManifestCheckpointName = parentMCP
 			c.Status.ChildrenSnapshotContentRefs = []storagev1alpha1.SnapshotContentChildRef{{Name: childContentName}}
+			c.Status.SubtreeManifestsPersisted = true
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -159,6 +190,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 				return err
 			}
 			c.Status.ManifestCheckpointName = childMCP
+			c.Status.SubtreeManifestsPersisted = true
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
@@ -214,7 +246,7 @@ var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotCont
 		Eventually(parentContentConditionIs(snapshot.ConditionChildrenReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "parent SnapshotContent.ChildrenReady must fall to False after the child content degrades")
 		Eventually(parentContentConditionIs(snapshot.ConditionReady, metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
-			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = ManifestsReady && VolumesReady && ChildrenReady)")
+			Should(Succeed(), "parent SnapshotContent.Ready must fall to False (Ready = ManifestsReady && DataReady && ChildrenReady)")
 		Eventually(parentSnapshotReadyIs(metav1.ConditionFalse), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "parent Snapshot.Ready must fall to False via SnapshotContent ChildrenReady + mirror, NOT via recursive snapshot patching")
 

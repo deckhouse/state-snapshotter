@@ -30,18 +30,29 @@ const (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=stsnapct
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Manifests",type=string,JSONPath=`.status.conditions[?(@.type=="ManifestsReady")].status`
-// +kubebuilder:printcolumn:name="Volumes",type=string,JSONPath=`.status.conditions[?(@.type=="VolumesReady")].status`
+// +kubebuilder:printcolumn:name="Data",type=string,JSONPath=`.status.conditions[?(@.type=="DataReady")].status`
 // +kubebuilder:printcolumn:name="Children",type=string,JSONPath=`.status.conditions[?(@.type=="ChildrenReady")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // SnapshotContent holds the result of a snapshot (shared carrier for multiple snapshot root kinds).
+//
+// The spec is immutable EXCEPT for the snapshotRef back-reference, which may be re-pointed onto a freshly
+// re-created snapshot subject when recovering a content from the recycle bin. That single carve-out is
+// gated on the recycle-bin latch status.boundSnapshotDeleted: while the owning Snapshot is alive the ref is
+// frozen (the anti-spoofing handshake), and it becomes re-pointable only after the parent was deleted and
+// this cluster-scoped content survives in the TTL bin. It is the escape hatch that keeps recovery possible
+// (the automated restore flow is not yet defined; recovery is done by manual intervention).
+// deletionPolicy stays immutable in all cases. The rules live on the root object (not the spec field) so
+// CEL can read both self.spec and self.status.
+// +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the bound Snapshot is deleted (recycle-bin restore)"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
 type SnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="SnapshotContent spec is immutable"
 	Spec   SnapshotContentSpec   `json:"spec,omitempty"`
 	Status SnapshotContentStatus `json:"status,omitempty"`
 }
@@ -59,14 +70,16 @@ type SnapshotContentSpec struct {
 	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 
-	// SnapshotRef is the required, immutable back-reference to the snapshot subject that owns this
-	// content, mirroring VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time by
-	// whichever controller binds the content via the snapshot's status.boundSnapshotContentName (a core
-	// Snapshot, a domain XXXSnapshot, or a CSI VolumeSnapshot for orphan volume nodes), and it is the
-	// anti-spoofing handshake: a consumer (static bind / restore) accepts a content only when this ref
-	// points back at the very snapshot that referenced it, so a user cannot attach a foreign content by
-	// pointing status.boundSnapshotContentName at it. The whole spec is immutable, so this ref cannot
-	// change after creation.
+	// SnapshotRef is the required back-reference to the snapshot subject that owns this content, mirroring
+	// VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time by whichever controller binds
+	// the content via the snapshot's status.boundSnapshotContentName (a core Snapshot, a domain XXXSnapshot,
+	// or a CSI VolumeSnapshot for orphan volume nodes), and it is the anti-spoofing handshake: the restore
+	// path accepts a content only when this ref points back at the very snapshot that referenced it, so a
+	// user cannot attach a foreign content by pointing status.boundSnapshotContentName at it. It is
+	// immutable while the owning Snapshot is alive; it may be re-pointed onto a freshly re-created subject
+	// only once status.boundSnapshotDeleted latched true (see the object-level XValidation rules). The
+	// anti-spoofing check is not weakened by this: recovery proceeds by re-pointing the ref onto the new
+	// subject's identity, not by bypassing the handshake.
 	// +kubebuilder:validation:Required
 	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef"`
 }
@@ -91,20 +104,23 @@ type SnapshotDataArtifactRef struct {
 	Kind string `json:"kind"`
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+	// artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+	// referenced before its UID is known, so producers fill it best-effort.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
 }
 
-// SnapshotDataBinding associates the single PVC target of a logical snapshot node with its captured
-// data artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE dataRef; multiple
+// SnapshotDataBinding associates the single PVC source of a logical snapshot node with its captured data
+// artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE data binding; multiple
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
+// It is self-contained ({source, artifact, volume metadata}) so the core can mirror it verbatim onto the
+// namespaced snapshot's top-level status.data (see the status-source descriptor).
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
-	// TargetUID identifies the captured PersistentVolumeClaim (its UID) backing this node's data.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	TargetUID string `json:"targetUID"`
-
-	// Target identifies the PVC (and related metadata) captured in MCP for this binding.
-	Target SnapshotSubjectRef `json:"target"`
+	// Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+	// this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+	Source SnapshotSubjectRef `json:"source"`
 
 	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
 	Artifact SnapshotDataArtifactRef `json:"artifact"`
@@ -146,68 +162,85 @@ type SnapshotContentStatus struct {
 	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
 
 	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
+	//
+	// It carries the FROZEN expected child set of the node. As of the content-single-writer design (Block 4,
+	// INV-CONTENT-CHILDREN-2) it is written in ONE transition by the SOLE writer, the aggregator
+	// (SnapshotContentController): the aggregator projects it from the owning snapshot's frozen
+	// status.childrenSnapshotRefs (set-once at phase=Planned) and publishes the COMPLETE set only once every
+	// declared child snapshot has materialized+bound its content (all-or-nothing; see
+	// PublishSnapshotContentChildrenFromSnapshotRefs). Until then nothing is written, so the field
+	// transitions empty -> complete in a single patch and never grows incrementally. ChildrenReady is a pure
+	// recompute against it (no flap); a failed child stays a node (E3 degradation, edge preserved).
+	//
+	// The XValidation transition rule makes this immutability an API-level guarantee (Option A): once the set
+	// is non-empty it is frozen — no add, remove, reorder, or replace. The empty->set transition is the only
+	// allowed change (oldSelf.size()==0). The single-writer all-or-nothing publish is what makes this safe:
+	// it would be a wedge to enable this rule against an incremental (append) writer, which is why it lands
+	// only after the orphan special-path dismantling (Block 3d) unified the aggregator as the sole edge
+	// writer. self==oldSelf is an O(n) element comparison; MaxItems + the element name MaxLength bound the CEL
+	// estimated cost so the apiserver accepts the CRD (an unbounded list/name would exceed the cost budget —
+	// this is why the O(1) size-monotonic predecessor rule capped nothing). MaxItems=8192 is a generous
+	// per-node direct-child ceiling (far beyond any realistic fan-out) chosen to keep the cost well under
+	// budget. Not marked Required: a volume LEAF legitimately has no children (empty/omitted).
 	// +optional
+	// +kubebuilder:validation:MaxItems=8192
+	// +kubebuilder:validation:XValidation:rule="oldSelf.size() == 0 || self == oldSelf",message="childrenSnapshotContentRefs is frozen once set: the complete child SnapshotContent set is immutable (no add, remove, reorder, or replace)"
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
-	// DataRef is the single PVC-target-to-data-artifact binding for this logical snapshot node.
+	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
 	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
+	// It is the durable, self-contained {source, artifact, volume metadata} block the core mirrors onto
+	// the namespaced snapshot's top-level status.data.
 	// +optional
-	DataRef *SnapshotDataBinding `json:"dataRef,omitempty"`
+	Data *SnapshotDataBinding `json:"data,omitempty"`
 
-	// ResidualVolumeCapture latches completion of the final residual/orphan-PVC capture wave on a
-	// namespace-root SnapshotContent. It is the gate signal the aggregator reads to hold the FIRST
-	// Ready=True until the residual wave is done (fail-closed). It is written ONLY by the snapshot
-	// reconciler (the sole owner of the namespace PVC scope), never by the aggregator: absence (or any
-	// Phase != Complete) means "wave not finished yet". See ResidualVolumeCaptureStatus.
+	// BoundSnapshotDeleted is a one-shot internal latch set by the binder when the bound namespaced
+	// Snapshot is deleted while this cluster-scoped SnapshotContent survives (the recycle bin). Once true,
+	// the SnapshotContent controller no longer re-adds the parent-protect finalizer (the snapshot is gone)
+	// and GC may proceed. Monotonic (false -> true only); it replaces the former
+	// snapshot.deckhouse.io/parent-deleted annotation.
 	// +optional
-	ResidualVolumeCapture *ResidualVolumeCaptureStatus `json:"residualVolumeCapture,omitempty"`
+	BoundSnapshotDeleted bool `json:"boundSnapshotDeleted,omitempty"`
+
+	// SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
+	// ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
+	// fail-closed). This SnapshotContent field is the durable truth; user-facing objects do not carry this
+	// top-level field but DO carry a core-written mirror at captureState.commonController.subtreeManifestsPersisted
+	// (see CommonControllerCaptureState) used as the manifest-exclude pre-gate. It serves purposes not
+	// reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True against declared-but-unlinked
+	// children, (2) drive the wave-barrier exclude-set of an aggregator MCR (subtree completeness + linkage
+	// => no 409 double-capture; identities served by the subtree-manifest-identities subresource),
+	// (3) monotonicity (never re-opens after the first Ready). It never expresses failure — a terminal
+	// manifest failure surfaces via the Ready reason (IsReasonTerminal).
+	// +optional
+	SubtreeManifestsPersisted bool `json:"subtreeManifestsPersisted,omitempty"`
+
+	// CaptureState optionally carries core-written suppression leaves for a domain reader; on a
+	// core-owned SnapshotContent aggregator this is normally unset.
+	// +optional
+	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
+
+	// ExcludedRefs is the DURABLE AGGREGATE of source objects excluded from this content node's subtree
+	// (this node's own direct exclusions UNION the direct exclusions of all descendants; on the root, PLUS
+	// the explicit top-level drops). It is written ONLY by the core (single aggregator) and is the TRUTH:
+	// being on the cluster-scoped SnapshotContent, it outlives deletion of the namespaced Snapshot (the
+	// recycle bin, wave4B) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
+	// than direct edges (like childrenSnapshotContentRefs) because an excluded object is non-navigable: no
+	// snapshot node is created for it, so per-node reconstruction is impossible after the fact.
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs,omitempty"`
 
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// ResidualVolumeCapturePhase values for SnapshotContentStatus.residualVolumeCapture.phase.
-const (
-	// ResidualVolumeCapturePhasePending is an explicit "wave not finished" marker. The reconciler is
-	// not required to write it: an absent residualVolumeCapture is treated as Pending. It exists for
-	// observability only; the gate reacts solely to Complete.
-	ResidualVolumeCapturePhasePending = "Pending"
-	// ResidualVolumeCapturePhaseComplete latches that the residual/orphan-PVC capture wave finished
-	// (no orphan targets, or every orphan child node is linked and ready). The aggregator opens the
-	// first Ready=True only when phase == Complete. Monotonic: it never reverts (point-in-time capture,
-	// immutable spec — no recapture).
-	ResidualVolumeCapturePhaseComplete = "Complete"
-)
-
-// ResidualVolumeCaptureStatus is the residual/orphan-PVC capture latch on a namespace-root
-// SnapshotContent. Only the snapshot reconciler writes it (status field, like dataRef), and only the
-// SnapshotContent aggregator reads it (locally, to gate the first Ready=True). It is NOT a condition:
-// conditions on SnapshotContent are the aggregator's exclusive domain, so the "wave finished" signal
-// that the reconciler owns is carried as a field and surfaced to users via the aggregate Ready reason.
-// +k8s:deepcopy-gen=true
-type ResidualVolumeCaptureStatus struct {
-	// Phase is the latch state. The reconciler writes only Complete; the aggregator treats anything
-	// other than Complete (including an absent residualVolumeCapture) as "wave not finished".
-	// +kubebuilder:validation:Enum=Pending;Complete
-	// +optional
-	Phase string `json:"phase,omitempty"`
-
-	// TargetUIDs records the captured orphan PVC UIDs at completion (empty when there were no orphan
-	// targets). Diagnostic only; the gate does not read it.
-	// +optional
-	TargetUIDs []string `json:"targetUIDs,omitempty"`
-
-	// CompletedAt records when the latch reached Complete. Diagnostic only.
-	// +optional
-	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
-}
-
-// DataRefList returns status.dataRef as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
+// DataList returns status.data as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
 // node, but the coverage/dedup/publish helpers stay generic over a slice; this bridge lets them iterate
 // the single binding without each call site special-casing the nil pointer.
-func (c *SnapshotContent) DataRefList() []SnapshotDataBinding {
-	if c == nil || c.Status.DataRef == nil {
+func (c *SnapshotContent) DataList() []SnapshotDataBinding {
+	if c == nil || c.Status.Data == nil {
 		return nil
 	}
-	return []SnapshotDataBinding{*c.Status.DataRef}
+	return []SnapshotDataBinding{*c.Status.Data}
 }

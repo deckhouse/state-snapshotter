@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -50,191 +49,6 @@ func NewArchiveHandler(client client.Client, archiveService *usecase.ArchiveServ
 		archiveService: archiveService,
 		logger:         logger,
 	}
-}
-
-// ErrorResponse represents an error response
-type ErrorResponse struct {
-	Error   string `json:"error"`
-	Details string `json:"details,omitempty"`
-}
-
-// ============================================================================
-// Checkpoint API Endpoints
-// ============================================================================
-
-// HandleGetCheckpointArchive handles GET /api/v1/checkpoints/<name>/archive
-func (h *ArchiveHandler) HandleGetCheckpointArchive(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-
-	// Extract checkpoint name from URL path: /api/v1/checkpoints/<name>/archive
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/checkpoints/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid URL path. Expected: /api/v1/checkpoints/<name>/archive", "")
-		return
-	}
-
-	checkpointName := parts[0]
-
-	// Get checkpoint
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := h.client.Get(r.Context(), types.NamespacedName{Name: checkpointName}, &checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			h.writeErrorResponse(w, http.StatusNotFound, "Checkpoint not found", "")
-			return
-		}
-		h.logger.Error(err, "Failed to get ManifestCheckpoint", "name", checkpointName)
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get checkpoint", err.Error())
-		return
-	}
-
-	// Check if checkpoint is ready (using Ready condition)
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
-	if readyCondition == nil || readyCondition.Status != metav1.ConditionTrue {
-		phaseMsg := "Unknown"
-		if readyCondition != nil {
-			phaseMsg = fmt.Sprintf("Ready condition: %s (Reason: %s)", readyCondition.Status, readyCondition.Reason)
-		}
-		h.writeErrorResponse(w, http.StatusConflict, "Checkpoint is not ready yet", phaseMsg)
-		return
-	}
-
-	// Get the archive using already-loaded checkpoint to avoid duplicate Get/Ready checks
-	req := &usecase.ArchiveRequest{
-		CheckpointName:  checkpointName,
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: checkpoint.Spec.SourceNamespace,
-	}
-
-	archiveData, checksum, err := h.archiveService.GetArchiveFromCheckpoint(r.Context(), &checkpoint, req)
-	if err != nil {
-		h.logger.Error(err, "Failed to get archive", "checkpoint", checkpointName)
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to create archive", err.Error())
-		return
-	}
-
-	// Set appropriate headers
-	setArchiveHeaders(w, checkpointName, len(archiveData), checksum)
-
-	// Write the archive data
-	if _, err := w.Write(archiveData); err != nil {
-		h.logger.Error(err, "Failed to write archive data")
-		return
-	}
-
-	duration := time.Since(start)
-	h.logger.Info("Successfully served checkpoint archive",
-		"checkpoint", checkpointName,
-		"size", len(archiveData),
-		"checksum", checksum,
-		"duration", duration)
-}
-
-// HandleGetCheckpointInfo handles GET /api/v1/checkpoints/<name>/info
-func (h *ArchiveHandler) HandleGetCheckpointInfo(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-
-	// Extract checkpoint name from URL path
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/checkpoints/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) == 0 || parts[0] == "" {
-		h.writeErrorResponse(w, http.StatusBadRequest, "Invalid URL path. Expected: /api/v1/checkpoints/<name>/info", "")
-		return
-	}
-
-	checkpointName := parts[0]
-
-	// Get checkpoint
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := h.client.Get(r.Context(), types.NamespacedName{Name: checkpointName}, &checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			h.writeErrorResponse(w, http.StatusNotFound, "Checkpoint not found", "")
-			return
-		}
-		h.logger.Error(err, "Failed to get ManifestCheckpoint", "name", checkpointName)
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get checkpoint", err.Error())
-		return
-	}
-
-	// Get archive info
-	req := &usecase.ArchiveRequest{
-		CheckpointName:  checkpointName,
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: checkpoint.Spec.SourceNamespace,
-	}
-
-	info, err := h.archiveService.GetArchiveInfo(r.Context(), req)
-	if err != nil {
-		h.logger.Error(err, "Failed to get archive info", "checkpoint", checkpointName)
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to get archive info", err.Error())
-		return
-	}
-
-	// Check Ready condition
-	readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
-	isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
-
-	// Get source capture request name from ref
-	sourceCaptureRequest := ""
-	if checkpoint.Spec.ManifestCaptureRequestRef != nil {
-		sourceCaptureRequest = checkpoint.Spec.ManifestCaptureRequestRef.Name
-	}
-
-	// Build response with checkpoint metadata
-	response := &CheckpointInfoResponse{
-		CheckpointName:       checkpointName,
-		SourceNamespace:      checkpoint.Spec.SourceNamespace,
-		SourceCaptureRequest: sourceCaptureRequest,
-		TotalObjects:         checkpoint.Status.TotalObjects,
-		TotalSizeBytes:       checkpoint.Status.TotalSizeBytes,
-		ChunksCount:          len(checkpoint.Status.Chunks),
-		Format:               "json",
-		Ready:                isReady,
-		CreatedAt:            checkpoint.CreationTimestamp.Format(time.RFC3339),
-		Labels:               checkpoint.Labels,
-		Annotations:          checkpoint.Annotations,
-		FileCount:            info.FileCount,
-		EstimatedSize:        info.EstimatedSize,
-	}
-
-	// Try to get checksum from cache if available
-	cacheKey := h.archiveService.GetCacheKey(req.CheckpointName, req.CheckpointUID)
-	if cached := h.archiveService.GetCacheItem(cacheKey); cached != nil {
-		response.Checksum = cached.Checksum
-		response.Cached = true
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		h.logger.Error(err, "Failed to encode checkpoint info response")
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to encode response", "")
-		return
-	}
-
-	duration := time.Since(start)
-	h.logger.Info("Served checkpoint info",
-		"checkpoint", checkpointName,
-		"duration", duration)
-}
-
-// CheckpointInfoResponse represents checkpoint information
-type CheckpointInfoResponse struct {
-	CheckpointName       string            `json:"checkpointName"`
-	SourceNamespace      string            `json:"sourceNamespace"`
-	SourceCaptureRequest string            `json:"sourceCaptureRequest"`
-	TotalObjects         int               `json:"totalObjects"`
-	TotalSizeBytes       int64             `json:"totalSizeBytes"`
-	ChunksCount          int               `json:"chunksCount"`
-	Format               string            `json:"format"`
-	Ready                bool              `json:"ready"`
-	CreatedAt            string            `json:"createdAt"`
-	Labels               map[string]string `json:"labels,omitempty"`
-	Annotations          map[string]string `json:"annotations,omitempty"`
-	FileCount            int               `json:"fileCount"`
-	EstimatedSize        int64             `json:"estimatedSize"`
-	Checksum             string            `json:"checksum,omitempty"`
-	Cached               bool              `json:"cached,omitempty"`
 }
 
 // ============================================================================
@@ -342,6 +156,15 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 				Kind:       "SnapshotContent",
 				Verbs:      []string{"get"},
 			},
+			{
+				// Internal, read-only exclude-computation endpoint: returns object IDENTITIES for the
+				// whole subtree (own node + descendants), fail-closed. Granted to domain controllers
+				// (which have no MCP/generic content RBAC) as one narrow verb (see wave5 §6.3).
+				Name:       "snapshotcontents/subtree-manifest-identities",
+				Namespaced: false,
+				Kind:       "SnapshotContent",
+				Verbs:      []string{"get"},
+			},
 		},
 	}
 
@@ -402,9 +225,8 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 
 	// Use archive service to get JSON archive using already-loaded checkpoint
 	req := &usecase.ArchiveRequest{
-		CheckpointName:  checkpointName,
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: checkpoint.Spec.SourceNamespace,
+		CheckpointName: checkpointName,
+		CheckpointUID:  string(checkpoint.UID),
 	}
 
 	archiveData, _, err := h.archiveService.GetArchiveFromCheckpoint(r.Context(), &checkpoint, req)
@@ -468,86 +290,6 @@ func shouldCompressResponse(r *http.Request) bool {
 }
 
 // ============================================================================
-// List Endpoints
-// ============================================================================
-
-// HandleListCheckpoints handles GET /api/v1/checkpoints
-func (h *ArchiveHandler) HandleListCheckpoints(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	sourceNamespace := r.URL.Query().Get("namespace")
-
-	var checkpointList storagev1alpha1.ManifestCheckpointList
-	if err := h.client.List(r.Context(), &checkpointList); err != nil {
-		h.logger.Error(err, "Failed to list ManifestCheckpoints")
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to list checkpoints", "")
-		return
-	}
-
-	// Convert to response format
-	checkpoints := make([]CheckpointListItem, 0)
-	for _, checkpoint := range checkpointList.Items {
-		// Filter by source namespace if specified
-		if sourceNamespace != "" && checkpoint.Spec.SourceNamespace != sourceNamespace {
-			continue
-		}
-		// Get source capture request name from ref
-		sourceCaptureRequest := ""
-		if checkpoint.Spec.ManifestCaptureRequestRef != nil {
-			sourceCaptureRequest = checkpoint.Spec.ManifestCaptureRequestRef.Name
-		}
-
-		// Check Ready condition
-		readyCondition := meta.FindStatusCondition(checkpoint.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady)
-		isReady := readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
-
-		checkpoints = append(checkpoints, CheckpointListItem{
-			Name:                 checkpoint.Name,
-			SourceNamespace:      checkpoint.Spec.SourceNamespace,
-			SourceCaptureRequest: sourceCaptureRequest,
-			TotalObjects:         checkpoint.Status.TotalObjects,
-			TotalSizeBytes:       checkpoint.Status.TotalSizeBytes,
-			ChunksCount:          len(checkpoint.Status.Chunks),
-			Ready:                isReady,
-			CreatedAt:            checkpoint.CreationTimestamp.Format(time.RFC3339),
-		})
-	}
-
-	response := &ListCheckpointsResponse{
-		Items: checkpoints,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		h.logger.Error(err, "Failed to encode checkpoints list response")
-		h.writeErrorResponse(w, http.StatusInternalServerError, "Failed to encode response", "")
-		return
-	}
-
-	duration := time.Since(start)
-	h.logger.Info("Served checkpoints list",
-		"count", len(checkpoints),
-		"namespace", sourceNamespace,
-		"duration", duration)
-}
-
-// CheckpointListItem represents a checkpoint in the list
-type CheckpointListItem struct {
-	Name                 string `json:"name"`
-	SourceNamespace      string `json:"sourceNamespace"`
-	SourceCaptureRequest string `json:"sourceCaptureRequest"`
-	TotalObjects         int    `json:"totalObjects"`
-	TotalSizeBytes       int64  `json:"totalSizeBytes"`
-	ChunksCount          int    `json:"chunksCount"`
-	Ready                bool   `json:"ready"`
-	CreatedAt            string `json:"createdAt"`
-}
-
-// ListCheckpointsResponse represents the response for listing checkpoints
-type ListCheckpointsResponse struct {
-	Items []CheckpointListItem `json:"items"`
-}
-
-// ============================================================================
 // Health Check Endpoints
 // ============================================================================
 
@@ -572,29 +314,6 @@ func (h *ArchiveHandler) HandleLive(w http.ResponseWriter, _ *http.Request) {
 // Helper Functions
 // ============================================================================
 
-// writeErrorResponse writes an error response in JSON format
-func (h *ArchiveHandler) writeErrorResponse(w http.ResponseWriter, statusCode int, message, details string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-
-	response := ErrorResponse{
-		Error:   message,
-		Details: details,
-	}
-
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-// setArchiveHeaders sets appropriate HTTP headers for archive download
-func setArchiveHeaders(w http.ResponseWriter, name string, size int, checksum string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.json\"", name))
-	w.Header().Set("Content-Length", strconv.Itoa(size))
-	w.Header().Set("X-Archive-Checksum", checksum)
-	w.Header().Set("Cache-Control", "max-age=300") // 5 minutes cache
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-}
-
 // GetArchiveService returns the archive service for external access
 func (h *ArchiveHandler) GetArchiveService() *usecase.ArchiveService {
 	return h.archiveService
@@ -602,38 +321,6 @@ func (h *ArchiveHandler) GetArchiveService() *usecase.ArchiveService {
 
 // SetupRoutes sets up HTTP routes for the archive API
 func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
-	// Checkpoint endpoints
-	// Use pattern matching for better route handling
-	mux.HandleFunc("/api/v1/checkpoints/", func(w http.ResponseWriter, r *http.Request) {
-		// Extract path after /api/v1/checkpoints/
-		path := strings.TrimPrefix(r.URL.Path, "/api/v1/checkpoints/")
-		if path == "" {
-			// List checkpoints
-			h.HandleListCheckpoints(w, r)
-			return
-		}
-
-		// Split path to get checkpoint name and action
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) == 2 {
-			action := parts[1]
-			switch action {
-			case "archive":
-				h.HandleGetCheckpointArchive(w, r)
-			case "info":
-				h.HandleGetCheckpointInfo(w, r)
-			default:
-				h.writeErrorResponse(w, http.StatusNotFound, "Not found", fmt.Sprintf("Unknown action: %s", action))
-			}
-		} else {
-			// Just checkpoint name without action - redirect to info
-			h.HandleGetCheckpointInfo(w, r)
-		}
-	})
-
-	// List checkpoints (exact match)
-	mux.HandleFunc("/api/v1/checkpoints", h.HandleListCheckpoints)
-
 	// Kubernetes APIService endpoints
 	// Path: /apis/subresources.state-snapshotter.deckhouse.io
 	// Handle API group discovery endpoint

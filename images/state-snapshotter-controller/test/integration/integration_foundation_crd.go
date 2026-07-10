@@ -36,7 +36,7 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-const volumeCaptureRequestCRDName = "volumecapturerequests.storage.deckhouse.io"
+const volumeCaptureRequestCRDName = "volumecapturerequests.storage-foundation.deckhouse.io"
 
 // integrationVolumeCaptureRequestAPIAvailable is true when envtest serves VolumeCaptureRequest
 // (from storage-foundation CRD dir and/or minimal fallback CRD installed in BeforeSuite).
@@ -66,21 +66,21 @@ func integrationResolveFoundationCRDDir(crdsPath string) (dir string, source str
 }
 
 func integrationMinimalVolumeCaptureRequestCRD() *apiextensionsv1.CustomResourceDefinition {
-	targetItem := apiextensionsv1.JSONSchemaProps{
+	// spec.target omits namespace (the captured PVC lives in the VCR namespace).
+	specTarget := apiextensionsv1.JSONSchemaProps{
 		Type: "object",
 		Properties: map[string]apiextensionsv1.JSONSchemaProps{
 			"uid":        {Type: "string", MinLength: ptrInt64(1)},
 			"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
 			"kind":       {Type: "string", MinLength: ptrInt64(1)},
 			"name":       {Type: "string", MinLength: ptrInt64(1)},
-			"namespace":  {Type: "string", MinLength: ptrInt64(1)},
 		},
-		Required: []string{"uid", "apiVersion", "kind", "name", "namespace"},
+		Required: []string{"uid", "apiVersion", "kind", "name"},
 	}
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: volumeCaptureRequestCRDName},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: "storage.deckhouse.io",
+			Group: "storage-foundation.deckhouse.io",
 			Scope: apiextensionsv1.NamespaceScoped,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Plural:     "volumecapturerequests",
@@ -100,8 +100,8 @@ func integrationMinimalVolumeCaptureRequestCRD() *apiextensionsv1.CustomResource
 								"spec": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"mode":    {Type: "string"},
-										"targets": {Type: "array", Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &targetItem}},
+										"mode":   {Type: "string"},
+										"target": specTarget,
 									},
 								},
 								"status": {Type: "object"},

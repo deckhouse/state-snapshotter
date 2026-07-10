@@ -82,19 +82,33 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	// container. (gcSpecs still builds its own short-TTL sub-tree — it deletes the root and reconfigures the
 	// module TTL, so it cannot reuse the shared root.)
 	Context("Phase 1 & 2: manifest-only flow (no volume data)", func() {
-		captureSpecs()                // capture_test.go: apply demo source + root Snapshot, assert Ready tree
-		aggregatedApiSpecs()          // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
-		namespaceCaptureReworkSpecs() // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
-		restoreSpecs()                // restore_test.go: manifest-level restore into a fresh namespace
-		importSpecs()                 // import_gc_test.go: export -> import round-trip
-		gcSpecs()                     // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
+		captureSpecs()                  // capture_test.go: apply demo source + root Snapshot, assert Ready tree
+		aggregatedApiSpecs()            // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
+		namespaceCaptureReworkSpecs()   // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
+		namespaceManifestCaptureSpecs() // namespace_manifest_capture_test.go: Namespace object capture + MCR admission
+		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
+		importSpecs()                   // import_gc_test.go: export -> import round-trip
+		gcSpecs()                       // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
+
+		// The shared manifest-only `captured` namespace (created in captureSpecs' BeforeAll) is read by every
+		// spec above but owned by none of them, so — unlike every other namespace, which has its own
+		// DeferCleanup(deleteNamespace) — it had no teardown and leaked after each run. Reap it once the whole
+		// phase completes: this AfterAll runs after all nested Contexts here (and before Phase 3), and
+		// deleteNamespace honors the keep-on-failure/keep-always knobs like every other cleanup.
+		AfterAll(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			deleteNamespace(ctx, captured.namespace)
+		})
 	})
-	resourceSelectorSpecs() // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
-	volumeDataSpecs()       // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	readyFlapSpecs()        // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
-	getLoadSpecs()          // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
-	backupDownloadSpecs()   // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	importVariantsSpecs()   // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
+	resourceSelectorSpecs()     // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
+	volumeDataSpecs()           // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	volumeSnapshotDomainSpecs() // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
+	childBridgeFailureSpecs()   // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
+	readyFlapSpecs()            // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
+	getLoadSpecs()              // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
+	backupDownloadSpecs()       // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
+	importVariantsSpecs()       // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
 })
 
 func prepareSuite() {
@@ -105,6 +119,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  namespace prefix:           %q\n", suiteCfg.nsPrefix)
 	GinkgoWriter.Printf("  snapshot ready timeout:     %s\n", suiteCfg.snapshotReadyTO)
 	GinkgoWriter.Printf("  capture ready timeout:      %s\n", suiteCfg.captureReadyTO)
+	GinkgoWriter.Printf("  data transfer timeout:      %s\n", suiteCfg.dataTransferTO)
 	GinkgoWriter.Printf("  module ready timeout:       %s\n", suiteCfg.moduleReadyTO)
 	GinkgoWriter.Printf("  GC TTL (snapshotRootOkTtl): %s\n", suiteCfg.gcTTL)
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
@@ -126,7 +141,7 @@ func prepareSuite() {
 	suiteDyn, err = dynamic.NewForConfig(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build dynamic client")
 
-	// waitModuleAndCSDReady runs two sequential waits (module Ready, then CSD RBACReady), each bounded
+	// waitModuleAndCSDReady runs two sequential waits (module Ready, then CSD AccessGranted), each bounded
 	// by moduleReadyTO, so the parent context budgets for both plus a buffer.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.moduleReadyTO+5*time.Minute)
 	defer cancel()

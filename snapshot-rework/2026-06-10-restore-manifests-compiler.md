@@ -111,7 +111,9 @@ const (
 Для `manifests-with-data-restoration` режим `restore-safe` **обязателен** и удаляет:
 
 - `metadata`: `uid`, `resourceVersion`, `generation`, `creationTimestamp`, `deletionTimestamp`,
-  `deletionGracePeriodSeconds`, `managedFields`, `ownerReferences`, `finalizers`, `selfLink`;
+  `deletionGracePeriodSeconds`, `managedFields`, `ownerReferences`, `selfLink`. **`finalizers` НЕ
+  удаляются** (политика сохранения intent, см. ниже); `ownerReferences` удаляются намеренно (висячий
+  ownerRef → мгновенный GC восстановленного объекта = потеря данных);
 - `metadata.namespace` → переписать на `targetNamespace` (для namespaced объектов);
 - `metadata.annotations`: `kubectl.kubernetes.io/last-applied-configuration`,
   `pv.kubernetes.io/bind-completed`, `pv.kubernetes.io/bound-by-controller`,
@@ -134,8 +136,17 @@ const (
 /`StorageClass` и т.п. В MVP — drop; «include cluster-scoped as-is» — возможная будущая опция, не
 этот этап.
 
-Замечание: capture-time `CleanObjectForSnapshot` остаётся как есть. Read-path санитайзер —
-независимый слой; restore не должен зависеть от того, был ли включён `EnableFiltering` при захвате.
+**Финализаторы сохраняются (не режутся на restore).** Класс 1 (машинные, напр.
+`kubernetes.io/pvc-protection`) целевой кластер навесит заново; Класс 3 (кастомные) кодируют intent
+пользователя и обязаны пережить restore; Класс 2 (self-induced wedge
+`snapshot.storage.kubernetes.io/pvc-as-source-protection`) до restore не доходит — он срезан **на
+захвате** (единственное field-level исключение verbatim-захвата). Cross-cluster import: кастомный
+финализатор без контроллера в целевом кластере оставит объект неудаляемым без ручного вмешательства —
+осознанная intent-семантика.
+
+Замечание: capture теперь имеет **ровно одно** field-level исключение из verbatim — срез транзиентного
+`pvc-as-source-protection`. Read-path санитайзер — независимый слой; restore не должен зависеть от того,
+был ли включён `EnableFiltering` при захвате.
 
 #### D4. `targetNamespace != sourceNamespace` становится рабочим для restore
 

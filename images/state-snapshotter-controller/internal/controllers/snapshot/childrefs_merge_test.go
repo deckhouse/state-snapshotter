@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -65,79 +65,51 @@ func TestMergeSnapshotChildRefs(t *testing.T) {
 	}
 }
 
-func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
+// TestWeightLayerCaptureReady exercises the weight-layer gate: a child opens the next layer only once it
+// reaches capture barrier 1 (domainSpecificController.phase Planned/Finished). Pending children (no phase
+// yet, or phase=Planning) hold the layer without a terminal message; a domain phase=Failed and a
+// current-generation terminal Ready reason both surface as a terminal failure. It replaced the former
+// PlanningReady-condition gate (no observedGeneration gate: the spec is immutable).
+func TestWeightLayerCaptureReady(t *testing.T) {
 	ctx := context.Background()
-	readyChild := demoSnapshotChild("ready", []metav1.Condition{{
-		Type:               snapshotpkg.ConditionChildrenSnapshotReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshotpkg.ReasonCompleted,
-		ObservedGeneration: 1,
-	}})
-	pendingChild := demoSnapshotChild("pending", nil)
-	failedChild := demoSnapshotChild("failed", []metav1.Condition{{
-		Type:               snapshotpkg.ConditionChildrenSnapshotReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             snapshotpkg.ReasonGraphPlanningFailed,
-		Message:            "child graph failed",
-		ObservedGeneration: 1,
-	}})
 
-	t.Run("all graph ready", func(t *testing.T) {
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
+	t.Run("all children planned -> ready", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(demoSnapshotChildWithPhase("ready", storagev1alpha1.SnapshotCapturePhasePlanned)).Build()}
+		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready")})
 		if err != nil || !ready || terminal != "" || len(pending) != 0 {
 			t.Fatalf("want ready with no terminal/pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 	})
 
-	t.Run("pending blocks lower priority without terminal message", func(t *testing.T) {
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(pendingChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
+	t.Run("child without a phase blocks the layer without terminal message", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(demoSnapshotChild("pending")).Build()}
+		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("pending")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending with no terminal message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
-		if !strings.Contains(pending[0], "no ChildrenSnapshotReady condition yet") {
-			t.Fatalf("pending descriptor should explain missing ChildrenSnapshotReady, got %q", pending[0])
+		if !strings.Contains(pending[0], "no capture phase yet") {
+			t.Fatalf("pending descriptor should explain the missing capture phase, got %q", pending[0])
 		}
 	})
 
-	t.Run("graph ready true without observedGeneration stays pending", func(t *testing.T) {
-		child := demoSnapshotChildRawConditions("noobserved", 1, []map[string]interface{}{{
-			"type":   snapshotpkg.ConditionChildrenSnapshotReady,
-			"status": string(metav1.ConditionTrue),
-			"reason": snapshotpkg.ReasonCompleted,
-		}})
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("noobserved")})
+	t.Run("child still Planning stays pending with its phase", func(t *testing.T) {
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(demoSnapshotChildWithPhase("planning", storagev1alpha1.SnapshotCapturePhasePlanning)).Build()}
+		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("planning")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
-		if !strings.Contains(pending[0], "without observedGeneration") {
-			t.Fatalf("pending descriptor should flag missing observedGeneration, got %q", pending[0])
+		if !strings.Contains(pending[0], "capture phase=Planning") {
+			t.Fatalf("pending descriptor should report the observed phase, got %q", pending[0])
 		}
 	})
 
-	t.Run("graph ready true with stale observedGeneration stays pending", func(t *testing.T) {
-		child := demoSnapshotChildRawConditions("stale", 3, []map[string]interface{}{{
-			"type":               snapshotpkg.ConditionChildrenSnapshotReady,
-			"status":             string(metav1.ConditionTrue),
-			"reason":             snapshotpkg.ReasonCompleted,
-			"observedGeneration": int64(2),
-		}})
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("stale")})
-		if err != nil || ready || terminal != "" || len(pending) != 1 {
-			t.Fatalf("want pending, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
-		}
-		if !strings.Contains(pending[0], "stale") {
-			t.Fatalf("pending descriptor should flag stale observedGeneration, got %q", pending[0])
-		}
-	})
-
-	t.Run("terminal graph failure returns message", func(t *testing.T) {
+	t.Run("domain phase=Failed returns a terminal message", func(t *testing.T) {
+		failedChild := demoSnapshotChildWithPhase("failed", storagev1alpha1.SnapshotCapturePhaseFailed)
+		_ = unstructured.SetNestedField(failedChild.Object, "SourceNotFound", "status", "captureState", "domainSpecificController", "reason")
+		_ = unstructured.SetNestedField(failedChild.Object, "source vm-1 is gone", "status", "captureState", "domainSpecificController", "message")
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(failedChild).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
-		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed graph planning") {
+		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("failed")})
+		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "phase=Failed") {
 			t.Fatalf("want terminal failure message, got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 	})
@@ -145,34 +117,64 @@ func TestPriorityLayerChildrenSnapshotReady(t *testing.T) {
 	t.Run("ready-based terminal failure requires current observedGeneration", func(t *testing.T) {
 		staleTerminal := demoSnapshotChildReadyTerminal("ready-stale", 3, 2, "ListFailed")
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(staleTerminal).Build()}
-		ready, terminal, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
+		ready, terminal, pending, err := r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-stale")})
 		if err != nil || ready || terminal != "" || len(pending) != 1 {
 			t.Fatalf("stale terminal Ready must be pending, not terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 
 		currentTerminal := demoSnapshotChildReadyTerminal("ready-current", 3, 3, "ListFailed")
 		r = &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(currentTerminal).Build()}
-		ready, terminal, pending, err = r.priorityLayerChildrenSnapshotReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
+		ready, terminal, pending, err = r.weightLayerCaptureReady(ctx, "ns1", []storagev1alpha1.SnapshotChildRef{childRef("ready-current")})
 		if err != nil || ready || len(pending) != 0 || !strings.Contains(terminal, "failed") {
 			t.Fatalf("current terminal Ready must be terminal; got ready=%v terminal=%q pending=%v err=%v", ready, terminal, pending, err)
 		}
 	})
 }
 
-// domainChildReady builds a bound child snapshot whose Ready condition reflects full readiness (Ready=True)
-// or in-progress capture (Ready=False/Capturing). It is the fixture for the orphan-PVC final-wave gate
-// (allDeclaredDomainChildSnapshotsReady), which keys on full Ready (via ClassifyGenericChildSnapshotReady),
-// not on ChildrenSnapshotReady.
-func domainChildReady(name string, ready bool) *unstructured.Unstructured {
-	cond := metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshotpkg.ReasonCompleted, ObservedGeneration: 1}
-	if !ready {
-		cond = metav1.Condition{Type: snapshotpkg.ConditionReady, Status: metav1.ConditionFalse, Reason: "Capturing", Message: "still capturing", ObservedGeneration: 1}
+// domainChildReady builds a bound child snapshot whose recursive planning latch reflects whether its
+// subtree finished planning: planned==true sets phase=Planned AND the main-computed
+// commonController.subtreePlanned=true (opens the orphan-PVC final-wave gate), planned==false sets
+// phase=Planning with no latch (still pending). Block 5 relaxed the gate from full Ready=True to
+// phase>=Planned; Block 7b tightened it to the recursive subtreePlanned latch, so this fixture keys on
+// that latch (the phase is kept for the pending descriptor).
+func domainChildReady(name string, planned bool) *unstructured.Unstructured {
+	phase := storagev1alpha1.SnapshotCapturePhasePlanned
+	if !planned {
+		phase = storagev1alpha1.SnapshotCapturePhasePlanning
 	}
-	child := demoSnapshotChild(name, []metav1.Condition{cond})
+	child := demoSnapshotChildWithPhase(name, phase)
 	if err := unstructured.SetNestedField(child.Object, "content-"+name, "status", "boundSnapshotContentName"); err != nil {
 		panic(err)
 	}
+	if planned {
+		if err := unstructured.SetNestedField(child.Object, true, "status", "captureState", "commonController", "subtreePlanned"); err != nil {
+			panic(err)
+		}
+	}
 	return child
+}
+
+// readyVSChild builds a bound orphan CSI VolumeSnapshot domain child whose subtree finished planning
+// (phase=Planned + commonController.subtreePlanned=true). Under the content-single-writer model an orphan
+// VolumeSnapshot is an ordinary domain child (no longer a skipped "visibility leaf"), so the final-wave
+// gate (Block 7b: recursive subtreePlanned) must treat it exactly like any other domain child.
+func readyVSChild(name, ns string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
+		"kind":       snapshotpkg.KindVolumeSnapshot,
+		"metadata":   map[string]interface{}{"name": name, "namespace": ns, "generation": int64(1)},
+		"status": map[string]interface{}{
+			"boundSnapshotContentName": "content-" + name,
+			"captureState": map[string]interface{}{
+				"domainSpecificController": map[string]interface{}{
+					"phase": string(storagev1alpha1.SnapshotCapturePhasePlanned),
+				},
+				"commonController": map[string]interface{}{
+					"subtreePlanned": true,
+				},
+			},
+		},
+	}}
 }
 
 func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
@@ -180,11 +182,11 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 	ns := "ns1"
 	vsLeaf := storagev1alpha1.SnapshotChildRef{APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshot, Name: "nss-vs-x"}
 
-	t.Run("no domain children passes vacuously (VS visibility leaf skipped)", func(t *testing.T) {
+	t.Run("declared VolumeSnapshot child not created keeps gate closed", func(t *testing.T) {
 		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{vsLeaf})
-		if err != nil || !ready || len(pending) != 0 {
-			t.Fatalf("vacuous gate must be open, got ready=%v pending=%v err=%v", ready, pending, err)
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected for uncreated VS domain child, got ready=%v pending=%v err=%v", ready, pending, err)
 		}
 	})
 
@@ -208,13 +210,24 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 		}
 	})
 
-	t.Run("all domain children Ready opens gate, VS leaf ignored", func(t *testing.T) {
+	t.Run("all domain children Ready (incl VolumeSnapshot) opens gate", func(t *testing.T) {
 		readyChild := domainChildReady("ready", true)
-		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		vsChild := readyVSChild("nss-vs-x", ns)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild, vsChild).Build()}
 		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), vsLeaf}
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
 		if err != nil || !ready || len(pending) != 0 {
 			t.Fatalf("open gate expected, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	t.Run("VolumeSnapshot child not yet Ready keeps gate closed", func(t *testing.T) {
+		readyChild := domainChildReady("ready", true)
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(readyChild).Build()}
+		refs := []storagev1alpha1.SnapshotChildRef{childRef("ready"), vsLeaf}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected while the VS child is uncreated, got ready=%v pending=%v err=%v", ready, pending, err)
 		}
 	})
 
@@ -226,6 +239,24 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, refs)
 		if err != nil || ready || len(pending) != 1 {
 			t.Fatalf("closed gate expected with one pending, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+	})
+
+	// Block 7b tightening: a direct child that reached its OWN barrier 1 (phase=Planned) but whose subtree
+	// is not planned yet (main has not latched commonController.subtreePlanned, e.g. a grandchild is still
+	// planning) must keep the gate closed — direct phase>=Planned is no longer sufficient.
+	t.Run("child Planned but subtree not planned keeps gate closed", func(t *testing.T) {
+		child := demoSnapshotChildWithPhase("planned-no-subtree", storagev1alpha1.SnapshotCapturePhasePlanned)
+		if err := unstructured.SetNestedField(child.Object, "content-planned-no-subtree", "status", "boundSnapshotContentName"); err != nil {
+			t.Fatalf("set bound: %v", err)
+		}
+		r := &SnapshotReconciler{Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()}
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, ns, []storagev1alpha1.SnapshotChildRef{childRef("planned-no-subtree")})
+		if err != nil || ready || len(pending) != 1 {
+			t.Fatalf("closed gate expected while the subtree latch is absent, got ready=%v pending=%v err=%v", ready, pending, err)
+		}
+		if !strings.Contains(pending[0], "subtree not planned yet") {
+			t.Fatalf("pending descriptor should explain the missing subtree latch, got %q", pending[0])
 		}
 	})
 }
@@ -345,7 +376,7 @@ func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
 
 func TestSnapshotCoverageCheckerSkipsChildWithoutSourceRef(t *testing.T) {
 	ctx := context.Background()
-	child := demoSnapshotChild("missing-source-ref", nil)
+	child := demoSnapshotChild("missing-source-ref")
 	checker := newSnapshotCoverageChecker(
 		fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build(),
 		"ns1",
@@ -407,7 +438,7 @@ func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
 }
 
 // TestRecomputeChildGraphKeepsLowerPriorityStandalone reconstructs a two-wave recompute
-// (VM priority 100 -> Disk priority 10) using the production coverage checker and merge, and proves
+// (VM priority 10 -> Disk priority 100) using the production coverage checker and merge, and proves
 // the deterministic idempotency invariant: on a repeated reconcile where the root status already
 // carries both generated refs, the lower-priority standalone disk ref survives, the disk-vm covered
 // by the VM subtree is not re-added (no duplicate), and the VM ref is kept.
@@ -429,12 +460,12 @@ func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).
 		WithObjects(vmChild, diskVMChild, diskStandaloneChild).Build()
 
-	// Wave 1 (VM, priority 100): the highest-priority wave seeds from nil, so the VM source is always
-	// re-planned and kept in the current pass.
+	// Wave 1 (VM, priority 10): the first (lowest-numeric-priority) wave seeds from nil, so the VM source
+	// is always re-planned and kept in the current pass.
 	vmRef := childRef("nss-child-vm")
 	desiredRefs := []storagev1alpha1.SnapshotChildRef{vmRef}
 
-	// Wave 2 (Disk, priority 10): coverage seeded ONLY from this pass (the fix). disk-vm is covered by
+	// Wave 2 (Disk, priority 100): coverage seeded ONLY from this pass (the fix). disk-vm is covered by
 	// the VM subtree; disk-standalone is not covered despite a stale status ref existing.
 	coverage := newSnapshotCoverageChecker(cl, "ns1", coverageRootsForNextWave(desiredRefs))
 
@@ -529,8 +560,8 @@ func TestSummarizePendingChildrenCapsMessage(t *testing.T) {
 	}
 }
 
-func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured.Unstructured {
-	child := &unstructured.Unstructured{
+func demoSnapshotChild(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "demo.test/v1",
 			"kind":       "DemoSnapshot",
@@ -541,50 +572,21 @@ func demoSnapshotChild(name string, conditions []metav1.Condition) *unstructured
 			},
 		},
 	}
-	if len(conditions) > 0 {
-		status := map[string]interface{}{}
-		items := make([]interface{}, 0, len(conditions))
-		for _, condition := range conditions {
-			items = append(items, map[string]interface{}{
-				"type":               condition.Type,
-				"status":             string(condition.Status),
-				"reason":             condition.Reason,
-				"message":            condition.Message,
-				"observedGeneration": condition.ObservedGeneration,
-			})
-		}
-		status["conditions"] = items
-		child.Object["status"] = status
+}
+
+// demoSnapshotChildWithPhase builds a child snapshot carrying
+// status.captureState.domainSpecificController.phase, the domain-owned capture barrier read by the
+// weight-layer gate.
+func demoSnapshotChildWithPhase(name string, phase storagev1alpha1.SnapshotCapturePhase) *unstructured.Unstructured {
+	child := demoSnapshotChild(name)
+	if err := unstructured.SetNestedField(child.Object, string(phase), "status", "captureState", "domainSpecificController", "phase"); err != nil {
+		panic(err)
 	}
 	return child
 }
 
-// demoSnapshotChildRawConditions builds a child snapshot with explicit raw condition maps, so a test
-// can omit observedGeneration entirely (to exercise the strict ChildrenSnapshotReady contract) or set a stale
-// value, which the typed helper cannot express.
-func demoSnapshotChildRawConditions(name string, generation int64, conditions []map[string]interface{}) *unstructured.Unstructured {
-	items := make([]interface{}, 0, len(conditions))
-	for _, c := range conditions {
-		items = append(items, c)
-	}
-	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "demo.test/v1",
-			"kind":       "DemoSnapshot",
-			"metadata": map[string]interface{}{
-				"name":       name,
-				"namespace":  "ns1",
-				"generation": generation,
-			},
-			"status": map[string]interface{}{
-				"conditions": items,
-			},
-		},
-	}
-}
-
 func demoSnapshotChildWithSource(name string, identity controllercommon.SnapshotSourceIdentity) *unstructured.Unstructured {
-	child := demoSnapshotChild(name, nil)
+	child := demoSnapshotChild(name)
 	if err := unstructured.SetNestedStringMap(child.Object, map[string]string{
 		"apiVersion": identity.APIVersion,
 		"kind":       identity.Kind,

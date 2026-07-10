@@ -6,7 +6,7 @@
 
 **Связь между Snapshot и Content:**
 - Логическая связь: `XxxxSnapshotContent.Spec.SnapshotRef` → `XxxxSnapshot`
-- Защита: финалайзер `snapshot.deckhouse.io/parent-protect` на `XxxxSnapshotContent`
+- Защита: финалайзер `state-snapshotter.deckhouse.io/parent-protect` на `XxxxSnapshotContent`
 - Удаление: `ObjectKeeper` удаляет `XxxxSnapshotContent` после истечения TTL
 
 ### Всё, что должно удаляться каскадом "по дереву" — должно иметь ownerRef
@@ -15,14 +15,14 @@
 - `YyyySnapshot.ownerRef` → `XxxxSnapshot` (если дочерние snapshot'ы создаются с ownerRef)
 - `YyyySnapshotContent.ownerRef` → `XxxxSnapshotContent`
 - Артефакты (`ManifestCheckpoint`, `VolumeSnapshotContent`).`ownerRef` → соответствующий `*SnapshotContent`
-- **Root retained content** (`XxxxSnapshotContent`, `NamespaceSnapshotContent`): **`ownerRef` → root `ObjectKeeper`** (TTL-якорь); OK следует за root snapshot (`FollowObjectWithTTL`), **без** `ObjectKeeper.ownerReferences` на content — см. design [`namespace-snapshot-controller.md`](../docs/state-snapshotter-rework/design/namespace-snapshot-controller.md) §4.3 для namespace-flow.
+- **Root retained content** (`XxxxSnapshotContent`, `NamespaceSnapshotContent`): **`ownerRef` → root `ObjectKeeper`** (TTL-якорь); OK следует за root snapshot (`FollowObjectWithTTL`), **без** `ObjectKeeper.ownerReferences` на content — см. design [`namespace-snapshot-controller.md`](../docs/internal/state-snapshotter-rework/design/namespace-snapshot-controller.md) §4.3 для namespace-flow.
 
 ### Финалайзеры должны сниматься только контроллерами
 
 Kubernetes GC ждёт, пока финалайзеры будут сняты. Поэтому все шаги "готов к удалению (финалайзеры сняты)" критичны для корректной работы алгоритма.
 
 **Финалайзеры:**
-- `snapshot.deckhouse.io/parent-protect` — снимается общим контроллером
+- `state-snapshotter.deckhouse.io/parent-protect` — снимается общим контроллером
 - Финалайзеры на артефактах (если есть) — снимаются соответствующими контроллерами
 
 ### Conditions: Ready и InProgress
@@ -140,7 +140,7 @@ XxxxSnapshot (parent-1)
 **Действия:**
 1. Общий контроллер проверяет существование связанного `XxxxSnapshot` по `spec.snapshotRef`
 2. Если `XxxxSnapshot` не найден (`IsNotFound`):
-   - Снимает финалайзер `snapshot.deckhouse.io/parent-protect` с `XxxxSnapshotContent`
+   - Снимает финалайзер `state-snapshotter.deckhouse.io/parent-protect` с `XxxxSnapshotContent`
    - `XxxxSnapshotContent` теряет логическую связь с Snapshot и ожидает TTL
 
 3. **ObjectKeeper:**
@@ -162,7 +162,7 @@ XxxxSnapshot (parent-1)
 1. Общий контроллер обнаруживает `DeletionTimestamp != nil`
 2. Каскадно снимает финалайзеры с дочерних `YyyySnapshotContent`:
    - Читает `status.childrenSnapshotContentRefs[]`
-   - Для каждого дочернего снимает финалайзер `snapshot.deckhouse.io/parent-protect`
+   - Для каждого дочернего снимает финалайзер `state-snapshotter.deckhouse.io/parent-protect`
    - **Важно:** Контроллер должен обрабатывать случаи, когда часть ссылок битая, чтобы избежать deadlock
 
 3. **Ключевой момент:** Контроллер НЕ инициирует `Delete(child-content)` — он только разблокирует GC, снимая финалайзеры. Удаление дочерних `YyyySnapshotContent` будет инициировано GC через `ownerRef`.

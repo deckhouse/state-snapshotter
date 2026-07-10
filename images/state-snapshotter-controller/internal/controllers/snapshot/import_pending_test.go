@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,10 +30,16 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+// readyCond returns the Ready condition from a status condition slice (nil if absent).
+func readyCond(t *testing.T, conds []metav1.Condition) *metav1.Condition {
+	t.Helper()
+	return meta.FindStatusCondition(conds, snapshotpkg.ConditionReady)
+}
+
 func importSnapshot() *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns", UID: types.UID("imp-uid")},
-		Spec:       storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{Import: &storagev1alpha1.SnapshotImportSource{}}},
+		Spec:       storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeImport},
 	}
 }
 
@@ -60,9 +67,10 @@ func TestReconcileImportPending_SetsPendingAndRequeues(t *testing.T) {
 	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != snapshotpkg.ReasonImportPending {
 		t.Fatalf("want Ready=False/ImportPending, got %#v", cond)
 	}
-	// Import mode must NOT trigger any capture artifacts.
-	if got.Status.BoundSnapshotContentName != "" || got.Status.ManifestCaptureRequestName != "" {
-		t.Fatalf("import snapshot must not capture: bound=%q mcr=%q", got.Status.BoundSnapshotContentName, got.Status.ManifestCaptureRequestName)
+	// Import mode must NOT trigger any capture artifacts. The root MCR name is core-internal (no longer a
+	// status field); capture materialization would show up as a bound content or a captureState block.
+	if got.Status.BoundSnapshotContentName != "" || got.Status.CaptureState != nil {
+		t.Fatalf("import snapshot must not capture: bound=%q captureState=%#v", got.Status.BoundSnapshotContentName, got.Status.CaptureState)
 	}
 }
 

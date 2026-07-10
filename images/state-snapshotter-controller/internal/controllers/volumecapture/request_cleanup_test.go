@@ -69,8 +69,8 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 	content := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "content-1", UID: contentUID},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "uid-a",
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"},
 				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
@@ -83,16 +83,19 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
 	vcr.SetName(vcpkg.SnapshotContentVCRName(contentUID))
 	vcr.SetNamespace(ns)
-	_ = unstructured.SetNestedSlice(vcr.Object, []interface{}{
-		map[string]interface{}{
-			"targetUID": "uid-a",
-			"artifact": map[string]interface{}{
-				"apiVersion": "snapshot.storage.k8s.io/v1",
-				"kind":       "VolumeSnapshotContent",
-				"name":       "vsc-a",
-			},
+	_ = unstructured.SetNestedMap(vcr.Object, map[string]interface{}{
+		"uid":        "uid-a",
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"name":       "pvc-a",
+	}, "spec", "target")
+	_ = unstructured.SetNestedMap(vcr.Object, map[string]interface{}{
+		"artifact": map[string]interface{}{
+			"apiVersion": "snapshot.storage.k8s.io/v1",
+			"kind":       "VolumeSnapshotContent",
+			"name":       "vsc-a",
 		},
-	}, "status", "dataRefs")
+	}, "status", "data")
 
 	vsc := &unstructured.Unstructured{}
 	vsc.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})

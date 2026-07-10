@@ -22,6 +22,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -41,6 +42,7 @@ import (
 	crconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -66,20 +68,30 @@ var (
 	testCfg                     *config.Options
 	unifiedSyncer               *unifiedruntime.Syncer
 	integrationGraphRegProvider *snapshotgraphregistry.Provider
+	// integrationContentController is the suite's SnapshotContentController, exposed so specs can drive its
+	// dynamic watch registration (AddVolumeCaptureRequestWatch) against the envtest-served VCR CRD.
+	integrationContentController *controllers.SnapshotContentController
+	// subtreeIdentitiesServer is the suite-scoped fake aggregated API service backing the root's
+	// manifest-exclude self-call (snapshotcontents/<name>/subtree-manifest-identities). envtest does not
+	// register the core APIService, so the reconciler's SDK cannot reach the real subresource; this
+	// httptest server (backed by the manager client) stands in and its REST client is injected into the
+	// snapshot controller via controllers.WithSnapshotSubresourceREST. Closed in AfterSuite.
+	subtreeIdentitiesServer *httptest.Server
 )
 
 func ptrInt64(v int64) *int64 {
 	return &v
 }
 
-// snapshotContentDataRefSchema is the Variant A singular status.dataRef schema (cardinality ≤1): a
-// SnapshotContent carries at most one data binding as an object, not a dataRefs[] list.
+// snapshotContentDataRefSchema is the Variant A singular status.data schema (cardinality ≤1): a
+// SnapshotContent carries at most one data binding as an object, not a list. wave5 renamed the binding
+// (status.dataRef->data), moved the source PVC under data.source, and dropped the standalone targetUID
+// (the volume identity is data.source.uid).
 func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 	return apiextensionsv1.JSONSchemaProps{
 		Type: "object",
 		Properties: map[string]apiextensionsv1.JSONSchemaProps{
-			"targetUID": {Type: "string", MinLength: ptrInt64(1)},
-			"target": {
+			"source": {
 				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
 					"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
@@ -100,7 +112,50 @@ func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 				Required: []string{"apiVersion", "kind", "name"},
 			},
 		},
-		Required: []string{"targetUID", "target", "artifact"},
+		Required: []string{"source", "artifact"},
+	}
+}
+
+// snapshotStatusCaptureStateSchema is the envtest structural schema for status.captureState. It must
+// list every nested field the controllers and test helpers write (commonController latches +
+// domainSpecificController phase/refs), otherwise the apiserver prunes them on status update.
+func snapshotStatusCaptureStateSchema() apiextensionsv1.JSONSchemaProps {
+	return apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"commonController": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"manifestCaptured": {Type: "boolean"},
+					"dataCaptured":     {Type: "boolean"},
+				},
+			},
+			"domainSpecificController": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"phase":                      {Type: "string"},
+					"reason":                     {Type: "string"},
+					"message":                    {Type: "string"},
+					"manifestCaptureRequestName": {Type: "string"},
+					"volumeCaptureRequestName":   {Type: "string"},
+				},
+			},
+		},
+	}
+}
+
+// snapshotSourceStatusSchema is the envtest structural schema for status.sourceRef (the resolved
+// top-level source object ref published by the domain/import controllers).
+func snapshotSourceStatusSchema() apiextensionsv1.JSONSchemaProps {
+	return apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"apiVersion": {Type: "string"},
+			"kind":       {Type: "string"},
+			"name":       {Type: "string"},
+			"namespace":  {Type: "string"},
+			"uid":        {Type: "string"},
+		},
 	}
 }
 
@@ -285,9 +340,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -344,8 +399,10 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCheckpointName": {Type: "string"},
-										"dataRef":                snapshotContentDataRefSchema(),
+										"manifestCheckpointName":    {Type: "string"},
+										"data":                      snapshotContentDataRefSchema(),
+										"captureState":              snapshotStatusCaptureStateSchema(),
+										"subtreeManifestsPersisted": {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -415,9 +472,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -474,8 +531,10 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCheckpointName": {Type: "string"},
-										"dataRef":                snapshotContentDataRefSchema(),
+										"manifestCheckpointName":    {Type: "string"},
+										"data":                      snapshotContentDataRefSchema(),
+										"captureState":              snapshotStatusCaptureStateSchema(),
+										"subtreeManifestsPersisted": {Type: "boolean"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -599,9 +658,9 @@ var _ = BeforeSuite(func() {
 								"status": {
 									Type: "object",
 									Properties: map[string]apiextensionsv1.JSONSchemaProps{
-										"manifestCaptureRequestName": {Type: "string"},
-										"volumeCaptureRequestName":   {Type: "string"},
-										"boundSnapshotContentName":   {Type: "string"},
+										"captureState":             snapshotStatusCaptureStateSchema(),
+										"sourceRef":                snapshotSourceStatusSchema(),
+										"boundSnapshotContentName": {Type: "string"},
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -665,24 +724,35 @@ var _ = BeforeSuite(func() {
 		"registrationtestsnapshotcontents.test.deckhouse.io",
 		"namespacedtestsnapshotcontents.test.deckhouse.io",
 		"graphregistrytestsnapshots.test.deckhouse.io",
-		"snapshots.storage.deckhouse.io",
-		"snapshotcontents.storage.deckhouse.io",
+		"snapshots.state-snapshotter.deckhouse.io",
+		"snapshotcontents.state-snapshotter.deckhouse.io",
 		"volumesnapshots.snapshot.storage.k8s.io",
 	}
+	// Explicit timeout: the default Gomega Eventually (1s) is too tight for cold envtest CRD
+	// establishment (apiserver just started), which flakes BeforeSuite intermittently.
 	Eventually(func() bool {
+		notReady := []string{}
 		for _, n := range crdNamesWaitEstablished {
 			if !crdEstablished(n) {
-				return false
+				notReady = append(notReady, n)
 			}
 		}
+		if len(notReady) > 0 {
+			fmt.Fprintf(GinkgoWriter, "CRDs not established yet: %v\n", notReady)
+			return false
+		}
 		return true
-	}).Should(BeTrue(), "CRDs should be established")
+	}, 30*time.Second, 1*time.Second).Should(BeTrue(), "CRDs should be established")
 
 	// Create manager
 	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: "0",
-		LeaderElection:         false,
+		// Disable the metrics server: its default bind is the fixed :8080, which collides across
+		// Ginkgo parallel processes (-procs>1) — each proc runs its own BeforeSuite/manager and the
+		// second onward fails BeforeSuite with "address already in use". "0" disables the listener.
+		Metrics:        metricsserver.Options{BindAddress: "0"},
+		LeaderElection: false,
 		// Several specs and the unified-runtime Syncer both register a controller for the same
 		// test.deckhouse.io/RegistrationTestSnapshot GVK on this single shared manager; without this the
 		// second registration is rejected for a duplicate controller name. Test-only.
@@ -721,6 +791,12 @@ var _ = BeforeSuite(func() {
 	for i := range genericSnapGVKs {
 		Expect(snapshotController.AddWatchForPair(mgr, genericSnapGVKs[i], genericContentGVKs[i])).To(Succeed())
 	}
+	// wave7 (w7-creator): mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
+	// startup so the root SnapshotContent is created/bound without waiting for a CSD-driven Syncer.Sync.
+	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
+		Expect(snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK)).To(Succeed())
+	}
 
 	var contentController *controllers.SnapshotContentController
 	contentController, err = controllers.NewSnapshotContentController(
@@ -733,12 +809,34 @@ var _ = BeforeSuite(func() {
 	)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(contentController.SetupWithManager(mgr)).To(Succeed())
+	integrationContentController = contentController
 	for _, snapshotGVK := range runtimeSnapGVKs {
 		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	}
+	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10),
+	// so the root pair must be marked domain-capture on the content controller too.
+	if rootSnapGVK, _, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
+		contentController.MarkDomainCaptureKind(rootSnapGVK)
+	}
 
 	Expect(controllers.AddManifestCheckpointControllerToManager(mgr, integrationLog, testCfg)).To(Succeed())
-	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider)).To(Succeed())
+	// Stand up the fake subtree-manifest-identities aggregated API service and inject its REST client, so
+	// the root capture's manifest-exclude self-call (sdk.SubtreeManifestIdentities) resolves in envtest
+	// (which registers no core APIService). The server (aggregatedManifestsIntegrationStartServer) reads
+	// live cluster state via k8sClient, so bind the global here — it holds the manager client the whole
+	// suite uses (re-set to the same value after cache sync below).
+	k8sClient = mgr.GetClient()
+	subtreeIdentitiesServer = aggregatedManifestsIntegrationStartServer()
+	subtreeIdentitiesREST, err := rest.RESTClientFor(&rest.Config{
+		Host:    subtreeIdentitiesServer.URL,
+		APIPath: "/apis",
+		ContentConfig: rest.ContentConfig{
+			GroupVersion:         &schema.GroupVersion{Group: "subresources.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+			NegotiatedSerializer: clientgoscheme.Codecs.WithoutConversion(),
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(controllers.AddSnapshotControllerToManager(mgr, testCfg, integrationGraphRegProvider, controllers.WithSnapshotSubresourceREST(subtreeIdentitiesREST))).To(Succeed())
 	// Core is demo-free: no dedicated domain-controller activators are wired here. Domain (demo) controller
 	// behavior is covered by the domain module's fake-client unit tests and by e2e; the unified runtime
 	// Syncer is exercised with generic CSD-gated pairs only.
@@ -800,6 +898,9 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
+	if subtreeIdentitiesServer != nil {
+		subtreeIdentitiesServer.Close()
+	}
 	err := testEnv.Stop()
 	Expect(err).NotTo(HaveOccurred())
 })

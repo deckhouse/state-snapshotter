@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -58,22 +59,30 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		// on the source PVC: it is the real allocated size the snapshot can be restored to and outlives
 		// the PVC. Read it for every artifact-bearing binding (domain data leaves too, which have no PVC
 		// target). A not-yet-populated restoreSize is left empty (best-effort) rather than blocking.
-		if size, serr := readArtifactRestoreSize(ctx, c, b.Artifact); serr != nil {
+		// The same VSC read also backfills the durable artifact uid when an upstream producer (e.g. the
+		// import path) referenced the artifact by name only; producers that already know the uid (VCR /
+		// orphan paths) keep theirs.
+		size, uid, serr := readArtifactRestoreSizeAndUID(ctx, c, b.Artifact)
+		if serr != nil {
 			return bindings, serr
-		} else if size != "" {
+		}
+		if size != "" {
 			b.Size = size
 		}
-		if b.Target.Kind != "PersistentVolumeClaim" || b.Target.Name == "" {
+		if b.Artifact.UID == "" && uid != "" {
+			b.Artifact.UID = uid
+		}
+		if b.Source.Kind != "PersistentVolumeClaim" || b.Source.Name == "" {
 			continue
 		}
 		pvc := &corev1.PersistentVolumeClaim{}
-		if err := c.Get(ctx, client.ObjectKey{Namespace: b.Target.Namespace, Name: b.Target.Name}, pvc); err != nil {
+		if err := c.Get(ctx, client.ObjectKey{Namespace: b.Source.Namespace, Name: b.Source.Name}, pvc); err != nil {
 			if apierrors.IsNotFound(err) {
 				log.Info("source PVC gone; skipping volume-metadata enrichment",
-					"pvc", b.Target.Namespace+"/"+b.Target.Name)
+					"pvc", b.Source.Namespace+"/"+b.Source.Name)
 				continue
 			}
-			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.Target.Namespace, b.Target.Name, err)
+			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.Source.Namespace, b.Source.Name, err)
 		}
 		// PVC.spec.volumeMode defaults to Filesystem when nil (Kubernetes semantics).
 		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != "" {
@@ -96,7 +105,7 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 		if b.VolumeMode != string(corev1.PersistentVolumeBlock) && pvc.Spec.VolumeName != "" {
 			pv := &corev1.PersistentVolume{}
 			if err := direct.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
-				return bindings, fmt.Errorf("read bound PV %s for fsType of PVC %s/%s: %w", pvc.Spec.VolumeName, b.Target.Namespace, b.Target.Name, err)
+				return bindings, fmt.Errorf("read bound PV %s for fsType of PVC %s/%s: %w", pvc.Spec.VolumeName, b.Source.Namespace, b.Source.Name, err)
 			}
 			if pv.Spec.CSI != nil {
 				b.FsType = pv.Spec.CSI.FSType
@@ -111,32 +120,42 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 // (no error) when the artifact is not a VSC, is unnamed, is being deleted, or has not published its
 // restoreSize yet; a transient read error is returned so the caller can requeue.
 func readArtifactRestoreSize(ctx context.Context, c client.Client, artifact storagev1alpha1.SnapshotDataArtifactRef) (string, error) {
+	size, _, err := readArtifactRestoreSizeAndUID(ctx, c, artifact)
+	return size, err
+}
+
+// readArtifactRestoreSizeAndUID reads the durable VolumeSnapshotContent once and returns both its
+// restoreSize (see readArtifactRestoreSize) and its uid. The uid is best-effort: it is empty (no error)
+// whenever the artifact is not a readable, live VSC, mirroring the size semantics. A single read backs
+// both values so enrichment does not double-GET the VSC.
+func readArtifactRestoreSizeAndUID(ctx context.Context, c client.Client, artifact storagev1alpha1.SnapshotDataArtifactRef) (string, types.UID, error) {
 	if artifact.Kind != "VolumeSnapshotContent" || artifact.Name == "" {
-		return "", nil
+		return "", "", nil
 	}
 	vsc := &unstructured.Unstructured{}
 	vsc.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
 	if err := c.Get(ctx, client.ObjectKey{Name: artifact.Name}, vsc); err != nil {
 		if apierrors.IsNotFound(err) {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("read VolumeSnapshotContent %s for restoreSize: %w", artifact.Name, err)
+		return "", "", fmt.Errorf("read VolumeSnapshotContent %s for restoreSize: %w", artifact.Name, err)
 	}
 	if !vsc.GetDeletionTimestamp().IsZero() {
-		return "", nil
+		return "", "", nil
 	}
+	uid := vsc.GetUID()
 	bytes, found, err := unstructured.NestedInt64(vsc.Object, "status", "restoreSize")
 	if err != nil {
 		// restoreSize present but not an int64 (decoder/schema drift). Leave Size empty (best-effort) but
 		// surface it at debug so an unexpected type is observable instead of silently swallowed.
 		logf.FromContext(ctx).V(1).Info("VolumeSnapshotContent status.restoreSize is present but not int64; leaving Size empty",
 			"vsc", artifact.Name, "error", err.Error())
-		return "", nil
+		return "", uid, nil
 	}
 	if !found || bytes <= 0 {
-		return "", nil
+		return "", uid, nil
 	}
-	return resource.NewQuantity(bytes, resource.BinarySI).String(), nil
+	return resource.NewQuantity(bytes, resource.BinarySI).String(), uid, nil
 }
 
 // PublishSnapshotContentDataRefs copies the durable data binding onto a logical SnapshotContent (N5 PR-4).
@@ -157,7 +176,7 @@ func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, conten
 }
 
 // PublishSnapshotContentDataRef writes the single durable data binding onto a logical SnapshotContent.
-// A nil binding clears status.dataRef. The write is idempotent under optimistic retry.
+// A nil binding clears status.data. The write is idempotent under optimistic retry.
 func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, contentName string, ref *storagev1alpha1.SnapshotDataBinding) error {
 	if contentName == "" {
 		return nil
@@ -167,18 +186,70 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
-		if snapshotDataRefEqual(content.Status.DataRef, ref) {
+		if snapshotDataRefEqual(content.Status.Data, ref) {
 			return nil
 		}
 		base := content.DeepCopy()
 		if ref == nil {
-			content.Status.DataRef = nil
+			content.Status.Data = nil
 		} else {
 			cp := *ref
-			content.Status.DataRef = &cp
+			content.Status.Data = &cp
 		}
 		return c.Status().Patch(ctx, content, client.MergeFrom(base))
 	})
+}
+
+// SnapshotDataBindingToUnstructuredMap renders a SnapshotDataBinding as a JSON-typed unstructured map
+// suitable for unstructured.SetNestedMap (only string / []interface{} / map[string]interface{} values).
+// source and artifact are always present (required); the volume-metadata fields are written only when
+// non-empty. This is the single wire-shape serializer for mirroring a binding onto a namespaced object's
+// top-level status.data — shared by the domain data-leaf mirror (genericbinder.mirrorDataToLeaf) and the
+// extended-VolumeSnapshot import mirror (volumesnapshotimport), so the two stay byte-identical for d8.
+func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding) map[string]interface{} {
+	source := map[string]interface{}{
+		"apiVersion": d.Source.APIVersion,
+		"kind":       d.Source.Kind,
+		"name":       d.Source.Name,
+	}
+	if d.Source.Namespace != "" {
+		source["namespace"] = d.Source.Namespace
+	}
+	if d.Source.UID != "" {
+		source["uid"] = string(d.Source.UID)
+	}
+	artifact := map[string]interface{}{
+		"apiVersion": d.Artifact.APIVersion,
+		"kind":       d.Artifact.Kind,
+		"name":       d.Artifact.Name,
+	}
+	if d.Artifact.UID != "" {
+		artifact["uid"] = string(d.Artifact.UID)
+	}
+	out := map[string]interface{}{
+		"source":   source,
+		"artifact": artifact,
+	}
+	if d.VolumeMode != "" {
+		out["volumeMode"] = d.VolumeMode
+	}
+	if d.FsType != "" {
+		out["fsType"] = d.FsType
+	}
+	if len(d.AccessModes) > 0 {
+		am := make([]interface{}, len(d.AccessModes))
+		for i, m := range d.AccessModes {
+			am[i] = m
+		}
+		out["accessModes"] = am
+	}
+	if d.StorageClassName != "" {
+		out["storageClassName"] = d.StorageClassName
+	}
+	if d.Size != "" {
+		out["size"] = d.Size
+	}
+	return out
 }
 
 // volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
@@ -271,12 +342,9 @@ func snapshotDataRefEqual(a, b *storagev1alpha1.SnapshotDataBinding) bool {
 }
 
 func dataBindingEqual(x, y storagev1alpha1.SnapshotDataBinding) bool {
-	if x.TargetUID != y.TargetUID {
-		return false
-	}
-	if x.Target.APIVersion != y.Target.APIVersion || x.Target.Kind != y.Target.Kind ||
-		x.Target.Name != y.Target.Name || x.Target.Namespace != y.Target.Namespace ||
-		string(x.Target.UID) != string(y.Target.UID) {
+	if x.Source.APIVersion != y.Source.APIVersion || x.Source.Kind != y.Source.Kind ||
+		x.Source.Name != y.Source.Name || x.Source.Namespace != y.Source.Namespace ||
+		string(x.Source.UID) != string(y.Source.UID) {
 		return false
 	}
 	if x.Artifact != y.Artifact {

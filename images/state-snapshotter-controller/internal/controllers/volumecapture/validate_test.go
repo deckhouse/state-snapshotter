@@ -74,8 +74,8 @@ func TestContentDataRefsCoverExpectedTargets_rejectsWrongUID(t *testing.T) {
 	t.Parallel()
 	expected := []vcpkg.Target{{UID: "uid-a"}, {UID: "uid-b"}}
 	published := []storagev1alpha1.SnapshotDataBinding{
-		{TargetUID: "uid-a", Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-a"}},
-		{TargetUID: "uid-wrong", Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-b"}},
+		{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"}, Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-a"}},
+		{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-wrong"}, Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-b"}},
 	}
 	if ContentDataRefsCoverExpectedTargets(published, expected) {
 		t.Fatal("stale/wrong targetUID must not satisfy coverage")

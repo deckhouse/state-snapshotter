@@ -24,10 +24,11 @@ import (
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// importDataBinding must target the orphan PVC (not the VolumeSnapshot handle): the restore compiler
-// matches a captured PVC manifest to its dataRef by PVC identity/UID. A VolumeSnapshot-targeted dataRef
-// would never match and the PVC would be emitted data-less (contract violation).
-func TestImportDataBinding_TargetsPVC(t *testing.T) {
+// importSnapshotSourceRef must target the orphan PVC (not the VolumeSnapshot handle): it is published as
+// status.sourceRef and the aggregator builds the dataRef source from it. The restore compiler matches
+// a captured PVC manifest to its dataRef by PVC identity/UID — a VolumeSnapshot-targeted source would never
+// match and the PVC would be emitted data-less (contract violation).
+func TestImportSnapshotSourceRef_TargetsPVC(t *testing.T) {
 	pvc := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
 		"kind":       "PersistentVolumeClaim",
@@ -38,44 +39,44 @@ func TestImportDataBinding_TargetsPVC(t *testing.T) {
 		},
 	}}
 
-	b := importDataBinding(pvc, "vsc-artifact")
+	src := importSnapshotSourceRef(pvc)
 
-	if b.TargetUID != "pvc-uid-123" {
-		t.Fatalf("TargetUID must be the PVC uid, got %q", b.TargetUID)
+	if string(src.UID) != "pvc-uid-123" {
+		t.Fatalf("Source.UID must be the PVC uid, got %q", src.UID)
 	}
-	if b.Target.Kind != "PersistentVolumeClaim" {
-		t.Fatalf("Target.Kind must be PersistentVolumeClaim, got %q", b.Target.Kind)
+	if src.Kind != "PersistentVolumeClaim" {
+		t.Fatalf("Source.Kind must be PersistentVolumeClaim, got %q", src.Kind)
 	}
-	if b.Target.APIVersion != "v1" {
-		t.Fatalf("Target.APIVersion must be v1, got %q", b.Target.APIVersion)
+	if src.APIVersion != "v1" {
+		t.Fatalf("Source.APIVersion must be v1, got %q", src.APIVersion)
 	}
-	if b.Target.Name != "bk-pvc" || b.Target.Namespace != "source-ns" {
-		t.Fatalf("Target identity mismatch: %s/%s", b.Target.Namespace, b.Target.Name)
-	}
-	if string(b.Target.UID) != "pvc-uid-123" {
-		t.Fatalf("Target.UID must be the PVC uid, got %q", b.Target.UID)
-	}
-	if b.Artifact.Kind != snapshotpkg.KindVolumeSnapshotContent || b.Artifact.Name != "vsc-artifact" {
-		t.Fatalf("Artifact must point at the durable VSC, got %s/%s", b.Artifact.Kind, b.Artifact.Name)
+	if src.Name != "bk-pvc" || src.Namespace != "source-ns" {
+		t.Fatalf("Source identity mismatch: %s/%s", src.Namespace, src.Name)
 	}
 }
 
-// isImportModeVolumeSnapshot keys solely on the unified empty marker spec.source.import: {} (parity with
-// every other snapshot kind); capture/pre-provisioned VS (other source fields) are not ours to bind.
+// isImportModeVolumeSnapshot keys solely on the unified enum spec.mode: Import (parity with every other
+// snapshot kind); capture/pre-provisioned VS (mode absent or Capture) are not ours to bind.
 func TestIsImportModeVolumeSnapshot(t *testing.T) {
 	cases := []struct {
 		name   string
+		mode   string
 		source map[string]interface{}
 		want   bool
 	}{
-		{name: "import marker present", source: map[string]interface{}{"import": map[string]interface{}{}}, want: true},
-		{name: "capture (persistentVolumeClaimName)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
-		{name: "pre-provisioned (volumeSnapshotContentName)", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
-		{name: "no source", source: nil, want: false},
+		{name: "mode Import (source omitted — canonical)", mode: "Import", source: nil, want: true},
+		{name: "mode Import (empty source from a typed client)", mode: "Import", source: map[string]interface{}{}, want: true},
+		{name: "mode Capture (persistentVolumeClaimName)", mode: "Capture", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
+		{name: "mode absent (CRD default Capture)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
+		{name: "pre-provisioned (volumeSnapshotContentName)", mode: "Capture", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
+		{name: "no source, no mode", source: nil, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := map[string]interface{}{}
+			if tc.mode != "" {
+				spec["mode"] = tc.mode
+			}
 			if tc.source != nil {
 				spec["source"] = tc.source
 			}
@@ -100,7 +101,7 @@ func TestResolveDataImportArtifact(t *testing.T) {
 		}
 		return &unstructured.Unstructured{Object: map[string]interface{}{
 			"metadata": map[string]interface{}{"name": "di-1", "namespace": "ns1"},
-			"status":   map[string]interface{}{"dataArtifactRef": ref},
+			"status":   map[string]interface{}{"data": map[string]interface{}{"artifact": ref}},
 		}}
 	}
 	r := &Controller{}

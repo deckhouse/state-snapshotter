@@ -35,48 +35,48 @@ write_obj() {
 
 ready_condition='"conditions":[{"type":"Ready","status":"True","reason":"Completed","message":"ok"}]'
 
-write_obj snapshots.storage.deckhouse.io root <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","volumeCaptureRequestName":"vcr-root","childrenSnapshotRefs":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
+write_obj snapshots.state-snapshotter.deckhouse.io root <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","volumeCaptureRequestName":"vcr-root","childrenSnapshotRefs":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
 EOF
 
 write_obj demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io disk-snap <<EOF
-{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","metadata":{"namespace":"ns1","name":"disk-snap","uid":"snap-disk","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"sourceRef":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"missing-disk"}},"status":{"boundSnapshotContentName":"sc-disk",${ready_condition}}}
+{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","metadata":{"namespace":"ns1","name":"disk-snap","uid":"snap-disk","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"sourceRef":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"missing-disk"}},"status":{"boundSnapshotContentName":"sc-disk",${ready_condition}}}
 EOF
 
-write_obj snapshotcontents.storage.deckhouse.io sc-root <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-root","uid":"sc-root-uid","ownerReferences":[{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","name":"ok-root","uid":"ok-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-root","childrenSnapshotContentRefs":[{"name":"sc-disk"},{"name":"sc-bad"},{"name":"sc-missing"}],"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
+write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-root <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-root","uid":"sc-root-uid","ownerReferences":[{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","name":"ok-root","uid":"ok-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-root","childrenSnapshotContentRefs":[{"name":"sc-disk"},{"name":"sc-bad"},{"name":"sc-missing"}],"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
 EOF
 
-write_obj snapshotcontents.storage.deckhouse.io sc-disk <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-disk","uid":"sc-disk-uid","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-root","uid":"sc-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-disk",${ready_condition}}}
+write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-disk <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-disk","uid":"sc-disk-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-root","uid":"sc-root-uid","controller":true}]},"status":{"manifestCheckpointName":"mcp-disk",${ready_condition}}}
 EOF
 
-write_obj snapshotcontents.storage.deckhouse.io sc-bad <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-bad","uid":"sc-bad-uid","ownerReferences":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap","uid":"snap-disk","controller":true}]},"status":{"manifestCheckpointName":"mcp-bad",${ready_condition}}}
+write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-bad <<EOF
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-bad","uid":"sc-bad-uid","ownerReferences":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap","uid":"snap-disk","controller":true}]},"status":{"manifestCheckpointName":"mcp-bad",${ready_condition}}}
 EOF
 
 write_obj objectkeepers.deckhouse.io ok-root <<EOF
-{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","metadata":{"name":"ok-root","uid":"ok-root-uid","ownerReferences":[]},"spec":{"mode":"FollowObjectWithTTL","ttl":"1m0s","followObjectRef":{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","namespace":"ns1","name":"root","uid":"snap-root"}}}
+{"apiVersion":"deckhouse.io/v1alpha1","kind":"ObjectKeeper","metadata":{"name":"ok-root","uid":"ok-root-uid","ownerReferences":[]},"spec":{"mode":"FollowObjectWithTTL","ttl":"1m0s","followObjectRef":{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","namespace":"ns1","name":"root","uid":"snap-root"}}}
 EOF
 
 write_obj manifestcapturerequests.state-snapshotter.deckhouse.io mcr-root <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCaptureRequest","metadata":{"namespace":"ns1","name":"mcr-root","uid":"mcr-root-uid","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"targets":[{"apiVersion":"v1","kind":"ConfigMap","name":"cm1"}]}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCaptureRequest","metadata":{"namespace":"ns1","name":"mcr-root","uid":"mcr-root-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"targets":[{"apiVersion":"v1","kind":"ConfigMap","name":"cm1"}]}}
 EOF
 
 write_obj customsnapshotdefinitions.state-snapshotter.deckhouse.io smoke-demo <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"snapshotResourceMapping":[{"source":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"RBACReady","status":"True","reason":"Smoke"}]}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"snapshotResourceMapping":[{"source":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"AccessGranted","status":"True","reason":"Smoke"}]}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-root <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-root","uid":"mcp-root-uid","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-root","uid":"sc-root-uid","controller":true}]},"status":{"chunks":[{"name":"chunk-root-0","index":0,"objectsCount":3}],${ready_condition}}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-root","uid":"mcp-root-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-root","uid":"sc-root-uid","controller":true}]},"status":{"chunks":[{"name":"chunk-root-0","index":0,"objectsCount":3}],${ready_condition}}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-disk <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-disk","uid":"mcp-disk-uid","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-disk","uid":"sc-disk-uid","controller":true}]},"status":{${ready_condition}}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-disk","uid":"mcp-disk-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-disk","uid":"sc-disk-uid","controller":true}]},"status":{${ready_condition}}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-bad <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-bad","uid":"mcp-bad-uid","ownerReferences":[{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-bad","uid":"sc-bad-uid","controller":true}]},"status":{${ready_condition}}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"ManifestCheckpoint","metadata":{"name":"mcp-bad","uid":"mcp-bad-uid","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","name":"sc-bad","uid":"sc-bad-uid","controller":true}]},"status":{${ready_condition}}}
 EOF
 
 write_obj manifestcheckpointcontentchunks.state-snapshotter.deckhouse.io chunk-root-0 <<EOF
@@ -91,8 +91,8 @@ write_obj volumesnapshotcontents.snapshot.storage.k8s.io vsc-root <<EOF
 {"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","metadata":{"name":"vsc-root","uid":"vsc-root-uid"},"status":{"readyToUse":true}}
 EOF
 
-write_obj volumecapturerequests.storage.deckhouse.io vcr-root <<EOF
-{"apiVersion":"storage.deckhouse.io/v1alpha1","kind":"VolumeCaptureRequest","metadata":{"namespace":"ns1","name":"vcr-root","uid":"vcr-root-uid"},"spec":{"mode":"Snapshot","targets":[{"uid":"pvc-root-uid","apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"}]},"status":{"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
+write_obj volumecapturerequests.storage-foundation.deckhouse.io vcr-root <<EOF
+{"apiVersion":"storage-foundation.deckhouse.io/v1alpha1","kind":"VolumeCaptureRequest","metadata":{"namespace":"ns1","name":"vcr-root","uid":"vcr-root-uid"},"spec":{"mode":"Snapshot","targets":[{"uid":"pvc-root-uid","apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"}]},"status":{"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
 EOF
 
 write_obj demovirtualdisks.demo.state-snapshotter.deckhouse.io live-disk <<EOF

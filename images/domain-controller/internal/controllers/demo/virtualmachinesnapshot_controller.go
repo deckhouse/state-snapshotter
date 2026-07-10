@@ -18,8 +18,6 @@ package demo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -35,17 +33,16 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
 // DemoVirtualMachineSnapshotReconciler owns demo VM DOMAIN planning only: sourceRef validation, the
 // owned-disk child snapshot graph, the per-snapshot manifest-capture request (MCR), and the planning
-// barrier. All Kubernetes transport (child adoption, owner references, optimistic-locked status patches,
-// the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk), which is delete-free: it
-// publishes the child set as the authoritative snapshot topology and never deletes children. The VM
-// snapshot is manifest-only (captures no data); it never touches the cluster-scoped SnapshotContent.
+// barrier. All Kubernetes transport (child adoption, owner references, orphan GC, optimistic-locked status
+// patches, the barrier condition) is delegated to the snapshot SDK (pkg/snapshotsdk). The VM snapshot is
+// manifest-only (no data leg); it never touches the cluster-scoped SnapshotContent.
 type DemoVirtualMachineSnapshotReconciler struct {
 	Client    client.Client
 	APIReader client.Reader
@@ -56,7 +53,7 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 	// RBAC is not generated from kubebuilder markers in this module.
 	// Static controller RBAC is defined in templates/controller/rbac-for-us.yaml.
 	// Domain/custom RBAC is granted externally by Deckhouse RBAC controller/hook
-	// before RBACReady=True is set on CSD.
+	// before AccessGranted=True is set on CSD.
 	// Content-free for SNAPSHOT reconcilers: NO SnapshotContent watch/informer here. The core
 	// GenericSnapshotBinderController owns all SnapshotContent work for this DomainCaptureSnapshotKind.
 	// The child DemoVirtualDiskSnapshot watch stays so the parent re-plans when a child changes.
@@ -71,12 +68,7 @@ func AddDemoVirtualMachineSnapshotControllerToManager(mgr ctrl.Manager, cfg *con
 }
 
 func (r *DemoVirtualMachineSnapshotReconciler) capture() snapshotsdk.CaptureSDK {
-	return snapshotsdk.New(r.Client, snapshotsdk.NewStorageFoundationProvider(r.Client))
-}
-
-func demoVirtualMachineDiskSnapshotName(namespace, vmSnapshotName, sourceDiskName string) string {
-	sum := sha256.Sum256([]byte("vm-disk:" + namespace + "/" + vmSnapshotName + "/" + sourceDiskName))
-	return "demovmdisk-" + hex.EncodeToString(sum[:8])
+	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client))
 }
 
 func mapDemoDiskSnapshotToParentVM(_ context.Context, o client.Object) []reconcile.Request {
@@ -105,7 +97,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	// Import mode: spec.source.import switches this VM snapshot off capture. The domain controller does NO
+	// Import mode: spec.mode: Import switches this VM snapshot off capture. The domain controller does NO
 	// capture planning (no source-VM lookup, no children planning, no MCR) — the live DemoVirtualMachine
 	// and its disks may be absent on import. The common controller materializes the backing SnapshotContent
 	// from the uploaded manifests and child refs. Domain planning is trivially complete for an import node.
@@ -118,85 +110,175 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 
 	resolution := resolveDemoSnapshotSource(controllercommon.KindDemoVirtualMachine, s.Spec.SourceRef)
 	if resolution.Reason != "" {
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
+		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{Reason: snapshotsdk.Reason(resolution.Reason), Message: resolution.Message})
 	}
 	source := &demov1alpha1.DemoVirtualMachine{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: resolution.Name}, source); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, sdk.MarkNotReady(ctx, adapter, snapshotsdk.NotReadyStatus{
-			Reason:  snapshotsdk.Reason(demoReasonSourceNotFound),
-			Message: fmt.Sprintf("%s %q not found", controllercommon.KindDemoVirtualMachine, resolution.Name),
-		})
+		// Recoverable, NOT terminal: the captured source may still appear. Surface it as a Pending
+		// diagnostic (message-only, phase preserved) and requeue — Fail/Reject would move to the terminal
+		// Failed SINK the SDK never leaves, so a VM that shows up later could never be captured. This is the
+		// pod model: stay Pending with a "waiting for X" note instead of failing.
+		if perr := sdk.ReportProgress(ctx, adapter, fmt.Sprintf("waiting for %s %q to exist", controllercommon.KindDemoVirtualMachine, resolution.Name)); perr != nil {
+			return ctrl.Result{}, perr
+		}
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
 	}
 
-	// Children planning: the domain decides which disks the VM owns and builds the desired child snapshot
-	// objects; the SDK adopts them and publishes status.childrenSnapshotRefs (delete-free). The set
-	// becomes the authoritative, immutable snapshot topology once the planning barrier is committed
-	// (ChildrenSnapshotReady=True): after that a different desired child set (e.g. after a restart with
-	// changed discovery) is rejected as terminal topology drift, never repaired by deletion. Detached
-	// leftovers are reclaimed by ownerRef GC when this parent is deleted.
-	children, err := r.planDemoVirtualMachineChildren(ctx, s, source)
+	// Source resolved: clear any stale "waiting for X" diagnostic left by a prior reconcile so a recovered
+	// snapshot does not keep showing an obsolete Pending note.
+	if err := clearDemoProgress(ctx, sdk, adapter); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Publish the captured live source's full reference (top-level status.sourceRef). d8-cli reads it
+	// as a self-contained block to rebuild the import-mode source. Not part of the readiness formula.
+	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualMachine,
+		Name:       source.Name,
+		Namespace:  source.Namespace,
+		UID:        source.UID,
+	}); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Children planning: the domain decides which disks the VM owns, honors the absolute exclude veto, and
+	// builds the desired child snapshot objects from the kept disks; the SDK adopts them and publishes
+	// status.childrenSnapshotRefs. The vetoed disks are handed back as excludedRefs (direct exclusions) and
+	// published into captureState.domainSpecificController.excludedRefs in the same status patch.
+	children, excluded, err := r.planDemoVirtualMachineChildren(ctx, s, source)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := sdk.EnsureChildren(ctx, adapter, children); err != nil {
-		reason := snapshotsdk.Reason(storagev1alpha1.ReasonCreateChildFailed)
-		if errors.Is(err, snapshotsdk.ErrTopologyDrift) {
-			reason = snapshotsdk.Reason(storagev1alpha1.ReasonTopologyDrift)
+	if err := sdk.EnsureChildren(ctx, adapter, children, excluded); err != nil {
+		// TERMINAL: the declared child set was frozen at barrier 1 (phase>=Planned) and a re-plan tried to
+		// GROW it. A snapshot is a point-in-time capture with an immutable membership, so a late-added edge
+		// would wedge the node at ChildrenLinkPending forever — move to the terminal Failed sink with the
+		// recommended GraphPlanningFailed reason (see snapshotsdk.ErrChildrenSetFrozen).
+		if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) {
+			return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
 		}
-		if perr := sdk.MarkPlanningFailed(ctx, adapter, reason, err); perr != nil {
-			return ctrl.Result{}, perr
-		}
+		// Recoverable / fail-closed: a child-adoption conflict or a transient API error. Do NOT enter the
+		// terminal Failed sink (it never recovers, and MarkPlanned below would then be a no-op forever) —
+		// requeue with backoff via the returned error, leaving the phase pre-Planned so the parent waits.
 		return ctrl.Result{}, err
 	}
 
-	// Manifest capture: ensure the per-snapshot MCR (VM is manifest-only, captures no data) and publish its name.
-	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{
-		Targets: []snapshotsdk.ManifestTarget{{
-			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
-			Kind:       controllercommon.KindDemoVirtualMachine,
-			Name:       source.Name,
-		}},
-	}); err != nil {
-		if errors.Is(err, snapshotsdk.ErrManifestDrift) {
-			if perr := sdk.MarkPlanningFailed(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonManifestDrift), err); perr != nil {
-				return ctrl.Result{}, perr
-			}
-		}
+	// Manifest leg: ensure the per-snapshot MCR (VM is manifest-only, no data leg) and publish its name.
+	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+		APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+		Kind:       controllercommon.KindDemoVirtualMachine,
+		Name:       source.Name,
+	}}}); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Planning barrier: children planned/published and MCR created. The common controller waits on this
-	// before taking over SnapshotContent (creation, children/MCP projection, Ready mirror).
-	return ctrl.Result{}, sdk.MarkPlanningReady(ctx, adapter, "child planning complete")
+	// Barrier 1 (Planned): children planned/published and the VM MCR created. The common controller waits
+	// on phase>=Planned before taking over SnapshotContent (creation, children/MCP projection, Ready mirror).
+	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Barrier 2 (Finished): switch on the SDK-derived capture outcome for the VM's own (manifest-only) leg.
+	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
+	case snapshotsdk.CaptureOutcomeFailed:
+		// Core-owned terminal, surfaced by the CORE on the Ready condition (Variant A): either the VM's own
+		// manifest leg failed, or a child disk's data leg failed and the core bubbled it up the content tree
+		// as ChildrenFailed and mirrored it onto this snapshot's Ready. The domain does NOT re-drive it into
+		// phase=Failed via Reject — turning a core-owned leg failure into a terminal is the core's job. Stop
+		// (the core owns the durable terminal state); requeuing would only spin.
+		return ctrl.Result{}, nil
+	case snapshotsdk.CaptureOutcomeCaptured:
+		// The VM's own manifest leg is captured. A VM aggregator additionally waits for every child disk's
+		// data leg to be captured before confirming consistency: this showcases fs freeze/unfreeze — the
+		// guest is unfrozen only after the disk snapshots are actually taken. Timing is driven off the
+		// fine-grained per-child dataCaptured latch (AllLegsCaptured), not a coarse child Ready rollup.
+		children, err := sdk.ChildrenCaptureStates(ctx, adapter)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// A terminally-failed child never latches its data leg, so waiting on AllLegsCaptured alone would
+		// spin forever. The core will bubble that child terminal up as ChildrenFailed onto this snapshot's
+		// Ready (flipping the outcome to Failed on a later reconcile), but stop waiting immediately here to
+		// avoid the requeue churn until it propagates — the domain never re-drives the child terminal itself.
+		if childrenHaveTerminal(children) {
+			return ctrl.Result{}, nil
+		}
+		if !allChildrenLegsCaptured(children) {
+			return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+		}
+		// (Showcase) the VM filesystem would be unfrozen here now that all disk data is captured.
+		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	default:
+		// Capturing: wait for the core to finish; woken by the status watch, poll as a fallback.
+		return ctrl.Result{RequeueAfter: defaultDemoSnapshotRequeueAfter}, nil
+	}
+}
+
+// childrenHaveTerminal reports whether any child snapshot carries a terminal Ready reason
+// (IsReasonTerminal). The core owns and bubbles that terminal; the domain uses it only to stop waiting.
+func childrenHaveTerminal(children []snapshotsdk.ChildCaptureState) bool {
+	for i := range children {
+		if storagev1alpha1.IsReasonTerminal(children[i].ReadyReason) {
+			return true
+		}
+	}
+	return false
+}
+
+// allChildrenLegsCaptured reports whether every child snapshot has all its declared capture legs latched
+// (per-child captureState.commonController). It reads the fine-grained latch rather than the child's Ready
+// rollup, so the VM can time consistency (fs unfreeze) precisely against disk data capture. An empty set
+// (no children) is vacuously captured.
+func allChildrenLegsCaptured(children []snapshotsdk.ChildCaptureState) bool {
+	for i := range children {
+		if !children[i].AllLegsCaptured {
+			return false
+		}
+	}
+	return true
 }
 
 // planDemoVirtualMachineChildren builds the desired set of child DemoVirtualDiskSnapshot objects for the
-// disks owned by the VM. Owner references, adoption, and ref derivation are the SDK's job (delete-free;
-// the child set becomes the immutable snapshot topology once the planning barrier is committed); the
-// domain only authors the child object identity and its immutable spec.sourceRef.
+// disks owned by the VM, honoring the absolute exclude veto. It returns the kept children plus the direct
+// exclusion refs for owned disks carrying state-snapshotter.deckhouse.io/exclude: a vetoed disk gets no
+// child snapshot (and hence no VCR/MCR), and the VM snapshot proceeds without it — an incomplete VM image
+// is accepted by design (no consistency-group machinery; the operator owns that trade-off). Owner
+// references, adoption, ref derivation, and excludedRefs publication are the SDK's job; the domain only
+// authors the child object identity and its immutable spec.sourceRef, and partitions the source disks.
 func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 	ctx context.Context,
 	vm *demov1alpha1.DemoVirtualMachineSnapshot,
 	source *demov1alpha1.DemoVirtualMachine,
-) ([]snapshotsdk.ChildSpec, error) {
+) ([]snapshotsdk.ChildSpec, []snapshotsdk.ExcludedObjectRef, error) {
 	disks := &demov1alpha1.DemoVirtualDiskList{}
 	if err := r.Client.List(ctx, disks, client.InNamespace(vm.Namespace)); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sort.Slice(disks.Items, func(i, j int) bool {
 		return disks.Items[i].Name < disks.Items[j].Name
 	})
 
-	var children []snapshotsdk.ChildSpec
+	// Collect the disks the VM owns as source objects, then split off the vetoed ones. The veto is applied
+	// here (in the domain enumerator) because the SDK sees only built child specs, not source labels.
+	var owned []client.Object
 	for i := range disks.Items {
 		disk := &disks.Items[i]
-		if !demoDiskOwnedByVM(disk, source) {
-			continue
+		if demoDiskOwnedByVM(disk, source) {
+			owned = append(owned, disk)
 		}
-		childName := demoVirtualMachineDiskSnapshotName(vm.Namespace, vm.Name, disk.Name)
+	}
+	kept, excluded := snapshotsdk.PartitionExcluded(owned)
+
+	children := make([]snapshotsdk.ChildSpec, 0, len(kept))
+	for _, o := range kept {
+		disk := o.(*demov1alpha1.DemoVirtualDisk)
+		// Name the sub-child from UIDs (wave4C unified scheme): the parent snapshot's UID + the source
+		// disk's UID. Connectivity is carried by the ownerRef/childRefs the SDK writes, not by the name.
+		childName := snapshotsdk.ChildSnapshotName(vm.UID, disk.UID)
 		children = append(children, snapshotsdk.ChildSpec{
 			Object: &demov1alpha1.DemoVirtualDiskSnapshot{
 				ObjectMeta: metav1.ObjectMeta{
@@ -215,7 +297,18 @@ func (r *DemoVirtualMachineSnapshotReconciler) planDemoVirtualMachineChildren(
 			},
 		})
 	}
-	return children, nil
+
+	// The excluded refs point at the SOURCE disks (the shadow of childrenSnapshotRefs), not at child
+	// snapshot objects (none exist for a vetoed disk).
+	excludedRefs := make([]snapshotsdk.ExcludedObjectRef, 0, len(excluded))
+	for _, o := range excluded {
+		excludedRefs = append(excludedRefs, snapshotsdk.ExcludedObjectRef{
+			APIVersion: demov1alpha1.SchemeGroupVersion.String(),
+			Kind:       controllercommon.KindDemoVirtualDisk,
+			Name:       o.GetName(),
+		})
+	}
+	return children, excludedRefs, nil
 }
 
 // demoDiskOwnedByVM resolves the snapshot-tree parent->child link from the VM side:

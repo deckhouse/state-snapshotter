@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -44,6 +45,10 @@ func vsConnectorScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
+	// Block 6a (§10.1): the upload path anchors the reconstructed import MCP with a dedicated ObjectKeeper,
+	// so the connector's client scheme must know the deckhouse.io ObjectKeeper type (production registers it
+	// in cmd/main.go's api-server fullScheme).
+	_ = deckhousev1alpha1.AddToScheme(scheme)
 	vsGVK := schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot}
 	scheme.AddKnownTypeWithName(vsGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: vsGVK.Group, Version: vsGVK.Version, Kind: "VolumeSnapshotList"}, &unstructured.UnstructuredList{})
@@ -51,8 +56,7 @@ func vsConnectorScheme() *runtime.Scheme {
 }
 
 // vsConnectorVolumeSnapshot builds an extended CSI VolumeSnapshot. importMode marks it as an import-mode
-// target via the unified empty marker spec.source.import: {}; ready sets status.readyToUse for the
-// restore path.
+// target via the unified enum spec.mode: Import; ready sets status.readyToUse for the restore path.
 func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMode, ready bool) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	status := map[string]interface{}{}
 	if boundVSC != "" {
@@ -71,7 +75,7 @@ func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMo
 		"status":     status,
 	}
 	if importMode {
-		obj["spec"] = map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}}
+		obj["spec"] = map[string]interface{}{"mode": "Import"} // source omitted: required only when mode != Import
 	}
 	return &unstructured.Unstructured{Object: obj}
 }
@@ -154,10 +158,9 @@ func seedVolumeSnapshotLeaf(t *testing.T, cl client.Client, vsName string, ready
 		},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-vol",
-			DataRef: &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "uid-pvc",
-				Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
-				Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
+				Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
 			},
 		},
 	}

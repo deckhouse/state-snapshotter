@@ -89,12 +89,12 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectDomainPlanned(snapshotObj)
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Snapshot is ready",
 			)
 
@@ -218,7 +218,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			Expect(err).NotTo(HaveOccurred())
 
 			// Snapshot is bound (boundSnapshotContentName set) but never Ready=True
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectDomainPlanned(snapshotObj)
 			// NO Ready=True condition
 
 			// Set contentName to non-existent Content
@@ -291,12 +291,12 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectDomainPlanned(snapshotObj)
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Snapshot is ready",
 			)
 
@@ -381,12 +381,12 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			injectChildrenSnapshotReadyCurrent(snapshotLike, snapshotObj.GetGeneration())
+			injectDomainPlanned(snapshotObj)
 			snapshot.SetCondition(
 				snapshotLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Snapshot is ready",
 			)
 
@@ -411,7 +411,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 				contentLike,
 				snapshot.ConditionReady,
 				metav1.ConditionTrue,
-				snapshot.ReasonReady,
+				snapshot.ReasonCompleted,
 				"Content is ready",
 			)
 
@@ -507,7 +507,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Consistency Che
 			finalReadyCond := snapshot.GetCondition(snapshotLike, snapshot.ConditionReady)
 			Expect(finalReadyCond).NotTo(BeNil())
 			Expect(finalReadyCond.Status).To(Equal(metav1.ConditionTrue), "Ready should remain True")
-			Expect(finalReadyCond.Reason).To(Equal(snapshot.ReasonReady), "Reason should remain Ready")
+			Expect(finalReadyCond.Reason).To(Equal(snapshot.ReasonCompleted), "Reason should remain Ready")
 			// LastTransitionTime should be unchanged (no-op)
 			Expect(finalReadyCond.LastTransitionTime).To(Equal(initialReadyCond.LastTransitionTime), "LastTransitionTime should be unchanged (no-op)")
 		})

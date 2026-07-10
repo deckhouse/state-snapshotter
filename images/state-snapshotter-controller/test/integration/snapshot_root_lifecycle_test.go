@@ -21,8 +21,6 @@ package integration
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -79,15 +77,14 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 			g.Expect(fresh.Status.BoundSnapshotContentName).NotTo(BeEmpty())
 
-			wantContent := fmt.Sprintf("ns-%s", strings.ReplaceAll(string(fresh.UID), "-", ""))
+			wantContent := snapshot.GenerateSnapshotContentName(fresh.Name, string(fresh.UID))
 			g.Expect(fresh.Status.BoundSnapshotContentName).To(Equal(wantContent))
-			g.Expect(fresh.Status.ObservedGeneration).To(Equal(fresh.Generation))
 
 			ready := meta.FindStatusCondition(fresh.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			// The temporary MCR name is cleared after the manifest artifact is handed off to SnapshotContent.
-			g.Expect(fresh.Status.ManifestCaptureRequestName).To(BeEmpty())
+			// The root MCR name is a core-internal deterministic handle (no longer a status field); its
+			// deletion after handoff is asserted below via SnapshotMCRName(uid).
 
 			sc := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: fresh.Status.BoundSnapshotContentName}, sc)).To(Succeed())
@@ -107,10 +104,8 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			for _, ref := range mcp.OwnerReferences {
 				g.Expect(ref.Kind).NotTo(Equal("ObjectKeeper"), "after handoff the MCP must no longer have an ObjectKeeper ownerRef")
 			}
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef).NotTo(BeNil())
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Namespace).To(Equal(nsName))
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.Name).To(Equal(mcrName))
-			g.Expect(mcp.Spec.ManifestCaptureRequestRef.UID).NotTo(BeEmpty())
+			g.Expect(mcp.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcrName))
+			g.Expect(mcp.Labels).ToNot(HaveKey("state-snapshotter.deckhouse.io/source-namespace"))
 			// Durability is guaranteed by the MCP being owned by SnapshotContent (asserted above), not by the
 			// transient execution ObjectKeeper. The execution OK itself is garbage-collected by the external
 			// Deckhouse ObjectKeeper controller (FollowObject -> MCR) once the MCR is deleted; that controller
@@ -118,7 +113,7 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 	})
 
-	It("reaches Ready with empty MCP when there are no allowlisted namespaced resources", func() {
+	It("reaches Ready capturing only the Namespace object when there are no allowlisted namespaced resources", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -160,8 +155,15 @@ var _ = Describe("Integration: Snapshot lifecycle", func() {
 			contentReady := meta.FindStatusCondition(sc.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(contentReady).NotTo(BeNil())
 			g.Expect(contentReady.Status).To(Equal(metav1.ConditionTrue))
+			// The namespace holds no allowlisted namespaced resources, but a namespace snapshot always
+			// captures the Namespace object itself (the one permitted cluster-scoped target — see
+			// BuildRootNamespaceManifestCaptureTargets), so the root MCP archive holds exactly it.
 			objects := integrationArchiveObjectsFromMCP(ctx, sc.Status.ManifestCheckpointName)
-			g.Expect(objects).To(BeEmpty())
+			g.Expect(objects).To(HaveLen(1))
+			g.Expect(objects[0]["kind"]).To(Equal("Namespace"))
+			md, ok := objects[0]["metadata"].(map[string]interface{})
+			g.Expect(ok).To(BeTrue())
+			g.Expect(md["name"]).To(Equal(nsName))
 		}).WithTimeout(60 * time.Second).WithPolling(200 * time.Millisecond).Should(Succeed())
 	})
 })

@@ -84,12 +84,10 @@ func aggManifestCreateChunk(name, cpName string, data, checksum string) *ssv1alp
 	}
 }
 
-func aggManifestReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, totalObj int) *ssv1alpha1.ManifestCheckpoint {
+func aggManifestReadyMCP(name string, chunks []ssv1alpha1.ChunkInfo, totalObj int) *ssv1alpha1.ManifestCheckpoint {
 	cp := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID("uid-" + name)},
-		Spec: ssv1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: srcNS,
-		},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       chunks,
 			TotalObjects: totalObj,
@@ -103,8 +101,8 @@ func aggManifestReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, tota
 	return cp
 }
 
-func aggManifestNotReadyMCP(name, srcNS string, chunks []ssv1alpha1.ChunkInfo, totalObj int) *ssv1alpha1.ManifestCheckpoint {
-	cp := aggManifestReadyMCP(name, srcNS, chunks, totalObj)
+func aggManifestNotReadyMCP(name string, chunks []ssv1alpha1.ChunkInfo, totalObj int) *ssv1alpha1.ManifestCheckpoint {
+	cp := aggManifestReadyMCP(name, chunks, totalObj)
 	meta.SetStatusCondition(&cp.Status.Conditions, metav1.Condition{
 		Type:   ssv1alpha1.ManifestCheckpointConditionTypeReady,
 		Status: metav1.ConditionFalse,

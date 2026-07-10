@@ -7,19 +7,12 @@ spec:
             Неизменяемый чекпоинт состояния манифестов, созданный по ManifestCaptureRequest.
           properties:
             spec:
-              properties:
-                manifestCaptureRequestRef:
-                  description: |
-                    Ссылка на ManifestCaptureRequest, по которому создан этот чекпоинт.
-                  properties:
-                    name:
-                      description: Имя связанного объекта.
-                    namespace:
-                      description: Namespace связанного объекта (пусто для cluster-scoped объектов).
-                    uid:
-                      description: UID связанного объекта.
-                sourceNamespace:
-                  description: Namespace исходного ManifestCaptureRequest.
+              description: |
+                Пустая по замыслу секция. ManifestCheckpoint адресуется по имени (из SnapshotContent и
+                агрегированного API), а не по полю spec. Происхождение — имя исходного (недолговечного)
+                ManifestCaptureRequest — записывается в метку state-snapshotter.deckhouse.io/source-request.
+                Поля или метки с namespace источника намеренно нет, чтобы тип оставался корректным для
+                будущих cluster-wide источников захвата.
             status:
               properties:
                 chunks:

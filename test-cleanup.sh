@@ -50,7 +50,7 @@ SNAPSHOT_NAME=""
 CLEANUP_ALL=false
 DRY_RUN=false
 FORCE=false
-SNAPSHOT_API_GROUP="storage.deckhouse.io"
+SNAPSHOT_API_GROUP="state-snapshotter.deckhouse.io"
 SNAPSHOT_API_VERSION="v1alpha1"
 
 # Helper functions

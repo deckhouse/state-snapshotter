@@ -33,6 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
@@ -47,10 +49,10 @@ func uploadTestClient(t *testing.T, objs ...client.Object) client.Client {
 		Build()
 }
 
-func importModeSnapshot(name, ns string, uid types.UID) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
+func importModeSnapshot() *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: uid},
-		Spec:       storagev1alpha1.SnapshotSpec{Source: &storagev1alpha1.SnapshotSource{Import: &storagev1alpha1.SnapshotImportSource{}}},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1", UID: types.UID("snap-uid")},
+		Spec:       storagev1alpha1.SnapshotSpec{Mode: storagev1alpha1.SnapshotModeImport},
 	}
 }
 
@@ -68,11 +70,11 @@ func uploadPayload(t *testing.T, childRefs ...UploadChildRef) []byte {
 
 func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
-	child := UploadChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
+	child := UploadChildRef{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
 	cpName, err := svc.Upload(ctx, storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"), "ns1", "snap", uploadPayload(t, child))
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
@@ -91,6 +93,32 @@ func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 	if cp.Status.TotalObjects != 1 {
 		t.Fatalf("want 1 object in MCP, got %d", cp.Status.TotalObjects)
 	}
+	if cp.Labels[ReconstructedManifestCheckpointLabelKey] != reconstructedManifestCheckpointLabelValue {
+		t.Fatalf("reconstructed MCP must carry the %s label, got %v", ReconstructedManifestCheckpointLabelKey, cp.Labels)
+	}
+
+	// Import-MCP durability backstop (§10.1): the reconstructed MCP is owned by the dedicated import
+	// ObjectKeeper that FollowObjects the import snapshot, so it is GC-safe from birth (before the
+	// SnapshotContent shell exists).
+	okName := names.ImportManifestCheckpointObjectKeeperName(types.UID("snap-uid"))
+	ok := &deckhousev1alpha1.ObjectKeeper{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: okName}, ok); err != nil {
+		t.Fatalf("import ObjectKeeper must be created by Upload: %v", err)
+	}
+	if ok.Spec.Mode != objectKeeperModeFollowObject || ok.Spec.FollowObjectRef == nil ||
+		ok.Spec.FollowObjectRef.Kind != "Snapshot" || ok.Spec.FollowObjectRef.Name != "snap" ||
+		ok.Spec.FollowObjectRef.UID != "snap-uid" {
+		t.Fatalf("import ObjectKeeper must FollowObject the import snapshot, got %#v", ok.Spec)
+	}
+	var ownedByOK bool
+	for _, ref := range cp.OwnerReferences {
+		if ref.Kind == kindObjectKeeper && ref.Name == okName && ref.Controller != nil && *ref.Controller {
+			ownedByOK = true
+		}
+	}
+	if !ownedByOK {
+		t.Fatalf("reconstructed MCP must be controller-owned by the import ObjectKeeper %s, got %#v", okName, cp.OwnerReferences)
+	}
 
 	got := &storagev1alpha1.Snapshot{}
 	if err := cl.Get(ctx, types.NamespacedName{Namespace: "ns1", Name: "snap"}, got); err != nil {
@@ -103,9 +131,49 @@ func TestImportUpload_ReconstructsMCPAndWritesChildRefs(t *testing.T) {
 	}
 }
 
+func TestEnsureReconstructedManifestCheckpointObjectKeeper(t *testing.T) {
+	ctx := context.Background()
+	snap := importModeSnapshot()
+	cl := uploadTestClient(t, snap)
+	gvk := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+
+	ref, err := EnsureReconstructedManifestCheckpointObjectKeeper(ctx, cl, snap, gvk)
+	if err != nil {
+		t.Fatalf("EnsureReconstructedManifestCheckpointObjectKeeper: %v", err)
+	}
+	okName := names.ImportManifestCheckpointObjectKeeperName(types.UID("snap-uid"))
+	if ref.Name != okName || ref.Kind != kindObjectKeeper || ref.Controller == nil || !*ref.Controller {
+		t.Fatalf("returned ownerRef must be a controller ref to %s, got %#v", okName, ref)
+	}
+
+	// It must NOT collide with the snapshot's root ObjectKeeper name (keyed by the same UID).
+	if okName == names.ObjectKeeperName(types.UID("snap-uid")) {
+		t.Fatalf("import ObjectKeeper name collides with the root ObjectKeeper name")
+	}
+
+	// The keeper object exists and FollowObjects the import snapshot.
+	ok := &deckhousev1alpha1.ObjectKeeper{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: okName}, ok); err != nil {
+		t.Fatalf("Ensure must create the import ObjectKeeper: %v", err)
+	}
+	if ok.Spec.Mode != objectKeeperModeFollowObject || ok.Spec.FollowObjectRef == nil ||
+		ok.Spec.FollowObjectRef.UID != "snap-uid" {
+		t.Fatalf("import ObjectKeeper must FollowObject the import snapshot, got %#v", ok.Spec)
+	}
+
+	// Idempotent: a second call returns the same-named keeper and does not error.
+	ref2, err := EnsureReconstructedManifestCheckpointObjectKeeper(ctx, cl, snap, gvk)
+	if err != nil {
+		t.Fatalf("second Ensure call: %v", err)
+	}
+	if ref2.Name != ref.Name {
+		t.Fatalf("Ensure not idempotent: name %q != %q", ref2.Name, ref.Name)
+	}
+}
+
 func TestImportUpload_Idempotent(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
@@ -136,7 +204,7 @@ func TestImportUpload_RejectsNonImportMode(t *testing.T) {
 
 func TestImportUpload_RejectsBadPayload(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
@@ -175,7 +243,7 @@ func TestImportUpload_NotFound(t *testing.T) {
 // A non-leaf upload still needs the write, so the conflict must surface (no silent loss of child edges).
 func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 	ctx := context.Background()
-	snap := importModeSnapshot("snap", "ns1", types.UID("snap-uid"))
+	snap := importModeSnapshot()
 	scheme := aggManifestTestScheme(t)
 	// Fail every Snapshot status update (the competing status owner always wins). The reconstructed
 	// ManifestCheckpoint status update is typed (*ManifestCheckpoint) and passes through untouched.
@@ -187,7 +255,7 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Snapshot" {
 					return apierrors.NewConflict(
-						schema.GroupResource{Group: "storage.deckhouse.io", Resource: "snapshots"},
+						schema.GroupResource{Group: "state-snapshotter.deckhouse.io", Resource: "snapshots"},
 						u.GetName(), fmt.Errorf("status writer race"))
 				}
 				return c.SubResource(subResourceName).Update(ctx, obj, opts...)
@@ -201,7 +269,7 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 		t.Fatalf("leaf upload must succeed despite a status-write conflict: %v", err)
 	}
 
-	child := UploadChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
+	child := UploadChildRef{APIVersion: "state-snapshotter.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: "child"}
 	_, err := svc.Upload(ctx, gvk, "ns1", "snap", uploadPayload(t, child))
 	assertAggStatus(t, err, http.StatusConflict)
 }

@@ -135,9 +135,8 @@ var _ = Describe("Integration: VSC degradation wakes owning SnapshotContent", Se
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
-			c.Status.DataRef = &storagev1alpha1.SnapshotDataBinding{
-				TargetUID: "pvc-uid-" + contentName,
-				Target: storagev1alpha1.SnapshotSubjectRef{
+			c.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+				Source: storagev1alpha1.SnapshotSubjectRef{
 					APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-1", Namespace: "default",
 					UID: types.UID("pvc-uid-" + contentName),
 				},

@@ -19,7 +19,6 @@ package snapshot
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	authorizationv1 "k8s.io/api/authorization/v1"
@@ -28,11 +27,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,8 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -70,8 +70,49 @@ type SnapshotReconciler struct {
 	Config                *config.Options
 	Archive               *usecase.ArchiveService
 	SnapshotGraphRegistry snapshotgraphregistry.LiveReader
-	Mgr                   ctrl.Manager
-	childWatchMgr         *snapshotDynamicWatchManager
+	// SubresourceREST is the aggregated-subresource REST client the capture SDK uses for the root's
+	// manifest-exclude leg (snapshotsdk.SubtreeManifestIdentities -> snapshotcontents/<name>/
+	// subtree-manifest-identities). Built from the manager rest.Config by default; overridable via
+	// WithSubresourceREST for envtest, where the aggregated APIService is not registered and a fake HTTP
+	// server stands in. A childless root never issues the self-call (the SDK short-circuits), so this may
+	// be nil for leaf-only setups.
+	SubresourceREST rest.Interface
+	Mgr             ctrl.Manager
+	// Recorder emits Events on the root Snapshot for out-of-band diagnostics that must stay OUT of the
+	// core-owned Ready condition (e.g. NamespacePlanUnreadable — a fail-closed unreadable namespace
+	// manifest plan). May be nil in unit tests, in which case Event emission is skipped.
+	Recorder      record.EventRecorder
+	childWatchMgr *snapshotDynamicWatchManager
+}
+
+// coreSubresourceGroupVersion is the core controller's aggregated subresources API group/version. It only
+// satisfies rest.RESTClientFor; the SDK's subtree-manifest-identities request uses AbsPath with the full
+// path, so this GroupVersion never shapes the URL (mirrors domainapi.NewCoreManifestsClient).
+var coreSubresourceGroupVersion = schema.GroupVersion{
+	Group:   "subresources.state-snapshotter.deckhouse.io",
+	Version: "v1alpha1",
+}
+
+// Option customizes AddSnapshotControllerToManager wiring.
+type Option func(*SnapshotReconciler)
+
+// WithSubresourceREST overrides the aggregated-subresource REST client the reconciler wires into the
+// capture SDK (see SnapshotReconciler.SubresourceREST). Tests (envtest) inject a client pointed at a fake
+// subtree-manifest-identities HTTP server; production leaves it unset and the manager rest.Config is used.
+func WithSubresourceREST(rc rest.Interface) Option {
+	return func(r *SnapshotReconciler) { r.SubresourceREST = rc }
+}
+
+// newSnapshotSubresourceRESTClient builds the aggregated-subresource REST client from an in-cluster
+// rest.Config (mirrors domainapi.NewCoreManifestsClient: placeholder GroupVersion/APIPath/serializer, the
+// real path is set via AbsPath by the SDK).
+func newSnapshotSubresourceRESTClient(cfg *rest.Config) (rest.Interface, error) {
+	cfgCopy := rest.CopyConfig(cfg)
+	cfgCopy.APIPath = "/apis"
+	gv := coreSubresourceGroupVersion
+	cfgCopy.GroupVersion = &gv
+	cfgCopy.NegotiatedSerializer = clientgoscheme.Codecs.WithoutConversion()
+	return rest.RESTClientFor(cfgCopy)
 }
 
 // selfSubjectAccessReviewer is the minimal SelfSubjectAccessReview creator used by the capture-RBAC gate
@@ -102,7 +143,7 @@ func (r *SnapshotReconciler) snapshotReader() client.Reader {
 // AddSnapshotControllerToManager registers the Snapshot reconciler.
 // snapshotGraphRegistry provides CSD/bootstrap snapshot↔content pairs for generic subtree graph and E5 child resolution (no domain imports in usecase).
 // Child snapshot watches are registered dynamically from the live registry (see snapshotDynamicWatchManager).
-func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader) error {
+func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snapshotGraphRegistry snapshotgraphregistry.LiveReader, opts ...Option) error {
 	if cfg == nil {
 		return fmt.Errorf("config must not be nil")
 	}
@@ -138,6 +179,19 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
+		Recorder:              mgr.GetEventRecorderFor("state-snapshotter-namespace-capture"),
+	}
+	// Options may override SubresourceREST (envtest injects a fake). Otherwise build the in-cluster client
+	// used for the root's manifest-exclude self-call (subtree-manifest-identities).
+	for _, opt := range opts {
+		opt(r)
+	}
+	if r.SubresourceREST == nil {
+		subresourceREST, err := newSnapshotSubresourceRESTClient(mgr.GetConfig())
+		if err != nil {
+			return fmt.Errorf("snapshot controller: subresource REST client: %w", err)
+		}
+		r.SubresourceREST = subresourceREST
 	}
 	r.childWatchMgr = newSnapshotDynamicWatchManager(mgr, r)
 	if err := registerSnapshotBoundContentFieldIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
@@ -199,7 +253,11 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	rootOK, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
+	// Ensure the root ObjectKeeper for the Snapshot record's own TTL GC. The returned keeper is no longer
+	// consumed here: import content is now created + anchored on the root keeper by the generic binder
+	// (creator, content-single-writer design §10), and the capture path anchors its own content. This
+	// ensure is kept for its side-effect (the Snapshot-following keeper must exist for every path).
+	_, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
 		r.Client,
 		r.APIReader,
@@ -217,7 +275,6 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	var ns corev1.Namespace
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: nsSnap.Namespace}, &ns); err != nil {
 		if errors.IsNotFound(err) {
-			nsSnap.Status.ObservedGeneration = nsSnap.Generation
 			meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 				Type:               snapshotpkg.ConditionReady,
 				Status:             metav1.ConditionFalse,
@@ -232,110 +289,30 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, err
 	}
-	_ = ns
 
-	// CSI-like static (pre-provisioning) bind: when spec.source.snapshotContentName is set the
-	// Snapshot binds to existing pre-provisioned content (created by the import path) instead of
-	// running dynamic capture. This MUST be handled before the deterministic expectedName logic below,
-	// which would otherwise reset the bind (the static bind points at the import-chosen content name).
-	// The root ObjectKeeper ensured above is intentionally kept for static-bind Snapshots too: it
-	// TTL-cleans the Snapshot record itself (its cascade to retained content is simply a no-op here,
-	// since the pre-provisioned content is owned via the import path, not re-owned on this path).
-	if nsSnap.IsStaticBind() {
-		return r.reconcileStaticBind(ctx, nsSnap)
-	}
-
-	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload
+	// Import-mode Snapshots (spec.mode: Import) are materialized from an uploaded payload
 	// (manifests-and-children-refs-upload) — the controller MUST NOT capture the live namespace. The
-	// import orchestrator reconstructs the SnapshotContent from the uploaded ManifestCheckpoint + child
-	// refs and binds it (the root structural node carries no data leg); it falls back to a non-terminal
-	// pending hold until the upload arrives.
+	// generic binder (creator, content-single-writer design §10) creates + binds the root SnapshotContent
+	// from the uploaded ManifestCheckpoint (owned by the root ObjectKeeper ensured above) and the aggregator
+	// projects its status; this orchestrator only holds a non-terminal ImportPending until the binder binds,
+	// then mirrors the bound content's Ready.
 	if nsSnap.IsImportMode() {
-		return r.reconcileImport(ctx, nsSnap, rootOK)
+		return r.reconcileImport(ctx, nsSnap)
 	}
 
-	expectedName := snapshotContentName(nsSnap)
-
-	if nsSnap.Status.BoundSnapshotContentName != "" && nsSnap.Status.BoundSnapshotContentName != expectedName {
-		nsSnap.Status.BoundSnapshotContentName = ""
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	content := &storagev1alpha1.SnapshotContent{}
-	err = r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content)
-	if errors.IsNotFound(err) {
-		if nsSnap.Status.BoundSnapshotContentName != "" {
-			nsSnap.Status.BoundSnapshotContentName = ""
-			meta.RemoveStatusCondition(&nsSnap.Status.Conditions, snapshotpkg.ConditionReady)
-			nsSnap.Status.ObservedGeneration = nsSnap.Generation
-			if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		om := snapshotContentObjectMeta(nsSnap)
-		om.OwnerReferences = []metav1.OwnerReference{controllercommon.RootObjectKeeperOwnerReference(rootOK)}
-		newContent := &storagev1alpha1.SnapshotContent{
-			ObjectMeta: om,
-			Spec:       desiredSnapshotContentSpec(nsSnap),
-		}
-		if err := r.Client.Create(ctx, newContent); err != nil {
-			if errors.IsAlreadyExists(err) {
-				return r.finishReconcileWithExistingContent(ctx, nsSnap, expectedName)
-			}
-			return ctrl.Result{}, err
-		}
-		nsSnap.Status.BoundSnapshotContentName = expectedName
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if nsSnap.Status.BoundSnapshotContentName == "" {
-		nsSnap.Status.BoundSnapshotContentName = expectedName
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
-		if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
-	}
-
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	graphChanged, graphReady, err := r.reconcileParentOwnedChildGraph(ctx, nsSnap, content)
-	if err != nil {
-		if patchErr := r.patchSnapshotChildrenSnapshotReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); patchErr != nil {
-			return ctrl.Result{}, patchErr
-		}
-		return ctrl.Result{}, err
-	}
-	if res, block := childGraphCaptureGate(graphChanged, graphReady); block {
-		return res, nil
-	}
-	graphPublished, err := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.snapshotReader(), nsSnap.Namespace, content.Name, nsSnap.Status.ChildrenSnapshotRefs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if !graphPublished {
-		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
-	}
-	return r.reconcileCaptureN2a(ctx, nsSnap, content)
+	// wave5 content-free flip: the root no longer creates/binds its own SnapshotContent nor runs the
+	// bespoke parent_graph + reconcileCaptureN2a legs. It drives capture through the in-process snapshotsdk
+	// (children planning + residual/orphan + manifest-exclude legs), while the generic binder — which now
+	// watches the root (unifiedbootstrap.DomainCaptureSnapshotKinds) — creates/binds the root
+	// SnapshotContent, chases its MCR->MCP, and mirrors Ready. See docs/wave5-namespace-domain-design.md
+	// and reconcileNamespaceCapture.
+	return r.reconcileNamespaceCapture(ctx, nsSnap, &ns)
 }
 
-// snapshotChildGraphPollInterval is the polling fallback cadence used while a priority layer is
-// pending ChildrenSnapshotReady. It is NOT a deadline: child snapshots may stay pending for hours. Child watches
-// are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does not
-// stall if a child-kind notification is dropped.
+// snapshotChildGraphPollInterval is the polling fallback cadence used while a weight layer is
+// pending capture phase Planned. It is NOT a deadline: child snapshots may stay pending for hours. Child
+// watches are the primary wake-up; this RequeueAfter only covers a missed watch event so the parent does
+// not stall if a child-kind notification is dropped.
 const snapshotChildGraphPollInterval = 30 * time.Second
 
 // childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
@@ -353,19 +330,6 @@ func childGraphCaptureGate(graphChanged, graphReady bool) (ctrl.Result, bool) {
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, true
 	}
 	return ctrl.Result{}, false
-}
-
-func (r *SnapshotReconciler) finishReconcileWithExistingContent(ctx context.Context, nsSnap *storagev1alpha1.Snapshot, expectedName string) (ctrl.Result, error) {
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := r.Client.Get(ctx, client.ObjectKey{Name: expectedName}, content); err != nil {
-		return ctrl.Result{}, err
-	}
-	nsSnap.Status.BoundSnapshotContentName = expectedName
-	nsSnap.Status.ObservedGeneration = nsSnap.Generation
-	if err := r.Client.Status().Update(ctx, nsSnap); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{Requeue: true}, nil
 }
 
 // reconcileDelete removes the Snapshot finalizer. It does not delete ManifestCheckpoint, chunks, or MCR;
@@ -450,24 +414,4 @@ func (r *SnapshotReconciler) updateSnapshotRemoveFinalizer(ctx context.Context, 
 		}
 		return r.Client.Update(ctx, cur)
 	})
-}
-
-func desiredSnapshotContentSpec(nsSnap *storagev1alpha1.Snapshot) storagev1alpha1.SnapshotContentSpec {
-	return controllercommon.NewSnapshotContentSpec(
-		storagev1alpha1.SnapshotContentDeletionPolicyRetain,
-		controllercommon.SnapshotSubjectRefFromSnapshot(nsSnap),
-	)
-}
-
-func snapshotContentName(ns *storagev1alpha1.Snapshot) string {
-	uid := strings.ReplaceAll(string(ns.UID), "-", "")
-	return fmt.Sprintf("ns-%s", uid)
-}
-
-// snapshotContentObjectMeta builds metadata for a new SnapshotContent.
-func snapshotContentObjectMeta(nsSnap *storagev1alpha1.Snapshot) metav1.ObjectMeta {
-	return metav1.ObjectMeta{
-		Name:       snapshotContentName(nsSnap),
-		Finalizers: []string{snapshotpkg.FinalizerParentProtect},
-	}
 }

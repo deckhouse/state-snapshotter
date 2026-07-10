@@ -22,7 +22,7 @@ rules:
 # Chunk payloads are controller-internal only: admin/manual paths MUST download via the per-CR
 # /manifests-download subresources below, never by reading the raw chunk objects directly.
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshots
   verbs:
@@ -34,7 +34,7 @@ rules:
   - patch
   - delete
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshots/status
   verbs:
@@ -42,7 +42,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshotcontents
   verbs:
@@ -52,7 +52,7 @@ rules:
   - patch
   - update
 - apiGroups:
-  - storage.deckhouse.io
+  - state-snapshotter.deckhouse.io
   resources:
   - snapshotcontents/status
   verbs:

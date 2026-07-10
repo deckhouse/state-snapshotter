@@ -34,7 +34,7 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 )
 
 type demoRestoreResolution struct {
@@ -115,16 +115,16 @@ func resolveDemoDiskRestore(
 		return out, nil
 	}
 
-	dataRef := content.Status.DataRef
+	dataRef := content.Status.Data
 	if dataRef == nil || dataRef.Artifact.Name == "" {
 		out.Reason = demoReasonContentNotReady
-		out.Message = fmt.Sprintf("waiting for SnapshotContent %q status.dataRef", content.Name)
+		out.Message = fmt.Sprintf("waiting for SnapshotContent %q status.data", content.Name)
 		return out, nil
 	}
-	if dataRef.Target.Namespace == "" || dataRef.Target.Namespace != disk.Namespace {
+	if dataRef.Source.Namespace == "" || dataRef.Source.Namespace != disk.Namespace {
 		out.Failed = true
 		out.Reason = demoReasonRestoreDenied
-		out.Message = fmt.Sprintf("dataRef target namespace %q does not match disk namespace %q", dataRef.Target.Namespace, disk.Namespace)
+		out.Message = fmt.Sprintf("data source namespace %q does not match disk namespace %q", dataRef.Source.Namespace, disk.Namespace)
 		return out, nil
 	}
 	if dataRef.Artifact.Kind != vscKind {
@@ -209,25 +209,38 @@ func demoSnapshotContentRefMismatch(ref *storagev1alpha1.SnapshotSubjectRef, sna
 
 func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestoreResolution) *unstructured.Unstructured {
 	name := demoDiskVRRName(disk.UID)
-	spec := map[string]interface{}{
-		"sourceRef": map[string]interface{}{
-			"kind": vscKind,
-			"name": resolution.VSCName,
-		},
-		"targetNamespace":  disk.Namespace,
-		"targetPVCName":    disk.Spec.PersistentVolumeClaimName,
+	// pvcTemplate is the spec of the PVC the restore creates and binds; it absorbs the former root
+	// storageClassName/volumeMode/accessModes. The PVC name lives in pvcTemplate.metadata.name; the
+	// namespace is implicit = the VRR namespace (restore is never cross-namespace), set below via
+	// metadata.namespace = disk.Namespace. Size is intentionally omitted — the foundation restore
+	// executor derives it from the source snapshot's restoreSize.
+	pvcSpec := map[string]interface{}{
 		"storageClassName": resolution.StorageClassName,
 		"volumeMode":       string(resolution.VolumeMode),
-	}
-	if resolution.FsType != "" {
-		spec["fsType"] = resolution.FsType
 	}
 	if len(resolution.AccessModes) > 0 {
 		modes := make([]interface{}, 0, len(resolution.AccessModes))
 		for _, mode := range resolution.AccessModes {
 			modes = append(modes, string(mode))
 		}
-		spec["accessModes"] = modes
+		pvcSpec["accessModes"] = modes
+	}
+	spec := map[string]interface{}{
+		"sourceRef": map[string]interface{}{
+			"kind": vscKind,
+			"name": resolution.VSCName,
+		},
+		"pvcTemplate": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"name": disk.Spec.PersistentVolumeClaimName,
+			},
+			"spec": pvcSpec,
+		},
+	}
+	// fsType is a restore execution parameter read by the external-provisioner, not a PVC field, so it
+	// stays at spec root (optional, ignored for Block volumes).
+	if resolution.FsType != "" {
+		spec["fsType"] = resolution.FsType
 	}
 
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
@@ -244,7 +257,7 @@ func buildDemoDiskVRR(disk *demov1alpha1.DemoVirtualDisk, resolution demoRestore
 		"spec": spec,
 	}}
 	obj.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "storage-foundation.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    vrrKind,
 	})
@@ -315,7 +328,7 @@ func adoptDemoDiskPVC(ctx context.Context, c client.Client, disk *demov1alpha1.D
 func deleteDemoDiskVRR(ctx context.Context, c client.Client, disk *demov1alpha1.DemoVirtualDisk) error {
 	vrr := &unstructured.Unstructured{}
 	vrr.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "storage.deckhouse.io",
+		Group:   "storage-foundation.deckhouse.io",
 		Version: "v1alpha1",
 		Kind:    vrrKind,
 	})

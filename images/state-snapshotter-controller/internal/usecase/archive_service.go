@@ -89,32 +89,8 @@ func NewArchiveService(client client.Reader, chunkClient client.Reader, logger l
 
 // ArchiveRequest represents a request to download an archive
 type ArchiveRequest struct {
-	CheckpointName  string
-	CheckpointUID   string // Used for cache key to detect checkpoint regeneration
-	SourceNamespace string // For RBAC validation
-}
-
-// ArchiveInfo contains information about an archive
-type ArchiveInfo struct {
-	CheckpointName  string
-	SourceNamespace string
-	FileCount       int
-	EstimatedSize   int64
-}
-
-// GetArchive retrieves and merges all chunks for a checkpoint into a single archive
-// This is a convenience wrapper that fetches the checkpoint first
-func (s *ArchiveService) GetArchive(ctx context.Context, req *ArchiveRequest) ([]byte, string, error) {
-	// Validate checkpoint exists and is ready
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := s.client.Get(ctx, types.NamespacedName{Name: req.CheckpointName}, &checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, "", fmt.Errorf("checkpoint %s not found", req.CheckpointName)
-		}
-		return nil, "", fmt.Errorf("failed to get checkpoint: %w", err)
-	}
-
-	return s.GetArchiveFromCheckpoint(ctx, &checkpoint, req)
+	CheckpointName string
+	CheckpointUID  string // Used for cache key to detect checkpoint regeneration
 }
 
 // GetArchiveFromCheckpoint retrieves and merges all chunks from an already-loaded checkpoint
@@ -125,15 +101,6 @@ func (s *ArchiveService) GetArchiveFromCheckpoint(ctx context.Context, checkpoin
 	if cached := s.cache.get(cacheKey); cached != nil {
 		s.logger.Info("Cache hit for archive", "key", cacheKey)
 		return cached.Data, cached.Checksum, nil
-	}
-
-	// Validate SourceNamespace matches
-	// Note: This check currently serves as an invariant check, not RBAC protection,
-	// because SourceNamespace in req is always taken from checkpoint.Spec.SourceNamespace.
-	// It ensures consistency but doesn't protect against namespace-based access control.
-	if checkpoint.Spec.SourceNamespace != req.SourceNamespace {
-		return nil, "", fmt.Errorf("source namespace mismatch: checkpoint has %s, requested %s",
-			checkpoint.Spec.SourceNamespace, req.SourceNamespace)
 	}
 
 	// Validate checkpoint is ready (using Ready condition)
@@ -583,34 +550,6 @@ func (s *ArchiveService) calculateChecksum(data []byte) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// GetArchiveInfo returns information about the archive without downloading it
-func (s *ArchiveService) GetArchiveInfo(ctx context.Context, req *ArchiveRequest) (*ArchiveInfo, error) {
-	// Get ManifestCheckpoint
-	var checkpoint storagev1alpha1.ManifestCheckpoint
-	if err := s.client.Get(ctx, types.NamespacedName{Name: req.CheckpointName}, &checkpoint); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("checkpoint %s not found", req.CheckpointName)
-		}
-		return nil, fmt.Errorf("failed to get checkpoint: %w", err)
-	}
-
-	// Validate SourceNamespace
-	if checkpoint.Spec.SourceNamespace != req.SourceNamespace {
-		return nil, fmt.Errorf("source namespace mismatch: checkpoint has %s, requested %s",
-			checkpoint.Spec.SourceNamespace, req.SourceNamespace)
-	}
-
-	totalFiles := checkpoint.Status.TotalObjects
-	estimatedSize := checkpoint.Status.TotalSizeBytes
-
-	return &ArchiveInfo{
-		CheckpointName:  req.CheckpointName,
-		SourceNamespace: req.SourceNamespace,
-		FileCount:       totalFiles,
-		EstimatedSize:   estimatedSize,
-	}, nil
-}
-
 // GetCacheKey generates a cache key based on checkpoint name and UID
 // UID-based to detect checkpoint regeneration
 func (s *ArchiveService) GetCacheKey(checkpointName, checkpointUID string) string {
@@ -640,11 +579,6 @@ func (c *ArchiveCache) set(key string, item *CacheItem) {
 	defer c.mu.Unlock()
 
 	c.items[key] = item
-}
-
-// GetCacheItem returns a cache item by key (for external access)
-func (s *ArchiveService) GetCacheItem(key string) *CacheItem {
-	return s.cache.get(key)
 }
 
 // CleanupCache cleans up expired cache items

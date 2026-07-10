@@ -35,7 +35,7 @@ func TestSanitizeForRestore_StripsRuntimeAndRewritesNamespace(t *testing.T) {
 			"creationTimestamp": "2026-01-01T00:00:00Z",
 			"managedFields":     []interface{}{map[string]interface{}{"manager": "kubectl"}},
 			"ownerReferences":   []interface{}{map[string]interface{}{"kind": "Foo"}},
-			"finalizers":        []interface{}{"x"},
+			"finalizers":        []interface{}{"kubernetes.io/pvc-protection", "custom.io/keep"},
 		},
 		"data":   map[string]interface{}{"k": "v"},
 		"status": map[string]interface{}{"observed": true},
@@ -49,9 +49,25 @@ func TestSanitizeForRestore_StripsRuntimeAndRewritesNamespace(t *testing.T) {
 		t.Fatalf("namespace = %q, want restore-ns", out.GetNamespace())
 	}
 	meta, _ := out.Object["metadata"].(map[string]interface{})
-	for _, f := range []string{"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "ownerReferences", "finalizers"} {
+	// ownerReferences MUST still be stripped (dangling owner -> immediate GC = data loss).
+	for _, f := range []string{"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "ownerReferences"} {
 		if _, ok := meta[f]; ok {
 			t.Fatalf("metadata.%s should have been stripped", f)
+		}
+	}
+	// Finalizers are DELIBERATELY preserved on restore (intent-preserving policy): Class-1 machine
+	// finalizers get re-added anyway, Class-3 custom finalizers encode user intent.
+	fin, found, _ := unstructured.NestedStringSlice(out.Object, "metadata", "finalizers")
+	if !found {
+		t.Fatal("finalizers must be preserved on restore, not stripped")
+	}
+	wantFin := map[string]bool{"kubernetes.io/pvc-protection": true, "custom.io/keep": true}
+	if len(fin) != len(wantFin) {
+		t.Fatalf("finalizers = %v, want %v", fin, wantFin)
+	}
+	for _, f := range fin {
+		if !wantFin[f] {
+			t.Fatalf("unexpected finalizer %q (all captured finalizers must be preserved)", f)
 		}
 	}
 	if _, ok := out.Object["status"]; ok {

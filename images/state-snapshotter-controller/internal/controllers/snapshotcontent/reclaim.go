@@ -65,7 +65,7 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 	logger := log.FromContext(ctx)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vsc := &unstructured.Unstructured{}
-		vsc.SetGroupVersionKind(artifactGVK())
+		vsc.SetGroupVersionKind(volumeSnapshotContentGVK())
 		if err := r.Get(ctx, client.ObjectKey{Name: vscName}, vsc); err != nil {
 			if errors.IsNotFound(err) {
 				return nil
@@ -89,7 +89,7 @@ func (r *SnapshotContentController) reclaimVolumeSnapshotContent(ctx context.Con
 	}
 
 	vsc := &unstructured.Unstructured{}
-	vsc.SetGroupVersionKind(artifactGVK())
+	vsc.SetGroupVersionKind(volumeSnapshotContentGVK())
 	vsc.SetName(vscName)
 	if err := r.Delete(ctx, vsc); err != nil && !errors.IsNotFound(err) {
 		return fmt.Errorf("reclaim VolumeSnapshotContent %s (delete): %w", vscName, err)

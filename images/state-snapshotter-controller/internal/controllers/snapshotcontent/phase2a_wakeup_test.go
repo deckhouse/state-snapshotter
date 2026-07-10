@@ -53,8 +53,8 @@ func TestContentPlanMCPNotFoundPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/non-terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown || plan.volumesReason != snapshot.ReasonManifestCapturePending {
-		t.Fatalf("volumesReady=%s/%s, want Unknown/%s (volume leg not evaluated yet)", plan.volumesReady, plan.volumesReason, snapshot.ReasonManifestCapturePending)
+	if plan.volumeReady != metav1.ConditionUnknown || plan.volumeReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("volumeReady=%s/%s, want Unknown/%s (volume leg not evaluated yet)", plan.volumeReady, plan.volumeReason, snapshot.ReasonManifestCapturePending)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCapturePending)
@@ -80,8 +80,8 @@ func TestContentPlanMCPFailedTerminal(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || !plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown {
-		t.Fatalf("volumesReady=%s, want Unknown (volume leg not evaluated under manifest failure)", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionUnknown {
+		t.Fatalf("volumeReady=%s, want Unknown (volume leg not evaluated under manifest failure)", plan.volumeReady)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonManifestCheckpointFailed {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonManifestCheckpointFailed)
@@ -251,7 +251,7 @@ func TestSelfHealVSCOwnerRefAddsAndPreservesForeign(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-1")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-1")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 
@@ -307,7 +307,7 @@ func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
 		}).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-owned")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-owned")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 
@@ -322,7 +322,7 @@ func TestSelfHealVSCMissingIsNoop(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build() // vsc-gone not created
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("c", "mcp-ok", "vsc-gone")
+	content := commonContentReadyWithMCPAndDataRefs("c", "vsc-gone")
 	// Must not panic / error; missing artifact is left to data readiness.
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 }
@@ -340,7 +340,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 		t.Fatalf("delete vsc: %v", err)
 	}
 
-	content := commonContentReadyWithMCPAndDataRefs("owning-content", "mcp-ok", "vsc-del")
+	content := commonContentReadyWithMCPAndDataRefs("owning-content", "vsc-del")
 	content.SetUID(types.UID("content-uid"))
 	r.selfHealDataArtifactOwnerRefs(ctx, content)
 
@@ -358,7 +358,7 @@ func TestSelfHealVSCDeletingNotPatched(t *testing.T) {
 
 // --- Propagation: terminal vs pending child classification, with sibling isolation ---
 
-// A leaf VolumesReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
+// A leaf DataReady=False/ArtifactMissing must propagate to the parent as ChildrenFailed (terminal),
 // and only the failed child drives the failure (the ready sibling is untouched).
 func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	ctx := context.Background()
@@ -385,7 +385,32 @@ func TestPropagationArtifactMissingToChildrenFailedSiblingReady(t *testing.T) {
 	}
 }
 
-// A leaf VolumesReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
+// vcr-watch-core-terminal (decision D2): a child content that went terminal on a failed data-leg VCR
+// (Ready=False/VolumeCaptureFailed) must propagate to the parent as ChildrenFailed (terminal), the same
+// way ArtifactMissing does. This is the end-to-end proof that a failed VCR now reaches the parent contents.
+func TestPropagationVolumeCaptureFailedToChildrenFailed(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	failed := contentWithReadyCond("disk-content", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed,
+		"data-leg volume capture failed: SnapshotCreationFailed: csi failed")
+	readySibling := contentWithReadyCond("logs-content", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(failed, readySibling).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	parent := parentContentWithChildRefs("vm-content", "disk-content", "logs-content")
+	ready, reason, msg, err := r.validateCommonContentChildren(ctx, parent)
+	if err != nil {
+		t.Fatalf("validate children: %v", err)
+	}
+	if ready || reason != snapshot.ReasonChildrenFailed {
+		t.Fatalf("got ready=%v reason=%s, want false/ChildrenFailed", ready, reason)
+	}
+	if !strings.Contains(msg, "leaf=disk-content") || !strings.Contains(msg, "reason=VolumeCaptureFailed") {
+		t.Fatalf("message %q must pin the failed leaf and its VolumeCaptureFailed reason", msg)
+	}
+}
+
+// A leaf DataReady=False/DataCapturePending is non-terminal and must propagate as ChildrenPending,
 // not ChildrenFailed (a transient child must not fail the tree).
 func TestPropagationDataCapturePendingToChildrenPending(t *testing.T) {
 	ctx := context.Background()

@@ -15,6 +15,10 @@ pull_secret_name := fox-registry
 USER := $(shell whoami)
 image_tag := $(USER)-domain-controller
 
+# Go toolchain version read from go.mod (the `go X.Y.Z` directive) so the dev image builder always matches
+# the required toolchain. Falls back to the Dockerfile ARG default if extraction fails.
+go_version := $(shell awk '/^go [0-9]/{print $$2; exit}' go.mod)
+
 # Variables
 GO := go
 GOFMT := gofmt
@@ -84,7 +88,8 @@ run: ## Run domain-controller locally
 	$(GO) run -race ./cmd/domain-controller
 
 fox_build_and_push: ## Build dev image and push to fox registry
-	DOCKER_BUILDKIT=1 docker build -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	@echo "$(BLUE)Building image (Go $(go_version))$(NC)"
+	DOCKER_BUILDKIT=1 docker build --build-arg GO_VERSION=$(go_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
 	docker push $(repo_fox)/$(image_name):$(image_tag)
 
 redeploy: ## Restart domain-controller deployment in the cluster

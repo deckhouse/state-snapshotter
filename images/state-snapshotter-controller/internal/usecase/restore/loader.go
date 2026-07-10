@@ -49,9 +49,8 @@ func (l *Loader) LoadManifests(ctx context.Context, checkpointName string) ([]un
 	}
 
 	req := &usecase.ArchiveRequest{
-		CheckpointName:  checkpointName,
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: checkpoint.Spec.SourceNamespace,
+		CheckpointName: checkpointName,
+		CheckpointUID:  string(checkpoint.UID),
 	}
 	archiveData, _, err := l.archiveService.GetArchiveFromCheckpoint(ctx, checkpoint, req)
 	if err != nil {

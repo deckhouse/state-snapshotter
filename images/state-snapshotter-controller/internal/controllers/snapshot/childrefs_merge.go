@@ -20,21 +20,7 @@ import (
 	"sort"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-// hasNonVisibilitySnapshotChildren reports whether the Snapshot has any real domain/subtree child
-// snapshot. CSI VolumeSnapshot visibility leaves (orphan-PVC data leg) are NOT subtree/domain children
-// and must not flip subtree-aware branches (e.g. plan-drift handling, child terminal-failure scans).
-func hasNonVisibilitySnapshotChildren(refs []storagev1alpha1.SnapshotChildRef) bool {
-	for i := range refs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(refs[i]) {
-			continue
-		}
-		return true
-	}
-	return false
-}
 
 func snapshotChildRefsEqual(a, b []storagev1alpha1.SnapshotChildRef) bool {
 	if len(a) != len(b) {

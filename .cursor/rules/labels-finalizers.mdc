@@ -18,4 +18,4 @@ alwaysApply: false
 
 - Spec/domain alignment (MUST):
   - Reasons, states, and condition Types/Reasons MUST be constants in `pkg/snapshot` (or domain package). Do not introduce new keys as inline literals except in constant-definition tests.
-  - If `docs/state-snapshotter-rework/spec/system-spec.md` or API adds a new key, add the corresponding constant in the same change set.
+  - If `docs/internal/state-snapshotter-rework/spec/system-spec.md` or API adds a new key, add the corresponding constant in the same change set.

@@ -35,22 +35,27 @@ LOGS_DIR ?= $(if $(E2E_LOGS_DIR),$(E2E_LOGS_DIR),$(TMP_BASE)/e2e/logs)
 CLEAN_WAIT_TIMEOUT ?= 180s
 
 .PHONY: clean-env
-clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (snap-e2e*, no wait) -> ObjectKeepers (ret-snap-snap-e2e*, wait) + timeline/controller logs
+clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (snap-e2e*, no wait) -> ObjectKeepers (by followObjectRef.namespace snap-e2e*, wait) + timeline/controller logs
 	@echo "==> Deleting Snapshots in 'snap-e2e' namespaces (waiting for finalizers/cascade)..."
 	@ns=$$(kubectl get ns -o name | sed 's|^namespace/||' | grep -E '^snap-e2e' || true); \
 	if [ -n "$$ns" ]; then \
 		for n in $$ns; do \
 			echo "  namespace $$n:"; \
-			kubectl -n "$$n" delete snapshots.storage.deckhouse.io --all --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) || true; \
+			kubectl -n "$$n" delete snapshots.state-snapshotter.deckhouse.io --all --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) || true; \
 		done; \
 	else echo "  none found"; fi
 	@echo "==> Deleting namespaces with prefix 'snap-e2e' (no wait)..."
 	@ns=$$(kubectl get ns -o name | grep -E '^namespace/snap-e2e' || true); \
 	if [ -n "$$ns" ]; then echo "$$ns" | xargs kubectl delete --wait=false; else echo "  none found"; fi
-	@echo "==> Deleting ObjectKeepers with prefix 'ret-snap-snap-e2e' (waiting)..."
-	@oks=$$(kubectl get objectkeepers.deckhouse.io -o name | grep -E '/ret-snap-snap-e2e' || true); \
+	@echo "==> Deleting ObjectKeepers tracking 'snap-e2e' objects (matched by spec.followObjectRef.namespace, waiting)..."
+	@# ObjectKeepers are cluster-scoped and UID-named (nss-ok-<h16(uid)> / nss-import-ok-<h16(uid)> since
+	@# wave4C), so there is no namespace slug in the name to grep. Select by the namespaced object each one
+	@# follows (spec.followObjectRef.namespace) — this catches every test keeper regardless of its name prefix.
+	@oks=$$(kubectl get objectkeepers.deckhouse.io \
+		-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.followObjectRef.namespace}{"\n"}{end}' \
+		| awk -F'\t' '$$2 ~ /^snap-e2e/ {print $$1}' || true); \
 	if [ -n "$$oks" ]; then \
-		echo "$$oks" | xargs kubectl delete --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) \
+		echo "$$oks" | xargs kubectl delete objectkeepers.deckhouse.io --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) \
 			|| echo "  WARNING: ObjectKeeper deletion timed out or failed (re-run clean-env)"; \
 	else echo "  none found"; fi
 	@echo "==> Deleting capture timeline logs in '$(TIMELINE_DIR)'..."

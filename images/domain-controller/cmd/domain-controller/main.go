@@ -61,7 +61,7 @@ const leaderElectionID = "domain-controller"
 
 var resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 	v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-	storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, VCR/VRR, ...)
+	storagev1alpha1.AddToScheme,   // state-snapshotter.deckhouse.io (Snapshot, SnapshotContent)
 	demov1alpha1.AddToScheme,      // demo.state-snapshotter.deckhouse.io (demo domain)
 	deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 	clientgoscheme.AddToScheme,

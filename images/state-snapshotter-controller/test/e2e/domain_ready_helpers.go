@@ -20,31 +20,18 @@ limitations under the License.
 package e2e
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// injectChildrenSnapshotReadyCurrent sets ChildrenSnapshotReady=True with observedGeneration == generation on a
-// SnapshotLike (in memory). Use it inside blocks that already drive their own
-// SyncConditionsToUnstructured + Status().Update; SyncConditionsToUnstructured persists
-// observedGeneration so the condition stays current for the generic binder barrier.
-func injectChildrenSnapshotReadyCurrent(like snapshot.SnapshotLike, generation int64) {
-	conds := like.GetStatusConditions()
-	kept := make([]metav1.Condition, 0, len(conds)+1)
-	for _, c := range conds {
-		if c.Type == snapshot.ConditionChildrenSnapshotReady {
-			continue
-		}
-		kept = append(kept, c)
-	}
-	kept = append(kept, metav1.Condition{
-		Type:               snapshot.ConditionChildrenSnapshotReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             snapshot.ReasonCompleted,
-		Message:            "domain planning complete",
-		ObservedGeneration: generation,
-		LastTransitionTime: metav1.Now(),
-	})
-	like.SetStatusConditions(kept)
+// injectDomainPlanned publishes the domain planning-done signal
+// (status.captureState.domainSpecificController.phase=Planned) on obj (in memory). Use it inside
+// blocks that drive their own Status().Update. The generic binder barrier waits for this phase before
+// creating SnapshotContent; it replaced the former PlanningReady=True condition. The spec is immutable,
+// so no observedGeneration gate is needed.
+func injectDomainPlanned(obj *unstructured.Unstructured) {
+	Expect(unstructured.SetNestedField(obj.Object, string(storagev1alpha1.SnapshotCapturePhasePlanned),
+		"status", "captureState", "domainSpecificController", "phase")).To(Succeed())
 }

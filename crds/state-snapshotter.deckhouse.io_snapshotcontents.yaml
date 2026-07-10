@@ -1,0 +1,496 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
+  name: snapshotcontents.state-snapshotter.deckhouse.io
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: SnapshotContent
+    listKind: SnapshotContentList
+    plural: snapshotcontents
+    shortNames:
+    - stsnapct
+    singular: snapshotcontent
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ManifestsReady")].status
+      name: Manifests
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="DataReady")].status
+      name: Data
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ChildrenReady")].status
+      name: Children
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SnapshotContent holds the result of a snapshot (shared carrier for multiple snapshot root kinds).
+
+          The spec is immutable EXCEPT for the snapshotRef back-reference, which may be re-pointed onto a freshly
+          re-created snapshot subject when recovering a content from the recycle bin. That single carve-out is
+          gated on the recycle-bin latch status.boundSnapshotDeleted: while the owning Snapshot is alive the ref is
+          frozen (the anti-spoofing handshake), and it becomes re-pointable only after the parent was deleted and
+          this cluster-scoped content survives in the TTL bin. It is the escape hatch that keeps recovery possible
+          (the automated restore flow is not yet defined; recovery is done by manual intervention).
+          deletionPolicy stays immutable in all cases. The rules live on the root object (not the spec field) so
+          CEL can read both self.spec and self.status.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              deletionPolicy:
+                description: DeletionPolicy controls whether the controller may delete
+                  this SnapshotContent when the root snapshot is removed.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              snapshotRef:
+                description: |-
+                  SnapshotRef is the required back-reference to the snapshot subject that owns this content, mirroring
+                  VolumeSnapshotContent.spec.volumeSnapshotRef. It is set at creation time by whichever controller binds
+                  the content via the snapshot's status.boundSnapshotContentName (a core Snapshot, a domain XXXSnapshot,
+                  or a CSI VolumeSnapshot for orphan volume nodes), and it is the anti-spoofing handshake: the restore
+                  path accepts a content only when this ref points back at the very snapshot that referenced it, so a
+                  user cannot attach a foreign content by pointing status.boundSnapshotContentName at it. It is
+                  immutable while the owning Snapshot is alive; it may be re-pointed onto a freshly re-created subject
+                  only once status.boundSnapshotDeleted latched true (see the object-level XValidation rules). The
+                  anti-spoofing check is not weakened by this: recovery proceeds by re-pointing the ref onto the new
+                  subject's identity, not by bypassing the handshake.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            required:
+            - snapshotRef
+            type: object
+          status:
+            properties:
+              boundSnapshotDeleted:
+                description: |-
+                  BoundSnapshotDeleted is a one-shot internal latch set by the binder when the bound namespaced
+                  Snapshot is deleted while this cluster-scoped SnapshotContent survives (the recycle bin). Once true,
+                  the SnapshotContent controller no longer re-adds the parent-protect finalizer (the snapshot is gone)
+                  and GC may proceed. Monotonic (false -> true only); it replaces the former
+                  snapshot.deckhouse.io/parent-deleted annotation.
+                type: boolean
+              captureState:
+                description: |-
+                  CaptureState optionally carries core-written suppression leaves for a domain reader; on a
+                  core-owned SnapshotContent aggregator this is normally unset.
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
+                      subtreePlanned:
+                        description: |-
+                          SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
+                          barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
+                          true — i.e. the whole subtree has finished planning (objects + refs published, not necessarily
+                          captured/Ready). It is snapshot-native and main-written (the aggregator computes it by resolving the
+                          owner's direct children from status.childrenSnapshotRefs and reading each child's latch, then writes
+                          it SIDEWAYS onto this snapshot; content has no phase, so this cannot live on the SnapshotContent).
+                          The root's orphan/residual-PVC wave gates on its direct children's SubtreePlanned so an orphan PVC is
+                          evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
+                          It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
+                          planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      excludedRefs:
+                        description: |-
+                          ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+                          (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+                          folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+                          aggregate or the top-level mirror (both are core-owned).
+
+                          Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+                          distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
+                          (no live capture happens).
+                        items:
+                          description: |-
+                            ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                            status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                            the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                            state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                            snapshot. Namespace is implicit (the snapshot's namespace).
+
+                            Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                            excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                            created for it, so it cannot be descended into to recover a per-node view later.
+                          properties:
+                            apiVersion:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
+              childrenSnapshotContentRefs:
+                description: |-
+                  ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
+
+                  It carries the FROZEN expected child set of the node. As of the content-single-writer design (Block 4,
+                  INV-CONTENT-CHILDREN-2) it is written in ONE transition by the SOLE writer, the aggregator
+                  (SnapshotContentController): the aggregator projects it from the owning snapshot's frozen
+                  status.childrenSnapshotRefs (set-once at phase=Planned) and publishes the COMPLETE set only once every
+                  declared child snapshot has materialized+bound its content (all-or-nothing; see
+                  PublishSnapshotContentChildrenFromSnapshotRefs). Until then nothing is written, so the field
+                  transitions empty -> complete in a single patch and never grows incrementally. ChildrenReady is a pure
+                  recompute against it (no flap); a failed child stays a node (E3 degradation, edge preserved).
+
+                  The XValidation transition rule makes this immutability an API-level guarantee (Option A): once the set
+                  is non-empty it is frozen — no add, remove, reorder, or replace. The empty->set transition is the only
+                  allowed change (oldSelf.size()==0). The single-writer all-or-nothing publish is what makes this safe:
+                  it would be a wedge to enable this rule against an incremental (append) writer, which is why it lands
+                  only after the orphan special-path dismantling (Block 3d) unified the aggregator as the sole edge
+                  writer. self==oldSelf is an O(n) element comparison; MaxItems + the element name MaxLength bound the CEL
+                  estimated cost so the apiserver accepts the CRD (an unbounded list/name would exceed the cost budget —
+                  this is why the O(1) size-monotonic predecessor rule capped nothing). MaxItems=8192 is a generous
+                  per-node direct-child ceiling (far beyond any realistic fan-out) chosen to keep the cost well under
+                  budget. Not marked Required: a volume LEAF legitimately has no children (empty/omitted).
+                items:
+                  description: |-
+                    SnapshotContentChildRef identifies one child common SnapshotContent in the target content graph.
+                    SnapshotContent is cluster-scoped, so the ref is name-only and MUST NOT carry namespace.
+                  properties:
+                    name:
+                      description: |-
+                        Name is the cluster-scoped child SnapshotContent name. MaxLength=253 is the Kubernetes object-name
+                        ceiling (a DNS subdomain), so it constrains nothing real; it is REQUIRED here to bound the CEL
+                        estimated cost of the childrenSnapshotContentRefs frozen-set immutability rule (self == oldSelf), which
+                        otherwise assumes an unbounded per-element string and blows the apiserver cost budget (CRD rejected).
+                      maxLength: 253
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 8192
+                type: array
+                x-kubernetes-validations:
+                - message: 'childrenSnapshotContentRefs is frozen once set: the complete
+                    child SnapshotContent set is immutable (no add, remove, reorder,
+                    or replace)'
+                  rule: oldSelf.size() == 0 || self == oldSelf
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              data:
+                description: |-
+                  Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
+                  Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+                  represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
+                  It is the durable, self-contained {source, artifact, volume metadata} block the core mirrors onto
+                  the namespaced snapshot's top-level status.data.
+                properties:
+                  accessModes:
+                    description: AccessModes records the source PVC access modes (e.g.
+                      ReadWriteOnce, ReadWriteMany).
+                    items:
+                      type: string
+                    type: array
+                  artifact:
+                    description: Artifact references the cluster-scoped durable data
+                      artifact (for example VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        minLength: 1
+                        type: string
+                      kind:
+                        minLength: 1
+                        type: string
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+                          artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+                          referenced before its UID is known, so producers fill it best-effort.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: FsType records the source filesystem type (Filesystem
+                      volumes only).
+                    type: string
+                  size:
+                    description: |-
+                      Size records the real allocated size of the captured volume, taken from the data artifact
+                      (VolumeSnapshotContent.status.restoreSize). The snapshot outlives the source PVC, so the size MUST
+                      be persisted here to recreate the volume on restore/export (the export VolumeRestoreRequest sizes
+                      the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
+                      dependency-free; controllers parse it via resource.ParseQuantity.
+                    type: string
+                  source:
+                    description: |-
+                      Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+                      this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: |-
+                      StorageClassName records the source StorageClass of the captured volume. Used by the
+                      aggregated /index and by import StorageClass mapping.
+                    type: string
+                  volumeMode:
+                    description: |-
+                      VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
+                      mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
+                      and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
+                      controllers convert it to corev1.PersistentVolumeMode.
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifact
+                - source
+                type: object
+              excludedRefs:
+                description: |-
+                  ExcludedRefs is the DURABLE AGGREGATE of source objects excluded from this content node's subtree
+                  (this node's own direct exclusions UNION the direct exclusions of all descendants; on the root, PLUS
+                  the explicit top-level drops). It is written ONLY by the core (single aggregator) and is the TRUTH:
+                  being on the cluster-scoped SnapshotContent, it outlives deletion of the namespaced Snapshot (the
+                  recycle bin, wave4B) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
+                  than direct edges (like childrenSnapshotContentRefs) because an excluded object is non-navigable: no
+                  snapshot node is created for it, so per-node reconstruction is impossible after the fact.
+                items:
+                  description: |-
+                    ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                    status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                    the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                    state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                    snapshot. Namespace is implicit (the snapshot's namespace).
+
+                    Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                    excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                    created for it, so it cannot be descended into to recover a per-node view later.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              manifestCheckpointName:
+                description: ManifestCheckpointName is the cluster-scoped ManifestCheckpoint
+                  name once manifest capture has persisted.
+                type: string
+              subtreeManifestsPersisted:
+                description: |-
+                  SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
+                  ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
+                  fail-closed). This SnapshotContent field is the durable truth; user-facing objects do not carry this
+                  top-level field but DO carry a core-written mirror at captureState.commonController.subtreeManifestsPersisted
+                  (see CommonControllerCaptureState) used as the manifest-exclude pre-gate. It serves purposes not
+                  reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True against declared-but-unlinked
+                  children, (2) drive the wave-barrier exclude-set of an aggregator MCR (subtree completeness + linkage
+                  => no 409 double-capture; identities served by the subtree-manifest-identities subresource),
+                  (3) monotonicity (never re-opens after the first Ready). It never expresses failure — a terminal
+                  manifest failure surfaces via the Ready reason (IsReasonTerminal).
+                type: boolean
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: SnapshotContent spec.snapshotRef is immutable until the bound Snapshot
+            is deleted (recycle-bin restore)
+          rule: self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status)
+            && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)
+        - message: SnapshotContent spec.deletionPolicy is immutable
+          rule: has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy)
+            && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -27,7 +27,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"sort"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -46,9 +45,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/names"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -69,6 +69,51 @@ type terminalCaptureError struct{ err error }
 
 func (e *terminalCaptureError) Error() string { return e.err.Error() }
 func (e *terminalCaptureError) Unwrap() error { return e.err }
+
+// transientCaptureFinalizerDenylist lists self-induced, transient "protection" finalizers that the
+// capture pipeline itself provokes and that MUST NOT be archived verbatim. When state-snapshotter
+// snapshots an orphan/standalone PVC it creates a CSI VolumeSnapshot over that PVC; the CSI
+// snapshot-controller then briefly stamps `pvc-as-source-protection` on the source PVC and removes it
+// once the snapshot is ready. That finalizer is therefore an artifact of OUR capture, not part of the
+// user's object: capturing it verbatim makes the archived PVC diverge from the live one (raw-vs-live
+// drift) and could wedge deletion on a cluster without a matching CSI snapshot in flight. Only the
+// PVC-side `*-as-source-protection` needs listing here — the VolumeSnapshot-side `*-bound-protection`
+// never reaches the archive because CSI VolumeSnapshot is excluded from manifest capture
+// (namespacemanifest/targets.go). Kept as our own const; external-snapshotter is not imported for a
+// single string. This is the ONLY field-level exception to verbatim capture.
+var transientCaptureFinalizerDenylist = map[string]struct{}{
+	"snapshot.storage.kubernetes.io/pvc-as-source-protection": {},
+}
+
+// stripTransientCaptureFinalizers removes denylisted self-induced protection finalizers from a
+// normalized object map (metadata.finalizers), in place. It operates on the serialization copy
+// (normalizedMap in createChunks), never the source obj.Object, so capture stays mutation-safe
+// regardless of the object's origin. When the finalizers list becomes empty the key is dropped so the
+// archived object matches a live object that carries no finalizers.
+func stripTransientCaptureFinalizers(normalizedMap map[string]interface{}) {
+	metaField, ok := normalizedMap["metadata"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	raw, ok := metaField["finalizers"].([]interface{})
+	if !ok {
+		return
+	}
+	kept := make([]interface{}, 0, len(raw))
+	for _, f := range raw {
+		if name, ok := f.(string); ok {
+			if _, denied := transientCaptureFinalizerDenylist[name]; denied {
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+	if len(kept) == 0 {
+		delete(metaField, "finalizers")
+		return
+	}
+	metaField["finalizers"] = kept
+}
 
 // terminalCapturef builds a terminalCaptureError with a formatted message.
 func terminalCapturef(format string, a ...interface{}) error {
@@ -230,15 +275,18 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// A NotFound here is always from a missing target object and is terminal (see below).
 	objects, err := r.collectTargetObjects(ctx, mcr)
 	if err != nil {
-		// Only a genuinely absent target (NotFound) is terminal: Kubernetes is declarative, so if the
-		// source object does not exist the capture fails fast (Ready=False) and the user recreates the MCR
-		// once the object appears. EVERY other error is transient and is requeued WITHOUT marking the MCR
-		// terminal — most importantly Forbidden, which happens routinely during module rollout while the
-		// dynamic per-domain RBAC (030-domain-rbac) is still propagating to the controller SA. Bricking the
-		// MCR on a transient Forbidden would silently wedge the whole snapshot (ManifestCapturePending) and
-		// require a manual delete/recreate after every deploy. This mirrors the parent-graph planner, which
-		// soft-degrades source-list Forbidden and requeues instead of failing (see sourceListForbiddenError).
-		if !errors.IsNotFound(err) {
+		// Two error classes are terminal here: (1) a genuinely absent target (NotFound) — Kubernetes is
+		// declarative, so if the source object does not exist the capture fails fast (Ready=False) and the
+		// user recreates the MCR once the object appears; and (2) a forbidden cluster-scoped target
+		// (terminalCaptureError from collectTargetObjects) — a namespaced MCR may only capture its own
+		// Namespace, so any other cluster-scoped target is a permanent misuse no retry can fix. EVERY other
+		// error is transient and is requeued WITHOUT marking the MCR terminal — most importantly Forbidden,
+		// which happens routinely during module rollout while the dynamic per-domain RBAC (030-domain-rbac)
+		// is still propagating to the controller SA. Bricking the MCR on a transient Forbidden would silently
+		// wedge the whole snapshot (ManifestCapturePending) and require a manual delete/recreate after every
+		// deploy. This mirrors the parent-graph planner, which soft-degrades source-list Forbidden and
+		// requeues instead of failing (see sourceListForbiddenError).
+		if !errors.IsNotFound(err) && !isTerminalCaptureError(err) {
 			r.Logger.Info("Manifest capture collection failed with a transient error; requeueing without marking the request terminal",
 				"mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name), "error", err.Error())
 			return ctrl.Result{}, err
@@ -288,7 +336,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 	// executor never creates artifacts owned by SnapshotContent and never depends on SnapshotContent
 	// existing. Execution ObjectKeeper names are UID-aware so stale keepers from a deleted MCR cannot
 	// block a recreated request with the same namespace/name.
-	retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+	retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 	r.Logger.Info("Step 1: Creating ObjectKeeper for MCR", "objectKeeper", retainerName, "mcr", fmt.Sprintf("%s/%s", mcr.Namespace, mcr.Name))
 	r.updateProcessingMessage(ctx, mcr, "Creating ObjectKeeper...")
 
@@ -381,19 +429,11 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		ObjectMeta: metav1.ObjectMeta{
 			Name: checkpointName,
 			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/source-namespace": mcr.Namespace,
-				"state-snapshotter.deckhouse.io/source-request":   mcr.Name,
+				"state-snapshotter.deckhouse.io/source-request": mcr.Name,
 			},
 			OwnerReferences: mcpOwnerRefs,
 		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: mcr.Namespace,
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      mcr.Name,
-				Namespace: mcr.Namespace,
-				UID:       string(mcr.UID),
-			},
-		},
+		Spec:   storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{},
 	}
 
@@ -663,22 +703,45 @@ func (r *ManifestCheckpointController) collectTargetObjects(ctx context.Context,
 		objects = append(objects, *obj)
 	}
 
-	// MCR targets are namespaced in the same namespace as ManifestCaptureRequest.
+	// MCR targets are namespaced in the same namespace as the ManifestCaptureRequest, EXCEPT the namespace's
+	// own Namespace object — the ONLY cluster-scoped target a namespace capture may hold (name must equal
+	// mcr.Namespace). Scope is resolved via the RESTMapper; any other cluster-scoped target is a permanent
+	// misuse of a namespaced MCR and is rejected terminally (see the terminalCaptureError handling in
+	// processCaptureRequest). This is the actor-independent guard: it holds regardless of who created the MCR.
 	for _, target := range mcr.Spec.Targets {
 		gv, err := schema.ParseGroupVersion(target.APIVersion)
 		if err != nil {
 			return nil, fmt.Errorf("invalid apiVersion %s: %w", target.APIVersion, err)
 		}
 
+		gvk := schema.GroupVersionKind{Group: gv.Group, Version: gv.Version, Kind: target.Kind}
+
 		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   gv.Group,
-			Version: gv.Version,
-			Kind:    target.Kind,
-		})
+		obj.SetGroupVersionKind(gvk)
 		obj.SetName(target.Name)
-		key := client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
-		obj.SetNamespace(mcr.Namespace)
+
+		mapping, err := r.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+		if err != nil {
+			// The RESTMapper/discovery can lag behind freshly-registered kinds, so a mapping miss is
+			// transient (requeue) rather than terminal — a momentary discovery gap must never wedge the
+			// snapshot. Returning a plain (non-terminalCaptureError) error keeps this on the retry path.
+			return nil, fmt.Errorf("restmapping %s: %w", gvk, err)
+		}
+
+		var key client.ObjectKey
+		if mapping.Scope.Name() == meta.RESTScopeNameRoot {
+			// Cluster-scoped: only the capture's own Namespace is allowed (name == mcr.Namespace).
+			if gvk.Group != "" || gvk.Version != "v1" || gvk.Kind != "Namespace" || target.Name != mcr.Namespace {
+				return nil, terminalCapturef("cluster-scoped target %s/%s is not allowed in a namespace capture (only Namespace %q)", target.APIVersion, target.Kind, mcr.Namespace)
+			}
+			// A cluster-scoped GET keys on name only, and the captured object carries an empty namespace so
+			// the restore sanitizer drops it (metadata.namespace == "") and the dedup uses the _cluster key.
+			key = client.ObjectKey{Name: target.Name}
+			obj.SetNamespace("")
+		} else {
+			key = client.ObjectKey{Namespace: mcr.Namespace, Name: target.Name}
+			obj.SetNamespace(mcr.Namespace)
+		}
 
 		if err := r.Get(ctx, key, obj); err != nil {
 			// Preserve original error for IsNotFound check in caller
@@ -739,11 +802,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		// Encode to base64 for storage
 		compressed := base64.StdEncoding.EncodeToString(gzipBytes)
 
-		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
-			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
-		}
-		chunkName := fmt.Sprintf("%s%s-0", namespacemanifest.CheckpointNamePrefix, checkpointID)
+		chunkName := names.ChunkName(types.UID(checkpointUID), 0)
 
 		chunk := &storagev1alpha1.ManifestCheckpointContentChunk{
 			TypeMeta: metav1.TypeMeta{
@@ -819,6 +878,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 		if normalizedMap, ok := normalized.(map[string]interface{}); ok {
 			normalizedMap["apiVersion"] = obj.GetAPIVersion()
 			normalizedMap["kind"] = obj.GetKind()
+			// Verbatim capture has exactly ONE field-level exception: strip the self-induced,
+			// transient protection finalizers our own capture provoked (see
+			// transientCaptureFinalizerDenylist). Done on the normalized serialization copy, not on
+			// obj.Object, so the source object is never mutated.
+			stripTransientCaptureFinalizers(normalizedMap)
 		}
 
 		jsonObjects = append(jsonObjects, normalized)
@@ -896,12 +960,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// Create chunk resources
 	chunkInfos := make([]storagev1alpha1.ChunkInfo, 0, len(chunks))
 	for i, chunk := range chunks {
-		// Extract ID from checkpoint name (remove prefix if present)
-		checkpointID := checkpointName
-		if strings.HasPrefix(checkpointName, namespacemanifest.CheckpointNamePrefix) {
-			checkpointID = checkpointName[len(namespacemanifest.CheckpointNamePrefix):]
-		}
-		chunkName := fmt.Sprintf("%s%s-%d", namespacemanifest.CheckpointNamePrefix, checkpointID, i)
+		// Chunk name keyed by the ManifestCheckpoint UID (unified wave4C scheme, see api/names). The
+		// name is recorded in status.chunks[].name and read back from there, so consumers never
+		// reverse-derive it.
+		chunkName := names.ChunkName(types.UID(checkpointUID), i)
 
 		// Marshal chunk objects to JSON array
 		chunkJSON, err := json.Marshal(chunk.objects)
@@ -1209,7 +1271,7 @@ func (r *ManifestCheckpointController) updateProcessingMessage(
 	}
 }
 
-// finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// finalizeMCR finalizes MCR by setting Ready condition, CompletionTimestamp, and updating status.
 // This is a unified helper to eliminate code duplication across all finalization paths.
 func (r *ManifestCheckpointController) finalizeMCR(
 	ctx context.Context,
@@ -1259,44 +1321,7 @@ func (r *ManifestCheckpointController) finalizeMCR(
 		return fmt.Errorf("failed to update MCR status: %w", err)
 	}
 
-	// Update TTL annotation (informational only, best-effort, no retry)
-	current := &storagev1alpha1.ManifestCaptureRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(mcr), current); err == nil {
-		base := current.DeepCopy()
-		r.setTTLAnnotation(current)
-		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
-	}
-
 	return nil
-}
-
-// setTTLAnnotation sets TTL annotation on the object.
-//
-// IMPORTANT TTL SEMANTICS:
-// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is INFORMATIONAL ONLY.
-// - Actual TTL deletion timing is controlled by controller configuration (config.DefaultTTL).
-// - TTL scanner uses config.DefaultTTL, NOT the annotation value.
-// - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
-//
-// TTL is set when Ready/Failed condition is set during finalization.
-// TTL comes from configuration (state-snapshotter module settings), not from MCR spec.
-// If annotation already exists, it is not overwritten (idempotent).
-func (r *ManifestCheckpointController) setTTLAnnotation(mcr *storagev1alpha1.ManifestCaptureRequest) {
-	// Don't overwrite if annotation already exists
-	if mcr.Annotations != nil {
-		if _, exists := mcr.Annotations[controllercommon.AnnotationKeyTTL]; exists {
-			return
-		}
-	}
-	if mcr.Annotations == nil {
-		mcr.Annotations = make(map[string]string)
-	}
-	// Get TTL from configuration (default: 168h)
-	ttlStr := config.DefaultTTLStr
-	if r.Config != nil && r.Config.DefaultTTLStr != "" {
-		ttlStr = r.Config.DefaultTTLStr
-	}
-	mcr.Annotations[controllercommon.AnnotationKeyTTL] = ttlStr
 }
 
 func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error {
@@ -1341,8 +1366,7 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 //   - Non-terminal MCRs are never touched
 //
 // 2. TTL source:
-//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations
-//   - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL is ALWAYS taken from controller configuration (config.DefaultTTL)
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -1386,18 +1410,15 @@ func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, clie
 // scanAndDeleteExpiredMCRs lists all MCRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
-// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL), NOT from MCR annotations.
-// - TTL annotation (state-snapshotter.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL is ALWAYS taken from controller configuration (config.DefaultTTL).
 // - This ensures consistent cleanup behavior: all MCRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when MCR reaches Ready=True or Ready=False).
 func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
-	// TTL annotation is informational only and is ignored here
 	defaultTTL := config.DefaultTTL
 	if r.Config != nil && r.Config.DefaultTTL > 0 {
 		defaultTTL = r.Config.DefaultTTL

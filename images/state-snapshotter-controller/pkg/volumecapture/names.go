@@ -17,19 +17,21 @@ limitations under the License.
 package volumecapture
 
 import (
-	"fmt"
-
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
-// SnapshotContentVCRName returns the deterministic VolumeCaptureRequest name for a logical SnapshotContent (N5 PR-4).
+// SnapshotContentVCRName returns the deterministic VolumeCaptureRequest name for a logical SnapshotContent,
+// keyed by the content UID (unified wave4C scheme, see api/names). Used only to clear a stale root VCR
+// left by a legacy VCR-based run (the Variant A orphan path never creates a root VCR).
 func SnapshotContentVCRName(contentUID types.UID) string {
-	return fmt.Sprintf("snap-vcr-%s", contentUID)
+	return names.VolumeCaptureRequestName(contentUID)
 }
 
 // SnapshotOwnedVCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a domain
-// snapshot, keyed by the snapshot UID. Used by domain (demo) controllers so the request name is derivable
-// from the snapshot alone, without reading SnapshotContent (commit 2 content-ownership decoupling, D3).
+// snapshot, keyed by the snapshot UID (unified wave4C scheme, see api/names). Used by domain (demo)
+// controllers so the request name is derivable from the snapshot alone, without reading SnapshotContent.
 func SnapshotOwnedVCRName(snapshotUID types.UID) string {
-	return fmt.Sprintf("snap-owned-vcr-%s", snapshotUID)
+	return names.VolumeCaptureRequestName(snapshotUID)
 }

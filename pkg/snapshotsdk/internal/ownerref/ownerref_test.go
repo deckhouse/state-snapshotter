@@ -68,20 +68,6 @@ func TestEnsureFailsClosedOnDifferentParentSameKind(t *testing.T) {
 	}
 }
 
-func TestEnsureFailsClosedOnSameNameDifferentUID(t *testing.T) {
-	// A child left behind by a previous parent that reused the same name (apiVersion/kind/name match,
-	// but a different UID) must NOT be adopted — it belongs to a recreated/older snapshot.
-	stale := metav1.OwnerReference{APIVersion: "demo/v1", Kind: "Parent", Name: "p", UID: "old-uid"}
-	obj := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", OwnerReferences: []metav1.OwnerReference{stale}}}
-
-	if err := Ensure(obj, desiredOwner()); err == nil {
-		t.Fatal("expected conflict error for a same-name owner with a different UID")
-	}
-	if refs := obj.GetOwnerReferences(); len(refs) != 1 || refs[0].UID != "old-uid" {
-		t.Fatalf("object mutated on UID conflict: %#v", refs)
-	}
-}
-
 func TestEnsureFailsClosedOnForeignController(t *testing.T) {
 	controller := true
 	foreign := metav1.OwnerReference{APIVersion: "other/v1", Kind: "Boss", Name: "boss", Controller: &controller}

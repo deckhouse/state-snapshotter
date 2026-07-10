@@ -30,17 +30,16 @@ import (
 	"errors"
 	"fmt"
 
-	rbacv1 "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/deckhouse/module-sdk/pkg"
 	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
 	"github.com/deckhouse/module-sdk/pkg/registry"
 	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -65,7 +64,7 @@ var _ = registry.RegisterFunc(
 		Kubernetes: []pkg.KubernetesConfig{
 			{
 				Name:                         "snapshots",
-				APIVersion:                   "storage.deckhouse.io/v1alpha1",
+				APIVersion:                   "state-snapshotter.deckhouse.io/v1alpha1",
 				Kind:                         "Snapshot",
 				ExecuteHookOnSynchronization: ptr.Bool(true),
 				ExecuteHookOnEvents:          ptr.Bool(true),

@@ -87,16 +87,12 @@ var _ = Describe("Integration: Snapshot N1 boundary (recovery)", func() {
 		Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
 		fresh.Status.BoundSnapshotContentName = ""
 		fresh.Status.Conditions = nil
-		fresh.Status.ObservedGeneration = 0
 		Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
 
 		Eventually(func(g Gomega) {
 			again := &storagev1alpha1.Snapshot{}
 			g.Expect(k8sClient.Get(ctx, key, again)).To(Succeed())
 			g.Expect(again.Status.BoundSnapshotContentName).To(Equal(contentName))
-			domainReady := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionChildrenSnapshotReady)
-			g.Expect(domainReady).NotTo(BeNil())
-			g.Expect(domainReady.Status).To(Equal(metav1.ConditionTrue))
 			ready := meta.FindStatusCondition(again.Status.Conditions, snapshot.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))

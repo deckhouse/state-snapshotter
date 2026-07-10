@@ -27,7 +27,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -36,7 +35,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	volumecaptureuc "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -97,31 +95,9 @@ func pr7CreateNamespace(ctx context.Context, labelValue string) *corev1.Namespac
 	return ns
 }
 
-func pr7CreatePVC(ctx context.Context, namespace, name string) *corev1.PersistentVolumeClaim {
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: resource.MustParse("1Gi"),
-				},
-			},
-		},
-	}
-	Expect(k8sClient.Create(ctx, pvc)).To(Succeed())
-	var fresh corev1.PersistentVolumeClaim
-	Eventually(func(g Gomega) {
-		g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &fresh)).To(Succeed())
-		g.Expect(fresh.UID).NotTo(BeEmpty())
-	}).Should(Succeed())
-	return &fresh
-}
-
 func pr7PVCDataBinding(pvc *corev1.PersistentVolumeClaim, vscName string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: string(pvc.UID),
-		Target: storagev1alpha1.SnapshotSubjectRef{
+		Source: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: corev1.SchemeGroupVersion.String(),
 			Kind:       "PersistentVolumeClaim",
 			Name:       pvc.Name,
@@ -158,7 +134,7 @@ func pr7InstallReadyChildSubtreeFixture(
 			},
 		}
 	}
-	aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, mcpName, nsName, objects)
+	aggregatedManifestsIntegrationMustInstallReadyMCP(ctx, k8sClient, mcpName, objects)
 	Expect(pr7PatchSnapshotContent(ctx, childContentName, mcpName, dataRefs)).To(Succeed())
 }
 
@@ -180,13 +156,31 @@ func pr7PatchSnapshotContent(
 		// Variant A (cardinality ≤1): publish the single dataRef on the child volume node. Callers pass at
 		// most one binding (a domain/child leaf owns exactly one PVC); >1 would be a fixture bug.
 		if len(dataRefs) > 0 {
-			Expect(dataRefs).To(HaveLen(1), "Variant A: a SnapshotContent carries at most one dataRef")
+			Expect(dataRefs).To(HaveLen(1), "Variant A: a SnapshotContent carries at most one data binding")
 			cp := dataRefs[0]
-			sc.Status.DataRef = &cp
+			sc.Status.Data = &cp
 		}
 		// Do not mark SnapshotContent Ready here: SCC would validate VolumeSnapshotContent objects that envtest does not install.
 		return k8sClient.Status().Patch(ctx, sc, client.MergeFrom(base))
 	})
+}
+
+// pr7SeedSubtreeManifestsPersisted latches a child SnapshotContent's subtreeManifestsPersisted=true. This
+// is the root manifest-capture wave barrier (requireContentManifestsArchived): the root MCR/exclude set is
+// not built until every declared direct child content reports its subtree manifests persisted. The latch is
+// fail-closed and success-only (monotonic), so the live content aggregator never resets it. Fixture child
+// subtrees are fully persisted by construction, so seeding it lets the root proceed to the PVC exclude
+// computation (where the subtree covered-PVC-UID guard runs) instead of parking on ManifestCapturePending.
+func pr7SeedSubtreeManifestsPersisted(ctx context.Context, contentName string) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		sc := &storagev1alpha1.SnapshotContent{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, sc); err != nil {
+			return err
+		}
+		base := sc.DeepCopy()
+		sc.Status.SubtreeManifestsPersisted = true
+		return k8sClient.Status().Patch(ctx, sc, client.MergeFrom(base))
+	})).To(Succeed())
 }
 
 func pr7InstallPendingVCR(ctx context.Context, namespace string, content *storagev1alpha1.SnapshotContent, pvc *corev1.PersistentVolumeClaim) {
@@ -240,10 +234,6 @@ func pr7MCRHasPVCTarget(mcr *ssv1alpha1.ManifestCaptureRequest, pvc *corev1.Pers
 		}
 	}
 	return false
-}
-
-func pr7AssertSnapshotDoesNotUseStubAnnotation(snap *storagev1alpha1.Snapshot) {
-	Expect(snap.Annotations).NotTo(HaveKey(volumecaptureuc.AnnotationStubVolumeCapturePVCs))
 }
 
 func pr7KickSnapshot(ctx context.Context, key types.NamespacedName) {

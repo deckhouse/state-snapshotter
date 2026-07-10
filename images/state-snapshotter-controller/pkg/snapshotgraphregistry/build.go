@@ -64,10 +64,10 @@ func BuildRegistry(ctx context.Context, mapper meta.RESTMapper, apiReader client
 	if err != nil {
 		return nil, fmt.Errorf("snapshot graph registry: NewGVKRegistryFromParallelSnapshotContentPairs: %w", err)
 	}
-	// Carry CSD spec.dataBacked onto the registry so domain-agnostic consumers learn which snapshot
-	// kinds expect a volume data leg. Built-in/bootstrap pairs leave it false.
+	// Carry CSD spec.requiresDataArtifact onto the registry so domain-agnostic consumers learn which
+	// snapshot kinds expect a volume data leg. Built-in/bootstrap pairs leave it false.
 	for _, p := range resolved {
-		reg.MarkDataBacked(p.Snapshot.Kind, p.DataBacked)
+		reg.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
 	}
 	return reg, nil
 }

@@ -66,13 +66,23 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 
 		mcpName := "mcp-wake-" + contentName
 
-		// Publish the truth ref (status.manifestCheckpointName) on the content.
+		// Publish the truth ref (status.manifestCheckpointName) on the content and seed the two
+		// core-internal, lowest-priority Ready gates. This spec fabricates a namespace-root content
+		// (retainContentSpec's spec.snapshotRef is a core Snapshot) without a real owning Snapshot graph,
+		// so those gates cannot latch on their own and must be seeded to their satisfied (monotonic) values:
+		//   - subtreeManifestsPersisted: the recursive manifest latch. Its declared-vs-linked fail-closed
+		//     check resolves the owning Snapshot's childrenSnapshotRefs, which is absent here, so it would
+		//     otherwise pin Ready=False (SubtreeManifestCapturePending) forever.
+		// The orphan-link ChildrenReady gate is vacuously open here: the owning Snapshot is never created, so
+		// it declares no orphan VolumeSnapshot leaves (the former residualVolumeCapture seed is gone).
+		// This spec exercises MCP-driven manifest degradation, not that gate.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
+			c.Status.SubtreeManifestsPersisted = true
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
@@ -167,12 +177,17 @@ var _ = Describe("Integration: MCP degradation wakes owning SnapshotContent", Se
 		mcpName := "chunk-wake-" + contentName
 		chunkName := mcpName + "-0"
 
+		// Publish the manifest truth ref and seed the lowest-priority subtreeManifestsPersisted gate; see the
+		// companion spec above for why a namespace-root content without a real owning Snapshot graph must seed
+		// it (and why the orphan-link ChildrenReady gate is vacuously open here). This spec exercises
+		// chunk-integrity degradation, not that gate.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, c); err != nil {
 				return err
 			}
 			c.Status.ManifestCheckpointName = mcpName
+			c.Status.SubtreeManifestsPersisted = true
 			return k8sClient.Status().Update(ctx, c)
 		})).To(Succeed())
 
@@ -254,10 +269,7 @@ func ensureManifestCheckpointStatus(
 						Controller: &ctrlTrue,
 					}},
 				},
-				Spec: ssv1alpha1.ManifestCheckpointSpec{
-					SourceNamespace:           "default",
-					ManifestCaptureRequestRef: &ssv1alpha1.ObjectReference{Name: "mcr-" + contentName, Namespace: "default", UID: "mcr-uid"},
-				},
+				Spec: ssv1alpha1.ManifestCheckpointSpec{},
 			}
 			if cErr := k8sClient.Create(ctx, m); cErr != nil {
 				return cErr

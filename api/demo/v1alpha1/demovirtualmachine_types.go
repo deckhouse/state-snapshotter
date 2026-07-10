@@ -23,6 +23,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovm
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // DemoVirtualMachine is the demo domain compute resource. The domain controller materializes a Pod that
 // mounts the backing PVC of the linked DemoVirtualDisk.
 type DemoVirtualMachine struct {

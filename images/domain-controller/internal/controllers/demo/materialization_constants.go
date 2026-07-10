@@ -40,10 +40,11 @@ const (
 
 	demoManagedByValue = "domain-controller"
 
-	vrrAPIVersion = "storage.deckhouse.io/v1alpha1"
+	vrrAPIVersion = "storage-foundation.deckhouse.io/v1alpha1"
 	vrrKind       = "VolumeRestoreRequest"
 
 	vscKind = "VolumeSnapshotContent"
+	pvcKind = "PersistentVolumeClaim"
 
 	objectKeeperKind       = "ObjectKeeper"
 	objectKeeperAPIVersion = "deckhouse.io/v1alpha1"

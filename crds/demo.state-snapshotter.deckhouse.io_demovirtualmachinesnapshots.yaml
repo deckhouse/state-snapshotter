@@ -2,10 +2,10 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  labels:
-    module: state-snapshotter
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
   name: demovirtualmachinesnapshots.demo.state-snapshotter.deckhouse.io
 spec:
   group: demo.state-snapshotter.deckhouse.io
@@ -43,42 +43,24 @@ spec:
             type: object
           spec:
             description: |-
-              DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. Exactly one of
-              SourceRef (capture) or Source (import) is set.
+              DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. spec.mode
+              selects the content source: Capture (sourceRef) or Import (no source).
             properties:
-              source:
+              mode:
+                default: Capture
                 description: |-
-                  Source, when set, switches this VM snapshot into IMPORT mode (spec.source.import: {} only — no static
-                  pre-provisioning on a demo leaf). In import mode the domain controller does NO capture planning (no
-                  source-VM lookup, no children planning, no MCR): the common controller materializes it from the
-                  uploaded manifests and child refs. Immutable once set.
-                properties:
-                  import:
-                    description: |-
-                      Import, when present, marks this Snapshot as an import target. It is an empty marker object —
-                      its mere presence selects import mode (content is materialized from an uploaded payload, not
-                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
-                      source members and to allow future import options without another union rewrite.
-                    type: object
-                  snapshotContentName:
-                    description: |-
-                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName).
-                    minLength: 1
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: 'only spec.source.import: {} is supported on a demo snapshot
-                    leaf'
-                  rule: has(self.import) && !has(self.snapshotContentName)
-                - message: spec.source is immutable
-                  rule: self == oldSelf
+                  Mode selects how this VM snapshot obtains its content (Capture|Import), immutable.
+                  Capture: capture the live source VM (spec.sourceRef) and plan children. Import: materialize from an
+                  uploaded payload plus child refs (no live capture).
+                enum:
+                - Capture
+                - Import
+                type: string
               sourceRef:
                 description: |-
-                  SourceRef identifies the DemoVirtualMachine captured by this snapshot in CAPTURE mode. It is the
-                  single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
-                  its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
-                  (spec.source.import) has no live source VM and omits it.
+                  SourceRef identifies the DemoVirtualMachine captured by this snapshot in Capture mode. It is the
+                  single source-of-truth for what the snapshot captures and is immutable once set. Required in Capture
+                  mode and forbidden otherwise.
                 properties:
                   apiVersion:
                     minLength: 1
@@ -94,14 +76,12 @@ spec:
                 - kind
                 - name
                 type: object
-                x-kubernetes-validations:
-                - message: spec.sourceRef is immutable
-                  rule: self == oldSelf
             type: object
             x-kubernetes-validations:
-            - message: exactly one of spec.sourceRef (capture) or spec.source (import)
-                must be set
-              rule: has(self.sourceRef) != has(self.source)
+            - message: spec is immutable
+              rule: self == oldSelf
+            - message: spec.sourceRef is required in Capture mode and forbidden otherwise
+              rule: 'self.mode == ''Capture'' ? has(self.sourceRef) : !has(self.sourceRef)'
           status:
             description: DemoVirtualMachineSnapshotStatus defines the observed state
               of DemoVirtualMachineSnapshot.
@@ -110,6 +90,118 @@ spec:
                 description: BoundSnapshotContentName is the cluster-scoped SnapshotContent
                   name, once created.
                 type: string
+              captureState:
+                description: |-
+                  CaptureState collects internal capture signals. As a manifest-only aggregator, commonController
+                  carries only manifestCaptured (no dataCaptured), and domainSpecificController carries the MCR ref +
+                  phase (no volumeCaptureRequestName).
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
+                      subtreePlanned:
+                        description: |-
+                          SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
+                          barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
+                          true — i.e. the whole subtree has finished planning (objects + refs published, not necessarily
+                          captured/Ready). It is snapshot-native and main-written (the aggregator computes it by resolving the
+                          owner's direct children from status.childrenSnapshotRefs and reading each child's latch, then writes
+                          it SIDEWAYS onto this snapshot; content has no phase, so this cannot live on the SnapshotContent).
+                          The root's orphan/residual-PVC wave gates on its direct children's SubtreePlanned so an orphan PVC is
+                          evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
+                          It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
+                          planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      excludedRefs:
+                        description: |-
+                          ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+                          (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+                          folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+                          aggregate or the top-level mirror (both are core-owned).
+
+                          Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+                          distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
+                          (no live capture happens).
+                        items:
+                          description: |-
+                            ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                            status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                            the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                            state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                            snapshot. Namespace is implicit (the snapshot's namespace).
+
+                            Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                            excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                            created for it, so it cannot be descended into to recover a per-node view later.
+                          properties:
+                            apiVersion:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
               childrenSnapshotRefs:
                 description: ChildrenSnapshotRefs lists child snapshot objects (e.g.
                   DemoVirtualDiskSnapshot) under this VM snapshot.
@@ -141,8 +233,8 @@ spec:
                 - name
                 x-kubernetes-list-type: map
               conditions:
-                description: Conditions report readiness (e.g. Ready=True for generic
-                  parent children-readiness aggregation).
+                description: Conditions report readiness. Ready is the single user-facing
+                  condition, always derived by the core.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -201,17 +293,63 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              manifestCaptureRequestName:
-                description: ManifestCaptureRequestName is the temporary MCR owned
-                  by this snapshot while own-scope capture runs.
-                type: string
-              manifestCaptured:
+              excludedRefs:
                 description: |-
-                  ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
-                  durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
-                  owned by the content). It is a domain-only suppression signal: the domain controller reads it to
-                  stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
-                type: boolean
+                  ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+                  (source objects vetoed out of this VM snapshot's subtree — e.g. a disk labeled with the exclude
+                  veto). Written ONLY by the core, exactly as it mirrors Ready.
+                items:
+                  description: |-
+                    ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                    status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                    the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                    state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                    snapshot. Namespace is implicit (the snapshot's namespace).
+
+                    Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                    excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                    created for it, so it cannot be descended into to recover a per-node view later.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              sourceRef:
+                description: |-
+                  SourceRef is the full reference to the captured live source object (top-level, written by the
+                  domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the source object (namespaced sources
+                      only).
+                    type: string
+                  uid:
+                    description: UID of the captured live source object (best-effort;
+                      used by d8-cli for import-mode recreation).
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             type: object
         type: object
     served: true

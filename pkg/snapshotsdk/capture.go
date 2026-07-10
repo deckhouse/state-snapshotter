@@ -18,169 +18,326 @@ package snapshotsdk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/children"
-	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/conditions"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/manifest"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/patch"
 )
 
-// Planning drives the three idempotent, restart-safe parts of a snapshot's planning: its child snapshots,
-// its volume (PVC) data capture, and its manifest capture. Each method reconciles the cluster toward the
-// desired intent and publishes the resulting names/refs into the snapshot status.
-//
-// Lifecycle model (all three methods): the planning barrier (ChildrenSnapshotReady=True, written by
-// MarkPlanningReady) is the final commit point of the planning phase; an individual planning artifact
-// becomes immutable the moment it is published, even before the barrier. This yields three states:
-//   - State 1 (nothing published, barrier not committed): converge — create/reuse freely.
-//   - State 2 (published, barrier not committed): fail closed if the desired artifact diverges from the
-//     published one, so a restart with non-deterministic discovery cannot silently rewrite planning intent.
-//   - State 3 (barrier committed): the SDK is INERT — every Ensure* returns nil immediately, creating,
-//     reusing, and validating nothing. Ownership has passed to the core controller.
-//
-// The SDK is delete-free throughout and consults no execution-phase signal (it does not wait on the core
-// controller); suppression after the barrier is the domain-owned condition alone.
+// Planning drives the three idempotent, restart-safe planning legs of a snapshot: its child snapshots, its
+// data-leg volume capture, and its manifest capture. Each method reconciles the cluster toward the desired
+// intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
-	// EnsureChildren create/adopts the desired child snapshots and publishes their refs as
-	// status.childrenSnapshotRefs (create/adopt + publication only; never deletes). Per the lifecycle
-	// model: inert once the barrier is committed; before commit, a published non-empty set that diverges
-	// from desired (set equality on (apiVersion,kind,name), not count) is terminal topology drift —
-	// ErrTopologyDrift, creating/deleting nothing — surfaced via MarkPlanningFailed(ReasonTopologyDrift).
-	// An empty published set still converges. A duplicate desired child is a non-drift error.
-	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error
+	// EnsureChildren creates/adopts the desired child snapshots (each under this snapshot) and ADDITIVELY
+	// publishes their refs into status.childrenSnapshotRefs — a union, never a replace (wave5): the freshly
+	// derived refs are UNIONED into the currently published set, so refs contributed by a co-writer of the
+	// same field that this pass does not itself enumerate (the namespace root's orphan VolumeSnapshot wave,
+	// §6.2) are preserved. It performs create/adopt + publication only and never deletes children (SDK v1
+	// is delete-free): a nil or empty desired set therefore publishes NO new refs and leaves the currently
+	// published set intact. A child no longer desired is simply not re-added by its emitter and is left in
+	// the cluster for ownerRef GC / a future cleanup component to reclaim.
+	//
+	// The declared set is FROZEN once the node declares barrier 1: at phase>=Planned (and at the terminal
+	// Failed) EnsureChildren rejects any GROWTH of the set (or change of the excluded set) with
+	// ErrChildrenSetFrozen — fail-closed and BEFORE any child CR is created, so a rejected call has no side
+	// effects. An idempotent re-publish of the same set (desired ⊆ published, excluded unchanged) stays a
+	// no-op at any phase. The freeze mirrors the immutable SnapshotContent.childrenSnapshotContentRefs (a
+	// late-added edge would be rejected by that CEL and wedge the node at ChildrenLinkPending); the
+	// recommended domain reaction to the error is sdk.Fail(GraphPlanningFailed).
+	//
+	// excluded is the domain's DIRECT exclusion vetoes at this node — the source objects it dropped (via
+	// the exclude label) while enumerating children, obtained from PartitionExcluded. It is published in
+	// the same status patch as the kept children, into
+	// status.captureState.domainSpecificController.excludedRefs (the INPUT the core aggregates). The SDK
+	// does NOT compute the veto (it sees built child specs, not source labels): the domain partitions and
+	// hands both halves here. Pass nil when nothing is excluded; the wire value is normalized to [].
+	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error
 
-	// EnsureVolumeCapture ensures the volume capture request for the snapshot's single data-ref PVC and
-	// publishes its name. A nil DataRef is a manifest-only snapshot (no request, delete-free: a previously
-	// published name is never cleared). Per the lifecycle model: inert once the barrier is committed;
-	// before commit it create-or-reuses the VCR (a missing VCR is recreated), while an existing VCR
-	// targeting a different PVC fails closed (per-artifact immutability of the data capture).
+	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
+	// name. An empty target set is a manifest-only snapshot (no request, no published name). The operation
+	// is suppressed once the core controller has stamped the data leg captured.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
-	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the domain-chosen target set
-	// plus any owned-PVC target discovered from the data capture) and publishes its name. Per the lifecycle
-	// model: inert once the barrier is committed; before commit it creates the request when absent and,
-	// when the request already exists, requires the desired target set to match its targets by canonical
-	// identity (set equality on (apiVersion,kind,name), order and duplicates ignored) — a differing set is
-	// terminal ErrManifestDrift (no update/patch/delete), surfaced via MarkPlanningFailed(ReasonManifestDrift).
-	//
-	// Cardinality invariant: the FINAL target set (domain targets plus any owned-PVC augmentation) must be
-	// non-empty. If it is empty, EnsureManifestCapture fails closed with ErrEmptyManifest before touching
-	// the cluster (no Get/Create, no status patch). The SDK does not inject the source object — supplying at
-	// least one manifest target is the domain's responsibility.
+	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the base target SET plus any
+	// owned-PVC targets discovered from the data leg) and publishes its name. The operation is suppressed
+	// once the core controller has stamped the manifest leg captured.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
-// PlanningBarrier publishes the derived planning-complete signal the core controller waits on before it
-// takes over snapshot content. It is the single place the legacy condition name is written.
-type PlanningBarrier interface {
-	// MarkPlanningReady declares the snapshot's planning complete — manifest capture, data capture, and
-	// child snapshot planning are all done (planning barrier satisfied).
-	MarkPlanningReady(ctx context.Context, t SnapshotAdapter, message string) error
-	// MarkPlanningFailed declares planning blocked with a domain-chosen reason and underlying cause.
-	MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error
+// CaptureBarrier publishes the domain lifecycle phase the core controller reads to sequence its work
+// (barrier 1 = Planned, barrier 2 = Finished). The SDK writes only
+// status.captureState.domainSpecificController.phase; it never writes the Ready condition.
+type CaptureBarrier interface {
+	// MarkPlanned declares barrier 1 satisfied: all objects created and refs published (children + MCR/VCR).
+	// Sets phase=Planned.
+	MarkPlanned(ctx context.Context, t SnapshotAdapter) error
+	// ConfirmConsistent declares barrier 2 satisfied: the domain finished its side including consistency
+	// actions (e.g. fs unfreeze). Sets phase=Finished.
+	ConfirmConsistent(ctx context.Context, t SnapshotAdapter) error
 }
 
-// ReadinessFault publishes a Ready=False outcome for a snapshot whose source or required artifact is not
-// (yet) usable.
-type ReadinessFault interface {
-	MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error
+// CaptureFault records a domain failure (phase=Failed + reason/message). The failure surfaces to users
+// through the core-derived Ready (the core mirrors phase=Failed into Ready=False). Fail is the quick
+// form (reason + underlying cause); Reject is the structured form (FailSpec).
+type CaptureFault interface {
+	Fail(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error
+	Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error
+}
+
+// CaptureProgress publishes a NON-terminal, domain-owned diagnostic into
+// status.captureState.domainSpecificController.message. It is the observable companion to a fail-closed
+// requeue (a planning leg that is retrying, e.g. an unreadable namespace manifest plan): the message says
+// WHY the leg is stuck, in the domain-owned status field the ADR status model keeps in every phase, so an
+// operator sees it in `kubectl get snapshot -o yaml` instead of only in controller logs.
+type CaptureProgress interface {
+	// ReportProgress writes ONLY the domain message, preserving the current phase and reason — it never
+	// advances/regresses the lifecycle phase and never writes the core-owned Ready condition (so it does
+	// not violate the Ready writer discipline). It is idempotent (no status write when the message is
+	// unchanged); an empty message clears a prior diagnostic. Unlike Fail/Reject this is non-terminal: the
+	// caller keeps requeuing, this only makes the wait observable.
+	ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error
+}
+
+// SourcePublisher publishes the captured live source's full reference into the top-level
+// status.sourceRef. It is used by import-mode recreation (d8-cli reads it as a single block). Only
+// domain snapshots that capture a live source publish it; a nil/zero source is a no-op.
+type SourcePublisher interface {
+	PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error
+}
+
+// ManifestExclude is the reusable exclude-ordering capability (wave5 §6.3) any aggregator uses to build
+// its own manifest MCR as EnsureManifestCapture(base − exclude): the exclude set is everything its
+// descendant snapshots already captured. It is optional — only aggregators that own a manifest leg
+// spanning objects their children also capture need it (the namespace-root Snapshot; a VM whose disk
+// children capture part of its objects). It requires a subresource REST client (WithSubresourceREST).
+type ManifestExclude interface {
+	// SubtreeManifestIdentities returns the union of object identities captured across this snapshot's
+	// DIRECT children subtrees — the exclude set for the aggregator's own manifest MCR. It resolves each
+	// child's bound SnapshotContent (child.status.boundSnapshotContentName) and calls the
+	// snapshotcontents/<name>/subtree-manifest-identities subresource, unioning (de-duplicating) the
+	// results. It is FAIL-CLOSED: if any subtree is not fully persisted (a 409 from the subresource) or a
+	// child has not bound its content yet, it returns ErrSubtreeIdentitiesPending and the caller requeues
+	// — a partial exclude is never returned. A node with no children returns an empty set.
+	SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error)
+}
+
+// CaptureInspection exposes read-only condition views the domain uses to build its own Finished/wait/stop
+// logic (Variant A): the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
+// owning snapshot, and it bubbles a failed leg up the content tree as ChildrenFailed. The domain never
+// turns a core-owned leg failure into a terminal itself — it only READS these to time its consistency
+// actions and to stop requeuing once the core has surfaced a terminal outcome. A snapshot's OWN Ready is
+// read directly off the adapter (ReadyStatus/ReadyReason/ReadyMessage); this capability adds the children.
+type CaptureInspection interface {
+	// ChildrenCaptureStates resolves the snapshot's declared child snapshot refs
+	// (status.childrenSnapshotRefs) and returns, for each, its Ready condition (status/reason/message) and
+	// whether all its declared capture legs are latched captured (status.captureState.commonController).
+	// Children are read as unstructured objects by the ref GVK, so it works across any domain child kind
+	// without the SDK importing the concrete types. A child not found yet is reported with an empty Ready
+	// (status "") and AllLegsCaptured=false so the caller treats it as still-pending.
+	ChildrenCaptureStates(ctx context.Context, t SnapshotAdapter) ([]ChildCaptureState, error)
 }
 
 // CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
-// Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the planning
-// barrier condition) behind a small set of intent verbs.
+// Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the
+// lifecycle phase) behind a small set of intent verbs.
 type CaptureSDK interface {
 	Planning
-	PlanningBarrier
-	ReadinessFault
+	CaptureBarrier
+	CaptureFault
+	CaptureProgress
+	SourcePublisher
+	ManifestExclude
+	CaptureInspection
 }
 
-// New returns a CaptureSDK bound to a client (for writes and cached reads) and a volume-capture provider
-// (see NewStorageFoundationProvider). Suppression is driven by the planning barrier condition read from
-// the adapter's in-memory state, so no separate API reader is needed.
-func New(c client.Client, provider VolumeCaptureProvider) CaptureSDK {
-	return &sdk{client: c, provider: provider}
+// CoreCaptureOutcome derives the tri-state the domain switches its wait loop on, from the core's leg
+// latches (captureState.commonController) plus the terminal Ready reason. Failed is checked first (a
+// terminal Ready reason wins over success latches, which are success-only and never express failure).
+func CoreCaptureOutcome(t SnapshotAdapter) CaptureOutcomeResult {
+	reason := t.ReadyReason()
+	if storagev1alpha1.IsReasonTerminal(reason) {
+		return CaptureOutcomeResult{Outcome: CaptureOutcomeFailed, Reason: reason, Message: t.ReadyMessage()}
+	}
+	if t.CoreCaptureState().AllLegsCaptured() {
+		return CaptureOutcomeResult{Outcome: CaptureOutcomeCaptured}
+	}
+	return CaptureOutcomeResult{Outcome: CaptureOutcomeCapturing}
+}
+
+// Option configures optional SDK dependencies passed to New.
+type Option func(*sdk)
+
+// WithSubresourceREST wires the aggregated-subresource REST client (typically a discovery REST client)
+// the SDK uses for the ManifestExclude capability (SubtreeManifestIdentities). Domains that do not use
+// that capability may omit it; SubtreeManifestIdentities then returns a configuration error.
+func WithSubresourceREST(r rest.Interface) Option {
+	return func(s *sdk) { s.subresourceREST = r }
+}
+
+// New returns a CaptureSDK bound to a client (for writes and cached reads), an API reader (for live,
+// TOCTOU-safe marker refreshes), and a data-leg provider (see NewStorageFoundationProvider). Optional
+// dependencies (e.g. the subresource REST client for ManifestExclude) are supplied via Options.
+func New(c client.Client, apiReader client.Reader, provider VolumeCaptureProvider, opts ...Option) CaptureSDK {
+	s := &sdk{client: c, apiReader: apiReader, provider: provider}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 type sdk struct {
-	client   client.Client
-	provider VolumeCaptureProvider
+	client          client.Client
+	apiReader       client.Reader
+	provider        VolumeCaptureProvider
+	subresourceREST rest.Interface
 }
 
-func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec) error {
-	// After the planning barrier is committed the planning phase is immutable and the SDK is inert:
-	// ownership has passed to the core controller, so EnsureChildren neither creates, adopts, nor
-	// validates anything. A post-commit divergence is an invalid state the SDK does not repair or report.
-	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
-		return nil
-	}
+// ErrChildrenSetFrozen is returned by EnsureChildren when a domain tries to GROW the declared child set
+// (or change the excluded set) after the node has frozen its plan (phase>=Planned, including the terminal
+// Failed). The declared child set is the snapshot's point-in-time membership: once barrier 1 (Planned) is
+// declared it is immutable, mirroring the frozen SnapshotContent.status.childrenSnapshotContentRefs. The
+// guard is fail-closed and side-effect-free (it rejects BEFORE any child CR is created), so a violating
+// domain gets a clean error — recommended reaction sdk.Fail(GraphPlanningFailed) — instead of wedging the
+// node in ChildrenLinkPending forever (the immutable content-ref CEL would reject the new edge). Callers
+// match it with errors.Is(err, ErrChildrenSetFrozen).
+var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phase>=Planned): EnsureChildren cannot grow the declared child set")
+
+func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
-	objs := make([]client.Object, 0, len(desired))
-	for i, d := range desired {
-		if d.Object == nil {
-			return fmt.Errorf("snapshotsdk: desired[%d].Object is nil; ChildSpec.Object must be a domain-built child object", i)
-		}
-		objs = append(objs, d.Object)
-	}
-	desiredRefs, err := children.DeriveRefs(s.client.Scheme(), objs)
+
+	// Fail-closed freeze pre-check, run BEFORE children.Reconcile creates/adopts anything. Reconcile
+	// writes to the cluster first and publishes refs later, so a reject AFTER it ran would leave a freshly
+	// created child CR orphaned. The refs the specs WOULD publish are derivable without a cluster write
+	// (GVK + name), and the authoritative phase/published-set come from an uncached re-read (apiReader,
+	// the same TOCTOU-safe pattern as EnsureVolumeCapture) so a stale cache cannot let a post-Planned
+	// growth slip through. desired ⊆ published with an unchanged excluded set is NOT growth: it falls
+	// through to the harmless idempotent no-op / ownerRef repair below.
+	desiredRefs, err := s.childRefsForSpecs(desired)
 	if err != nil {
 		return err
 	}
-
-	// Per-artifact immutability: a planning artifact becomes immutable the moment it is published, even
-	// before the barrier, so a restart whose discovery yields a different set cannot silently rewrite
-	// already-published planning intent. A published, non-empty child set that diverges from desired (set
-	// equality on the canonical (apiVersion,kind,name) key, NOT count) is terminal topology drift — fail
-	// closed without creating, deleting, or republishing anything. An empty published set is State 1
-	// (nothing published yet): the set may still converge to newly observed desired (R25).
-	published := t.GetDomainCaptureState().ChildrenSnapshotRefs
-	if len(published) > 0 && !children.RefsEqualIgnoreOrder(published, desiredRefs) {
-		return ErrTopologyDrift
+	newExcluded := normalizeExcludedRefs(excluded)
+	if err := s.refresh(ctx, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if st := t.GetDomainCaptureState(); childrenSetFrozen(st.Phase) {
+		grew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, children.UnionRefs(st.ChildrenSnapshotRefs, desiredRefs))
+		excludedChanged := !excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded)
+		if grew || excludedChanged {
+			return fmt.Errorf("%w: node %s/%s at phase %q; desired refs %v vs published %v, desired excluded %v vs published %v",
+				ErrChildrenSetFrozen, obj.GetNamespace(), obj.GetName(), st.Phase,
+				desiredRefs, st.ChildrenSnapshotRefs, newExcluded, st.ExcludedRefs)
+		}
 	}
 
 	owner, err := s.ownerRef(t)
 	if err != nil {
 		return err
 	}
-	if err := children.EnsureAll(ctx, s.client, owner, objs); err != nil {
+	objs := make([]client.Object, 0, len(desired))
+	for _, d := range desired {
+		objs = append(objs, d.Object)
+	}
+	newRefs, err := children.Reconcile(ctx, s.client, s.client.Scheme(), owner, objs)
+	if err != nil {
 		return err
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		if children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, desiredRefs) {
+		// Additive publication: union the freshly planned refs into the currently published set instead
+		// of overwriting it. patch.Status re-reads the live object before every attempt, so st here holds
+		// FRESH refs — the union therefore preserves refs published by a co-writer of the same field (the
+		// root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not enumerate.
+		mergedRefs := children.UnionRefs(st.ChildrenSnapshotRefs, newRefs)
+		refsGrew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs)
+		excludedChanged := !excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded)
+		// TOCTOU belt: the node may have advanced into a frozen phase between the pre-check's authoritative
+		// read and this retry re-read. patch.Status cannot surface an error from the closure, so instead of
+		// persisting a frozen-set growth it fail-closed DROPS the write here (the pre-check already returned
+		// ErrChildrenSetFrozen for the non-racing case). A genuine no-op (nothing grew, no excluded change)
+		// short-circuits below regardless of phase, so an idempotent post-Planned re-reconcile is unaffected.
+		if childrenSetFrozen(st.Phase) && (refsGrew || excludedChanged) {
 			return false
 		}
-		st.ChildrenSnapshotRefs = desiredRefs
+		if !refsGrew && !excludedChanged {
+			return false
+		}
+		st.ChildrenSnapshotRefs = mergedRefs
+		st.ExcludedRefs = newExcluded
 		t.SetDomainCaptureState(st)
 		return true
 	})
+}
+
+// childRefsForSpecs derives the SnapshotChildRefs the given specs WOULD publish, without any cluster write
+// — the same (apiVersion, kind, name) derivation children.Reconcile performs — so the freeze pre-check can
+// detect declared-set growth before Reconcile creates/adopts anything.
+func (s *sdk) childRefsForSpecs(desired []ChildSpec) ([]storagev1alpha1.SnapshotChildRef, error) {
+	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
+	for _, d := range desired {
+		gvk, err := apiutil.GVKForObject(d.Object, s.client.Scheme())
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, storagev1alpha1.SnapshotChildRef{
+			APIVersion: gvk.GroupVersion().String(),
+			Kind:       gvk.Kind,
+			Name:       d.Object.GetName(),
+		})
+	}
+	return refs, nil
 }
 
 func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error {
 	if in.DataRef == nil {
 		return nil
 	}
-	// Inert after the planning barrier (see EnsureChildren). Before the barrier this create-or-reuses the
-	// VCR; a missing VCR is (re)created, while an existing VCR targeting a different PVC fails closed inside
-	// EnsureVCR (per-artifact immutability for the data capture).
-	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
+	obj := t.Object()
+	if t.CoreCaptureState().dataCaptured() {
 		return nil
 	}
-	obj := t.Object()
+	namespace := obj.GetNamespace()
+	name := s.provider.VCRName(obj.GetUID())
+
+	// Cached existence probe first (a live data-leg VCR always carries its PVC target, so a non-nil result
+	// means the request still exists). While the data leg is in flight the VCR is present in cache, so we
+	// converge without any uncached read and keep the domain's in-flight poll off the API server. Only
+	// when the VCR is absent is the state ambiguous ("not created yet" vs "captured, then deleted by the
+	// binder"): only then do we pay the authoritative uncached read to consult the leg latch and avoid
+	// re-creating a captured request (the binder sets dataCaptured=true before deleting the VCR).
+	existingTarget, err := s.provider.OwnedPVCTarget(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+	if existingTarget == nil {
+		if err := s.refresh(ctx, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if t.CoreCaptureState().dataCaptured() {
+			return nil
+		}
+	}
 	owner, err := s.ownerRef(t)
 	if err != nil {
 		return err
 	}
-	name := s.provider.VCRName(obj.GetUID())
-	if err := s.provider.EnsureVCR(ctx, obj.GetNamespace(), name, owner, *in.DataRef); err != nil {
+	if err := s.provider.EnsureVCR(ctx, namespace, name, owner, *in.DataRef); err != nil {
 		return err
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
@@ -195,42 +352,38 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 }
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
-	// Inert after the planning barrier (see EnsureChildren).
-	if conditions.IsTrue(t.GetConditions(), storagev1alpha1.ConditionChildrenSnapshotReady) {
+	obj := t.Object()
+	if t.CoreCaptureState().manifestCaptured() {
 		return nil
 	}
-	obj := t.Object()
-	gvk, err := apiutil.GVKForObject(obj, s.client.Scheme())
-	if err != nil {
-		return err
-	}
 	namespace := obj.GetNamespace()
-	mcrName := manifest.RequestName(gvk.Kind, namespace, obj.GetName())
+	mcrName := manifest.RequestName(obj.GetUID())
 
-	// Build the FULL desired target set exactly as on create — domain targets plus the owned-PVC target
-	// derived from the data-capture VCR — so the drift comparison below is apples-to-apples (the augmented
-	// PVC target must be part of desired, otherwise an existing MCR that legitimately carries it would
-	// be a false-positive drift).
-	ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
-	if err != nil {
-		return err
-	}
-	base := append([]ssv1alpha1.ManifestTarget(nil), in.Targets...)
-	desiredTargets := manifest.Targets(base, ownedPVC, namespace)
-
-	// Manifest capture cardinality invariant: the final target set (domain targets + owned-PVC augmentation)
-	// must be non-empty. Fail closed BEFORE any cluster mutation (no MCR Get/Create, no status patch) so an
-	// empty manifest capture can never be silently published as a valid request.
-	if len(desiredTargets) == 0 {
-		return ErrEmptyManifest
-	}
-
+	// Cached existence probe first. While the manifest leg is in flight the MCR still lives in the informer
+	// cache, so we converge without any uncached read — this keeps the domain's in-flight poll
+	// (RequeueAfter every few hundred ms) off the API server. Only when the cache shows the MCR absent is
+	// the state ambiguous ("not created yet" vs "captured, then deleted by the binder"): only then do we
+	// pay the authoritative uncached read to consult the leg latch and avoid re-creating a captured
+	// request (the binder sets manifestCaptured=true before deleting the MCR).
 	existing := &ssv1alpha1.ManifestCaptureRequest{}
 	getErr := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: mcrName}, existing)
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
 	if apierrors.IsNotFound(getErr) {
+		if err := s.refresh(ctx, obj); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if t.CoreCaptureState().manifestCaptured() {
+			return nil
+		}
+		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
+		if err != nil {
+			return err
+		}
 		owner, err := s.ownerRef(t)
 		if err != nil {
 			return err
@@ -242,16 +395,12 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-				Targets: desiredTargets,
+				Targets: manifest.Targets(in.Targets, ownedPVC, namespace),
 			},
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
-	} else if !manifest.TargetsEqualIgnoreOrder(existing.Spec.Targets, desiredTargets) {
-		// Fail-closed manifest capture: the published MCR's targets diverge from the desired set. Do not
-		// update/patch/delete the request and do not touch status — surface terminal drift.
-		return ErrManifestDrift
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
@@ -264,40 +413,143 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	})
 }
 
-func (s *sdk) MarkPlanningReady(ctx context.Context, t SnapshotAdapter, message string) error {
-	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionTrue, storagev1alpha1.ReasonCompleted, message)
+func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error {
+	if src.APIVersion == "" && src.Kind == "" && src.Name == "" {
+		return nil
+	}
+	obj := t.Object()
+	return patch.Status(ctx, s.client, obj, func() bool {
+		cur := t.GetSnapshotSource()
+		if cur != nil && *cur == src {
+			return false
+		}
+		v := src
+		t.SetSnapshotSource(&v)
+		return true
+	})
 }
 
-func (s *sdk) MarkPlanningFailed(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error {
+func (s *sdk) MarkPlanned(ctx context.Context, t SnapshotAdapter) error {
+	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhasePlanned, "", "")
+}
+
+func (s *sdk) ConfirmConsistent(ctx context.Context, t SnapshotAdapter) error {
+	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFinished, "", "")
+}
+
+func (s *sdk) Fail(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error {
 	message := ""
 	if cause != nil {
 		message = cause.Error()
 	}
-	return s.patchCondition(ctx, t, storagev1alpha1.ConditionChildrenSnapshotReady, metav1.ConditionFalse, string(reason), message)
+	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFailed, string(reason), message)
 }
 
-func (s *sdk) MarkNotReady(ctx context.Context, t SnapshotAdapter, in NotReadyStatus) error {
+func (s *sdk) Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error {
 	message := in.Message
 	if message == "" && in.Cause != nil {
 		message = in.Cause.Error()
 	}
-	return s.patchCondition(ctx, t, storagev1alpha1.ConditionReady, metav1.ConditionFalse, string(in.Reason), message)
+	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFailed, string(in.Reason), message)
 }
 
-func (s *sdk) patchCondition(ctx context.Context, t SnapshotAdapter, condType string, status metav1.ConditionStatus, reason, message string) error {
-	return patch.Condition(ctx, s.client, t.Object(), t.GetConditions, t.SetConditions,
-		func(conds []metav1.Condition, observedGeneration int64) ([]metav1.Condition, bool) {
-			if conditions.Equal(conds, condType, status, reason, message, observedGeneration) {
-				return conds, false
-			}
-			return conditions.Upsert(conds, metav1.Condition{
-				Type:               condType,
-				Status:             status,
-				Reason:             reason,
-				Message:            message,
-				ObservedGeneration: observedGeneration,
-			}), true
-		})
+// ReportProgress patches ONLY status.captureState.domainSpecificController.message, leaving the phase and
+// reason untouched — a non-terminal, observable-only write (see CaptureProgress). It intentionally does
+// NOT go through setPhase (which is the phase-transition path with the monotonic barrier guard): a
+// diagnostic is unordered and must never disturb the lifecycle phase or clear a real failure reason.
+func (s *sdk) ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error {
+	obj := t.Object()
+	return patch.Status(ctx, s.client, obj, func() bool {
+		st := t.GetDomainCaptureState()
+		// Failed is terminal: a non-terminal progress note must never overwrite the terminal
+		// reason/message (ReportProgress is the Pending-only diagnostic channel).
+		if st.Phase == storagev1alpha1.SnapshotCapturePhaseFailed {
+			return false
+		}
+		if st.Message == message {
+			return false
+		}
+		st.Message = message
+		t.SetDomainCaptureState(st)
+		return true
+	})
+}
+
+// setPhase patches status.captureState.domainSpecificController.phase (+ reason/message) via the adapter.
+func (s *sdk) setPhase(ctx context.Context, t SnapshotAdapter, phase storagev1alpha1.SnapshotCapturePhase, reason, message string) error {
+	obj := t.Object()
+	return patch.Status(ctx, s.client, obj, func() bool {
+		st := t.GetDomainCaptureState()
+		// Monotonic barrier guard. Domain controllers call MarkPlanned on every reconcile (before
+		// switching on the capture outcome), so without this a snapshot that already advanced to Finished
+		// would be dragged back to Planned. That regression makes each reconcile emit two status writes
+		// (Planned then Finished) and, because the domain watches its own object, the pair re-triggers the
+		// reconcile — a self-sustaining phase write storm (Planned<->Finished) that starves the core
+		// binder's optimistic-lock Ready mirror and wedges the snapshot tree at Ready=False/ContentMissing.
+		if !phaseCanAdvance(st.Phase, phase) {
+			return false
+		}
+		if st.Phase == phase && st.Reason == reason && st.Message == message {
+			return false
+		}
+		st.Phase = phase
+		st.Reason = reason
+		st.Message = message
+		t.SetDomainCaptureState(st)
+		return true
+	})
+}
+
+// phaseRank orders the forward capture barriers. Unknown/empty ranks 0 so the first real phase always
+// advances; Failed is intentionally absent (handled out-of-band in phaseCanAdvance).
+func phaseRank(p storagev1alpha1.SnapshotCapturePhase) int {
+	switch p {
+	case storagev1alpha1.SnapshotCapturePhasePlanning:
+		return 1
+	case storagev1alpha1.SnapshotCapturePhasePlanned:
+		return 2
+	case storagev1alpha1.SnapshotCapturePhaseFinished:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// phaseCanAdvance reports whether a from->to phase transition is allowed. Two rules:
+//
+//   - the forward chain Planning<Planned<Finished must never regress — this is what stops MarkPlanned from
+//     dragging a Finished snapshot back to Planned;
+//   - Failed is a TERMINAL SINK: once a capture fails it can never leave Failed. A snapshot is a
+//     point-in-time capture with an immutable spec, so it never re-plans (the rest of the system already
+//     treats Failed as terminal — see childrenSetFrozen and ownerDomainCaptureAtLeastPlanned). Making it a
+//     sink here also kills the phase write storm where a domain's unconditional per-reconcile MarkPlanned
+//     dragged Failed->Planned and the terminal outcome immediately re-Failed it (flapping the mirrored
+//     Ready). Only Fail/Reject enter Failed; a NON-terminal, recoverable "waiting for X" state must NOT use
+//     them — it stays in its current phase and surfaces the reason via ReportProgress (message-only), the
+//     way a Pod stays Pending with a diagnostic instead of moving to a terminal phase.
+//
+// A Failed->Failed transition stays allowed so an idempotent re-assert (or a refined terminal
+// reason/message) is a harmless no-op/refresh via setPhase's equality check.
+func phaseCanAdvance(from, to storagev1alpha1.SnapshotCapturePhase) bool {
+	if from == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return to == storagev1alpha1.SnapshotCapturePhaseFailed
+	}
+	if to == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return true
+	}
+	return phaseRank(to) >= phaseRank(from)
+}
+
+// childrenSetFrozen reports whether the declared child set is frozen at this phase: barrier 1 (Planned)
+// and beyond (Finished), plus the terminal Failed. After the freeze EnsureChildren rejects any growth of
+// the declared set or change of the excluded set (see ErrChildrenSetFrozen). Planned and Finished rank
+// at/above Planned; Failed is terminal (a failed snapshot never re-plans) and, because phaseRank leaves it
+// at 0, is matched explicitly here — the same out-of-band treatment phaseCanAdvance gives it.
+func childrenSetFrozen(p storagev1alpha1.SnapshotCapturePhase) bool {
+	if p == storagev1alpha1.SnapshotCapturePhaseFailed {
+		return true
+	}
+	return phaseRank(p) >= phaseRank(storagev1alpha1.SnapshotCapturePhasePlanned)
 }
 
 func (s *sdk) ownerRef(t SnapshotAdapter) (metav1.OwnerReference, error) {
@@ -314,4 +566,8 @@ func (s *sdk) ownerRef(t SnapshotAdapter) (metav1.OwnerReference, error) {
 		UID:        obj.GetUID(),
 		Controller: &controller,
 	}, nil
+}
+
+func (s *sdk) refresh(ctx context.Context, obj client.Object) error {
+	return s.apiReader.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 }

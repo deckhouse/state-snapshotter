@@ -102,6 +102,56 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			}, nil
 		}
 
+		// The Namespace object itself is the ONLY cluster-scoped target a namespaced MCR may capture, and
+		// only when it is the MCR's own namespace (name == mcr.Namespace). This mirrors the actor-independent
+		// guard in the capture executor (collectTargetObjects). Bypass the namespaced discovery/lookup below
+		// and authorize the initiating user via a cluster-scoped SubjectAccessReview on `namespaces get`.
+		if gv.Group == "" && gv.Version == "v1" && target.Kind == "Namespace" {
+			if target.Name != mcr.Namespace {
+				return &kwhvalidating.ValidatorResult{
+					Valid:   false,
+					Message: fmt.Sprintf("Target %d: Namespace %q may only be captured from its own namespace (ManifestCaptureRequest is in namespace %q)", i, target.Name, mcr.Namespace),
+				}, nil
+			}
+
+			sar := &authorizationv1.SubjectAccessReview{
+				Spec: authorizationv1.SubjectAccessReviewSpec{
+					User:   arReview.UserInfo.Username,
+					Groups: arReview.UserInfo.Groups,
+					UID:    arReview.UserInfo.UID,
+					Extra:  convertExtra(arReview.UserInfo.Extra),
+					ResourceAttributes: &authorizationv1.ResourceAttributes{
+						Namespace: "", // cluster-scoped
+						Verb:      "get",
+						Group:     "",
+						Version:   "v1",
+						Resource:  "namespaces",
+						Name:      target.Name,
+					},
+				},
+			}
+			result, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
+			if err != nil {
+				klog.Errorf("Failed to create SubjectAccessReview for target %d (Namespace/%s): %v", i, target.Name, err)
+				return &kwhvalidating.ValidatorResult{
+					Valid:   false,
+					Message: fmt.Sprintf("internal error: failed to check permissions for namespaces/%s", target.Name),
+				}, nil
+			}
+			if !result.Status.Allowed {
+				reason := result.Status.Reason
+				if reason == "" {
+					reason = "forbidden by RBAC"
+				}
+				klog.Infof("User %s does not have GET permission for Namespace/%s: %s", arReview.UserInfo.Username, target.Name, reason)
+				return &kwhvalidating.ValidatorResult{
+					Valid:   false,
+					Message: fmt.Sprintf("user %q cannot GET namespaces/%s: %s", arReview.UserInfo.Username, target.Name, reason),
+				}, nil
+			}
+			continue
+		}
+
 		// Use Discovery API to get resource information (namespaced, plural name)
 		resourceInfo, err := getResourceInfo(ctx, clientset, gv, target.Kind)
 		if err != nil {

@@ -19,54 +19,15 @@ package snapshotcontent
 import (
 	"context"
 	"errors"
-	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-// MarkResidualVolumeCaptureComplete latches status.residualVolumeCapture.phase = Complete on a
-// namespace-root SnapshotContent, signalling that the final residual/orphan-PVC capture wave finished
-// (no orphan targets, or every orphan child node linked and ready).
-//
-// Option P: the reconciler is the SOLE writer of this field; the SnapshotContent aggregator only reads
-// it (locally) to gate the FIRST Ready=True (fail-closed). The write is an idempotent, monotonic latch —
-// once Phase is already Complete this is a no-op, so re-stamping on every steady-state reconcile
-// (import / static-bind) costs nothing and the latch never reverts. targetUIDs/CompletedAt are
-// best-effort diagnostics only (nil/empty when there were no orphan targets); the gate reads ONLY
-// Phase, so a re-stamp through a momentarily stale cache (which would refresh CompletedAt) is benign.
-// It writes a status MergeFrom patch (NOT a full Status().Update) so it never clobbers the conditions
-// the aggregator owns (INV-COND2): the two writers touch disjoint status subtrees.
-func MarkResidualVolumeCaptureComplete(ctx context.Context, c client.Client, contentName string, targetUIDs []string) error {
-	if contentName == "" {
-		return nil
-	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		content := &storagev1alpha1.SnapshotContent{}
-		if err := c.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-			return err
-		}
-		if content.Status.ResidualVolumeCapture != nil &&
-			content.Status.ResidualVolumeCapture.Phase == storagev1alpha1.ResidualVolumeCapturePhaseComplete {
-			return nil
-		}
-		base := content.DeepCopy()
-		now := metav1.Now()
-		content.Status.ResidualVolumeCapture = &storagev1alpha1.ResidualVolumeCaptureStatus{
-			Phase:       storagev1alpha1.ResidualVolumeCapturePhaseComplete,
-			TargetUIDs:  append([]string(nil), targetUIDs...),
-			CompletedAt: &now,
-		}
-		return c.Status().Patch(ctx, content, client.MergeFrom(base))
-	})
-}
 
 func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.Client, contentName, mcpName string) error {
 	if contentName == "" || mcpName == "" {
@@ -86,18 +47,25 @@ func PublishSnapshotContentManifestCheckpointName(ctx context.Context, c client.
 	})
 }
 
-// PublishSnapshotContentChildrenRefs sets the snapshot-derived (domain) child content edges on
+// PublishSnapshotContentChildrenRefs writes the snapshot-derived (domain) child content edges to
 // contentName.status.childrenSnapshotContentRefs.
 //
-// domainRefs is the authoritative DOMAIN child set (derived from the owning snapshot's
-// status.childrenSnapshotRefs). It is published as a full replacement of the domain edges, but
-// child-volume-node edges (orphan/root-residual PVC nodes, named <contentName>-vol-<hash>) are
-// PRESERVED: those are linked by a separate writer (LinkChildVolumeContentRef) and are not part of
-// the snapshot-derived set, so a blind full-replace here would clobber them and start a write-war
-// with that linker (each side repeatedly removing the other's edge, churning resourceVersion and
-// livelocking the optimistic status update that publishes Ready). The read is done via reader
-// (the non-cached APIReader) so the preserve set reflects edges just written by the other writer
-// rather than a stale cache that would re-clobber them.
+// domainRefs is the child set (derived from the owning snapshot's status.childrenSnapshotRefs — orphan/
+// residual-PVC VolumeSnapshot children are ordinary domain children now, §11.6). The caller
+// (PublishSnapshotContentChildrenFromSnapshotRefs) passes the COMPLETE set all-or-nothing, so in normal
+// operation this writes the field ONCE (empty -> complete frozen set) and is a no-op thereafter — the
+// frozen-set immutability CEL (Option A, INV-CONTENT-CHILDREN-2) rejects any later change. The merge
+// preserves existing edges and adds any missing ones, deduped by name: on the single firing that union
+// equals the complete set (existing is a subset), and it keeps an E3-degraded edge (child content deleted)
+// rather than dropping it. The aggregator is the sole edge writer (INV-CONTENT-CHILDREN-1) as of Block 3d;
+// the optimistic lock below is retained as defense in depth. The read is done via reader (the non-cached
+// APIReader) so the preserve set reflects the freshest edges rather than a stale cache.
+//
+// Frozen-set guard: because the field is immutable once non-empty (Option A CEL), this NEVER attempts to
+// grow or replace an already-populated set — that would be rejected by the apiserver and wedge the reconcile
+// with a hard error. Only the empty -> complete first write is patched; a non-empty existing set is held
+// as-is (see the guard below). This makes the writer upgrade-safe against a legacy partial set written under
+// the old append-only rule.
 func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, reader client.Reader, contentName string, domainRefs []storagev1alpha1.SnapshotContentChildRef) error {
 	if contentName == "" {
 		return nil
@@ -105,17 +73,24 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 	if reader == nil {
 		reader = c
 	}
-	// Anchored to THIS content's own vol-node naming (ChildVolumeContentName = contentName + infix +
-	// hash). Unlike a bare infix scan this cannot misclassify a domain child: domain child content
-	// names derive from the child snapshot, never from the parent content name + "-vol-".
-	volNodePrefix := contentName + snapshotpkg.ChildVolumeContentInfix
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		content := &storagev1alpha1.SnapshotContent{}
 		if err := reader.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 			return err
 		}
 		desired := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(domainRefs)+len(content.Status.ChildrenSnapshotContentRefs))
-		seen := make(map[string]struct{}, len(domainRefs))
+		seen := make(map[string]struct{}, len(domainRefs)+len(content.Status.ChildrenSnapshotContentRefs))
+		// Preserve every existing edge first (append-only), then add new domain edges.
+		for _, ref := range content.Status.ChildrenSnapshotContentRefs {
+			if ref.Name == "" {
+				continue
+			}
+			if _, ok := seen[ref.Name]; ok {
+				continue
+			}
+			seen[ref.Name] = struct{}{}
+			desired = append(desired, ref)
+		}
 		for _, ref := range domainRefs {
 			if ref.Name == "" {
 				continue
@@ -126,23 +101,26 @@ func PublishSnapshotContentChildrenRefs(ctx context.Context, c client.Client, re
 			seen[ref.Name] = struct{}{}
 			desired = append(desired, ref)
 		}
-		for _, ref := range content.Status.ChildrenSnapshotContentRefs {
-			if _, ok := seen[ref.Name]; ok {
-				continue
-			}
-			if strings.HasPrefix(ref.Name, volNodePrefix) {
-				seen[ref.Name] = struct{}{}
-				desired = append(desired, ref)
-			}
-		}
 		controllercommon.SortSnapshotContentChildRefs(desired)
 		if controllercommon.SnapshotContentChildRefsEqualIgnoreOrder(content.Status.ChildrenSnapshotContentRefs, desired) {
 			return nil
 		}
+		// Frozen-set guard (Block 4, INV-CONTENT-CHILDREN-2, Option A CEL: oldSelf.size()==0 || self==oldSelf).
+		// Reaching here means desired differs from a NON-EMPTY existing set, i.e. an attempt to grow/replace an
+		// already-populated frozen set. The all-or-nothing caller never produces this on a fresh deployment (the
+		// field goes empty -> complete in one write and every later pass recomputes the identical complete set,
+		// caught by the equality no-op above, incl. the E3-degraded re-publish). The only way to get here is a
+		// LEGACY partial set carried across an upgrade from the append-only era: completing it would be rejected
+		// by the apiserver CEL and turn every reconcile into a hard error, wedging the node in ChildrenLinkPending.
+		// Hold the frozen set as-is instead (no patch) — the invariant says a non-empty set is immutable, so there
+		// is nothing valid to write. Fresh deployments never take this branch.
+		if len(content.Status.ChildrenSnapshotContentRefs) > 0 {
+			return nil
+		}
 		base := content.DeepCopy()
 		content.Status.ChildrenSnapshotContentRefs = desired
-		// Optimistic lock: childrenSnapshotContentRefs is co-written by LinkChildVolumeContentRef; a
-		// concurrent edit turns into a 409 so RetryOnConflict re-reads the fresh (merged) list instead of
+		// Optimistic lock (defense in depth): the aggregator is the sole edge writer as of Block 3d, but a
+		// concurrent edit still turns into a 409 so RetryOnConflict re-reads the fresh list instead of
 		// blindly replacing it (matches the convention in genericbinder.patchSnapshotConditionFromContent).
 		return c.Status().Patch(ctx, content, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
@@ -175,9 +153,6 @@ func PublishSnapshotContentChildrenFromSnapshotRefs(
 	}
 	out := make([]storagev1alpha1.SnapshotContentChildRef, 0, len(childSnapshotRefs))
 	for _, childRef := range childSnapshotRefs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(childRef) {
-			continue
-		}
 		childContentName, err := usecase.ResolveChildSnapshotRefToBoundContentName(ctx, readClient, childRef, parentNamespace)
 		if err != nil {
 			if errors.Is(err, usecase.ErrRunGraphChildNotBound) ||

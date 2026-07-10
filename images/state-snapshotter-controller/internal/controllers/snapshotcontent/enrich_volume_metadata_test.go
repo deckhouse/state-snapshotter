@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -50,10 +51,9 @@ func fsMode() *corev1.PersistentVolumeMode    { m := corev1.PersistentVolumeFile
 func blockMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeBlock; return &m }
 func scPtr(s string) *string                  { return &s }
 
-func pvcTargetBinding(ns, name string) storagev1alpha1.SnapshotDataBinding { //nolint:unparam // test fixture keeps uniform signature
+func pvcTargetBinding(name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-" + name,
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "PersistentVolumeClaim", Namespace: ns, Name: name},
+		Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
 	}
 }
 
@@ -75,7 +75,7 @@ func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, pv).Build()
 
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "data")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("data")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestEnrich_BlockPVCSkipsPV(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	// The PV is intentionally absent: a Block volume must not read it. If it did, the missing PV would
 	// surface as an error, so a nil error proves the PV read was skipped.
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "blk")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("blk")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestEnrich_NilVolumeModeDefaultsFilesystem(t *testing.T) {
 	scheme := enrichScheme(t)
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "nm"}}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
-	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "nm")})
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("nm")})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEnrich_MissingPVCTolerated(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-	in := []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "gone")}
+	in := []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("gone")}
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, in)
 	if err != nil {
 		t.Fatalf("a genuinely-gone source PVC must be tolerated, got error: %v", err)
@@ -164,7 +164,7 @@ func TestEnrich_PVReadErrorReturned(t *testing.T) {
 		},
 	}).Build()
 
-	_, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, directFail, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("ns1", "data")})
+	_, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, directFail, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("data")})
 	if err == nil {
 		t.Fatal("expected a PV read error to be returned, not swallowed")
 	}
@@ -175,8 +175,7 @@ func TestEnrich_NonPVCTargetSkipped(t *testing.T) {
 	scheme := enrichScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	binding := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-x",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-x", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
 	}
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{binding})
 	if err != nil {
@@ -223,12 +222,11 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 		WithObjects(pvc, vscWithRestoreSize("vsc-pvc", tenGiB, false), vscWithRestoreSize("vsc-disk", tenGiB, false)).
 		Build()
 
-	pvcBinding := pvcTargetBinding("ns1", "data")
+	pvcBinding := pvcTargetBinding("data")
 	pvcBinding.Artifact = vscArtifact("vsc-pvc")
 	domainBinding := storagev1alpha1.SnapshotDataBinding{
-		TargetUID: "uid-disk",
-		Target:    storagev1alpha1.SnapshotSubjectRef{Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
-		Artifact:  vscArtifact("vsc-disk"),
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Artifact: vscArtifact("vsc-disk"),
 	}
 
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcBinding, domainBinding})
@@ -240,6 +238,40 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 	}
 	if out[1].Size != "10Gi" {
 		t.Errorf("domain (non-PVC) binding size: want 10Gi, got %q", out[1].Size)
+	}
+}
+
+// Enrichment backfills the durable artifact uid from the live VolumeSnapshotContent when an upstream
+// producer referenced the artifact by name only (the import path), and MUST NOT override a uid a
+// producer already supplied (the VCR / orphan paths).
+func TestEnrich_BackfillsArtifactUIDFromVSC(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	const tenGiB = int64(10) * 1024 * 1024 * 1024
+	vscNamed := vscWithRestoreSize("vsc-named", tenGiB, false)
+	vscNamed.SetUID("vsc-uid-from-object")
+	vscPreset := vscWithRestoreSize("vsc-preset", tenGiB, false)
+	vscPreset.SetUID("vsc-uid-from-object")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vscNamed, vscPreset).Build()
+
+	nameOnly := storagev1alpha1.SnapshotDataBinding{
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		Artifact: vscArtifact("vsc-named"),
+	}
+	preset := storagev1alpha1.SnapshotDataBinding{
+		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk2", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk2"},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-preset", UID: "producer-supplied-uid"},
+	}
+
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{nameOnly, preset})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if out[0].Artifact.UID != "vsc-uid-from-object" {
+		t.Errorf("name-only artifact uid: want backfill from VSC object, got %q", out[0].Artifact.UID)
+	}
+	if out[1].Artifact.UID != "producer-supplied-uid" {
+		t.Errorf("producer-supplied artifact uid must not be overridden, got %q", out[1].Artifact.UID)
 	}
 }
 
@@ -300,8 +332,7 @@ func TestReadArtifactRestoreSize_TransientErrorPropagates(t *testing.T) {
 
 func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	base := storagev1alpha1.SnapshotDataBinding{
-		TargetUID:        "u1",
-		Target:           storagev1alpha1.SnapshotSubjectRef{Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
+		Source:           storagev1alpha1.SnapshotSubjectRef{UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
 		Artifact:         storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1"},
 		VolumeMode:       "Filesystem",
 		FsType:           "ext4",
@@ -326,6 +357,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		"storageClassName": func(b *storagev1alpha1.SnapshotDataBinding) { b.StorageClassName = "other" },
 		"size":             func(b *storagev1alpha1.SnapshotDataBinding) { b.Size = "20Gi" },
 		"accessModes":      func(b *storagev1alpha1.SnapshotDataBinding) { b.AccessModes = []string{"ReadWriteMany"} },
+		"artifactUID":      func(b *storagev1alpha1.SnapshotDataBinding) { b.Artifact.UID = "different-uid" },
 	} {
 		if dataBindingEqual(base, mut(f)) {
 			t.Errorf("bindings differing by %s must compare unequal", name)

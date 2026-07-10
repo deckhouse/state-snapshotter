@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,7 +38,7 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
@@ -83,6 +84,20 @@ func objectsByKindName(objects []unstructured.Unstructured) map[string]unstructu
 	return result
 }
 
+// testRESTMapper builds a RESTMapper covering the kinds used across the controller tests so
+// collectTargetObjects can resolve each target's scope (the controller-runtime fake client has no
+// RESTMapper by default, so RESTMapping would panic). Namespace and ClusterRole are cluster-scoped; the
+// rest are namespaced.
+func testRESTMapper() meta.RESTMapper {
+	m := meta.NewDefaultRESTMapper(nil)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Namespace"}, meta.RESTScopeRoot)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Version: "v1", Kind: "Service"}, meta.RESTScopeNamespace)
+	m.Add(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"}, meta.RESTScopeRoot)
+	return m
+}
+
 var _ = Describe("ManifestCaptureRequest TTL", func() {
 	var (
 		baseClient ctrlclient.Client
@@ -105,6 +120,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 
 		baseClient = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -267,59 +283,74 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			// A non-domain annotation that the legacy cleaner would have stripped must survive raw capture.
 			Expect(svcCaptured.GetAnnotations()).To(HaveKeyWithValue("example.com/keep-me", "raw"))
 		})
+
+		// Scope guard: a namespaced MCR may capture the cluster-scoped Namespace object ONLY when it is its
+		// own namespace (name == mcr.Namespace). Any other cluster-scoped target — including a foreign
+		// Namespace — is a permanent misuse and must fail terminally (terminalCaptureError), never requeue.
+		It("should capture its own Namespace as a cluster-scoped object", func() {
+			ctx := context.Background()
+			Expect(baseClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns1"}})).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-ns-self", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "ns1"}, // name == mcr.Namespace
+					},
+				},
+			}
+
+			objects, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objects).To(HaveLen(1))
+			Expect(objects[0].GetKind()).To(Equal("Namespace"))
+			Expect(objects[0].GetName()).To(Equal("ns1"))
+			// Cluster-scoped: the captured object carries an empty namespace so the restore sanitizer drops it.
+			Expect(objects[0].GetNamespace()).To(Equal(""))
+		})
+
+		It("should terminally reject a foreign Namespace target", func() {
+			ctx := context.Background()
+			Expect(baseClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "other-ns"}})).To(Succeed())
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-ns-other", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "other-ns"}, // name != mcr.Namespace
+					},
+				},
+			}
+
+			_, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsNotFound(err)).To(BeFalse(), "a forbidden foreign Namespace is not a NotFound")
+			Expect(isTerminalCaptureError(err)).To(BeTrue(), "a forbidden cluster-scoped target must be terminal")
+		})
+
+		It("should terminally reject a non-Namespace cluster-scoped target", func() {
+			ctx := context.Background()
+
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-clusterrole", Namespace: "ns1"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "ClusterRole", Name: "cluster-admin"},
+					},
+				},
+			}
+
+			_, err := ctrl.collectTargetObjects(ctx, mcr)
+			Expect(err).To(HaveOccurred())
+			Expect(isTerminalCaptureError(err)).To(BeTrue(), "a forbidden cluster-scoped target must be terminal")
+		})
 	})
 
 	// ============================================================================
 	// TTL-related tests
 	// ============================================================================
-	// These tests verify TTL annotation management and TTL scanner behavior.
-	// TTL enforcement is centralized in the background scanner, not in reconcile loop.
-
-	Describe("setTTLAnnotation", func() {
-		It("should set TTL annotation when not exists", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations).ToNot(BeNil())
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("168h"))
-		})
-
-		It("should not overwrite existing TTL annotation", func() {
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-					Annotations: map[string]string{
-						controllercommon.AnnotationKeyTTL: "24h",
-					},
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("24h"))
-		})
-
-		It("should use config TTL when available", func() {
-			cfg.DefaultTTLStr = "72h"
-			mcr := &storagev1alpha1.ManifestCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mcr",
-					Namespace: "default",
-				},
-			}
-
-			ctrl.setTTLAnnotation(mcr)
-
-			Expect(mcr.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("72h"))
-		})
-	})
+	// These tests verify TTL scanner behavior. TTL enforcement is centralized in the
+	// background scanner (config.DefaultTTL), not in the reconcile loop.
 
 	Describe("TTL Scanner", func() {
 		var (
@@ -331,6 +362,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			scannerClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			// Initialize controller for scanner tests
@@ -506,6 +538,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			restartClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			// Reuse logger from parent BeforeEach
@@ -587,6 +620,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			ctx = context.Background()
 			finalizeClient = fake.NewClientBuilder().
 				WithScheme(scheme).
+				WithRESTMapper(testRESTMapper()).
 				WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 				Build()
 			ctrl.Client = finalizeClient
@@ -712,8 +746,6 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 			Expect(updatedMCR.Status.CompletionTimestamp).ToNot(BeNil())
-			Expect(updatedMCR.Annotations).ToNot(BeNil())
-			Expect(updatedMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal(cfg.DefaultTTLStr))
 		})
 	})
 })
@@ -734,6 +766,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}, &storagev1alpha1.ManifestCheckpoint{}).
 			Build()
 	})
@@ -772,7 +805,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 
 			// Create ObjectKeeper manually (simulating controller behavior)
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: controllercommon.DeckhouseAPIVersion,
@@ -817,7 +850,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 				},
 			}
 
-			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.Namespace, mcr.Name, mcr.UID)
+			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: retainerName,
@@ -850,14 +883,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 						},
 					},
 				},
-				Spec: storagev1alpha1.ManifestCheckpointSpec{
-					SourceNamespace: mcr.Namespace,
-					ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-						Name:      mcr.Name,
-						Namespace: mcr.Namespace,
-						UID:       string(mcr.UID),
-					},
-				},
+				Spec: storagev1alpha1.ManifestCheckpointSpec{},
 			}
 			Expect(client.Create(ctx, checkpoint)).To(Succeed())
 
@@ -899,8 +925,8 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			Expect(client.Create(ctx, cm)).To(Succeed())
 			Expect(client.Create(ctx, mcr2)).To(Succeed())
 
-			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.Namespace, mcr1.Name, mcr1.UID)
-			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.Namespace, mcr2.Name, mcr2.UID)
+			oldRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr1.UID)
+			newRetainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr2.UID)
 			Expect(newRetainerName).ToNot(Equal(oldRetainerName))
 
 			oldObjectKeeper := &deckhousev1alpha1.ObjectKeeper{
@@ -968,6 +994,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -1071,16 +1098,19 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 
-			// Update metadata (TTL annotation)
+			// Update metadata (a plain annotation) via a separate metadata patch.
 			base2 := updatedMCR.DeepCopy()
-			ctrl.setTTLAnnotation(updatedMCR)
+			if updatedMCR.Annotations == nil {
+				updatedMCR.Annotations = map[string]string{}
+			}
+			updatedMCR.Annotations["state-snapshotter.deckhouse.io/test"] = "meta"
 			Expect(client.Patch(ctx, updatedMCR, ctrlclient.MergeFrom(base2))).To(Succeed())
 
 			// Verify metadata was updated
 			finalMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, finalMCR)).To(Succeed())
 			Expect(finalMCR.Annotations).ToNot(BeNil())
-			Expect(finalMCR.Annotations[controllercommon.AnnotationKeyTTL]).To(Equal("10m"))
+			Expect(finalMCR.Annotations["state-snapshotter.deckhouse.io/test"]).To(Equal("meta"))
 			// Verify status is still intact
 			ready = meta.FindStatusCondition(finalMCR.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
 			Expect(ready).NotTo(BeNil())
@@ -1387,19 +1417,11 @@ var _ = Describe("Resource Scoping", func() {
 					Name: "mcp-test-123",
 					// No Namespace field - cluster-scoped
 				},
-				Spec: storagev1alpha1.ManifestCheckpointSpec{
-					SourceNamespace: "test-namespace",
-					ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-						Name:      "test-mcr",
-						Namespace: "test-namespace",
-						UID:       "test-uid",
-					},
-				},
+				Spec: storagev1alpha1.ManifestCheckpointSpec{},
 			}
 
 			Expect(checkpoint.Namespace).To(Equal(""))
 			Expect(checkpoint.Name).ToNot(BeEmpty())
-			Expect(checkpoint.Spec.SourceNamespace).To(Equal("test-namespace"))
 		})
 
 		It("should verify ManifestCheckpointContentChunk is cluster-scoped", func() {
@@ -1424,8 +1446,8 @@ var _ = Describe("Resource Scoping", func() {
 	})
 })
 
-var _ = Describe("Object References", func() {
-	It("should create ManifestCaptureRequestRef correctly", func() {
+var _ = Describe("Source provenance", func() {
+	It("should carry the originating request name on the source-request label", func() {
 		mcr := &storagev1alpha1.ManifestCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-mcr",
@@ -1434,20 +1456,21 @@ var _ = Describe("Object References", func() {
 			},
 		}
 
-		spec := storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: mcr.Namespace,
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      mcr.Name,
-				Namespace: mcr.Namespace,
-				UID:       string(mcr.UID),
+		// Both manifestCaptureRequestRef and sourceNamespace were dropped from the spec (the originating
+		// request is short-lived and never resolved by ref; a namespace field does not fit future
+		// cluster-wide sources). Provenance is now carried solely by the source-request label.
+		checkpoint := &storagev1alpha1.ManifestCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "mcp-provenance",
+				Labels: map[string]string{
+					"state-snapshotter.deckhouse.io/source-request": mcr.Name,
+				},
 			},
+			Spec: storagev1alpha1.ManifestCheckpointSpec{},
 		}
 
-		Expect(spec.SourceNamespace).To(Equal(mcr.Namespace))
-		Expect(spec.ManifestCaptureRequestRef).ToNot(BeNil())
-		Expect(spec.ManifestCaptureRequestRef.Name).To(Equal(mcr.Name))
-		Expect(spec.ManifestCaptureRequestRef.Namespace).To(Equal(mcr.Namespace))
-		Expect(spec.ManifestCaptureRequestRef.UID).To(Equal(string(mcr.UID)))
+		Expect(checkpoint.Labels).To(HaveKeyWithValue("state-snapshotter.deckhouse.io/source-request", mcr.Name))
+		Expect(checkpoint.Labels).ToNot(HaveKey("state-snapshotter.deckhouse.io/source-namespace"))
 	})
 })
 
@@ -1515,6 +1538,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 
 		k8sClient = fake.NewClientBuilder().
 			WithScheme(scheme).
+			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
@@ -1709,6 +1733,36 @@ var _ = Describe("Ready Condition Semantics", func() {
 			Expect(updated.Status.CompletionTimestamp).NotTo(BeNil())
 		})
 
+	})
+
+	Describe("terminal cluster-scoped rejection", func() {
+		// A forbidden cluster-scoped target must be classified terminally (Ready=False/Failed) by
+		// processCaptureRequest, exactly like a NotFound target — not requeued forever. This is the
+		// reconcile-level counterpart to the collectTargetObjects scope-guard unit specs.
+		It("fails the MCR terminally when it targets a foreign Namespace", func() {
+			mcr := &storagev1alpha1.ManifestCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "mcr-foreign-ns", Namespace: "default"},
+				Spec: storagev1alpha1.ManifestCaptureRequestSpec{
+					Targets: []storagev1alpha1.ManifestTarget{
+						{APIVersion: "v1", Kind: "Namespace", Name: "some-other-ns"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+
+			// A terminal error is handled inside processCaptureRequest (finalized to Ready=False/Failed),
+			// so it must NOT surface as a requeue error to the reconcile loop.
+			_, err := reconciler.processCaptureRequest(ctx, mcr)
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &storagev1alpha1.ManifestCaptureRequest{}
+			Expect(k8sClient.Get(ctx, ctrlclient.ObjectKeyFromObject(mcr), updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, storagev1alpha1.ManifestCaptureRequestConditionTypeReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonFailed))
+		})
 	})
 
 	Describe("isTerminal semantics", func() {

@@ -23,34 +23,62 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-func TestResolveResourceSelector_NilMeansEverything(t *testing.T) {
-	// A nil snapshot and a nil resourceSelector both mean "no filtering" -> Everything (matches all),
-	// which is the opposite of metav1.LabelSelectorAsSelector(nil) (Nothing). This is the key regression.
+func TestResolveResourceSelector_NilStillHonorsExcludeVeto(t *testing.T) {
+	// A nil snapshot and a nil resourceSelector both mean "no user filtering", but the exclude veto is
+	// ALWAYS ANDed on top: the resolved selector matches everything EXCEPT objects carrying
+	// ExcludeLabelKey. It is therefore no longer Empty() (unlike the pre-wave4A "Everything") — that is
+	// the key regression this test guards.
 	for _, s := range []*Snapshot{nil, {}} {
 		sel, err := s.ResolveResourceSelector()
 		if err != nil {
 			t.Fatalf("ResolveResourceSelector: unexpected error: %v", err)
 		}
-		if !sel.Empty() {
-			t.Fatalf("nil selector must resolve to an empty (Everything) selector, got %q", sel.String())
+		if sel.Empty() {
+			t.Fatalf("nil selector must carry the exclude veto (not be Empty), got %q", sel.String())
 		}
 		if !sel.Matches(labels.Set{"any": "value"}) {
-			t.Fatal("nil selector must match a labeled object")
+			t.Fatal("nil selector must match a labeled object without the exclude veto")
 		}
 		if !sel.Matches(labels.Set{}) {
 			t.Fatal("nil selector must match an unlabeled object")
 		}
+		if sel.Matches(labels.Set{ExcludeLabelKey: ""}) {
+			t.Fatal("nil selector must NOT match an object carrying the exclude veto (empty value)")
+		}
+		if sel.Matches(labels.Set{ExcludeLabelKey: "true", "any": "value"}) {
+			t.Fatal("exclude veto must win regardless of other labels or its value")
+		}
 	}
 }
 
-func TestResolveResourceSelector_EmptySelectorMeansEverything(t *testing.T) {
+func TestResolveResourceSelector_EmptySelectorHonorsExcludeVeto(t *testing.T) {
 	s := &Snapshot{Spec: SnapshotSpec{ResourceSelector: &metav1.LabelSelector{}}}
 	sel, err := s.ResolveResourceSelector()
 	if err != nil {
 		t.Fatalf("ResolveResourceSelector: unexpected error: %v", err)
 	}
 	if !sel.Matches(labels.Set{}) || !sel.Matches(labels.Set{"x": "y"}) {
-		t.Fatalf("empty selector must match everything, got %q", sel.String())
+		t.Fatalf("empty selector must match everything without the exclude veto, got %q", sel.String())
+	}
+	if sel.Matches(labels.Set{ExcludeLabelKey: "any"}) {
+		t.Fatal("empty selector must still exclude objects carrying the exclude veto")
+	}
+}
+
+func TestResolveResourceSelector_ExcludeVetoOverridesPositiveMatch(t *testing.T) {
+	// Even an object that the user selector would include is dropped when it also carries the veto.
+	s := &Snapshot{Spec: SnapshotSpec{ResourceSelector: &metav1.LabelSelector{
+		MatchLabels: map[string]string{"group": "keep"},
+	}}}
+	sel, err := s.ResolveResourceSelector()
+	if err != nil {
+		t.Fatalf("ResolveResourceSelector: unexpected error: %v", err)
+	}
+	if !sel.Matches(labels.Set{"group": "keep"}) {
+		t.Fatal("included object without the veto must match")
+	}
+	if sel.Matches(labels.Set{"group": "keep", ExcludeLabelKey: ""}) {
+		t.Fatal("exclude veto must override a positive matchLabels include")
 	}
 }
 

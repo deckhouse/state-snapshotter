@@ -191,19 +191,20 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 		GinkgoWriter.Printf("DataImport %s/%s: <get failed: %v>\n", ns, name, err)
 		return
 	}
-	targetGroup, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "group")
-	targetKind, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "kind")
-	targetName, _, _ := unstructured.NestedString(obj.Object, "spec", "targetRef", "name")
+	snapAPIVersion, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "apiVersion")
+	targetKind, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "kind")
+	targetName, _, _ := unstructured.NestedString(obj.Object, "spec", "snapshotRef", "name")
 	url, _, _ := unstructured.NestedString(obj.Object, "status", "url")
 	volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 	ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
-	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "dataArtifactRef")
+	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
 	GinkgoWriter.Printf("DataImport %s/%s:\n", ns, name)
-	GinkgoWriter.Printf("    targetRef: group=%q kind=%q name=%q\n", targetGroup, targetKind, targetName)
-	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t dataArtifactRef=%v\n", url, volMode, ca != "", artifact)
+	GinkgoWriter.Printf("    snapshotRef: apiVersion=%q kind=%q name=%q\n", snapAPIVersion, targetKind, targetName)
+	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t data.artifact=%v\n", url, volMode, ca != "", artifact)
 	dumpObjectConditions(obj)
 
-	// Resolve target leaf boundSnapshotContentName when DataImport waits on it.
+	// Resolve target leaf boundSnapshotContentName when DataImport waits on it. Only a
+	// PopulateData DataImport carries snapshotRef; CreatePVC ones leave targetName empty.
 	if targetName == "" {
 		return
 	}
@@ -216,7 +217,7 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 	case "DemoVirtualMachineSnapshot":
 		gvr = demoVMSnapshotGVR
 	default:
-		GinkgoWriter.Printf("    target leaf %s/%s: <unsupported targetRef.kind %q>\n", ns, targetName, targetKind)
+		GinkgoWriter.Printf("    target leaf %s/%s: <unsupported snapshotRef.kind %q>\n", ns, targetName, targetKind)
 		return
 	}
 	leaf, lerr := getResource(ctx, gvr, ns, targetName)
@@ -249,9 +250,10 @@ func dumpImportLeavesInNS(ctx context.Context, ns string) {
 		for i := range list.Items {
 			obj := &list.Items[i]
 			bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
-			// Import mode is the unified marker spec.source.import: {} across every snapshot kind, including
-			// the extended VolumeSnapshot (the owning DataImport is reverse-looked-up, not named on the leaf).
-			_, importMarker, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
+			// Import mode is the same enum spec.mode: Import on EVERY snapshot kind, including the extended
+			// CSI VolumeSnapshot fork (the owning DataImport is reverse-looked-up, not named on the leaf).
+			mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+			importMarker := mode == "Import"
 			GinkgoWriter.Printf("%s %s/%s:\n", entry.label, ns, obj.GetName())
 			GinkgoWriter.Printf("    boundSnapshotContentName=%q importMode=%v ownerRefs=%s\n",
 				bound, importMarker, formatOwnerReferences(obj.GetOwnerReferences()))

@@ -18,7 +18,7 @@ limitations under the License.
 // Each ref carries explicit apiVersion/kind/name; the child object is loaded with a single Get (no registry scan).
 //
 // This is NOT a Ready aggregator. Final readiness is owned by SnapshotContent
-// (Ready = ManifestsReady && VolumesReady && ChildrenReady) and Snapshot.Ready mirrors the bound SnapshotContent.Ready.
+// (Ready = ManifestsReady && DataReady && ChildrenReady) and Snapshot.Ready mirrors the bound SnapshotContent.Ready.
 // The helpers here serve two narrow purposes:
 //   - the priority-wave barrier (parent_graph.go), which must detect terminal child failures;
 //   - the single Snapshot.Ready bridge exception for child-Snapshot capture failures that no
@@ -48,19 +48,15 @@ import (
 //
 // This set MUST stay in sync with the exhaustive terminal capture-failure reasons documented in
 // ready_patch.go (the pre-bind/pre-publish failCapture writers). In particular the volume-capture
-// terminal reasons (VolumeCaptureTargetsFailed/VolumeCaptureFailed) and DuplicateCoveredPVCUID are
-// carried by a child Snapshot's Ready=False before any child SnapshotContent can represent them, so the
-// child-Snapshot terminal-failure bridge (SummarizeChildSnapshotTerminalFailures) must classify them as
-// Failed — otherwise a domain child whose volume capture failed is misclassified as Pending and the
-// parent holds a stale Ready=True over lost data (INV-FAIL-PROP).
+// terminal reason (VolumeCaptureFailed) and DuplicateCoveredPVCUID are carried by a child Snapshot's
+// Ready=False before any child SnapshotContent can represent them, so the child-Snapshot
+// terminal-failure bridge (SummarizeChildSnapshotTerminalFailures) must classify them as Failed —
+// otherwise a domain child whose volume capture failed is misclassified as Pending and the parent
+// holds a stale Ready=True over lost data (INV-FAIL-PROP).
 var ChildSnapshotTerminalReadyReasons = map[string]struct{}{
 	"ListFailed":                       {},
-	"NoCaptureTargets":                 {},
-	"CapturePlanDrift":                 {},
 	"ManifestCheckpointFailed":         {},
-	"ContentRefMismatch":               {},
 	"NamespaceNotFound":                {},
-	"VolumeCaptureTargetsFailed":       {},
 	snapshot.ReasonVolumeCaptureFailed: {}, // "VolumeCaptureFailed"
 	"DuplicateCoveredPVCUID":           {},
 }
@@ -185,9 +181,6 @@ type ChildSnapshotTerminalFailures struct {
 func SummarizeChildSnapshotTerminalFailures(ctx context.Context, c client.Reader, refs []storagev1alpha1.SnapshotChildRef, parentSnapshotNamespace string) (ChildSnapshotTerminalFailures, error) {
 	var out ChildSnapshotTerminalFailures
 	for _, ref := range refs {
-		if snapshot.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		if _, err := RefGVK(ref); err != nil {
 			out.HasFailed = true
 			out.Messages = append(out.Messages, err.Error())

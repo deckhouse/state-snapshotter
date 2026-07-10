@@ -60,7 +60,7 @@ import (
 var (
 	resourcesSchemeFuncs = []func(*runtime.Scheme) error{
 		v1alpha1.AddToScheme,          // state-snapshotter.deckhouse.io group
-		storagev1alpha1.AddToScheme,   // storage.deckhouse.io (Snapshot, SnapshotContent, ...)
+		storagev1alpha1.AddToScheme,   // state-snapshotter.deckhouse.io (Snapshot, SnapshotContent, ...)
 		deckhousev1alpha1.AddToScheme, // deckhouse.io group (ObjectKeeper)
 		clientgoscheme.AddToScheme,
 		extv1.AddToScheme,
@@ -185,7 +185,7 @@ func main() {
 	fullScheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(fullScheme)
 	_ = v1alpha1.AddToScheme(fullScheme)          // state-snapshotter.deckhouse.io group (MCP, chunks, …)
-	_ = storagev1alpha1.AddToScheme(fullScheme)   // storage.deckhouse.io (Snapshot, SnapshotContent)
+	_ = storagev1alpha1.AddToScheme(fullScheme)   // state-snapshotter.deckhouse.io (Snapshot, SnapshotContent)
 	_ = deckhousev1alpha1.AddToScheme(fullScheme) // deckhouse.io group (ObjectKeeper)
 
 	// Create controller manager with full scheme (for informers)
@@ -313,10 +313,27 @@ func main() {
 		cancel()
 		os.Exit(1)
 	}
-	// Carry CSD spec.dataBacked from the merged pairs onto the binder's GVK registry so the import path
-	// knows which snapshot kinds expect a DataImport/data artifact. Built-in/bootstrap pairs stay false.
+	// Carry CSD spec.requiresDataArtifact from the merged pairs onto BOTH controllers' GVK registries
+	// (they hold separate instances): the binder's import path and main's capture-leg eager-init
+	// (main-owned commonController, decision #10) read the same flag. Built-in/bootstrap pairs stay false.
+	anyDataArtifactKind := false
 	for _, p := range mergedPairs {
-		snapshotController.MarkDataBacked(p.Snapshot.Kind, p.DataBacked)
+		snapshotController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
+		contentController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
+		if p.RequiresDataArtifact {
+			anyDataArtifactKind = true
+		}
+	}
+	// Event-driven VCR (vcr-watch-core-terminal Phase 3): a registered data-artifact kind means the forked
+	// storage-foundation VolumeCaptureRequest CRD is deployed and RESTMappable now, so add the VCR watch to
+	// the existing content controller (single content queue). This replaces the data-leg 500 ms poll: a VCR
+	// status flip enqueues the owning SnapshotContent directly. Idempotent + RESTMapping-guarded internally.
+	if anyDataArtifactKind {
+		if err := contentController.AddVolumeCaptureRequestWatch(mgr); err != nil {
+			log.Error(err, "Failed to add VolumeCaptureRequest watch to SnapshotContentController")
+			cancel()
+			os.Exit(1)
+		}
 	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
@@ -325,9 +342,37 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	// wave7 (w7-creator): additionally register the built-in root Snapshot pair on the binder at boot.
+	// FilterGenericSnapshotGVKPairs strips the root (a dedicated kind) but since wave5 the binder is the
+	// creator/owner of the root SnapshotContent, and the compensating unifiedSync.Sync only runs on CSD
+	// reconciles — so without this the binder never watches the root at startup and root content is never
+	// created. See unifiedbootstrap.StartupDomainCaptureRootPair. Idempotent w.r.t. a later Sync.
+	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(snapshotGVKs, snapshotContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
+		// Main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10).
+		contentController.MarkDomainCaptureKind(rootSnapGVK)
+		if err := snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK); err != nil {
+			log.Error(err, "Failed to setup GenericSnapshotBinderController root Snapshot watch", "snapshotGVK", rootSnapGVK.String(), "snapshotContentGVK", rootContentGVK.String())
+			cancel()
+			os.Exit(1)
+		}
+		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup (w7-creator)", "snapshotGVK", rootSnapGVK.String())
+	}
+	// Built-in CSI VolumeSnapshot: mark it domain-capture at boot. Unlike the root it is NOT a dedicated
+	// kind, so FilterGenericSnapshotGVKPairs kept it and the loop above already added its watch — only the
+	// domain-capture MARK is missing. Without it the binder would eagerly create + bind a SnapshotContent
+	// shell before the out-of-process storage-foundation VolumeSnapshot domain controller claims the object
+	// (dual content writer). The compensating unifiedSync.Sync mark runs only on CSD reconciles (never at
+	// boot, and not at all with zero CSDs), so wire it here; a later Sync re-asserts it idempotently. See
+	// unifiedbootstrap.StartupBuiltInVolumeSnapshotPair.
+	if vsSnapGVK, _, ok := unifiedbootstrap.StartupBuiltInVolumeSnapshotPair(snapshotGVKs, snapshotContentGVKs); ok {
+		snapshotController.MarkDomainCaptureKind(vsSnapGVK)
+		contentController.MarkDomainCaptureKind(vsSnapGVK)
+		log.Info("GenericSnapshotBinderController marked built-in VolumeSnapshot domain-capture at startup", "snapshotGVK", vsSnapGVK.String())
+	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
-	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.import marker; owning DataImport
+	// Import binder for extended generic-PVC VolumeSnapshots (spec.mode: Import; owning DataImport
 	// found by reverse-lookup of DataImport.spec.targetRef).
 	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
 	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
@@ -422,7 +467,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsDomainCaptureSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
+	// The restore delegate predicate must be the OUT-OF-PROCESS domain set, NOT the domain-CAPTURE set:
+	// since wave5 the root "Snapshot" is a domain-capture kind, but its restore is served in-process by
+	// this very apiserver. Passing the capture set would make the compiler delegate the root back to core's
+	// own manifests-with-data-restoration endpoint (self-recursion, HTTP 500). Only demo/external kinds
+	// are truly out-of-process for restore.
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsOutOfProcessDomainSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

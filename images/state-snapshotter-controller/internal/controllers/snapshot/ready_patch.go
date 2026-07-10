@@ -43,14 +43,9 @@ import (
 //
 //   - PRE-BIND / PRE-PUBLISH PLANNING/CAPTURE FAILURES via failCapture(): these all happen before the root
 //     publishes its own truth refs (manifestCheckpointName / dataRefs), so SnapshotContent cannot yet carry
-//     them through ManifestsReady/VolumesReady:
-//   - "ListFailed"                — building capture targets failed (capture.go);
-//   - "CapturePlanDrift"          — plain N2a MCR plan drift, terminal (capture.go);
-//   - "VolumeCaptureTargetsFailed"/"VolumeCaptureFailed" — volume capture planning/exec (volume_capture.go);
-//   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (capture.go);
-//   - "SubtreeManifestFailed"     — PRE-PUBLISH BRIDGE: a descendant MCP is terminally Failed so the root
-//     exclude set / plan cannot be computed and the root MCR/MCP is not created yet. The descendant failure
-//     is also representable via content ChildrenReady once child refs are published (deferred conversion).
+//     them through ManifestsReady/DataReady:
+//   - "ListFailed"                — building capture targets failed (namespace_capture_run.go);
+//   - "DuplicateCoveredPVCUID"    — invalid plan: same PVC UID covered twice (namespace_capture_run.go);
 //   - NamespaceNotFound (no namespace, so no content can be produced) — documented exception;
 //   - the child-Snapshot terminal capture-failure bridge below (patchSnapshotChildSnapshotFailedBridge);
 //   - the mirrorSnapshotReadyFromBoundContent fallback to ContentBindingPending (pre-publish pending window).
@@ -71,7 +66,6 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 		if err := r.Client.Get(ctx, parentKey, nsSnap); err != nil {
 			return err
 		}
-		nsSnap.Status.ObservedGeneration = nsSnap.Generation
 		meta.SetStatusCondition(&nsSnap.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             metav1.ConditionFalse,
@@ -85,62 +79,6 @@ func (r *SnapshotReconciler) patchSnapshotChildSnapshotFailedBridge(
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
-}
-
-// mirrorSnapshotManifestsArchivedFromBoundContent mirrors the bound SnapshotContent's ManifestsArchived
-// subtree-latch condition verbatim onto the root Snapshot. The SnapshotContent carries the source of truth
-// (it aggregates the latch across the whole subtree); the Snapshot is a read mirror so consumers (and the
-// per-namespace capture RBAC hook / e2e) can observe the latch on the Snapshot itself.
-//
-// ManifestsArchived gates the content Ready formula (it must be True before the first content Ready=True),
-// but this Snapshot-side mirror does not itself write Ready: it is an additive, standalone latch condition
-// surfaced for visibility, so it does not touch the single-aggregator Ready contract (INV-COND2/INV-COND4).
-// It stays useful after Ready later flaps False (the latch records that archiving did happen).
-//
-// Latch semantics: once the Snapshot's ManifestsArchived is True it is never downgraded (the content latch is
-// itself lifelong; this guard also protects against a transient content read that momentarily lost the
-// condition, e.g. child-content degradation — see E3). If the content has no ManifestsArchived condition yet
-// this is a no-op (the capture has not archived for the first time).
-func (r *SnapshotReconciler) mirrorSnapshotManifestsArchivedFromBoundContent(
-	ctx context.Context,
-	parentKey types.NamespacedName,
-	contentName string,
-) error {
-	fresh, err := r.getSnapshotContentFresh(ctx, contentName)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	src := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-	if src == nil {
-		return nil
-	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
-			return err
-		}
-		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionManifestsArchived)
-		// Latch: never re-open a Snapshot ManifestsArchived=True (the content latch is lifelong).
-		if existing != nil && existing.Status == metav1.ConditionTrue && src.Status != metav1.ConditionTrue {
-			return nil
-		}
-		if existing != nil && existing.Status == src.Status && existing.Reason == src.Reason &&
-			existing.Message == src.Message && existing.ObservedGeneration == cur.Generation {
-			return nil
-		}
-		cur.Status.ObservedGeneration = cur.Generation
-		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionManifestsArchived,
-			Status:             src.Status,
-			Reason:             src.Reason,
-			Message:            src.Message,
-			ObservedGeneration: cur.Generation,
-		})
-		return r.Client.Status().Update(ctx, cur)
-	})
 }
 
 // mirrorSnapshotReadyFromBoundContent sets the parent Snapshot.Ready to a verbatim mirror of the bound
@@ -160,7 +98,14 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 	if transientErr != nil {
 		message = transientErr.Error()
 	}
+	// contentExcluded mirrors the bound content's durable excludedRefs aggregate onto the root Snapshot.
+	// Only applied when the content is observable (haveContent): a transient NotFound must not clobber a
+	// previously-mirrored set. The aggregate is monotonic on the content side, so a verbatim mirror is safe.
+	var contentExcluded []storagev1alpha1.ExcludedObjectRef
+	haveContent := false
 	if fresh, err := r.getSnapshotContentFresh(ctx, content.Name); err == nil {
+		haveContent = true
+		contentExcluded = fresh.Status.ExcludedRefs
 		if cond := meta.FindStatusCondition(fresh.Status.Conditions, snapshotpkg.ConditionReady); cond != nil {
 			status = cond.Status
 			reason = cond.Reason
@@ -175,12 +120,16 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 		if err := r.Client.Get(ctx, parentKey, cur); err != nil {
 			return err
 		}
+		excludedChanged := haveContent && !excludedObjectRefsEqualIgnoreOrder(cur.Status.ExcludedRefs, contentExcluded)
 		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
-		if existing != nil && existing.Status == status && existing.Reason == reason &&
-			existing.Message == message && existing.ObservedGeneration == cur.Generation {
+		conditionCurrent := existing != nil && existing.Status == status && existing.Reason == reason &&
+			existing.Message == message && existing.ObservedGeneration == cur.Generation
+		if conditionCurrent && !excludedChanged {
 			return nil
 		}
-		cur.Status.ObservedGeneration = cur.Generation
+		if excludedChanged {
+			cur.Status.ExcludedRefs = sortedExcludedObjectRefsSlice(contentExcluded)
+		}
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
 			Type:               snapshotpkg.ConditionReady,
 			Status:             status,
@@ -190,4 +139,14 @@ func (r *SnapshotReconciler) mirrorSnapshotReadyFromBoundContent(
 		})
 		return r.Client.Status().Update(ctx, cur)
 	})
+}
+
+// sortedExcludedObjectRefsSlice returns a stable, sorted copy of refs (nil-safe).
+func sortedExcludedObjectRefsSlice(refs []storagev1alpha1.ExcludedObjectRef) []storagev1alpha1.ExcludedObjectRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := append([]storagev1alpha1.ExcludedObjectRef(nil), refs...)
+	sortExcludedObjectRefs(out)
+	return out
 }

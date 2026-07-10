@@ -26,10 +26,22 @@
 #                           STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr<N>/mr<N>
 #                           (storage-e2e's generic <MODULE>_MODULE_PULL_OVERRIDE
 #                           convention; in-YAML ${VAR} is rejected).
-# The thin snapshot-capable StorageClass backends (sds-node-configurator +
-# sds-local-volume) are NOT listed here: they are enabled at runtime by the phase-3
-# setup (testkit.EnsureDefaultStorageClass) only when E2E_VOLUME_DATA is set, so
-# phases 1-2 do not pay for them.
+#   - sds-node-configurator: block-device/LVM manager on the nodes; the
+#                           sds-local-volume backend requires it. Enabled here so
+#                           its image is pinnable via SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE.
+#   - sds-local-volume    : the thin, snapshot-capable local StorageClass backend
+#                           (CSI driver local.csi.storage.deckhouse.io) the phase-3
+#                           data leg captures/restores through. Enabled here so its
+#                           image is pinnable via SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE
+#                           (same generic <MODULE>_MODULE_PULL_OVERRIDE convention).
+#                           Its module.yaml requires BOTH sds-node-configurator and
+#                           storage-foundation, so it is listed as depending on both
+#                           (storage-e2e enables it last, after they are Ready).
+# NOTE: enabling the two SDS backends at bring-up only deploys the modules (they
+# reach Ready with no StorageClass yet). The actual storage provisioning (node
+# labels, LVMVolumeGroups, LocalStorageClass, the wired VolumeSnapshotClass) still
+# happens at runtime in the phase-3 setup (testkit.EnsureDefaultStorageClass), only
+# when E2E_VOLUME_DATA is set — so phases 1-2 still do not provision volumes.
 clusterDefinition:
   masters:
     - hostname: "master-1"
@@ -66,7 +78,13 @@ clusterDefinition:
         version: 1
         enabled: true
         modulePullOverride: "main"
-        dependencies: []
+        # storage-foundation requires state-snapshotter (module.yaml
+        # requirements.modules.state-snapshotter): Deckhouse holds it off until
+        # state-snapshotter is enabled+Ready. This ordering MUST match module.yaml,
+        # otherwise SF is "turned off: dependency 'state-snapshotter' is disabled"
+        # and the e2e module-enable step deadlocks.
+        dependencies:
+          - "state-snapshotter"
       - name: "state-snapshotter"
         version: 1
         enabled: true
@@ -77,5 +95,30 @@ clusterDefinition:
         modulePullOverride: "main"
         settings:
           enableDemoDomain: true
+        # No module dependency: state-snapshotter comes up first and tolerates
+        # storage-foundation's CRDs (VolumeCaptureRequest, extended VolumeSnapshot)
+        # being absent at startup — the VCR watch is added dynamically once the CRD
+        # becomes RESTMappable. storage-foundation then depends on this module.
+        dependencies: []
+      - name: "sds-node-configurator"
+        version: 1
+        enabled: true
+        # Static default tag; CI overrides WITHOUT editing this file by exporting
+        # SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE=pr<N>/mr<N>.
+        modulePullOverride: "main"
+        # No module requirements (module.yaml: only a deckhouse version floor).
+        dependencies: []
+      - name: "sds-local-volume"
+        version: 1
+        enabled: true
+        # Static default tag; CI overrides WITHOUT editing this file by exporting
+        # SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE=pr<N>/mr<N>.
+        modulePullOverride: "main"
+        # sds-local-volume/module.yaml requires BOTH sds-node-configurator and
+        # storage-foundation; Deckhouse holds it off until both are enabled+Ready.
+        # This ordering MUST list both, otherwise SLV is "turned off: dependency
+        # '...' is disabled" and the e2e module-enable step deadlocks (same failure
+        # mode as the earlier storage-foundation/state-snapshotter inversion).
         dependencies:
+          - "sds-node-configurator"
           - "storage-foundation"

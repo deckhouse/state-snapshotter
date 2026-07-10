@@ -36,16 +36,38 @@ type SnapshotChildRef struct {
 //
 // +k8s:deepcopy-gen=true
 type SnapshotContentChildRef struct {
+	// Name is the cluster-scoped child SnapshotContent name. MaxLength=253 is the Kubernetes object-name
+	// ceiling (a DNS subdomain), so it constrains nothing real; it is REQUIRED here to bound the CEL
+	// estimated cost of the childrenSnapshotContentRefs frozen-set immutability rule (self == oldSelf), which
+	// otherwise assumes an unbounded per-element string and blows the apiserver cost budget (CRD rejected).
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+}
+
+// ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+// status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+// the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+// state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+// snapshot. Namespace is implicit (the snapshot's namespace).
+//
+// Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+// excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+// created for it, so it cannot be descended into to recover a per-node view later.
+//
+// +k8s:deepcopy-gen=true
+type ExcludedObjectRef struct {
+	APIVersion string `json:"apiVersion"`
+	Kind       string `json:"kind"`
+	Name       string `json:"name"`
 }
 
 // SnapshotSourceRef is the single source-of-truth identifying the namespace-local source object that a
 // snapshot captures. It lives on the snapshot spec (spec.sourceRef) and is the generic contract the
 // core planner reads to deduplicate coverage across the run tree. Namespace is implicit: the source
-// object MUST live in the same namespace as the snapshot.
+// object MUST live in the same namespace as the snapshot. It carries no uid; the captured source
+// object ref (including uid) is published separately on the snapshot status (status.sourceRef).
 //
-// This is the canonical definition shared across API groups (the demo API group aliases it). It
-// replaces the former state-snapshotter.deckhouse.io/source-ref annotation.
+// This is the canonical definition shared across API groups (the demo API group aliases it).
 //
 // +k8s:deepcopy-gen=true
 type SnapshotSourceRef struct {

@@ -14,5 +14,5 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +groupName=storage.deckhouse.io
+// +groupName=state-snapshotter.deckhouse.io
 package v1alpha1

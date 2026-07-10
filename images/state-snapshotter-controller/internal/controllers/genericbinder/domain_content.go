@@ -18,254 +18,31 @@ package genericbinder
 
 import (
 	"context"
-	"fmt"
+	"reflect"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
-	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// ensureDomainContentLinks projects a domain-capture snapshot's planning results (children + data leg)
-// onto its bound SnapshotContent and runs the request lifecycle the domain controller no longer owns:
-//   - children: SnapshotContent.status.childrenSnapshotContentRefs from demo.status.childrenSnapshotRefs;
-//   - data leg: read demo.status.volumeCaptureRequestName -> VCR -> enrich + VSC ownership handoff ->
-//     SnapshotContent.status.dataRefs;
-//   - cleanup + markers: once a leg's handoff to SnapshotContent is durable, delete the domain MCR/VCR
-//     and stamp the domain-only suppression marker (status.manifestCaptured / status.dataCaptured) so the
-//     domain controller stops re-creating the request without ever reading SnapshotContent.
-//
-// mcrName is the snapshot's current status.manifestCaptureRequestName (already used for the MCP publish).
-func (r *GenericSnapshotBinderController) ensureDomainContentLinks(
-	ctx context.Context,
-	obj *unstructured.Unstructured,
-	contentName string,
-	mcrName string,
-) (requeue bool, terminalReason string, terminalMessage string, err error) {
-	ns := obj.GetNamespace()
+// The domain-capture request lifecycle that used to live here — the capture-leg eager-init, the
+// commonController.manifestCaptured/dataCaptured latches, the subtreeManifestsPersisted snapshot-mirror,
+// and the MCR/VCR reap — moved to the SnapshotContentController aggregator
+// (snapshotcontent/capture_legs.go): main-owned commonController, content-single-writer design §2/§3,
+// decision #10. The binder is a pure creator; it keeps only the leaf status.data mirror below (top-level
+// export descriptor for d8, not part of captureState).
 
-	// Manifest cleanup + marker: once the MCP is published and owned by the SnapshotContent, the domain
-	// MCR is stale. Stamp manifestCaptured (so the domain controller stops re-creating it) and delete it.
-	manifestCaptured := nestedBool(obj, "manifestCaptured")
-	if !manifestCaptured && mcrName != "" {
-		safe, sErr := manifestcapture.ManifestCaptureRequestSafeToDelete(ctx, r.APIReader, types.NamespacedName{Namespace: ns, Name: mcrName}, contentName)
-		if sErr != nil {
-			return false, "", "", sErr
-		}
-		if safe {
-			if mErr := r.markCaptureDone(ctx, obj, "manifestCaptured", "manifestCaptureRequestName"); mErr != nil {
-				return false, "", "", mErr
-			}
-			if dErr := r.deleteManifestCaptureRequest(ctx, types.NamespacedName{Namespace: ns, Name: mcrName}); dErr != nil {
-				return false, "", "", dErr
-			}
-		}
-	}
-
-	// Children projection (intermediate nodes, e.g. demo VM). A leaf with no children publishes nothing:
-	// SnapshotContentController treats absent childrenSnapshotContentRefs as "no children" (leaf-complete).
-	childRefs := parseChildrenSnapshotRefs(obj)
-	if len(childRefs) > 0 {
-		published, pErr := snapshotcontent.PublishSnapshotContentChildrenFromSnapshotRefs(ctx, r.Client, r.APIReader, ns, contentName, childRefs)
-		if pErr != nil {
-			return false, "", "", pErr
-		}
-		if !published {
-			requeue = true
-		}
-	}
-
-	// Data leg (leaf nodes with a PVC, e.g. demo disk). Absent volumeCaptureRequestName means manifest-only.
-	vcrName := nestedString(obj, "volumeCaptureRequestName")
-	dataCaptured := nestedBool(obj, "dataCaptured")
-	if !dataCaptured && vcrName != "" {
-		done, treason, tmsg, dErr := r.projectDataLegFromVCR(ctx, obj, contentName, vcrName)
-		if dErr != nil {
-			return false, "", "", dErr
-		}
-		if treason != "" {
-			return requeue, treason, tmsg, nil
-		}
-		if !done {
-			requeue = true
-		} else {
-			vcrKey := types.NamespacedName{Namespace: ns, Name: vcrName}
-			safe, sErr := vcctrl.VolumeCaptureRequestSafeToDeleteWithHandoff(ctx, r.APIReader, vcrKey, contentName)
-			if sErr != nil {
-				return false, "", "", sErr
-			}
-			if safe {
-				if mErr := r.markCaptureDone(ctx, obj, "dataCaptured", "volumeCaptureRequestName"); mErr != nil {
-					return false, "", "", mErr
-				}
-				if delErr := r.deleteVolumeCaptureRequest(ctx, vcrKey); delErr != nil {
-					return false, "", "", delErr
-				}
-			} else {
-				requeue = true
-			}
-		}
-	}
-
-	return requeue, "", "", nil
-}
-
-// projectDataLegFromVCR reads the domain-created VolumeCaptureRequest, validates its result against its
-// own spec.targets, enriches volume metadata, transfers VolumeSnapshotContent ownership to the
-// SnapshotContent, and publishes dataRefs. Returns done=true once dataRefs cover the VCR targets.
-func (r *GenericSnapshotBinderController) projectDataLegFromVCR(
-	ctx context.Context,
-	obj *unstructured.Unstructured,
-	contentName string,
-	vcrName string,
-) (done bool, terminalReason string, terminalMessage string, err error) {
-	vcrKey := client.ObjectKey{Namespace: obj.GetNamespace(), Name: vcrName}
-	vcr := &unstructured.Unstructured{}
-	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if getErr := r.Get(ctx, vcrKey, vcr); getErr != nil {
-		if errors.IsNotFound(getErr) {
-			// Domain controller has not (re)created the VCR yet; wait for it.
-			return false, "", "", nil
-		}
-		return false, "", "", getErr
-	}
-
-	expectedTargets, parseErr := vcctrl.ParseVolumeCaptureTargets(vcr)
-	if parseErr != nil {
-		return false, "", "", parseErr
-	}
-
-	content := &storagev1alpha1.SnapshotContent{}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
-	}
-	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataRefList(), expectedTargets) {
-		return true, "", "", nil
-	}
-
-	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
-		detail := msg
-		if reason != "" {
-			detail = fmt.Sprintf("%s: %s", reason, msg)
-		}
-		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("data-leg volume capture failed: %s", detail), nil
-	}
-	if !vcctrl.VolumeCaptureRequestReady(vcr) {
-		return false, "", "", nil
-	}
-
-	vcrRefs, refErr := vcctrl.ParseVolumeCaptureDataRefs(vcr)
-	if refErr != nil {
-		return false, "", "", refErr
-	}
-	if validateErr := vcctrl.ValidateDataRefsForPublish(expectedTargets, vcrRefs); validateErr != nil {
-		// Ready VCR whose dataRefs are not yet consistent: retry without a terminal condition.
-		return false, "", "", nil
-	}
-
-	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
-	// Variant A: a domain volume leaf owns exactly one PVC, so its content holds ≤1 dataRef. A ready VCR
-	// that returned >1 data artifact for this single logical content cannot be represented (status.dataRef
-	// is singular) and is a domain decomposition fault — fail terminally instead of silently publishing
-	// dataRefs[0] (which would drop the others) or looping forever. Real multi-volume scopes must fan out
-	// into child volume nodes upstream, never a list on one content.
-	if len(bindings) > 1 {
-		return false, snapshot.ReasonVolumeCaptureFailed,
-			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
-	}
-	bindings, enrichErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
-	if enrichErr != nil {
-		return false, "", "", enrichErr
-	}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
-	}
-	if handoffErr := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
-		// Retryable handoff; coverage still holds via the pending VCR until dataRefs are published.
-		return false, "", "", nil
-	}
-	if pubErr := snapshotcontent.PublishSnapshotContentDataRefs(ctx, r.Client, contentName, bindings); pubErr != nil {
-		return false, "", "", pubErr
-	}
-	return true, "", "", nil
-}
-
-// markCaptureDone sets a domain-only boolean capture marker to true and clears the matching request-name
-// field in the same status patch, under an optimistic retry. The marker MUST be set before the request is
-// deleted so the domain controller (which gates re-creation on the marker) never re-creates it.
-func (r *GenericSnapshotBinderController) markCaptureDone(ctx context.Context, obj *unstructured.Unstructured, markerField, clearNameField string) error {
-	gvk := obj.GetObjectKind().GroupVersionKind()
-	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		fresh := &unstructured.Unstructured{}
-		fresh.SetGroupVersionKind(gvk)
-		if err := r.Get(ctx, key, fresh); err != nil {
-			return err
-		}
-		marker := nestedBool(fresh, markerField)
-		name := nestedString(fresh, clearNameField)
-		if marker && name == "" {
-			return nil
-		}
-		base := fresh.DeepCopy()
-		if err := unstructured.SetNestedField(fresh.Object, true, "status", markerField); err != nil {
-			return err
-		}
-		if err := unstructured.SetNestedField(fresh.Object, "", "status", clearNameField); err != nil {
-			return err
-		}
-		// D4a: demo.status is co-owned (domain writes conditions/capture fields), so use an optimistic-lock
-		// merge patch — a concurrent demo status write yields 409 and RetryOnConflict re-reads, instead of
-		// this patch silently racing on a stale resourceVersion.
-		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
-}
-
-func (r *GenericSnapshotBinderController) deleteManifestCaptureRequest(ctx context.Context, key types.NamespacedName) error {
-	mcr := &ssv1alpha1.ManifestCaptureRequest{}
-	if err := r.Get(ctx, key, mcr); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if err := r.Delete(ctx, mcr); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	return nil
-}
-
-func (r *GenericSnapshotBinderController) deleteVolumeCaptureRequest(ctx context.Context, key types.NamespacedName) error {
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := r.Get(ctx, key, obj); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return err
-	}
-	if err := r.Delete(ctx, obj); err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	return nil
-}
-
-// mirrorLeafVolumeMetadataFromContent copies the data leaf's volume metadata
-// (storageClassName/size/volumeMode) from the bound SnapshotContent.status.dataRef onto the leaf
-// snapshot status, so d8 can read it on export (the leaf status mirrors the content dataRef). On import
-// the content dataRef carries no storageClassName (it is not derived from a live PVC), so the caller
-// passes scOverride from DataImport.spec.storageClassName; on capture scOverride is empty and the live
-// dataRef.storageClassName is used. No-op until the content has a published dataRef.
-func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
+// mirrorLeafDataFromContent mirrors the bound SnapshotContent's self-contained data binding
+// (SnapshotContent.status.data: source + artifact + volume metadata) verbatim onto the namespaced data
+// leaf's top-level status.data, so d8 can read the captured-volume descriptor namespaced without touching
+// the cluster-scoped SnapshotContent. On import the content data carries no storageClassName (it is not
+// derived from a live PVC), so the caller passes scOverride from DataImport.spec.storageClassName; on
+// capture scOverride is empty and the live content storageClassName is used. No-op until the content has
+// a published data binding.
+func (r *GenericSnapshotBinderController) mirrorLeafDataFromContent(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	contentName string,
@@ -275,39 +52,25 @@ func (r *GenericSnapshotBinderController) mirrorLeafVolumeMetadataFromContent(
 	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		return err
 	}
-	if content.Status.DataRef == nil {
+	if content.Status.Data == nil {
 		return nil
 	}
-	sc := content.Status.DataRef.StorageClassName
+	data := *content.Status.Data
 	if scOverride != "" {
-		sc = scOverride
+		data.StorageClassName = scOverride
 	}
-	return r.mirrorVolumeMetadataToLeaf(ctx, obj, sc, content.Status.DataRef.Size, content.Status.DataRef.VolumeMode)
+	return r.mirrorDataToLeaf(ctx, obj, &data)
 }
 
-// mirrorVolumeMetadataToLeaf writes the provided (non-empty) volume metadata fields onto the leaf
-// snapshot status under an optimistic-lock merge patch (D4a: demo.status is co-owned). Idempotent — it
-// re-reads and short-circuits when all provided fields already match.
-func (r *GenericSnapshotBinderController) mirrorVolumeMetadataToLeaf(
+// mirrorDataToLeaf writes the self-contained data binding onto the leaf snapshot's top-level status.data
+// under an optimistic-lock merge patch (D4a: demo.status is co-owned). Idempotent — it re-reads and
+// short-circuits when status.data already equals the desired block.
+func (r *GenericSnapshotBinderController) mirrorDataToLeaf(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
-	storageClassName string,
-	size string,
-	volumeMode string,
+	data *storagev1alpha1.SnapshotDataBinding,
 ) error {
-	desired := map[string]string{}
-	if storageClassName != "" {
-		desired["storageClassName"] = storageClassName
-	}
-	if size != "" {
-		desired["size"] = size
-	}
-	if volumeMode != "" {
-		desired["volumeMode"] = volumeMode
-	}
-	if len(desired) == 0 {
-		return nil
-	}
+	desired := snapshotcontent.SnapshotDataBindingToUnstructuredMap(data)
 	gvk := obj.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: obj.GetName()}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -316,62 +79,60 @@ func (r *GenericSnapshotBinderController) mirrorVolumeMetadataToLeaf(
 		if err := r.Get(ctx, key, fresh); err != nil {
 			return err
 		}
-		allMatch := true
-		for field, want := range desired {
-			if nestedString(fresh, field) != want {
-				allMatch = false
-				break
-			}
-		}
-		if allMatch {
+		if cur, found, _ := unstructured.NestedMap(fresh.Object, "status", "data"); found && reflect.DeepEqual(cur, desired) {
 			return nil
 		}
 		base := fresh.DeepCopy()
-		for field, want := range desired {
-			if err := unstructured.SetNestedField(fresh.Object, want, "status", field); err != nil {
-				return err
-			}
+		if err := unstructured.SetNestedMap(fresh.Object, desired, "status", "data"); err != nil {
+			return err
 		}
 		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }
 
-func nestedString(obj *unstructured.Unstructured, field string) string {
-	v, _, _ := unstructured.NestedString(obj.Object, "status", field)
+// domainCaptureStateString reads a string field from status.captureState.domainSpecificController
+// (the domain-written half of captureState: MCR/VCR names, phase reason/message).
+func domainCaptureStateString(obj *unstructured.Unstructured, field string) string {
+	v, _, _ := unstructured.NestedString(obj.Object, "status", "captureState", "domainSpecificController", field)
 	return v
 }
 
-func nestedBool(obj *unstructured.Unstructured, field string) bool {
-	v, _, _ := unstructured.NestedBool(obj.Object, "status", field)
-	return v
+// domainCapturePhase reads status.captureState.domainSpecificController.phase off a domain snapshot.
+func domainCapturePhase(obj *unstructured.Unstructured) string {
+	return domainCaptureStateString(obj, "phase")
 }
 
-// parseChildrenSnapshotRefs reads status.childrenSnapshotRefs into typed child refs (APIVersion/Kind/Name).
-func parseChildrenSnapshotRefs(obj *unstructured.Unstructured) []storagev1alpha1.SnapshotChildRef {
-	raw, _, err := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotRefs")
-	if err != nil || len(raw) == 0 {
-		return nil
+// domainCaptureAtLeastPlanned reports whether the domain reached capture barrier 1 (phase Planned or
+// Finished): objects created and refs published, so the binder may take over the SnapshotContent.
+func domainCaptureAtLeastPlanned(obj *unstructured.Unstructured) bool {
+	switch storagev1alpha1.SnapshotCapturePhase(domainCapturePhase(obj)) {
+	case storagev1alpha1.SnapshotCapturePhasePlanned, storagev1alpha1.SnapshotCapturePhaseFinished:
+		return true
+	default:
+		return false
 	}
-	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(raw))
-	for _, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		ref := storagev1alpha1.SnapshotChildRef{}
-		if v, ok := m["apiVersion"].(string); ok {
-			ref.APIVersion = v
-		}
-		if v, ok := m["kind"].(string); ok {
-			ref.Kind = v
-		}
-		if v, ok := m["name"].(string); ok {
-			ref.Name = v
-		}
-		if ref.Name == "" {
-			continue
-		}
-		out = append(out, ref)
-	}
-	return out
 }
+
+// domainHasClaimed reports whether a domain controller has CLAIMED this snapshot by writing ANY part of
+// status.captureState.domainSpecificController (its MCR/VCR names, children/excluded refs, or phase). The
+// binder gates eager content-shell creation for domain-capture kinds on this claim so that a domain which
+// plans only a SUBSET of a registered kind's instances (e.g. the storage-foundation VolumeSnapshot domain,
+// which skips legacy/unlabeled, vetoed, import-mode, and pre-provisioned VolumeSnapshots — design §11.3)
+// leaves the rest unclaimed; the binder then materializes NEITHER an ObjectKeeper NOR a SnapshotContent for
+// them, so a pre-existing/legacy CSI VolumeSnapshot stays a plain CSI object.
+//
+// Deadlock-safety (design §9): the claim is written on the domain's FIRST reconcile, independent of the
+// content existing (for the namespace root it is the step-3 EnsureChildren write, strictly BEFORE the
+// step-4 orphan-wave Ready gate; for a leaf domain it is the first EnsureManifestCapture/MarkPlanned). It
+// is therefore strictly EARLIER than the phase>=Planned projection barrier, so gating on it does not
+// reintroduce the eager-shell creation cycle — parent/child content still appear before any Ready/bind
+// edge is read.
+func domainHasClaimed(obj *unstructured.Unstructured) bool {
+	m, found, err := unstructured.NestedMap(obj.Object, "status", "captureState", "domainSpecificController")
+	return err == nil && found && m != nil
+}
+
+// Barrier-2 (phase=Finished) finalization and the phase=Failed bubble are applied by the single post-bind
+// Ready writer in the SnapshotContentController (ready_mirror.go: ownerDomainCapturePhase /
+// ownerDomainCaptureFailed), not here — wave7 final-wave-1 removed the binder's steady-state Ready mirror.
+// domainCapturePhase / domainCaptureAtLeastPlanned above remain for the Step-1 barrier (isDomainPlanningComplete).

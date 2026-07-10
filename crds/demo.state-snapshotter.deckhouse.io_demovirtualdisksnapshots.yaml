@@ -2,10 +2,10 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  labels:
-    module: state-snapshotter
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
   name: demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io
 spec:
   group: demo.state-snapshotter.deckhouse.io
@@ -43,43 +43,24 @@ spec:
             type: object
           spec:
             description: |-
-              DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. Exactly one of
-              SourceRef (capture) or Source (import) is set.
+              DemoVirtualDiskSnapshotSpec defines the desired state of DemoVirtualDiskSnapshot. spec.mode selects
+              the content source: Capture (sourceRef) or Import (no source).
             properties:
-              source:
+              mode:
+                default: Capture
                 description: |-
-                  Source, when set, switches this disk snapshot into IMPORT mode. Only the import marker is allowed on
-                  a demo snapshot leaf (no static pre-provisioning), so spec.source.import: {} is the sole valid form.
-                  In import mode the domain controller does NO capture planning (no source-disk lookup, no MCR/VCR):
-                  the common controller materializes the backing SnapshotContent from the uploaded manifests and the
-                  data leg from the matching DataImport (reverse-lookup by DataImport.spec.targetRef). Immutable once set.
-                properties:
-                  import:
-                    description: |-
-                      Import, when present, marks this Snapshot as an import target. It is an empty marker object —
-                      its mere presence selects import mode (content is materialized from an uploaded payload, not
-                      captured from the live namespace). Kept as a struct (not a bool) to mirror VolumeSnapshot-style
-                      source members and to allow future import options without another union rewrite.
-                    type: object
-                  snapshotContentName:
-                    description: |-
-                      SnapshotContentName binds this Snapshot to an existing cluster-scoped SnapshotContent
-                      (static pre-provisioning, analogous to volumeSnapshotContentName).
-                    minLength: 1
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: 'only spec.source.import: {} is supported on a demo snapshot
-                    leaf'
-                  rule: has(self.import) && !has(self.snapshotContentName)
-                - message: spec.source is immutable
-                  rule: self == oldSelf
+                  Mode selects how this disk snapshot obtains its content (Capture|Import), immutable.
+                  Capture: capture the live source disk (spec.sourceRef). Import: materialize from an uploaded payload
+                  plus the matching DataImport (no live capture).
+                enum:
+                - Capture
+                - Import
+                type: string
               sourceRef:
                 description: |-
-                  SourceRef identifies the DemoVirtualDisk captured by this snapshot in CAPTURE mode. It is the
-                  single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
-                  its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
-                  (spec.source.import) has no live source disk and omits it.
+                  SourceRef identifies the DemoVirtualDisk captured by this snapshot in Capture mode. It is the
+                  single source-of-truth for what the snapshot captures and is immutable once set. Required in Capture
+                  mode and forbidden otherwise.
                 properties:
                   apiVersion:
                     minLength: 1
@@ -95,14 +76,12 @@ spec:
                 - kind
                 - name
                 type: object
-                x-kubernetes-validations:
-                - message: spec.sourceRef is immutable
-                  rule: self == oldSelf
             type: object
             x-kubernetes-validations:
-            - message: exactly one of spec.sourceRef (capture) or spec.source (import)
-                must be set
-              rule: has(self.sourceRef) != has(self.source)
+            - message: spec is immutable
+              rule: self == oldSelf
+            - message: spec.sourceRef is required in Capture mode and forbidden otherwise
+              rule: 'self.mode == ''Capture'' ? has(self.sourceRef) : !has(self.sourceRef)'
           status:
             description: DemoVirtualDiskSnapshotStatus defines the observed state
               of DemoVirtualDiskSnapshot.
@@ -111,9 +90,150 @@ spec:
                 description: BoundSnapshotContentName is the cluster-scoped SnapshotContent
                   name, once created.
                 type: string
+              captureState:
+                description: |-
+                  CaptureState collects internal capture signals: commonController (core-written leg latches
+                  manifestCaptured/dataCaptured) and domainSpecificController (domain-written MCR/VCR refs + phase).
+                properties:
+                  commonController:
+                    description: 'CommonController holds the core-written capture-leg
+                      success latches. Single writer: core.'
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
+                          nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
+                          child's dataCaptured to time freeze/unfreeze.
+                        type: boolean
+                      manifestCaptured:
+                        description: |-
+                          ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
+                          false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+                        type: boolean
+                      subtreeManifestsPersisted:
+                        description: |-
+                          SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
+                          (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
+                          leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
+                          RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
+                          an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
+                          (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
+                          own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
+                          fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
+                          carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+                        type: boolean
+                      subtreePlanned:
+                        description: |-
+                          SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
+                          barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
+                          true — i.e. the whole subtree has finished planning (objects + refs published, not necessarily
+                          captured/Ready). It is snapshot-native and main-written (the aggregator computes it by resolving the
+                          owner's direct children from status.childrenSnapshotRefs and reading each child's latch, then writes
+                          it SIDEWAYS onto this snapshot; content has no phase, so this cannot live on the SnapshotContent).
+                          The root's orphan/residual-PVC wave gates on its direct children's SubtreePlanned so an orphan PVC is
+                          evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
+                          It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
+                          planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: 'DomainSpecificController holds the domain-written
+                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    properties:
+                      excludedRefs:
+                        description: |-
+                          ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
+                          (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+                          folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
+                          aggregate or the top-level mirror (both are core-owned).
+
+                          Written WITHOUT omitempty: an empty list ([]) means "domain planned, nothing excluded" and MUST be
+                          distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
+                          (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
+                          (no live capture happens).
+                        items:
+                          description: |-
+                            ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                            status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                            the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                            state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                            snapshot. Namespace is implicit (the snapshot's namespace).
+
+                            Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                            excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                            created for it, so it cannot be descended into to recover a per-node view later.
+                          properties:
+                            apiVersion:
+                              type: string
+                            kind:
+                              type: string
+                            name:
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      manifestCaptureRequestName:
+                        description: ManifestCaptureRequestName is the temporary MCR
+                          owned by the domain node while own-scope capture runs.
+                        type: string
+                      message:
+                        description: Message is a human-readable detail for Phase=Failed.
+                        type: string
+                      phase:
+                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a short, machine-readable reason for
+                          Phase=Failed (free-form domain string).
+                        type: string
+                      volumeCaptureRequestName:
+                        description: VolumeCaptureRequestName is the temporary VCR
+                          owned by a data-leaf domain node while the data leg runs.
+                        type: string
+                    type: object
+                type: object
+              childrenSnapshotRefs:
+                description: ChildrenSnapshotRefs is empty on a data-leaf disk snapshot
+                  (kept for uniformity across snapshot kinds).
+                items:
+                  description: |-
+                    SnapshotChildRef identifies one child snapshot object in the run tree (element of
+                    status.childrenSnapshotRefs). apiVersion and kind are required (Kubernetes-style reference);
+                    generic code resolves the object with a single client Get — no registry scan and no ambiguity.
+
+                    Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
+                    in the same namespace as that parent. Namespace is implicit and always taken from parent
+                    Snapshot namespace. Cross-namespace refs are not part of this model.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - apiVersion
+                - kind
+                - name
+                x-kubernetes-list-type: map
               conditions:
-                description: Conditions report readiness (e.g. Ready=True for generic
-                  parent children-readiness aggregation).
+                description: Conditions report readiness. Ready is the single user-facing
+                  condition, always derived by the core.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -172,45 +292,157 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              dataCaptured:
+              data:
                 description: |-
-                  DataCaptured is set by the common controller once this disk snapshot's data leg has been durably
-                  handed off to SnapshotContent (dataRefs published and the VolumeSnapshotContent owned by the content).
-                  Domain-only suppression signal: the domain controller reads it to stop re-creating the VCR after the
-                  common controller deletes it. Always considered captured for a manifest-only disk (no data leg).
-                type: boolean
-              manifestCaptureRequestName:
-                description: ManifestCaptureRequestName is the temporary MCR owned
-                  by this snapshot while own-scope capture runs.
-                type: string
-              manifestCaptured:
+                  Data is the self-contained, top-level captured-volume descriptor for this data leaf: the
+                  {source, artifact, volumeMode, fsType, accessModes, storageClassName, size} block the core mirrors
+                  verbatim from the bound SnapshotContent.status.data (mirrorLeafDataFromContent). It makes the
+                  namespaced snapshot self-sufficient for d8 export/restore without reading the cluster-scoped
+                  SnapshotContent. It replaces the former flat status.storageClassName/size/volumeMode mirrors.
+                  Populated by the common controller once the bound content has a published data binding.
+                properties:
+                  accessModes:
+                    description: AccessModes records the source PVC access modes (e.g.
+                      ReadWriteOnce, ReadWriteMany).
+                    items:
+                      type: string
+                    type: array
+                  artifact:
+                    description: Artifact references the cluster-scoped durable data
+                      artifact (for example VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        minLength: 1
+                        type: string
+                      kind:
+                        minLength: 1
+                        type: string
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+                          artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+                          referenced before its UID is known, so producers fill it best-effort.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: FsType records the source filesystem type (Filesystem
+                      volumes only).
+                    type: string
+                  size:
+                    description: |-
+                      Size records the real allocated size of the captured volume, taken from the data artifact
+                      (VolumeSnapshotContent.status.restoreSize). The snapshot outlives the source PVC, so the size MUST
+                      be persisted here to recreate the volume on restore/export (the export VolumeRestoreRequest sizes
+                      the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
+                      dependency-free; controllers parse it via resource.ParseQuantity.
+                    type: string
+                  source:
+                    description: |-
+                      Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+                      this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        description: |-
+                          UID is a type that holds unique ID values, including UUIDs.  Because we
+                          don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                          intent and helps make sure that UIDs and names do not get conflated.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: |-
+                      StorageClassName records the source StorageClass of the captured volume. Used by the
+                      aggregated /index and by import StorageClass mapping.
+                    type: string
+                  volumeMode:
+                    description: |-
+                      VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
+                      mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
+                      and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
+                      controllers convert it to corev1.PersistentVolumeMode.
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifact
+                - source
+                type: object
+              excludedRefs:
                 description: |-
-                  ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
-                  durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
-                  owned by the content). It is a domain-only suppression signal: the domain controller reads it to
-                  stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
-                type: boolean
-              size:
+                  ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate,
+                  written ONLY by the core (as it mirrors Ready). A data-leaf disk has no children, so this is
+                  normally empty; it is kept for uniformity across snapshot kinds.
+                items:
+                  description: |-
+                    ExcludedObjectRef identifies one source object excluded from a snapshot (element of
+                    status.excludedRefs on Snapshot/domain CRs and SnapshotContent). It is the shadow of SnapshotChildRef:
+                    the same {apiVersion,kind,name} shape, but pointing at the SOURCE object that was vetoed out (via the
+                    state-snapshotter.deckhouse.io/exclude label, or an explicit top-level drop) rather than at a child
+                    snapshot. Namespace is implicit (the snapshot's namespace).
+
+                    Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
+                    excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
+                    created for it, so it cannot be descended into to recover a per-node view later.
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              sourceRef:
                 description: |-
-                  Size mirrors the real allocated volume size (e.g. "10Gi"): the bound dataRef.size on capture, or the
-                  VolumeSnapshotContent restoreSize on import. Populated by the common controller.
-                type: string
-              storageClassName:
-                description: |-
-                  StorageClassName mirrors this data leaf's volume StorageClass for d8 export: the bound
-                  SnapshotContent.status.dataRef.storageClassName on capture, or DataImport.spec.storageClassName on
-                  import (the import dataRef carries no storageClassName). Populated by the common controller.
-                type: string
-              volumeCaptureRequestName:
-                description: |-
-                  VolumeCaptureRequestName is the temporary VCR owned by this disk snapshot while data-leg capture runs.
-                  The common controller reads this VCR's result to enrich and publish SnapshotContent.status.dataRefs;
-                  the domain controller never touches SnapshotContent itself.
-                type: string
-              volumeMode:
-                description: VolumeMode mirrors the source volume mode (Filesystem
-                  or Block). Populated by the common controller.
-                type: string
+                  SourceRef is the full reference to the captured live source object (top-level, written by the
+                  domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the source object (namespaced sources
+                      only).
+                    type: string
+                  uid:
+                    description: UID of the captured live source object (best-effort;
+                      used by d8-cli for import-mode recreation).
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
             type: object
         type: object
     served: true

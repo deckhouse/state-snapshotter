@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots that
-// carry the unified import marker spec.source.import: {} (the C2 extended-VS source fork). The owning
-// DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this VolumeSnapshot), not named on
-// the leaf. The forked snapshot-controller skips these VolumeSnapshots, so this common controller is the
-// sole binder for them.
+// carry the unified enum spec.mode: Import (parity with every other snapshot kind; the fork CRD hosts the
+// field). The owning DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this
+// VolumeSnapshot), not named on the leaf. The forked snapshot-controller skips import-mode
+// VolumeSnapshots, so this common controller is the sole binder for them.
 //
 // It is the generic-PVC twin of the domain data-leaf import branch in genericbinder: it materializes the
 // backing cluster-scoped SnapshotContent (deletionPolicy=Delete) from the uploaded ManifestCheckpoint and
@@ -33,6 +33,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -49,7 +50,7 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -108,8 +109,8 @@ func AddToManager(mgr ctrl.Manager) error {
 }
 
 // importVolumeSnapshotPredicate restricts the controller to extended VolumeSnapshots in import mode
-// (the unified marker spec.source.import is present). Capture VolumeSnapshots (persistentVolumeClaimName)
-// and plain pre-provisioned ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
+// (spec.mode: Import). Capture VolumeSnapshots (persistentVolumeClaimName) and plain pre-provisioned
+// ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
 func importVolumeSnapshotPredicate() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		u, ok := o.(*unstructured.Unstructured)
@@ -121,11 +122,12 @@ func importVolumeSnapshotPredicate() predicate.Predicate {
 }
 
 // isImportModeVolumeSnapshot reports whether an extended VolumeSnapshot is in IMPORT mode, signalled by
-// the unified empty marker spec.source.import: {} (parity with every other state-snapshotter snapshot
-// kind). The owning DataImport is not named here; it is found by reverse-lookup (DataImport.spec.targetRef).
+// the unified enum spec.mode: Import (parity with every other state-snapshotter snapshot kind; the fork
+// CRD hosts the field). The owning DataImport is not named here; it is found by reverse-lookup
+// (DataImport.spec.targetRef).
 func isImportModeVolumeSnapshot(u *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedFieldNoCopy(u.Object, "spec", "source", "import")
-	return found
+	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
+	return mode == string(storagev1alpha1.SnapshotModeImport)
 }
 
 func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -199,8 +201,11 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg: the reconstructed ManifestCheckpoint (the PVC manifest), keyed to the VS UID by the
-	// per-CR upload endpoint. Hold until it is uploaded.
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// (projecting the reconstructed checkpoint name keyed to the VS UID once the per-CR upload endpoint has
+	// created it). This controller no longer publishes it; it still waits for the checkpoint to exist and to
+	// go Ready below, because it recovers the orphan PVC manifest from the checkpoint chunks for the dataRef.
 	mcpName := usecase.ReconstructedManifestCheckpointName(vs.GetUID(), "")
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	if mErr := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); mErr != nil {
@@ -208,9 +213,6 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{RequeueAfter: importPollInterval}, nil
 		}
 		return ctrl.Result{}, mErr
-	}
-	if pErr := snapshotcontent.PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentName, mcpName); pErr != nil {
-		return ctrl.Result{}, pErr
 	}
 
 	// Reverse-lookup the DataImport that materializes this leaf's data leg: the import marker carries no
@@ -250,7 +252,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// The dataRef must target the orphan PVC the leaf carries (recovered from the reconstructed
 	// ManifestCheckpoint), not the VolumeSnapshot — otherwise the restore compiler cannot bind the PVC
-	// to its snapshot and emits a data-less PVC. See importDataBinding.
+	// to its snapshot and emits a data-less PVC. See importSnapshotSourceRef. The recovered PVC is published
+	// as the VS status.sourceRef that the aggregator's native-CSI data-leg projection reads.
 	//
 	// Resolve the PVC only once the checkpoint is Ready: ReconstructManifestCheckpoint writes its chunks
 	// and flips Ready in one status update, so a not-yet-Ready (or cache-stale, empty status.chunks)
@@ -273,22 +276,6 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	binding := importDataBinding(pvc, vscName)
-	enriched, eErr := snapshotcontent.EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, []storagev1alpha1.SnapshotDataBinding{binding})
-	if eErr != nil {
-		return ctrl.Result{}, eErr
-	}
-	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return ctrl.Result{}, cErr
-	}
-	if hErr := snapshotcontent.EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, enriched); hErr != nil {
-		// Retryable handoff; poll until the VSC is adoptable.
-		return ctrl.Result{RequeueAfter: importPollInterval}, nil
-	}
-	if pErr := snapshotcontent.PublishSnapshotContentDataRef(ctx, r.Client, contentName, &enriched[0]); pErr != nil {
-		return ctrl.Result{}, pErr
-	}
-
 	// Wire the imported VSC's spec.volumeSnapshotRef back to this VS so the pair is a CSI-valid bound
 	// snapshot BEFORE announcing readiness on the VS status. Without the back-ref the external-provisioner
 	// rejects PVC restores from this VS with "snapshot not bound" (the orphan-PVC restore leg).
@@ -296,15 +283,41 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, bErr
 	}
 
-	// Legacy CSI binding on the VS so it reads as a bound, ready snapshot pointing at the imported VSC.
+	// Legacy CSI binding on the VS so it reads as a bound, ready snapshot pointing at the imported VSC. The
+	// aggregator's native-CSI data-leg projection keys off status.boundVolumeSnapshotContentName, so this
+	// must be set for it to publish content.status.data.
 	if lErr := r.setLegacyVolumeSnapshotBound(ctx, req.NamespacedName, vscName); lErr != nil {
 		return ctrl.Result{}, lErr
 	}
 
-	// Mirror volume metadata onto the extended VS status for d8 export/consumption (parity with the
-	// generic/domain leaf mirror). Source is DataImport.spec — the authoritative import parameters.
-	if mErr := r.mirrorVolumeMetadataFromDataImport(ctx, req.NamespacedName, di); mErr != nil {
-		logger.Error(mErr, "Failed to mirror volume metadata to import VolumeSnapshot status")
+	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
+	// content-single-writer design §10/§11.4): the aggregator is the single writer of content.status.data.
+	// For a native-CSI VolumeSnapshot it builds the {captured PVC source, bound VSC} binding from
+	// status.sourceRef + status.boundVolumeSnapshotContentName and performs the enrich +
+	// Retain/ownerRef handoff + publish itself. This controller therefore publishes the recovered orphan PVC
+	// as status.sourceRef — the import twin of the foundation domain reconciler's capture-time
+	// snapshotSource — instead of writing the content, which fixes the native-CSI branch requeueing forever
+	// on an empty snapshotSource for imports.
+	if sErr := r.publishVolumeSnapshotSource(ctx, req.NamespacedName, pvc); sErr != nil {
+		return ctrl.Result{}, sErr
+	}
+
+	// Export mirror: mirror the aggregator-published content.status.data onto the extended VS top-level
+	// status.data for d8 export/consumption (byte-identical wire shape to the domain data-leaf mirror
+	// genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's captured-volume descriptor (source
+	// + artifact + volume metadata) from the namespaced VolumeSnapshot alone, without touching the
+	// cluster-scoped SnapshotContent. It is a no-op until the aggregator publishes (snapshotSource + bound
+	// just propagated), so poll until it does. StorageClass is overridden from DataImport.spec.storageClassName
+	// (the authoritative import mapping), matching the domain import path.
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+		return ctrl.Result{}, cErr
+	}
+	if content.Status.Data == nil {
+		return ctrl.Result{RequeueAfter: importPollInterval}, nil
+	}
+	scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
+	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data, scOverride); mErr != nil {
+		logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
 	}
 	return ctrl.Result{}, nil
 }
@@ -318,8 +331,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 //
 // Pure function (the DataImport is already fetched by the reverse-lookup), so it is unit-testable directly.
 func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (vscName string, ready bool, terminalMessage string) {
-	kind, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "kind")
-	name, _, _ := unstructured.NestedString(di.Object, "status", "dataArtifactRef", "name")
+	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "kind")
+	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "name")
 	if name == "" {
 		// Artifact not produced yet (kind may be set early, but without a name there is nothing to bind).
 		return "", false, ""
@@ -332,45 +345,32 @@ func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (v
 	return name, true, ""
 }
 
-// mirrorVolumeMetadataFromDataImport copies the DataImport's scratch-volume parameters
-// (spec.storageClassName/size/volumeMode) onto the extended VolumeSnapshot status.{storageClassName,size,
-// volumeMode} under an optimistic-lock merge patch (D4a). These are the mirrored volume-metadata fields the
-// forked extended-VS status exposes for d8 export/consumption; the forked snapshot-controller skips import
-// VS, so they are ours to own. Best-effort and idempotent: only non-empty source fields are written.
-func (r *Controller) mirrorVolumeMetadataFromDataImport(ctx context.Context, key client.ObjectKey, di *unstructured.Unstructured) error {
-	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-	size, _, _ := unstructured.NestedString(di.Object, "spec", "size")
-	volumeMode, _, _ := unstructured.NestedString(di.Object, "spec", "volumeMode")
-	if storageClassName == "" && size == "" && volumeMode == "" {
-		return nil
+// mirrorDataToImportVolumeSnapshot writes the self-contained data binding onto the extended VolumeSnapshot's
+// top-level status.data (source + artifact + volume metadata) under an optimistic-lock merge patch (D4a).
+// It mirrors the SAME binding just published onto the backing SnapshotContent, via the shared
+// snapshotcontent.SnapshotDataBindingToUnstructuredMap, so the wire shape is byte-identical to the domain
+// data-leaf mirror (genericbinder.mirrorDataToLeaf); d8 then resolves the imported leaf's captured-volume
+// descriptor from the namespaced VolumeSnapshot alone. scOverride, when non-empty, replaces the binding's
+// StorageClassName with DataImport.spec.storageClassName (the authoritative import StorageClass mapping),
+// matching the domain import path. The forked snapshot-controller skips import VS, so status.data is ours to
+// own. Idempotent: re-reads and short-circuits when status.data already equals the desired block.
+func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding, scOverride string) error {
+	if scOverride != "" {
+		binding.StorageClassName = scOverride
 	}
+	desired := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&binding)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}
 		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
 		if err := r.Get(ctx, key, vs); err != nil {
 			return err
 		}
-		curSC, _, _ := unstructured.NestedString(vs.Object, "status", "storageClassName")
-		curSize, _, _ := unstructured.NestedString(vs.Object, "status", "size")
-		curMode, _, _ := unstructured.NestedString(vs.Object, "status", "volumeMode")
-		if curSC == storageClassName && curSize == size && curMode == volumeMode {
+		if cur, found, _ := unstructured.NestedMap(vs.Object, "status", "data"); found && reflect.DeepEqual(cur, desired) {
 			return nil
 		}
 		base := vs.DeepCopy()
-		if storageClassName != "" {
-			if err := unstructured.SetNestedField(vs.Object, storageClassName, "status", "storageClassName"); err != nil {
-				return err
-			}
-		}
-		if size != "" {
-			if err := unstructured.SetNestedField(vs.Object, size, "status", "size"); err != nil {
-				return err
-			}
-		}
-		if volumeMode != "" {
-			if err := unstructured.SetNestedField(vs.Object, volumeMode, "status", "volumeMode"); err != nil {
-				return err
-			}
+		if err := unstructured.SetNestedMap(vs.Object, desired, "status", "data"); err != nil {
+			return err
 		}
 		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
@@ -401,28 +401,54 @@ func (r *Controller) setVolumeSnapshotError(ctx context.Context, key client.Obje
 	})
 }
 
-// importDataBinding builds the single dataRef binding for the imported orphan-PVC leaf. The binding
-// TARGET is the orphan PVC the leaf carries (not the VolumeSnapshot handle): the restore compiler matches
-// a captured PVC manifest to its dataRef by the PVC identity/UID (findDataBindingForPVC), so a
-// VolumeSnapshot-targeted dataRef would never match and the PVC would be emitted data-less (contract
-// violation). This mirrors the capture path (orphanPVCVolumeSnapshotBinding), keeping both paths' dataRef
-// shape identical. Size/storageClass etc. are enriched downstream from VolumeSnapshotContent.status.restoreSize.
-func importDataBinding(pvc *unstructured.Unstructured, vscName string) storagev1alpha1.SnapshotDataBinding {
-	return storagev1alpha1.SnapshotDataBinding{
-		TargetUID: string(pvc.GetUID()),
-		Target: storagev1alpha1.SnapshotSubjectRef{
-			APIVersion: pvc.GetAPIVersion(),
-			Kind:       pvc.GetKind(),
-			Namespace:  pvc.GetNamespace(),
-			Name:       pvc.GetName(),
-			UID:        pvc.GetUID(),
-		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
-			APIVersion: snapshotpkg.CSISnapshotAPIVersion,
-			Kind:       snapshotpkg.KindVolumeSnapshotContent,
-			Name:       vscName,
-		},
+// importSnapshotSourceRef builds the captured-source ref for the imported orphan-PVC leaf. It targets the
+// orphan PVC the leaf carries (recovered from the reconstructed ManifestCheckpoint), NOT the VolumeSnapshot
+// handle: the restore compiler matches a captured PVC manifest to its dataRef by the PVC identity/UID
+// (findDataBindingForPVC), so a VolumeSnapshot-targeted source would never match and the PVC would be
+// emitted data-less (contract violation). It is published as the VS status.sourceRef, from which the
+// aggregator's native-CSI data-leg projection (volumeSnapshotOwnerSource) builds the {source PVC, bound VSC}
+// binding — mirroring the capture path (the foundation domain reconciler's snapshotSource), keeping both
+// paths' dataRef source identical.
+func importSnapshotSourceRef(pvc *unstructured.Unstructured) storagev1alpha1.SnapshotSubjectRef {
+	return storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: pvc.GetAPIVersion(),
+		Kind:       pvc.GetKind(),
+		Namespace:  pvc.GetNamespace(),
+		Name:       pvc.GetName(),
+		UID:        pvc.GetUID(),
 	}
+}
+
+// publishVolumeSnapshotSource writes the recovered orphan-PVC source onto the import VolumeSnapshot's
+// status.sourceRef under an optimistic-lock merge patch (D4a). The aggregator's native-CSI data-leg
+// projection reads this (with status.boundVolumeSnapshotContentName) to build + publish content.status.data
+// — the import twin of the foundation domain reconciler's capture-time snapshotSource. The forked
+// snapshot-controller skips import VS, so status.sourceRef is ours to own. Idempotent: re-reads and
+// short-circuits when it already matches the desired ref.
+func (r *Controller) publishVolumeSnapshotSource(ctx context.Context, key client.ObjectKey, pvc *unstructured.Unstructured) error {
+	ref := importSnapshotSourceRef(pvc)
+	desired := map[string]interface{}{
+		"apiVersion": ref.APIVersion,
+		"kind":       ref.Kind,
+		"namespace":  ref.Namespace,
+		"name":       ref.Name,
+		"uid":        string(ref.UID),
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+		if err := r.Get(ctx, key, vs); err != nil {
+			return err
+		}
+		if cur, found, _ := unstructured.NestedMap(vs.Object, "status", "sourceRef"); found && reflect.DeepEqual(cur, desired) {
+			return nil
+		}
+		base := vs.DeepCopy()
+		if err := unstructured.SetNestedMap(vs.Object, desired, "status", "sourceRef"); err != nil {
+			return err
+		}
+		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
 }
 
 // resolveImportedOrphanPVC recovers the single orphan PVC manifest the leaf carries, decoding the

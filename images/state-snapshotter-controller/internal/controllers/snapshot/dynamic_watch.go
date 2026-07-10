@@ -177,7 +177,7 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 // childHasUnifiedSnapshotControllerOwner reports whether the child object is controller-owned by a
-// unified Snapshot (storage.deckhouse.io/<v>, Kind=Snapshot). Such an object is a direct child of a
+// unified Snapshot (state-snapshotter.deckhouse.io/<v>, Kind=Snapshot). Such an object is a direct child of a
 // Snapshot run tree and is expected to be listed in that parent's status.childrenSnapshotRefs, so the
 // relay may briefly retry while the parent catches up. The head/root Snapshot (no ownerReference) and
 // children owned by domain snapshots return false.

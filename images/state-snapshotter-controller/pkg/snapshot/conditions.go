@@ -26,38 +26,41 @@ import (
 // Contract conditions/reasons are defined canonically in api/storage and aliased here so core code
 // keeps using snapshot.ConditionReady etc. unchanged, while the domain controller shares the same
 // definitions via api/. Core-internal leg conditions and the rest of the reason taxonomy stay below.
+//
+// Ready is the ONLY user-facing condition. The former PlanningReady/Consistent conditions were
+// replaced by status.captureState.domainSpecificController.phase, and the ManifestsArchived latch
+// condition by SnapshotContent.status.subtreeManifestsPersisted (a core-internal bool).
 const (
-	ConditionReady                 = storagev1alpha1.ConditionReady
-	ConditionChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
-	// ConditionManifestsArchived is the subtree-latch contract condition (see api/storage). It is NOT
-	// part of the Ready formula; it signals that this node and all descendants have archived their
-	// manifests at least once and never re-opens once True.
-	ConditionManifestsArchived = storagev1alpha1.ConditionManifestsArchived
+	ConditionReady = storagev1alpha1.ConditionReady
 
 	ReasonArtifactMissing     = storagev1alpha1.ReasonArtifactMissing
 	ReasonCompleted           = storagev1alpha1.ReasonCompleted
 	ReasonCreateChildFailed   = storagev1alpha1.ReasonCreateChildFailed
 	ReasonGraphPlanningFailed = storagev1alpha1.ReasonGraphPlanningFailed
 
-	// ManifestsArchived reasons (subtree latch): Archived (True, lifelong), Capturing (False,
-	// transient), Failed (False, terminal). Defined canonically in api/storage.
-	ReasonManifestsArchived      = storagev1alpha1.ReasonManifestsArchived
-	ReasonManifestsCapturing     = storagev1alpha1.ReasonManifestsCapturing
-	ReasonManifestsArchiveFailed = storagev1alpha1.ReasonManifestsArchiveFailed
+	// ReasonChildSnapshotDeleted (NON-terminal) and ReasonChildSnapshotLost (terminal) are folded onto the
+	// owner Ready mirror by the SnapshotContentController when a declared child snapshot vanishes. Defined
+	// canonically in api/storage; see there for the full recoverable-vs-lost semantics.
+	ReasonChildSnapshotDeleted = storagev1alpha1.ReasonChildSnapshotDeleted
+	ReasonChildSnapshotLost    = storagev1alpha1.ReasonChildSnapshotLost
 )
 
+// IsReasonTerminal reports whether a Ready=False reason is terminal. Re-exported from api/storage so
+// core code and the wave-barrier reference the single canonical classifier.
+var IsReasonTerminal = storagev1alpha1.IsReasonTerminal
+
 // Condition types: the public condition model
-// (ChildrenSnapshotReady, ManifestsReady, VolumesReady, ChildrenReady, Ready).
+// (ManifestsReady, DataReady, ChildrenReady, Ready).
 const (
 	// ConditionManifestsReady reports this node's own manifest leg readiness: the manifest
 	// capture checkpoint (status.manifestCheckpointName) is published and Ready (empty archive counts).
-	// It does not consider the volume leg or children.
+	// It does not consider the data leg or children.
 	ConditionManifestsReady = "ManifestsReady"
 
-	// ConditionVolumesReady reports this node's own volume/data leg readiness: all required data
-	// artifacts (status.dataRefs[]) are Ready (an empty dataRefs[] is VolumesReady=True vacuously).
+	// ConditionDataReady reports this node's own data leg readiness: the node's data
+	// artifact (status.dataRef) is Ready (a node with no dataRef is DataReady=True vacuously).
 	// It does not consider the manifest leg or children.
-	ConditionVolumesReady = "VolumesReady"
+	ConditionDataReady = "DataReady"
 
 	// ConditionChildrenReady reports that all child SnapshotContents are Ready=True
 	// (a leaf with no children is ChildrenReady=True vacuously).
@@ -66,10 +69,9 @@ const (
 
 // Reasons for Ready=False
 const (
-	ReasonContentMissing       = "ContentMissing"
-	ReasonChildSnapshotMissing = "ChildSnapshotMissing"
+	ReasonContentMissing = "ContentMissing"
 	// ReasonArtifactNotReady is an internal/compat reason for "artifact exists but not ready yet".
-	// The data leg surfaces this state on VolumesReady/Ready as ReasonDataCapturePending (progress-aware);
+	// The data leg surfaces this state on DataReady/Ready as ReasonDataCapturePending (progress-aware);
 	// ReasonArtifactNotReady is retained for internal classification and backward compatibility.
 	ReasonArtifactNotReady = "ArtifactNotReady"
 	// ReasonDataCapturePending is the surfaced pending reason for the data leg: published data artifacts
@@ -99,19 +101,11 @@ const (
 	// is a verbatim mirror of SnapshotContent.Ready and this reason is not used.
 	ReasonContentBindingPending = "ContentBindingPending"
 	ReasonDeleting              = "Deleting"
-	// ReasonImportPending is the non-terminal reason on an import-mode Snapshot (spec.source.import)
+	// ReasonImportPending is the non-terminal reason on an import-mode Snapshot (spec.mode: Import)
 	// whose content has not been materialized yet. The controller does NOT capture the live namespace
 	// for these; d8 uploads per-node manifests+children and (for data leaves) creates a DataImport, then
 	// the import orchestrator reconstructs SnapshotContent and binds it. Requeued, never terminal.
 	ReasonImportPending = "ImportPending"
-	// ReasonSourceContentNotFound is the non-terminal static-bind reason on a Snapshot whose
-	// spec.source.snapshotContentName references a SnapshotContent that does not exist yet (the import
-	// controller may not have pre-provisioned it). The controller requeues without failing terminally.
-	ReasonSourceContentNotFound = "SourceContentNotFound"
-	// ReasonSnapshotContentMisbound is the terminal static-bind reason when the referenced
-	// SnapshotContent.spec.snapshotRef does not point back at this Snapshot (cross-binding). Because
-	// SnapshotContent.spec is immutable, the only fix is editing spec.source, so this is not requeued.
-	ReasonSnapshotContentMisbound = "SnapshotContentMisbound"
 
 	// ReasonChildrenPending is set while a required child SnapshotContent/Snapshot is not yet bound,
 	// has no Ready condition, is Ready=False with a non-terminal reason, or root capture is not complete
@@ -121,47 +115,32 @@ const (
 	// while status.childrenSnapshotRefs is non-empty but the subtree exclude set cannot be computed yet
 	// (no root ManifestCaptureRequest until exclude is complete — distinct from ChildrenPending / ListFailed).
 	ReasonSubtreeManifestCapturePending = "SubtreeManifestCapturePending"
-	// ReasonNamespaceCaptureIncomplete is the non-terminal, fail-closed reason on a root Snapshot when
-	// discovery-based namespace capture planning could not read every namespaced type: a Forbidden list
-	// (RBAC for the transient per-namespace RoleBinding has not propagated yet) or a partial discovery
-	// failure (broken aggregated APIService). The controller does NOT create the root MCR with an
-	// incomplete plan; it degrades Ready and requeues until the missing types become readable. The
-	// message lists the unreadable GVRs.
-	ReasonNamespaceCaptureIncomplete = "NamespaceCaptureIncomplete"
 	// ReasonManifestCapturePending is set while a snapshot controller waits for its own MCR/MCP materialization.
 	ReasonManifestCapturePending = "ManifestCapturePending"
 	// ReasonChildrenFailed is set when any required child has a terminal Ready=False
 	// (see usecase.ChildSnapshotTerminalReadyReasons).
 	ReasonChildrenFailed = "ChildrenFailed"
-	// ReasonResidualVolumeCapturePending is the non-terminal, fail-closed reason on a namespace-root
-	// SnapshotContent (mirrored onto Snapshot) while the final residual/orphan-PVC capture wave has not
-	// completed (status.residualVolumeCapture.phase != Complete). It gates only the FIRST Ready=True so
-	// a consumer never restores before the orphan data is captured. Defined canonically in api/storage.
-	ReasonResidualVolumeCapturePending = storagev1alpha1.ReasonResidualVolumeCapturePending
+	// ReasonChildrenLinkPending is the non-terminal, fail-closed reason on a namespace-root SnapshotContent
+	// (mirrored onto Snapshot) while declared child snapshots — in particular the orphan/residual-PVC
+	// volume leaves — are not yet linked into status.childrenSnapshotContentRefs. ChildrenReady is held at
+	// this reason until every declared child content edge is present, so a consumer never observes the
+	// first Ready=True before the orphan data is captured and linked. It subsumes the former residual/
+	// orphan-PVC capture latch gate. Defined canonically in api/storage.
+	ReasonChildrenLinkPending = storagev1alpha1.ReasonChildrenLinkPending
 )
 
-// Reasons for ChildrenSnapshotReady=False.
+// Graph/capture-planning reasons surfaced on the root Snapshot Ready condition. The parent no longer
+// carries a separate PlanningReady condition: waiting on an earlier weight layer folds into
+// Ready=False/ChildrenPending (with the pending children listed in the message).
 const (
-	ReasonChildGraphPending = "ChildGraphPending"
-	ReasonListFailed        = "ListFailed"
-	// ReasonPriorityLayerPending is set on a parent Snapshot while a higher-priority child snapshot
-	// layer has not yet published a current ChildrenSnapshotReady=True. This is NOT a failure and has no deadline:
-	// a child snapshot (e.g. a large-storage capture) may legitimately stay pending for hours. The
-	// parent holds ChildrenSnapshotReady=False/PriorityLayerPending (with the pending children listed in the
-	// message) and never starts capture until the layer is ready. Waiting is woken primarily by child
-	// watches; a RequeueAfter polling fallback covers a missed watch event.
-	ReasonPriorityLayerPending = "PriorityLayerPending"
+	// ReasonListFailed is a terminal reason when listing a mapped source kind fails (in TerminalReadyReasons).
+	ReasonListFailed = "ListFailed"
 	// ReasonSourceListForbidden is set when listing a mapped source kind is rejected with Forbidden.
 	// RBAC for domain/custom resources is granted externally (Deckhouse RBAC controller, signalled via
-	// DSC RBACReady); the planner must not treat a Forbidden source list as "no objects" (that would
-	// silently drop coverage). Instead it degrades the graph (ChildrenSnapshotReady=False) and requeues so coverage
+	// CSD AccessGranted); the planner must not treat a Forbidden source list as "no objects" (that would
+	// silently drop coverage). Instead it degrades Ready (non-terminal) and requeues so coverage
 	// resumes once RBAC is granted, without spamming hard reconcile errors.
 	ReasonSourceListForbidden = "SourceListForbidden"
-)
-
-// Reasons for Ready=True
-const (
-	ReasonReady = "Ready"
 )
 
 // SetCondition sets a condition on a SnapshotLike or SnapshotContentLike object.

@@ -14,20 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package children create-or-adopts a snapshot's desired set of child snapshot objects and derives their
-// durable SnapshotChildRefs. SDK v1 is a publication layer, not a lifecycle owner: it never deletes
-// children. Once the planning barrier is committed (ChildrenSnapshotReady=True) the published
-// childrenSnapshotRefs are the authoritative, immutable snapshot topology — the SDK layer
-// (EnsureChildren) treats a later desired set that differs from the committed one as terminal topology
-// drift and fails closed rather than reconciling the difference. Reclaiming any detached leftover object
-// is left to ownerRef garbage collection (the parent owns each child) or a future cleanup component. This
-// keeps the contract delete-free — no List, no orphan diff, no unstructured delete, no risk of removing a
-// foreign object on the strength of a stale status (see design R23/R29).
+// Package children reconciles a snapshot's desired set of child snapshot objects: create-or-adopt each
+// desired child and derive its durable SnapshotChildRef. SDK v1 is a publication layer, not a lifecycle
+// owner: it never deletes children, and publication is additive (the caller UNIONs these refs into status,
+// never removing one). A child no longer enumerated by its emitter therefore KEEPS its published
+// childrenSnapshotRefs entry; only the leftover OBJECT is reclaimed — by ownerRef garbage collection (the
+// parent owns each child, so it is collected when the parent is deleted) or a future cleanup component.
+// This keeps the contract delete-free — no List, no orphan diff, no unstructured delete, no risk of
+// removing a foreign object on the strength of a stale status (see design R23/R29).
 package children
 
 import (
 	"context"
-	"fmt"
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,53 +38,37 @@ import (
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/ownerref"
 )
 
-// DeriveRefs computes the sorted SnapshotChildRefs for desired without touching the cluster. A child's
-// canonical key is (apiVersion, kind, name): children live in the parent's namespace, so the triple is the
-// per-namespace canonical identity. Callers compare the derived set against the published set (see
-// RefsEqualIgnoreOrder) to detect topology drift before creating anything.
+// Reconcile creates/adopts each desired child snapshot object (the domain-built templates) under owner and
+// returns the resulting, sorted SnapshotChildRefs for the caller to UNION into status. It performs
+// create/adopt + ref derivation only and never deletes children (SDK v1 is delete-free; see package doc).
+// A nil/empty desired set therefore yields empty refs without touching any previously created object.
 //
-// It fails closed on a duplicate desired child (two specs with the same canonical key): a duplicate is a
-// domain planning bug, and silently deduplicating it would mask the bug and corrupt set comparison. The
-// caller surfaces it as a planning failure, not as topology drift.
-func DeriveRefs(scheme *runtime.Scheme, desired []client.Object) ([]storagev1alpha1.SnapshotChildRef, error) {
-	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
-	seen := make(map[storagev1alpha1.SnapshotChildRef]struct{}, len(desired))
+// It fails closed on a child already owned by a different parent (no theft), leaving that child untouched.
+func Reconcile(
+	ctx context.Context,
+	c client.Client,
+	scheme *runtime.Scheme,
+	owner metav1.OwnerReference,
+	desired []client.Object,
+) ([]storagev1alpha1.SnapshotChildRef, error) {
+	newRefs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
 	for _, d := range desired {
 		gvk, err := apiutil.GVKForObject(d, scheme)
 		if err != nil {
 			return nil, err
 		}
-		ref := storagev1alpha1.SnapshotChildRef{
+		if err := ensureChild(ctx, c, d, owner); err != nil {
+			return nil, err
+		}
+		newRefs = append(newRefs, storagev1alpha1.SnapshotChildRef{
 			APIVersion: gvk.GroupVersion().String(),
 			Kind:       gvk.Kind,
 			Name:       d.GetName(),
-		}
-		if _, dup := seen[ref]; dup {
-			return nil, fmt.Errorf("duplicate desired child %s/%s/%s", ref.APIVersion, ref.Kind, ref.Name)
-		}
-		seen[ref] = struct{}{}
-		refs = append(refs, ref)
+		})
 	}
-	SortRefs(refs)
-	return refs, nil
-}
 
-// EnsureAll create-or-adopts each desired child under owner. It performs create/adopt only and never
-// deletes children (SDK v1 is delete-free; see package doc), so a nil/empty desired set is a no-op that
-// leaves any previously created object in place. It fails closed on a child already owned by a different
-// parent (no theft), leaving that child untouched.
-func EnsureAll(
-	ctx context.Context,
-	c client.Client,
-	owner metav1.OwnerReference,
-	desired []client.Object,
-) error {
-	for _, d := range desired {
-		if err := ensureChild(ctx, c, d, owner); err != nil {
-			return err
-		}
-	}
-	return nil
+	SortRefs(newRefs)
+	return newRefs, nil
 }
 
 // ensureChild creates-or-adopts the child described by desired without ever mutating desired itself: the
@@ -127,6 +109,34 @@ func SortRefs(refs []storagev1alpha1.SnapshotChildRef) {
 		}
 		return refs[i].Name < refs[j].Name
 	})
+}
+
+// UnionRefs returns the set union of two child-ref slices, de-duplicated by full ref identity
+// (apiVersion+kind+name) and sorted deterministically. It is the additive publication primitive (wave5):
+// a planning pass unions its freshly derived refs INTO the already-published set rather than replacing it,
+// so refs contributed by a co-writer of the same field — the namespace root's orphan VolumeSnapshot wave,
+// which a given planning pass does not itself enumerate (see wave5 design §6.2) — are preserved. This keeps
+// SDK v1 delete-free: refs only accumulate; a child no longer desired is simply not re-added by its
+// emitter, nothing is removed here.
+func UnionRefs(existing, added []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
+	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(existing)+len(added))
+	seen := make(map[storagev1alpha1.SnapshotChildRef]struct{}, len(existing)+len(added))
+	for _, r := range existing {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	for _, r := range added {
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	SortRefs(out)
+	return out
 }
 
 // RefsEqualIgnoreOrder reports set equality of two child-ref slices.

@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package storagefoundation implements the storage-foundation VolumeCaptureRequest mechanics behind the
-// SDK's data capture. The SDK talks to the foundation only through unstructured objects, so there is no Go
+// SDK's data leg. The SDK talks to the foundation only through unstructured objects, so there is no Go
 // dependency on the foundation API module.
 package storagefoundation
 
@@ -30,11 +30,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
 // VolumeCaptureRequestGVK is the storage-foundation VolumeCaptureRequest GVK.
 var VolumeCaptureRequestGVK = schema.GroupVersionKind{
-	Group:   "storage.deckhouse.io",
+	Group:   "storage-foundation.deckhouse.io",
 	Version: "v1alpha1",
 	Kind:    "VolumeCaptureRequest",
 }
@@ -50,13 +52,14 @@ type Target struct {
 	Namespace  string
 }
 
-// VCRName returns the deterministic data-capture VolumeCaptureRequest name owned by a snapshot, keyed by the
-// snapshot UID. The name is derivable from the snapshot alone, without reading SnapshotContent.
+// VCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a snapshot, keyed by the
+// snapshot UID (unified wave4C scheme, see api/names). The name is derivable from the snapshot alone,
+// without reading SnapshotContent.
 func VCRName(snapshotUID types.UID) string {
-	return fmt.Sprintf("snap-owned-vcr-%s", snapshotUID)
+	return names.VolumeCaptureRequestName(snapshotUID)
 }
 
-// Provider creates and reads storage-foundation VolumeCaptureRequests on behalf of the SDK's data capture.
+// Provider creates and reads storage-foundation VolumeCaptureRequests on behalf of the SDK data leg.
 type Provider struct {
 	client client.Client
 }
@@ -68,16 +71,13 @@ func NewProvider(c client.Client) *Provider { return &Provider{client: c} }
 func (p *Provider) VCRName(snapshotUID types.UID) string { return VCRName(snapshotUID) }
 
 // EnsureVCR reconciles the snapshot's VolumeCaptureRequest toward the desired owner reference and single
-// data-capture PVC target. It creates the request when absent, fails closed if an existing request's target
-// differs from the desired one, and only then adopts it (adds the owner reference) when present but
-// unowned. The request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
-//
-// Order matters: targets are compared BEFORE adoption, so a data-capture drift is diagnosed without first
-// mutating (adopting) the foreign/stale request. This keeps the fail-closed path side-effect-free.
+// data-leg PVC target. It creates the request when absent, adopts it (adds the owner reference) when
+// present but unowned, and fails closed if an existing request's target differs from the desired one. The
+// request is keyed by the snapshot UID, so the operation is idempotent and restart-safe.
 //
 // A snapshot node binds at most one data artifact, so this takes a single target. The foundation
-// VolumeCaptureRequest CRD models spec.targets as a list, so the single target is written as a one-element
-// list here (the list shape is confined to this foundation boundary).
+// VolumeCaptureRequest CRD models spec.target as a single object (namespace omitted: the PVC lives in the
+// VCR namespace). The 0-or-1 slice shape is confined to this foundation boundary.
 func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, dataRef Target) error {
 	desired := []Target{dataRef}
 	existing := &unstructured.Unstructured{}
@@ -94,21 +94,19 @@ func (p *Provider) EnsureVCR(ctx context.Context, namespace, name string, ownerR
 		return err
 	}
 
-	// Diagnose drift first (read-only), fail closed before any mutation.
-	existingTargets, parseErr := parseTargets(existing)
-	if parseErr != nil {
-		return parseErr
-	}
-	if !targetsEqual(existingTargets, desired) {
-		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.targets differ from desired PVC target", namespace, name)
-	}
-
 	if !hasOwnerRef(existing.GetOwnerReferences(), ownerRef) {
 		base := existing.DeepCopy()
 		existing.SetOwnerReferences(append(existing.GetOwnerReferences(), ownerRef))
 		if patchErr := p.client.Patch(ctx, existing, client.MergeFrom(base)); patchErr != nil {
 			return patchErr
 		}
+	}
+	existingTargets, parseErr := parseTargets(existing)
+	if parseErr != nil {
+		return parseErr
+	}
+	if !targetsEqual(existingTargets, desired) {
+		return fmt.Errorf("VolumeCaptureRequest %s/%s spec.target differs from desired PVC target", namespace, name)
 	}
 	return nil
 }
@@ -143,7 +141,7 @@ func sortByUID(ts []Target) {
 	sort.Slice(ts, func(i, j int) bool { return ts[i].UID < ts[j].UID })
 }
 
-// OwnedPVCTarget reads the snapshot's single data-capture PVC target from its VolumeCaptureRequest. A missing
+// OwnedPVCTarget reads the snapshot's single data-leg PVC target from its VolumeCaptureRequest. A missing
 // request (or one with no target) yields nil (manifest-only or not yet created).
 func (p *Provider) OwnedPVCTarget(ctx context.Context, namespace, vcrName string) (*Target, error) {
 	if vcrName == "" {
@@ -168,15 +166,18 @@ func (p *Provider) OwnedPVCTarget(ctx context.Context, namespace, vcrName string
 }
 
 func newVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.OwnerReference, targets []Target) *unstructured.Unstructured {
-	specTargets := make([]interface{}, 0, len(targets))
-	for _, t := range targets {
-		specTargets = append(specTargets, map[string]interface{}{
+	spec := map[string]interface{}{
+		"mode": volumeCaptureModeSnapshot,
+	}
+	if len(targets) > 0 {
+		t := targets[0]
+		// spec.target carries no namespace: the captured PVC always lives in the VCR namespace.
+		spec["target"] = map[string]interface{}{
 			"uid":        t.UID,
 			"apiVersion": t.APIVersion,
 			"kind":       t.Kind,
 			"name":       t.Name,
-			"namespace":  t.Namespace,
-		})
+		}
 	}
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": VolumeCaptureRequestGVK.Group + "/" + VolumeCaptureRequestGVK.Version,
@@ -186,10 +187,7 @@ func newVolumeCaptureRequestObject(namespace, name string, ownerRef metav1.Owner
 			"namespace":       namespace,
 			"ownerReferences": []interface{}{ownerRefToMap(ownerRef)},
 		},
-		"spec": map[string]interface{}{
-			"mode":    volumeCaptureModeSnapshot,
-			"targets": specTargets,
-		},
+		"spec": spec,
 	}}
 	obj.SetGroupVersionKind(VolumeCaptureRequestGVK)
 	return obj
@@ -209,28 +207,25 @@ func ownerRefToMap(ref metav1.OwnerReference) map[string]interface{} {
 }
 
 func parseTargets(obj *unstructured.Unstructured) ([]Target, error) {
-	raw, found, err := unstructured.NestedSlice(obj.Object, "spec", "targets")
+	m, found, err := unstructured.NestedMap(obj.Object, "spec", "target")
 	if err != nil {
 		return nil, err
 	}
-	if !found || len(raw) == 0 {
+	if !found || len(m) == 0 {
 		return nil, nil
 	}
-	out := make([]Target, 0, len(raw))
-	for i, item := range raw {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("spec.targets[%d]: expected object", i)
-		}
-		out = append(out, Target{
-			UID:        nestedString(m, "uid"),
-			APIVersion: nestedString(m, "apiVersion"),
-			Kind:       nestedString(m, "kind"),
-			Name:       nestedString(m, "name"),
-			Namespace:  nestedString(m, "namespace"),
-		})
+	// spec.target omits namespace; the captured PVC lives in the VCR namespace.
+	namespace := nestedString(m, "namespace")
+	if namespace == "" {
+		namespace = obj.GetNamespace()
 	}
-	return out, nil
+	return []Target{{
+		UID:        nestedString(m, "uid"),
+		APIVersion: nestedString(m, "apiVersion"),
+		Kind:       nestedString(m, "kind"),
+		Name:       nestedString(m, "name"),
+		Namespace:  namespace,
+	}}, nil
 }
 
 func nestedString(m map[string]interface{}, key string) string {

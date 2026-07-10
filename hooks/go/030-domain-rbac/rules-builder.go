@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -28,9 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )
 
 // buildRules builds a deterministic (sorted by group, resources within group)
@@ -132,7 +131,7 @@ func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1
 //     parent-graph planner: it CREATES one parent-owned child snapshot per source object
 //     (parent_graph.go:ensureParentOwnedChildSnapshot → r.Client.Create) and PATCHes it to maintain the
 //     ownerRef back to the root Snapshot. Without create the planner fails with
-//     ChildrenSnapshotReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
+//     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
 //     projection, co-owned via D4a.
@@ -181,7 +180,7 @@ func buildCoreReadRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.Pol
 //   - list — the SnapshotReconciler enumerates the mapped source objects (e.g. DemoVirtualMachine,
 //     DemoVirtualDisk) to build the parent-owned child graph (parent_graph.go), one-shot
 //     r.Dynamic...List(namespace) per reconcile. Without it the root Snapshot degrades to
-//     ChildrenSnapshotReady=False/SourceListForbidden.
+//     PlanningReady=False/SourceListForbidden.
 //   - get — once the graph is planned, the ManifestCaptureRequest controller fetches each named source
 //     target by name to capture its manifest (checkpoint_controller.go: r.Get(target)). Without it the MCR
 //     terminates Ready=False/Failed ("cannot get demovirtualdisks ...") and the root Snapshot hangs on
@@ -234,6 +233,26 @@ func coreManifestsSubresourceRules(snapshotGVRs []schema.GroupVersionResource) [
 	return []rbacv1.PolicyRule{{
 		APIGroups: []string{consts.CoreSubresourcesGroup},
 		Resources: sortedUnique(resources),
+		Verbs:     []string{"get"},
+	}}
+}
+
+// coreSubtreeManifestIdentitiesRule grants the DOMAIN SA get on core's SINGLE, fixed
+// snapshotcontents/subtree-manifest-identities aggregated subresource (core subresources group). Unlike
+// coreManifestsSubresourceRules this rule is NOT per-snapshot-GVR — the endpoint hangs off the core
+// SnapshotContent resource (all snapshot kinds bind to it), so one grant covers every domain. It backs
+// the reusable SDK ManifestExclude capability: an aggregator snapshot reconciler (e.g. a VM aggregating
+// disk children) calls it on each child's bound content to compute its own manifest MCR as
+// EnsureManifestCapture(base - exclude). Read-only and fail-closed (409 while any subtree checkpoint is
+// not Ready); it exposes captured identities only, granting neither ManifestCheckpoint nor generic
+// SnapshotContent reads. Gated on a registered domain (snapshotGVRs) to match coreManifestsSubresourceRules.
+func coreSubtreeManifestIdentitiesRule(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(snapshotGVRs) == 0 {
+		return nil
+	}
+	return []rbacv1.PolicyRule{{
+		APIGroups: []string{consts.CoreSubresourcesGroup},
+		Resources: []string{"snapshotcontents/subtree-manifest-identities"},
 		Verbs:     []string{"get"},
 	}}
 }
@@ -423,10 +442,10 @@ func moduleLabels() map[string]string {
 	}
 }
 
-// desiredRBACReadyCondition builds the RBACReady condition value to write on a CSD.
-func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
+// desiredAccessGrantedCondition builds the AccessGranted condition value to write on a CSD.
+func desiredAccessGrantedCondition(generation int64, status metav1.ConditionStatus, reason, message string) metav1.Condition {
 	return metav1.Condition{
-		Type:               consts.CSDConditionRBACReady,
+		Type:               consts.CSDConditionAccessGranted,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
@@ -435,16 +454,16 @@ func desiredRBACReadyCondition(generation int64, status metav1.ConditionStatus, 
 	}
 }
 
-// patchCSDRBACReady performs a read-modify-update on the CSD status to set only
-// the RBACReady condition, preserving Accepted and Ready (owned by the controller).
+// patchCSDAccessGranted performs a read-modify-update on the CSD status to set only
+// the AccessGranted condition, preserving Accepted and Ready (owned by the controller).
 // Retries on conflict per the ADR ownership model.
-func patchCSDRBACReady(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
+func patchCSDAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)
 		if err := cl.Get(ctx, ctrlclient.ObjectKey{Name: name}, fresh); err != nil {
 			return err
 		}
-		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionRBACReady)
+		existing := apimeta.FindStatusCondition(fresh.Status.Conditions, consts.CSDConditionAccessGranted)
 		if existing != nil &&
 			existing.Status == cond.Status &&
 			existing.Reason == cond.Reason &&

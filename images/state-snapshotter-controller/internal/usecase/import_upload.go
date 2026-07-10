@@ -26,12 +26,13 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // ManifestsAndChildrenUpload is the per-CR import payload (POST manifests-and-children-refs-upload):
@@ -101,21 +102,28 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if !uploadTargetIsImportMode(cr) {
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("%s %s/%s is not in import mode (no spec.source.import marker): refusing manifests upload", snapshotGVK.String(), namespace, name))
+			fmt.Sprintf("%s %s/%s is not in import mode (spec.mode is not Import): refusing manifests upload", snapshotGVK.String(), namespace, name))
 	}
 	uid := cr.GetUID()
 	if uid == "" {
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict", "target snapshot has no UID yet")
 	}
 
-	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID).
-	// ownerRefs are intentionally nil here: the ManifestCheckpoint is cluster-scoped and cannot be owned
-	// by the namespaced snapshot CR; the import orchestrator (C5) attaches it to the SnapshotContent it
-	// materializes, which is the durable GC owner. captureRef is a synthetic back-reference to the CR
-	// (ManifestCheckpointSpec requires one); it is not a real ManifestCaptureRequest on the import path.
+	// Import-MCP durability backstop (content-single-writer design §10.1): a cluster-scoped MCP cannot be
+	// owned by the namespaced snapshot CR, and the eager SnapshotContent shell may not exist yet at upload
+	// time, so the reconstructed MCP is anchored by a dedicated ObjectKeeper that FollowObjects the import
+	// snapshot. This makes the MCP + chunks GC-safe from birth: if the snapshot is deleted while the import
+	// is still pending, the keeper (and with it the MCP) cascades away. The aggregator re-parents the MCP
+	// onto its SnapshotContent and removes this keeper once the content materializes.
+	okRef, err := EnsureReconstructedManifestCheckpointObjectKeeper(ctx, s.client, cr, snapshotGVK)
+	if err != nil {
+		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
+	}
+
+	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID),
+	// owned by the dedicated import ObjectKeeper (durable GC anchor until the SnapshotContent handoff).
 	checkpointName := ReconstructedManifestCheckpointName(uid, "")
-	captureRef := &ssv1alpha1.ObjectReference{Name: name, Namespace: namespace, UID: string(uid)}
-	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, namespace, captureRef, nil, manifests); err != nil {
+	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, []metav1.OwnerReference{okRef}, manifests); err != nil {
 		return "", classifyReconstructError(err)
 	}
 
@@ -187,13 +195,22 @@ func childRefSlicesEqual(current, desired []interface{}) bool {
 	return reflect.DeepEqual(current, desired)
 }
 
-// uploadTargetIsImportMode reports whether a snapshot CR is an import target, signalled by the unified
-// import marker spec.source.import: {}. Every state-snapshotter snapshot kind carries it in import mode —
-// core/structural nodes, domain data leaves, and the generic-PVC extended VolumeSnapshot (F1/F2) alike —
-// so a single check covers them all. This keeps the upload endpoint from clobbering a live-capture snapshot.
+// uploadTargetIsImportMode reports whether a snapshot CR is an import target. Every snapshot kind the
+// upload endpoint sees — our snapshot CRDs (core/structural nodes, domain data leaves) AND the extended
+// CSI VolumeSnapshot fork — carries the same enum spec.mode: Import (the former spec.source.import: {}
+// fork marker was replaced by spec.mode on the fork CRD). This keeps the upload endpoint from clobbering
+// a live-capture snapshot.
 func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
-	return found
+	return IsUnstructuredImportMode(obj)
+}
+
+// IsUnstructuredImportMode reports whether an unstructured snapshot object is in import mode: the enum
+// spec.mode: Import, uniform across ALL snapshot kinds (root Snapshot, domain XxxxSnapshot, and the
+// extended CSI VolumeSnapshot fork, whose CRD now hosts the same top-level spec.mode). A live-capture
+// snapshot carries mode: Capture (or omits it — the CRD default).
+func IsUnstructuredImportMode(obj *unstructured.Unstructured) bool {
+	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+	return mode == string(storagev1alpha1.SnapshotModeImport)
 }
 
 // validateUploadManifests checks that manifests is present and is a JSON array (rejecting absent/null and

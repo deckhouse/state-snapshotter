@@ -169,7 +169,7 @@ func TestSetCondition_Idempotency(t *testing.T) {
 		}
 
 		// Step 1: Set condition first time
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		// Step 2: Get condition and record LastTransitionTime
 		cond1 := GetCondition(obj, ConditionReady)
@@ -179,8 +179,8 @@ func TestSetCondition_Idempotency(t *testing.T) {
 		if cond1.Status != metav1.ConditionTrue {
 			t.Errorf("Expected status=True, got %v", cond1.Status)
 		}
-		if cond1.Reason != ReasonReady {
-			t.Errorf("Expected reason=%s, got %s", ReasonReady, cond1.Reason)
+		if cond1.Reason != ReasonCompleted {
+			t.Errorf("Expected reason=%s, got %s", ReasonCompleted, cond1.Reason)
 		}
 		// Record LastTransitionTime in local variable to avoid comparing same pointer
 		t1 := cond1.LastTransitionTime.Time
@@ -189,7 +189,7 @@ func TestSetCondition_Idempotency(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Step 3: Set same condition again (idempotent call)
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		// Step 4: Get condition again and check LastTransitionTime
 		cond2 := GetCondition(obj, ConditionReady)
@@ -216,7 +216,7 @@ func TestSetCondition_Idempotency(t *testing.T) {
 		}
 
 		// Step 1: Set condition first time
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		// Step 2: Get condition and record LastTransitionTime
 		cond1 := GetCondition(obj, ConditionReady)
@@ -230,7 +230,7 @@ func TestSetCondition_Idempotency(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Step 3: Set same condition again (idempotent call)
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		// Step 4: Get condition again and check LastTransitionTime
 		cond2 := GetCondition(obj, ConditionReady)
@@ -292,7 +292,7 @@ func TestSetCondition_StatusChangeUpdatesLastTransitionTime(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Step 2: Change status to True
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		// Step 3: Get condition and record LastTransitionTime2
 		cond2 := GetCondition(obj, ConditionReady)
@@ -328,7 +328,7 @@ func TestSetCondition_StatusChangeUpdatesLastTransitionTime(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 
 		// Change status to True
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 
 		cond2 := GetCondition(obj, ConditionReady)
 
@@ -369,7 +369,7 @@ func TestIsReady_ReturnsTrueOnlyWhenReadyTrue(t *testing.T) {
 		}
 
 		// SCENARIO 1: Ready=True
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		if !IsReady(obj) {
 			t.Error("Expected IsReady() to return true when Ready=True")
 		}
@@ -394,7 +394,7 @@ func TestIsReady_ReturnsTrueOnlyWhenReadyTrue(t *testing.T) {
 		}
 
 		// SCENARIO 1: Ready=True
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		if !IsReady(obj) {
 			t.Error("Expected IsReady() to return true when Ready=True")
 		}
@@ -424,7 +424,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 	t.Run("Nil object", func(_ *testing.T) {
 		// EXPECTED BEHAVIOR: no panic, no side effects
 		// Should handle nil gracefully without panicking
-		SetCondition(nil, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(nil, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		// Test passes if no panic occurred
 	})
 
@@ -433,7 +433,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		// Object that doesn't implement SnapshotLike or SnapshotContentLike
 		invalidObj := struct{ name string }{name: "test"}
 		// Should handle invalid type gracefully without panicking
-		SetCondition(invalidObj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(invalidObj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		// Test passes if no panic occurred
 	})
 
@@ -444,7 +444,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		}
 
 		// Set multiple conditions
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
@@ -473,7 +473,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		}
 
 		// Set condition with initial values
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Initial message")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Initial message")
 
 		cond1 := GetCondition(obj, ConditionReady)
 		if cond1.Message != "Initial message" {
@@ -483,7 +483,7 @@ func TestSetCondition_EdgeCases(t *testing.T) {
 		t1 := cond1.LastTransitionTime.Time
 
 		// Update condition with new message (same status)
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Updated message")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Updated message")
 
 		cond2 := GetCondition(obj, ConditionReady)
 		if cond2.Message != "Updated message" {
@@ -529,7 +529,7 @@ func TestIsTerminal_ReturnsTrueOnlyWhenReadyTrueOrFalse(t *testing.T) {
 		}
 
 		// SCENARIO 1: Ready=True (terminal state)
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		if !IsTerminal(obj) {
 			t.Error("Expected IsTerminal() to return true when Ready=True")
 		}
@@ -560,7 +560,7 @@ func TestIsTerminal_ReturnsTrueOnlyWhenReadyTrueOrFalse(t *testing.T) {
 		}
 
 		// SCENARIO 1: Ready=True (terminal state)
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		if !IsTerminal(obj) {
 			t.Error("Expected IsTerminal() to return true when Ready=True")
 		}
@@ -632,7 +632,7 @@ func TestGetCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set multiple conditions
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		SetCondition(obj, ConditionManifestsReady, metav1.ConditionTrue, "Processing", "In progress")
 		SetCondition(obj, ConditionChildrenReady, metav1.ConditionTrue, "Started", "Started")
 
@@ -726,7 +726,7 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set Ready condition with status=True
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		// Check for Ready=True (should return true)
 		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 		if !has {
@@ -740,7 +740,7 @@ func TestHasCondition_EdgeCases(t *testing.T) {
 			conditions: []metav1.Condition{},
 		}
 		// Set Ready condition
-		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonReady, "Ready")
+		SetCondition(obj, ConditionReady, metav1.ConditionTrue, ReasonCompleted, "Ready")
 		// Check for Ready=True (should return true)
 		has := HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 		if !has {

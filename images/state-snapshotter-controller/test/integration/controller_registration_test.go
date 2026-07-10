@@ -60,14 +60,15 @@ var _ = Describe("Integration: Controller Registration", func() {
 		// This allows the test to run in parallel with other tests without conflicts
 		snapshotGVKs := []schema.GroupVersionKind{
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshot"},
-			// In production (main.go) the only built-in pair is:
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-			// Domain kinds are added exclusively via eligible CustomSnapshotDefinition, never hardcoded here.
+			// In production (main.go) the built-in pairs are:
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
+			// {Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"} (data-bearing).
+			// OTHER domain kinds are added exclusively via eligible CustomSnapshotDefinition, never hardcoded here.
 		}
 		snapshotContentGVKs := []schema.GroupVersionKind{
 			{Group: "test.deckhouse.io", Version: "v1alpha1", Kind: "RegistrationTestSnapshotContent"},
-			// In production (main.go) the only built-in content side is:
-			// {Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
+			// In production (main.go) both built-in pairs share the common content side:
+			// {Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"},
 		}
 
 		// Create GenericSnapshotBinderController (same pattern as main.go)

@@ -82,14 +82,14 @@ func TestCollectSubtreeCoveredPVCUIDs_staleUIDDoesNotCoverUnrelatedPVC(t *testin
 	child := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			DataRef: &storagev1alpha1.SnapshotDataBinding{TargetUID: "stale-uid-not-in-cluster"},
+			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "stale-uid-not-in-cluster"}},
 		},
 	}
 	pvcA := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc-a", Namespace: ns, UID: "uid-a"}}
 	pvcB := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "pvc-b", Namespace: ns, UID: "uid-b"}}
 	snap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root-snap", Namespace: ns}}
 	cl := fakeclient.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child, pvcA, pvcB, snap).Build()
-	covered, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, ns, root)
+	covered, err := CollectSubtreeCoveredPVCUIDs(context.Background(), cl, ns, root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestCollectSubtreeCoveredPVCUIDs_staleUIDDoesNotCoverUnrelatedPVC(t *testin
 		t.Fatalf("expected stale uid in covered set, got %v", covered)
 	}
 
-	got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, root)
+	got, err := ListOwnedPVCTargetsForLogicalContent(context.Background(), cl, snap, root, allKindsDataBearing)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -18,8 +18,6 @@ package snapshot
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	stderrors "errors"
 	"fmt"
 	"sort"
@@ -36,8 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/common"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -61,51 +60,57 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	// snapshots (nil = expand all). Resolved once here and threaded into every layer. Excluded objects are
 	// consistently dropped from the root manifest leg by the same selector. Nested domain children created by
 	// domain controllers are out of scope (see plan section 5a). A resolve error is surfaced as a graph
-	// planning failure by the caller (ChildrenSnapshotReady=False).
+	// planning failure by the caller (Ready=False/GraphPlanningFailed).
 	selector, err := nsSnap.ResolveResourceSelector()
 	if err != nil {
 		return false, false, fmt.Errorf("resolve spec.resourceSelector: %w", err)
 	}
 
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
+	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
 	for layerStart := 0; layerStart < len(mappings); {
-		priority := mappings[layerStart].Priority
+		// Mappings are ordered ascending by CSD spec.weight; a weight layer is the run of equal-weight
+		// mappings processed together before the next (higher) layer.
+		weight := mappings[layerStart].Weight
 		layerEnd := layerStart + 1
-		for layerEnd < len(mappings) && mappings[layerEnd].Priority == priority {
+		for layerEnd < len(mappings) && mappings[layerEnd].Weight == weight {
 			layerEnd++
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
 					sortSnapshotChildRefs(desiredRefs)
-					changed, perr := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceListForbidden, forbidden.Error())
+					changed, perr := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceListForbidden, forbidden.Error())
 					return changed, false, perr
 				}
 				return false, false, err
 			}
 			layerRefs = append(layerRefs, refs...)
+			topLevelDrops = append(topLevelDrops, excluded...)
 		}
 		desiredRefs = append(desiredRefs, layerRefs...)
-		ready, terminalMessage, pending, err := r.priorityLayerChildrenSnapshotReady(ctx, nsSnap.Namespace, layerRefs)
+		ready, terminalMessage, pending, err := r.weightLayerCaptureReady(ctx, nsSnap.Namespace, layerRefs)
 		if err != nil {
 			return false, false, err
 		}
 		if terminalMessage != "" {
+			// Canonical child-failure reason is ChildrenFailed (a terminal CHILD, not the root's own planning
+			// fault) — kept in sync with the active planner path (planNamespaceChildren).
 			sortSnapshotChildRefs(desiredRefs)
-			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonGraphPlanningFailed, terminalMessage)
+			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonChildrenFailed, terminalMessage)
 			return changed, false, err
 		}
 		if !ready {
 			// Unbounded by design: a child snapshot (e.g. large-storage capture) may stay pending for
-			// hours. Hold ChildrenSnapshotReady=False/PriorityLayerPending listing the pending children for
-			// diagnosability; never fail by duration. Capture stays gated until the layer is ready.
+			// hours. Hold Ready=False/ChildrenPending listing the pending children for diagnosability;
+			// never fail by duration. Capture stays gated until the weight layer is ready.
 			sortSnapshotChildRefs(desiredRefs)
-			message := fmt.Sprintf("waiting for priority %d child snapshots to publish current ChildrenSnapshotReady=True; %s", priority, summarizePendingChildren(pending))
-			changed, err := r.patchSnapshotChildrenRefsCondition(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonPriorityLayerPending, message)
+			message := fmt.Sprintf("waiting for weight %d child snapshots to reach capture phase Planned; %s", weight, summarizePendingChildren(pending))
+			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonChildrenPending, message)
 			return changed, false, err
 		}
 		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
@@ -118,8 +123,58 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, false, err
 	}
 
+	// Publish the root's OWN top-level exclude-veto drops (wave4A). Recorded on the root Snapshot's
+	// captureState.domainSpecificController.excludedRefs — the uniform "own direct exclusions" input the
+	// SnapshotContent aggregator reads for every node (domain CRs get theirs from the domain SDK; the root
+	// gets its top-level drops from here). Monotonic and only published once the full graph is enumerated.
+	dropsChanged, err := r.publishSnapshotTopLevelExcludedRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, topLevelDrops)
+	if err != nil {
+		return false, false, err
+	}
+
 	_ = content
-	return statusChanged, true, nil
+	return statusChanged || dropsChanged, true, nil
+}
+
+// publishSnapshotTopLevelExcludedRefs records the root Snapshot's own top-level exclude-veto drops into
+// status.captureState.domainSpecificController.excludedRefs. This is the root's "own direct exclusions"
+// input to the durable SnapshotContent.status.excludedRefs aggregate (the SnapshotContent controller reads
+// this field for every owning snapshot uniformly). The set is monotonic: an object vetoed out of an
+// immutable snapshot stays vetoed, so a partial pass (an early-returning higher weight layer) never
+// subtracts a previously-recorded drop.
+func (r *SnapshotReconciler) publishSnapshotTopLevelExcludedRefs(
+	ctx context.Context,
+	parent types.NamespacedName,
+	drops []storagev1alpha1.ExcludedObjectRef,
+) (bool, error) {
+	if len(drops) == 0 {
+		return false, nil
+	}
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, parent, cur); err != nil {
+			return err
+		}
+		var existing []storagev1alpha1.ExcludedObjectRef
+		if cs := cur.Status.CaptureState; cs != nil && cs.DomainSpecificController != nil {
+			existing = cs.DomainSpecificController.ExcludedRefs
+		}
+		merged := unionExcludedObjectRefs(existing, drops)
+		if excludedObjectRefsEqualIgnoreOrder(existing, merged) {
+			return nil
+		}
+		if cur.Status.CaptureState == nil {
+			cur.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
+		}
+		if cur.Status.CaptureState.DomainSpecificController == nil {
+			cur.Status.CaptureState.DomainSpecificController = &storagev1alpha1.DomainSpecificControllerCaptureState{}
+		}
+		cur.Status.CaptureState.DomainSpecificController.ExcludedRefs = merged
+		changed = true
+		return r.Client.Status().Update(ctx, cur)
+	})
+	return changed, err
 }
 
 func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
@@ -128,8 +183,9 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
 	selector labels.Selector,
-) ([]storagev1alpha1.SnapshotChildRef, error) {
+) ([]storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
+	var excluded []storagev1alpha1.ExcludedObjectRef
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(mapping.SourceGVK)
 	list.SetKind(mapping.SourceGVK.Kind + "List")
@@ -137,14 +193,14 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	if err != nil {
 		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
 		if errors.IsNotFound(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		// Forbidden is RBAC-driven (granted externally via DSC RBACReady). Treating it as "no objects"
+		// Forbidden is RBAC-driven (granted externally via CSD AccessGranted). Treating it as "no objects"
 		// would silently drop coverage, so degrade the graph instead of returning empty (fail-closed).
 		if errors.IsForbidden(err) {
-			return nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
+			return nil, nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	list.Items = resources.Items
 	sort.Slice(list.Items, func(i, j int) bool {
@@ -159,6 +215,18 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
+		// Absolute exclude veto (wave4A): a top-level source object carrying the exclude label is dropped
+		// from EVERY leg (it also fails selector.Matches below, since ResolveResourceSelector folds the
+		// veto in) and is recorded as an explicit top-level drop. This is the root node's OWN direct
+		// exclusion, published into status.captureState.domainSpecificController.excludedRefs so the
+		// SnapshotContent aggregator folds it into the durable excludedRefs aggregate.
+		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
+			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
+				APIVersion: mapping.SourceGVK.GroupVersion().String(),
+				Kind:       mapping.SourceGVK.Kind,
+				Name:       resource.GetName(),
+			})
+		}
 		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
 		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
 		// from the root manifest leg by the same selector, keeping the two legs consistent.
@@ -167,14 +235,14 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		}
 		covered, err := coverage.IsCovered(ctx, resource)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if covered {
 			continue
 		}
-		childName := snapshotChildSnapshotName(nsSnap.Name, mapping.SourceGVK.String(), mapping.SnapshotGVK.String(), resource.GetName(), string(resource.GetUID()))
+		childName := snapshotChildSnapshotName(nsSnap.UID, resource.GetUID())
 		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		ref := storagev1alpha1.SnapshotChildRef{
 			APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
@@ -183,16 +251,19 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 		}
 		refs = append(refs, ref)
 		if err := coverage.ObservePlannedSnapshot(ctx, resource, ref, nil); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	sortSnapshotChildRefs(refs)
-	return refs, nil
+	return refs, excluded, nil
 }
 
-func snapshotChildSnapshotName(parentName, resourceGVK, snapshotGVK, resourceName, resourceUID string) string {
-	sum := sha256.Sum256([]byte(parentName + "|" + resourceGVK + "|" + snapshotGVK + "|" + resourceName + "|" + resourceUID))
-	return "nss-child-" + hex.EncodeToString(sum[:10])
+// snapshotChildSnapshotName is the name of a root-owned domain child snapshot CR, keyed by the parent
+// Snapshot UID and the captured source object UID (unified wave4C scheme, see api/names). The child
+// snapshot GVK is intentionally NOT part of the key (it is derived from the source GVK via the
+// CustomSnapshotDefinition); connectivity is carried by ownerRefs/childRefs, not the name.
+func snapshotChildSnapshotName(parentSnapshotUID, sourceUID types.UID) string {
+	return names.ChildSnapshotName(parentSnapshotUID, sourceUID)
 }
 
 func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
@@ -248,8 +319,8 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 }
 
 // sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
-// RBAC for domain/custom sources is granted externally (DSC RBACReady), so the planner degrades the
-// graph (ChildrenSnapshotReady=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
+// RBAC for domain/custom sources is granted externally (CSD AccessGranted), so the planner degrades the
+// graph (Ready=False/SourceListForbidden) and requeues instead of treating Forbidden as an empty
 // result (which would silently drop coverage) or as a hard reconcile error (noisy log spam while
 // waiting for RBAC to be granted).
 type sourceListForbiddenError struct {
@@ -387,15 +458,16 @@ func coverageObjectKey(identity controllercommon.SnapshotSourceIdentity) string 
 	return identity.APIVersion + "|" + identity.Kind + "|" + identity.Namespace + "|" + identity.Name
 }
 
-// priorityLayerChildrenSnapshotReady reports whether every child snapshot in a priority layer has published a
-// current ChildrenSnapshotReady=True (observedGeneration == metadata.generation; Ready=True does NOT substitute
-// ChildrenSnapshotReady=True). Returns:
-//   - ready: all children are ChildrenSnapshotReady=True for their current generation;
-//   - terminalMessage: non-empty only when a child surfaced a terminal failure condition (the only
-//     thing that turns the layer into ChildrenSnapshotReady=False/GraphPlanningFailed); duration never does;
-//   - pending: human-readable descriptors of the children not yet ready (for the PriorityLayerPending
+// weightLayerCaptureReady reports whether every child snapshot in a weight layer has reached the domain
+// capture barrier 1 (status.captureState.domainSpecificController.phase >= Planned, i.e. Planned or
+// Finished). The former per-child PlanningReady condition was replaced by this domain-owned phase enum;
+// spec is immutable, so no observedGeneration gate is needed. Returns:
+//   - ready: all children are Planned/Finished;
+//   - terminalMessage: non-empty only when a child surfaced a terminal failure (phase=Failed, or a
+//     terminal Ready reason); duration never does;
+//   - pending: human-readable descriptors of the children not yet Planned (for the ChildrenPending
 //     message). Waiting on these is unbounded by design.
-func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
+func (r *SnapshotReconciler) weightLayerCaptureReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, terminalMessage string, pending []string, err error) {
 	for _, ref := range refs {
 		gv, err := schema.ParseGroupVersion(ref.APIVersion)
 		if err != nil {
@@ -414,12 +486,8 @@ func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Cont
 		if failed, message := snapshotChildTerminalFailure(child, gvk, namespace, ref.Name); failed {
 			return false, message, nil, nil
 		}
-		conditions, _, err := unstructured.NestedSlice(child.Object, "status", "conditions")
-		if err != nil {
-			return false, "", nil, err
-		}
-		if !conditionSliceHasCurrentTrue(conditions, snapshotpkg.ConditionChildrenSnapshotReady, child.GetGeneration()) {
-			pending = append(pending, describePendingChildChildrenSnapshotReady(conditions, gvk, namespace, ref.Name, child.GetGeneration()))
+		if !childCaptureAtLeastPlanned(child) {
+			pending = append(pending, describePendingChildPhase(child, gvk, namespace, ref.Name))
 		}
 	}
 	if len(pending) > 0 {
@@ -428,25 +496,53 @@ func (r *SnapshotReconciler) priorityLayerChildrenSnapshotReady(ctx context.Cont
 	return true, "", nil, nil
 }
 
+// childCapturePhase reads status.captureState.domainSpecificController.phase off a child domain snapshot.
+func childCapturePhase(child *unstructured.Unstructured) string {
+	phase, _, _ := unstructured.NestedString(child.Object, "status", "captureState", "domainSpecificController", "phase")
+	return phase
+}
+
+// childCaptureAtLeastPlanned reports whether the child reached barrier 1 (Planned or Finished): objects
+// created and refs published, so the root may expand its graph and the binder may take over the content.
+func childCaptureAtLeastPlanned(child *unstructured.Unstructured) bool {
+	switch storagev1alpha1.SnapshotCapturePhase(childCapturePhase(child)) {
+	case storagev1alpha1.SnapshotCapturePhasePlanned, storagev1alpha1.SnapshotCapturePhaseFinished:
+		return true
+	default:
+		return false
+	}
+}
+
+// childSubtreePlanned reports whether the child's main-computed recursive planning latch
+// status.captureState.commonController.subtreePlanned is present and true — i.e. the child AND its whole
+// subtree finished planning (design §8.1, decision #10). The orphan/residual wave gates on this rather
+// than the child's own phase so a PVC covered by a not-yet-planned GRANDCHILD is never momentarily seen
+// as orphan. nil/false (absent latch) reads as "subtree not planned yet".
+func childSubtreePlanned(child *unstructured.Unstructured) bool {
+	v, found, _ := unstructured.NestedBool(child.Object, "status", "captureState", "commonController", "subtreePlanned")
+	return found && v
+}
+
 // allDeclaredDomainChildSnapshotsReady reports whether every declared DOMAIN child snapshot of the root
-// (Snapshot.status.childrenSnapshotRefs, excluding CSI VolumeSnapshot visibility leaves) has reached full
-// Ready=True. It is the wave barrier for root orphan/residual PVC volume capture: orphan PVCs must be
-// evaluated only after the domain subtree has finished capturing, so a PVC that a domain child covers is
-// never momentarily seen as orphan (which previously created an nss-vs-* VolumeSnapshot + child volume
-// node that then got pruned, leaving a dangling, never-archiving node). The root MANIFEST branch is not
-// gated by this. A NotFound or not-yet-Ready child is pending (not a failure); a terminal child failure is
-// surfaced separately by the content aggregation (ChildrenFailed), so here it simply keeps the gate closed.
-// Readiness reuses ClassifyGenericChildSnapshotReady (Ready=True == Completed) for the pending/failed
-// descriptors AND enforces the strict generation contract: a Ready=True is honored only when its
-// observedGeneration == metadata.generation, so a stale Ready=True from a previous spec generation cannot
-// open the orphan wave while the child re-reconciles (mirrors readyConditionIsCurrentTerminal /
-// conditionSliceHasCurrentTrue; domain child controllers stamp Ready.observedGeneration on every write).
-// A namespace with no declared domain children passes the gate vacuously.
+// (Snapshot.status.childrenSnapshotRefs) has reached capture barrier 1 (status.captureState.
+// domainSpecificController.phase >= Planned, i.e. Planned or Finished). It is the wave barrier for root
+// orphan/residual PVC volume capture: orphan PVCs must be evaluated only once the already-declared domain
+// subtree's coverage is COMPUTABLE, so a PVC that a domain child covers is never momentarily seen as
+// orphan. Block 5 relaxed this from full Ready=True to phase>=Planned; Block 7b tightens it to the
+// main-computed recursive subtreePlanned latch (design §8.1, decision #10): each DIRECT child must report
+// commonController.subtreePlanned=true, which means the child AND all its descendants finished planning.
+// Direct phase>=Planned was insufficient — a PVC covered by a not-yet-planned GRANDCHILD could momentarily
+// be seen as orphan before that grandchild published its coverage. subtreePlanned needs only planning
+// (not Ready/status.data), so this does not reintroduce the deadlock: coverage still reads the covered PVC
+// UIDs straight from captureState (the in-flight VolumeCaptureRequest name for VCR domains, or
+// status.sourceRef.uid for native-CSI VolumeSnapshots — both published by Planned). The root MANIFEST
+// branch is not gated by this. A NotFound child is pending (not created yet); a child whose subtree is not
+// yet planned (latch absent/false) is pending; a terminal child failure (phase=Failed) is NOT surfaced here
+// (the content aggregation reports ChildrenFailed) — it stays pending, keeping the gate closed. No
+// observedGeneration gate: the latch is monotonic and the spec is immutable. A namespace with no declared
+// domain children passes the gate vacuously.
 func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Context, namespace string, refs []storagev1alpha1.SnapshotChildRef) (ready bool, pending []string, err error) {
 	for _, ref := range refs {
-		if snapshotpkg.IsVolumeSnapshotVisibilityLeaf(ref) {
-			continue
-		}
 		gv, perr := schema.ParseGroupVersion(ref.APIVersion)
 		if perr != nil {
 			return false, nil, perr
@@ -461,13 +557,8 @@ func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Co
 			}
 			return false, nil, gerr
 		}
-		if class, msg := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, ref.Name); class != usecase.SnapshotChildReadyClassCompleted {
-			pending = append(pending, msg)
-			continue
-		}
-		// Completed (Ready=True): require the current generation so a stale Ready does not open the gate.
-		if rc := usecase.CurrentReadyCondition(child); rc == nil || rc.ObservedGeneration != child.GetGeneration() {
-			pending = append(pending, fmt.Sprintf("%s/%s/%s (Ready=True but observedGeneration stale/missing; want %d)", gvk.String(), namespace, ref.Name, child.GetGeneration()))
+		if !childSubtreePlanned(child) {
+			pending = append(pending, describePendingChildSubtreePlanned(child, gvk, namespace, ref.Name))
 		}
 	}
 	if len(pending) > 0 {
@@ -477,12 +568,12 @@ func (r *SnapshotReconciler) allDeclaredDomainChildSnapshotsReady(ctx context.Co
 }
 
 // maxPendingChildrenInMessage caps how many pending child descriptors are embedded in the
-// PriorityLayerPending condition message. A namespace may map a large number of source objects; without
+// ChildrenPending condition message. A namespace may map a large number of source objects; without
 // a cap the condition message (and its status patch) could grow unboundedly and the apiserver may
 // reject an oversized status update. The full count is always reported.
 const maxPendingChildrenInMessage = 20
 
-// summarizePendingChildren renders the pending-children part of the PriorityLayerPending message,
+// summarizePendingChildren renders the pending-children part of the ChildrenPending message,
 // truncating to maxPendingChildrenInMessage while still reporting the total count.
 func summarizePendingChildren(pending []string) string {
 	if len(pending) <= maxPendingChildrenInMessage {
@@ -491,53 +582,47 @@ func summarizePendingChildren(pending []string) string {
 	return fmt.Sprintf("pending children (first %d of %d): %s", maxPendingChildrenInMessage, len(pending), strings.Join(pending[:maxPendingChildrenInMessage], ", "))
 }
 
-// describePendingChildChildrenSnapshotReady renders a compact, diagnosable descriptor for a child whose
-// ChildrenSnapshotReady is not yet current: it reports the observed ChildrenSnapshotReady status/reason, distinguishes a
-// missing condition from a stale observedGeneration, so the parent's PriorityLayerPending message
-// makes an hours-long wait explainable rather than silent.
-func describePendingChildChildrenSnapshotReady(conditions []interface{}, gvk schema.GroupVersionKind, namespace, name string, generation int64) string {
-	for _, raw := range conditions {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if m["type"] != snapshotpkg.ConditionChildrenSnapshotReady {
-			continue
-		}
-		status, _ := m["status"].(string)
-		reason, _ := m["reason"].(string)
-		observed, hasObserved := conditionObservedGeneration(m)
-		switch {
-		case status == string(metav1.ConditionTrue) && !hasObserved:
-			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=True without observedGeneration; want %d)", gvk.String(), namespace, name, generation)
-		case status == string(metav1.ConditionTrue) && observed != generation:
-			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=True observedGeneration=%d, stale; want %d)", gvk.String(), namespace, name, observed, generation)
-		default:
-			return fmt.Sprintf("%s/%s/%s (ChildrenSnapshotReady=%s/%s)", gvk.String(), namespace, name, status, reason)
-		}
+// describePendingChildPhase renders a compact, diagnosable descriptor for a child that has not yet
+// reached capture barrier 1, reporting its observed domain phase (empty = not started), so the parent's
+// ChildrenPending message makes an hours-long wait explainable rather than silent.
+func describePendingChildPhase(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) string {
+	phase := childCapturePhase(child)
+	if phase == "" {
+		return fmt.Sprintf("%s/%s/%s (no capture phase yet)", gvk.String(), namespace, name)
 	}
-	return fmt.Sprintf("%s/%s/%s (no ChildrenSnapshotReady condition yet)", gvk.String(), namespace, name)
+	return fmt.Sprintf("%s/%s/%s (capture phase=%s)", gvk.String(), namespace, name, phase)
 }
 
-// conditionObservedGeneration extracts a condition's observedGeneration (int64/float64) and whether
-// the field was present. A missing observedGeneration is treated as "not current" by the strict
-// ChildrenSnapshotReady contract.
-func conditionObservedGeneration(m map[string]interface{}) (int64, bool) {
-	switch observed := m["observedGeneration"].(type) {
-	case int64:
-		return observed, true
-	case float64:
-		return int64(observed), true
-	default:
-		return 0, false
+// describePendingChildSubtreePlanned renders a compact descriptor for a child whose recursive planning
+// latch (commonController.subtreePlanned) is not yet set, reporting its own domain phase so a wait that is
+// blocked on a not-yet-planned DESCENDANT (child phase already Planned, subtree latch still absent) is
+// distinguishable from a child that has not started planning itself.
+func describePendingChildSubtreePlanned(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) string {
+	phase := childCapturePhase(child)
+	if phase == "" {
+		return fmt.Sprintf("%s/%s/%s (subtree not planned yet: no capture phase)", gvk.String(), namespace, name)
 	}
+	return fmt.Sprintf("%s/%s/%s (subtree not planned yet: child phase=%s)", gvk.String(), namespace, name, phase)
 }
 
 func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.GroupVersionKind, namespace, name string) (bool, string) {
-	conditions, _, err := unstructured.NestedSlice(child.Object, "status", "conditions")
-	if err == nil && conditionSliceHasCurrentFalseReason(conditions, snapshotpkg.ConditionChildrenSnapshotReady, snapshotpkg.ReasonGraphPlanningFailed, child.GetGeneration()) {
-		return true, fmt.Sprintf("child snapshot %s/%s/%s failed graph planning", gvk.String(), namespace, name)
+	// Domain-owned terminal: phase=Failed carries the domain reason/message.
+	if storagev1alpha1.SnapshotCapturePhase(childCapturePhase(child)) == storagev1alpha1.SnapshotCapturePhaseFailed {
+		reason, _, _ := unstructured.NestedString(child.Object, "status", "captureState", "domainSpecificController", "reason")
+		msg, _, _ := unstructured.NestedString(child.Object, "status", "captureState", "domainSpecificController", "message")
+		detail := reason
+		if msg != "" {
+			detail = fmt.Sprintf("%s: %s", reason, msg)
+		}
+		return true, fmt.Sprintf("child snapshot %s/%s/%s failed capture (phase=Failed): %s", gvk.String(), namespace, name, detail)
 	}
+	// Core-derived terminal: a terminal Ready reason on the child. This is the fail-closed path for a domain
+	// child's data-leg failure caught DURING root planning (vcr-watch-core-terminal): the core makes the
+	// child content terminal (VolumeCaptureFailed) and mirrors it onto the child's Ready, and this gate
+	// catches it (e.g. VolumeCaptureFailed, GraphPlanningFailed, ChildrenFailed). The consumer
+	// (planNamespaceChildren) surfaces it on the root as the CANONICAL ChildrenFailed — the same reason the
+	// content aggregation + Ready mirror produce when the failure lands post-Planned — so the root's
+	// terminal reason does not depend on the race between the child failure and MarkPlanned.
 	class, message := usecase.ClassifyGenericChildSnapshotReady(child, gvk, namespace, name)
 	if class == usecase.SnapshotChildReadyClassFailed && readyConditionIsCurrentTerminal(child) {
 		return true, message
@@ -549,58 +634,44 @@ func snapshotChildTerminalFailure(child *unstructured.Unstructured, gvk schema.G
 // current generation (observedGeneration == metadata.generation). The Ready-based terminal classifier
 // (usecase.ClassifyGenericChildSnapshotReady) does not check observedGeneration, so without this guard
 // a stale Ready=False/<terminal reason> from an older spec generation could trip a false terminal
-// failure in the wave gate. Mirrors the strict ChildrenSnapshotReady contract: a terminal state counts only when
-// the child has confirmed it for the current generation.
+// failure in the wave gate: a terminal state counts only when the child confirmed it for the current
+// generation.
 func readyConditionIsCurrentTerminal(child *unstructured.Unstructured) bool {
 	rc := usecase.CurrentReadyCondition(child)
 	return rc != nil && rc.ObservedGeneration == child.GetGeneration()
 }
 
-func conditionSliceHasCurrentTrue(conditions []interface{}, typ string, generation int64) bool {
-	for _, raw := range conditions {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if m["type"] != typ || m["status"] != string(metav1.ConditionTrue) {
-			continue
-		}
-		// Strict contract: ChildrenSnapshotReady=True counts only with observedGeneration == metadata.generation.
-		// A missing or stale observedGeneration means the child has not confirmed the current spec, so
-		// the layer stays pending (never silently treated as ready).
-		observed, ok := conditionObservedGeneration(m)
-		return ok && observed == generation
-	}
-	return false
-}
-
-func conditionSliceHasCurrentFalseReason(conditions []interface{}, typ, reason string, generation int64) bool {
-	for _, raw := range conditions {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if m["type"] != typ || m["status"] != string(metav1.ConditionFalse) || m["reason"] != reason {
-			continue
-		}
-		// Strict contract: a terminal ChildrenSnapshotReady=False is only current with observedGeneration ==
-		// metadata.generation. A stale/missing observedGeneration is treated as not-yet-current
-		// (pending), so a child must re-confirm failure for the current spec generation.
-		observed, ok := conditionObservedGeneration(m)
-		return ok && observed == generation
-	}
-	return false
-}
-
+// patchSnapshotChildrenRefs publishes the planned child refs onto the root Snapshot without touching any
+// condition. The root no longer carries a PlanningReady condition; planning success is observable via the
+// refs alone, and the user-facing Ready is later mirrored from the bound SnapshotContent during capture.
 func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
 	ctx context.Context,
 	parent types.NamespacedName,
 	desired []storagev1alpha1.SnapshotChildRef,
 ) (bool, error) {
-	return r.patchSnapshotChildrenRefsCondition(ctx, parent, desired, metav1.ConditionTrue, snapshotpkg.ReasonCompleted, "child planning complete")
+	changed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		cur := &storagev1alpha1.Snapshot{}
+		if err := r.Client.Get(ctx, parent, cur); err != nil {
+			return err
+		}
+		effective := mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
+		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) {
+			return nil
+		}
+		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
+		changed = true
+		return r.Client.Status().Update(ctx, cur)
+	})
+	return changed, err
 }
 
-func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
+// patchSnapshotChildrenRefsWithReady publishes the planned child refs AND a local Ready condition on the
+// root Snapshot. It is used during planning to surface a graph-planning failure or a pending weight layer
+// (the root has no bound-content Ready to mirror yet): terminal reasons (GraphPlanningFailed) or
+// non-terminal ones (ChildrenPending / SourceListForbidden). Once planning completes and capture proceeds,
+// the content->Snapshot Ready mirror takes over.
+func (r *SnapshotReconciler) patchSnapshotChildrenRefsWithReady(
 	ctx context.Context,
 	parent types.NamespacedName,
 	desired []storagev1alpha1.SnapshotChildRef,
@@ -609,26 +680,24 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
 	message string,
 ) (bool, error) {
 	changed := false
-	var effective []storagev1alpha1.SnapshotChildRef
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &storagev1alpha1.Snapshot{}
 		if err := r.Client.Get(ctx, parent, cur); err != nil {
 			return err
 		}
-		effective = mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		domainReady := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
-		domainReadyCurrent := domainReady != nil &&
-			domainReady.Status == status &&
-			domainReady.Reason == reason &&
-			domainReady.Message == message &&
-			domainReady.ObservedGeneration == cur.Generation
-		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && domainReadyCurrent {
+		effective := mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
+		readyCond := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
+		readyCurrent := readyCond != nil &&
+			readyCond.Status == status &&
+			readyCond.Reason == reason &&
+			readyCond.Message == message &&
+			readyCond.ObservedGeneration == cur.Generation
+		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && readyCurrent {
 			return nil
 		}
 		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
-		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionChildrenSnapshotReady,
+			Type:               snapshotpkg.ConditionReady,
 			Status:             status,
 			Reason:             reason,
 			Message:            message,
@@ -640,10 +709,13 @@ func (r *SnapshotReconciler) patchSnapshotChildrenRefsCondition(
 	return changed, err
 }
 
-func (r *SnapshotReconciler) patchSnapshotChildrenSnapshotReady(
+// patchSnapshotNotReadyLocal writes a local (non-mirror) Ready=False condition on the root Snapshot. It is
+// used for planning-time failures that cannot yet be represented by the bound SnapshotContent (e.g. a graph
+// planning error before any content Ready exists); the Ready=True path is always driven by the mirror from
+// SnapshotContent, so this local writer only ever reports the failure state.
+func (r *SnapshotReconciler) patchSnapshotNotReadyLocal(
 	ctx context.Context,
 	key types.NamespacedName,
-	status metav1.ConditionStatus,
 	reason string,
 	message string,
 ) error {
@@ -652,19 +724,18 @@ func (r *SnapshotReconciler) patchSnapshotChildrenSnapshotReady(
 		if err := r.Client.Get(ctx, key, cur); err != nil {
 			return err
 		}
-		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionChildrenSnapshotReady)
+		existing := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
 		if existing != nil &&
-			existing.Status == status &&
+			existing.Status == metav1.ConditionFalse &&
 			existing.Reason == reason &&
 			existing.Message == message &&
 			existing.ObservedGeneration == cur.Generation {
 			return nil
 		}
 		base := cur.DeepCopy()
-		cur.Status.ObservedGeneration = cur.Generation
 		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionChildrenSnapshotReady,
-			Status:             status,
+			Type:               snapshotpkg.ConditionReady,
+			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            message,
 			ObservedGeneration: cur.Generation,
@@ -691,16 +762,16 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 }
 
 // coverageRootsForNextWave returns the snapshot refs used to seed the coverage checker for the next
-// (lower) priority wave during child-graph recompute. It intentionally returns ONLY the refs
+// (higher-numeric) weight wave during child-graph recompute. It intentionally returns ONLY the refs
 // planned/confirmed in the current recompute pass and NEVER the parent's own
 // status.childrenSnapshotRefs.
 //
-// Seeding from parent status is the self-coverage idempotency bug: a generated lower-priority child
-// carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
+// Seeding from parent status is the self-coverage idempotency bug: a generated child from another
+// wave carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
 // and marks that source covered. The same source is then skipped this pass, omitted from
 // desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
 // silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
-// coverage between waves flows only from higher-priority subtrees planned in this pass.
+// coverage between waves flows only from earlier (lower-numeric-weight) subtrees planned in this pass.
 func coverageRootsForNextWave(plannedThisPass []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	return append([]storagev1alpha1.SnapshotChildRef{}, plannedThisPass...)
 }

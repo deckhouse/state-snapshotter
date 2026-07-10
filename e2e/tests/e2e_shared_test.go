@@ -48,6 +48,7 @@ const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
 	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
+	envDataTransferTO       = "E2E_DATA_TRANSFER_TIMEOUT"
 	envModuleReadyTO        = "E2E_MODULE_READY_TIMEOUT"
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
@@ -66,7 +67,13 @@ const (
 	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
 	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
 	// where DataImport actually streams bytes back.
-	defaultCaptureTO         = 30 * time.Second
+	defaultCaptureTO = 30 * time.Second
+	// defaultDataTransferTO bounds each data-plane wait shared by phase-4 DataExport (Ready = snapshot
+	// resolved + download URL served) and phase-5 DataImport (Ready = PVC created + upload URL served,
+	// Completed = bytes streamed + durable artifact produced). A stuck transfer (e.g. a DataImport wedged
+	// at reason="PVCCreated" because the importer never serves an upload URL) MUST fail the spec on this
+	// deadline instead of dragging the whole run for tens of minutes. Override via E2E_DATA_TRANSFER_TIMEOUT.
+	defaultDataTransferTO    = 10 * time.Minute
 	defaultModuleTO          = 15 * time.Minute
 	defaultGCTTL             = "60s"
 	defaultStorageClass      = "e2e-thin"
@@ -75,7 +82,7 @@ const (
 
 	moduleName = "state-snapshotter"
 	// The demo domain ships two flat CSDs (one snapshot kind per object): the structural VM snapshot
-	// and the data-backed disk snapshot. Both must reach RBACReady before specs run.
+	// and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
@@ -101,17 +108,25 @@ const (
 	subManifestsDownload = "manifests-download"
 	subManifestsRestore  = "manifests-with-data-restoration"
 	subManifestsUpload   = "manifests-and-children-refs-upload"
+	// subManifestsIdentities is the cluster-scoped SnapshotContent subresource returning the flat,
+	// de-duplicated set of object identities captured across a content's ENTIRE subtree (its own
+	// ManifestCheckpoint plus every descendant). Block 7 Part C (content-single-writer design §8.3): the
+	// root manifest-exclude is computed from this endpoint (sdk.SubtreeManifestIdentities) instead of an
+	// in-reconciler archive read. It is fail-closed (HTTP 409 while any subtree MCP is not Ready or an
+	// object is double-captured across nodes).
+	subManifestsIdentities = "subtree-manifest-identities"
 )
 
-// Condition types. The Ready / ChildrenSnapshotReady contract constants come from api/storage; the leg
-// conditions (ManifestsReady / VolumesReady / ChildrenReady) live in the controller image's pkg/snapshot
-// and are mirrored here as the stable public contract to keep the e2e module dependency-light.
+// Condition types. Ready is the ONLY user-facing contract condition (from api/storage); the former
+// PlanningReady/ManifestsArchived conditions were replaced by internal status fields
+// (captureState.domainSpecificController.phase, captureState.commonController.*). The leg conditions
+// (ManifestsReady / DataReady / ChildrenReady) live in the controller image's pkg/snapshot and are
+// mirrored here as the stable public contract to keep the e2e module dependency-light.
 const (
-	condReady                 = storagev1alpha1.ConditionReady
-	condChildrenSnapshotReady = storagev1alpha1.ConditionChildrenSnapshotReady
-	condManifestsReady        = "ManifestsReady"
-	condVolumesReady          = "VolumesReady"
-	condChildrenReady         = "ChildrenReady"
+	condReady          = storagev1alpha1.ConditionReady
+	condManifestsReady = "ManifestsReady"
+	condDataReady      = "DataReady"
+	condChildrenReady  = "ChildrenReady"
 )
 
 // Demo domain API group (the CRs and their snapshot kinds).
@@ -120,10 +135,10 @@ var demoGroupVersion = demov1alpha1.SchemeGroupVersion.String()
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
 	snapshotGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshots",
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshots",
 	}
 	snapshotContentGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
 	}
 	demoVMGVR = schema.GroupVersionResource{
 		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
@@ -143,6 +158,13 @@ var (
 	manifestCheckpointGVR = schema.GroupVersionResource{
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcheckpoints",
 	}
+	// manifestCaptureRequestGVR is the transient MCR a domain node creates for its own-scope manifest
+	// capture. Block 7 (main-owned commonController, decision #10): the aggregator latches
+	// commonController.manifestCaptured on the xxxSnapshot then REAPS the MCR in the SAME pass, so at
+	// steady state no MCR remains and none is re-created (latch-before-reap => no churn).
+	manifestCaptureRequestGVR = schema.GroupVersionResource{
+		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests",
+	}
 	moduleConfigGVR = schema.GroupVersionResource{
 		Group: "deckhouse.io", Version: "v1alpha1", Resource: "moduleconfigs",
 	}
@@ -157,14 +179,27 @@ var (
 	volumeSnapshotGVR = schema.GroupVersionResource{
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
 	}
+	// volumeSnapshotContentGVR is the cluster-scoped CSI VolumeSnapshotContent — the durable data
+	// artifact a captured node's SnapshotContent.status.data points at. Block 3 moved the ownership
+	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) onto the aggregator, so the e2e
+	// asserts it via this GVR.
+	volumeSnapshotContentGVR = schema.GroupVersionResource{
+		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents",
+	}
 	volumeRestoreRequestGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests",
+	}
+	// volumeCaptureRequestGVR is the storage-foundation VolumeCaptureRequest a domain snapshot creates to
+	// capture a PVC's data. The namespace-root uses its in-flight spec.target as subtree coverage before
+	// the child's dataRef publishes (pkg/volumecapture pvcUIDsFromPendingVCR).
+	volumeCaptureRequestGVR = schema.GroupVersionResource{
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumecapturerequests",
 	}
 	dataExportGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataexports",
 	}
 	dataImportGVR = schema.GroupVersionResource{
-		Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
+		Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports",
 	}
 )
 
@@ -194,6 +229,7 @@ type e2eConfig struct {
 	nsPrefix          string
 	snapshotReadyTO   time.Duration
 	captureReadyTO    time.Duration
+	dataTransferTO    time.Duration
 	moduleReadyTO     time.Duration
 	gcTTL             string
 	volumeData        bool
@@ -248,6 +284,7 @@ func loadConfig() e2eConfig {
 	}
 	cfg.snapshotReadyTO = parseDuration(os.Getenv(envSnapshotReadyTO), defaultSnapshotTO)
 	cfg.captureReadyTO = parseDuration(os.Getenv(envCaptureReadyTO), defaultCaptureTO)
+	cfg.dataTransferTO = parseDuration(os.Getenv(envDataTransferTO), defaultDataTransferTO)
 	cfg.moduleReadyTO = parseDuration(os.Getenv(envModuleReadyTO), defaultModuleTO)
 	return cfg
 }
@@ -309,14 +346,14 @@ func cleanupNestedTestCluster() {
 // --- module / CSD readiness ------------------------------------------------
 
 // waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
-// RBACReady=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
+// AccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
 func waitModuleAndCSDReady(ctx context.Context) error {
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
 	}
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
-		if err := waitObjectCondition(ctx, csdGVR, "", csd, "RBACReady", "True", suiteCfg.moduleReadyTO); err != nil {
-			return fmt.Errorf("demo CSD %s not RBACReady: %w", csd, err)
+		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("demo CSD %s not AccessGranted: %w", csd, err)
 		}
 	}
 	return nil
@@ -394,7 +431,13 @@ func coreGenericSubPath(ns, resource, name, sub string) string {
 }
 
 func coreContentDownloadPath(name string) string {
-	return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s", coreSubresGroup, coreSubresVersion, name, subManifestsDownload)
+	return coreContentSubPath(name, subManifestsDownload)
+}
+
+// coreContentSubPath builds a cluster-scoped SnapshotContent subresource path in the core subresources
+// group (e.g. manifests-download, subtree-manifest-identities).
+func coreContentSubPath(name, sub string) string {
+	return fmt.Sprintf("/apis/%s/%s/snapshotcontents/%s/%s", coreSubresGroup, coreSubresVersion, name, sub)
 }
 
 func demoSubPath(ns, resource, name, sub string) string {
@@ -420,6 +463,18 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "..."
+}
+
+// snapshotCommonControllerLatch reads a core-owned capture-leg latch
+// status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
+// commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
+// subtreeManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
+// SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
+// found=false for these latches (the aggregator never writes them onto its own content). Returns
+// (value, found).
+func snapshotCommonControllerLatch(obj *unstructured.Unstructured, leg string) (value bool, found bool) {
+	v, ok, _ := unstructured.NestedBool(obj.Object, "status", "captureState", "commonController", leg)
+	return v, ok
 }
 
 // --- condition waiters -----------------------------------------------------
@@ -547,7 +602,7 @@ func waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Durati
 // True. The whole set shares a SINGLE timeout budget (one GET per poll checks every leg) rather than
 // granting each leg its own full timeout, so the caller's context can be sized to one `timeout`.
 func waitSnapshotContentReady(ctx context.Context, name string, timeout time.Duration) error {
-	required := []string{condManifestsReady, condVolumesReady, condChildrenReady, condReady}
+	required := []string{condManifestsReady, condDataReady, condChildrenReady, condReady}
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {

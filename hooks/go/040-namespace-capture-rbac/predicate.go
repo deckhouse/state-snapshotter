@@ -17,44 +17,44 @@ limitations under the License.
 package namespace_capture_rbac
 
 import (
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // needsCaptureRBAC reports whether a Snapshot currently requires the transient per-namespace capture
 // RoleBinding (the controller SA reading the live namespace via the wildcard ClusterRole).
 //
-// It keys strictly on the ManifestsArchived subtree latch (Phase A), NOT on Ready: Ready is a live-health
-// signal that re-opens on artifact/child degradation, but degradation is re-validation of existing
-// artifacts — never a fresh read of the live namespace — so it must not re-grant broad read rights.
+// It keys on the root manifest-leg latch (status.captureState.commonController.manifestCaptured), NOT on
+// live Ready: Ready is a live-health signal that re-opens on artifact/child degradation, but degradation
+// is re-validation of existing artifacts — never a fresh read of the live namespace — so it must not
+// re-grant broad read rights. The latch flips once the bound SnapshotContent reports the subtree
+// manifests persisted, and is monotonic (never flips back), so the grant is dropped for good.
 //
-//   - import / static-bind snapshots never capture the live namespace -> false.
-//   - ManifestsArchived=True (Archived): the subtree's manifests are captured; reading the namespace is no
-//     longer needed (immune to later Ready degradation or a child disappearing — the point of the latch).
-//   - ManifestsArchived=False/Failed: manifests can never be archived; the core stops reading the namespace.
-//   - otherwise (Capturing, or the condition not present yet): capture is in progress or about to start —
-//     hold/grant the rights.
+//   - import snapshots never capture the live namespace -> false.
+//   - manifestCaptured=true: the subtree's manifests are captured; reading the namespace is no longer
+//     needed (immune to later Ready degradation or a child disappearing — the point of the latch).
+//   - Ready=False with a terminal reason (IsReasonTerminal): manifests can never be captured for this
+//     run; the core stops reading the namespace.
+//   - otherwise (latch not set yet, Ready non-terminal or absent): capture is in progress or about to
+//     start — hold/grant the rights.
 func needsCaptureRBAC(snap *storagev1alpha1.Snapshot) bool {
 	if snap == nil {
 		return false
 	}
-	if snap.IsImportMode() || snap.IsStaticBind() {
+	if snap.IsImportMode() {
 		return false
 	}
-	cond := apimeta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionManifestsArchived)
-	if cond == nil {
-		// Condition not computed yet: capture is about to start, hold the rights (fail-open for the grant
-		// side narrows the fail-closed Phase 6 window; least-privilege is restored once Archived/Failed).
-		return true
-	}
-	if cond.Status == metav1.ConditionTrue {
+	if cs := snap.Status.CaptureState; cs != nil && cs.CommonController != nil &&
+		cs.CommonController.ManifestCaptured != nil && *cs.CommonController.ManifestCaptured {
 		return false
 	}
-	if cond.Status == metav1.ConditionFalse && cond.Reason == storagev1alpha1.ReasonManifestsArchiveFailed {
+	if cond := apimeta.FindStatusCondition(snap.Status.Conditions, storagev1alpha1.ConditionReady); cond != nil &&
+		cond.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(cond.Reason) {
 		return false
 	}
+	// Capture in progress or about to start: hold the rights (fail-open for the grant side narrows the
+	// fail-closed Phase 6 window; least-privilege is restored once captured or terminally failed).
 	return true
 }
 

@@ -65,15 +65,11 @@ func createTestCheckpoint(name string, ready bool) *storagev1alpha1.ManifestChec
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			UID:  types.UID("test-uid-" + name),
-		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "test-ns",
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      "test-mcr",
-				Namespace: "test-ns",
-				UID:       "mcr-uid",
+			Labels: map[string]string{
+				"state-snapshotter.deckhouse.io/source-request": "test-mcr",
 			},
 		},
+		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{
 			Chunks: []storagev1alpha1.ChunkInfo{
 				{Name: "chunk-0", Index: 0, Checksum: "test-checksum-0"},

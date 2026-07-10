@@ -34,17 +34,16 @@ import (
 // commonContentReadyWithMCPAndDataRefs builds a common SnapshotContent that already carries Ready=True
 // conditions and references a ready MCP plus a single VSC data artifact. It models a node that was
 // previously Ready=True; the aggregation recompute does not depend on the stored conditions.
-func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
+func commonContentReadyWithMCPAndDataRefs(name, vscName string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 		"kind":       "SnapshotContent",
 		"metadata":   map[string]interface{}{"name": name},
 		"status": map[string]interface{}{
-			"manifestCheckpointName": mcpName,
-			"dataRef": map[string]interface{}{
-				"targetUID": "pvc-1",
-				"target": map[string]interface{}{
-					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default",
+			"manifestCheckpointName": "mcp-ok",
+			"data": map[string]interface{}{
+				"source": map[string]interface{}{
+					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default", "uid": "pvc-1",
 				},
 				"artifact": map[string]interface{}{
 					"apiVersion": volumeSnapshotContentAPIVersion,
@@ -62,7 +61,7 @@ func commonContentReadyWithMCPAndDataRefs(name, mcpName, vscName string) *unstru
 }
 
 // Phase 1 revalidation-without-watch: a SnapshotContent that was Ready=True must, on a later reconcile
-// that observes the published data artifact missing, recompute VolumesReady=False / Ready=False with
+// that observes the published data artifact missing, recompute DataReady=False / Ready=False with
 // reason ArtifactMissing and the artifact kind/name in the message. No watch is involved. The manifest
 // leg stays Ready=True (the failure is on the volume leg only).
 func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
@@ -73,7 +72,7 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	content := commonContentReadyWithMCPAndDataRefs("c", "mcp-ok", "vsc-gone")
+	content := commonContentReadyWithMCPAndDataRefs("c", "vsc-gone")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
@@ -81,8 +80,8 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (manifest leg unaffected)", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionFalse || !plan.volumesFailed {
-		t.Fatalf("volumesReady=%s failed=%v, want False/terminal", plan.volumesReady, plan.volumesFailed)
+	if plan.volumeReady != metav1.ConditionFalse || !plan.volumeFailed {
+		t.Fatalf("volumeReady=%s failed=%v, want False/terminal", plan.volumeReady, plan.volumeFailed)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonArtifactMissing {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonArtifactMissing)
@@ -109,7 +108,7 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 		"metadata":   map[string]interface{}{"name": "c"},
 		"status": map[string]interface{}{
 			"manifestCheckpointName": "mcp-ok",
-			"dataRef":                dataRefEntry("pvc-1", "vsc-pending"),
+			"data":                   dataRefEntry("pvc-1", "vsc-pending"),
 		},
 	}}
 	content.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -121,8 +120,8 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (MCP ready)", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionFalse || plan.volumesFailed {
-		t.Fatalf("volumesReady=%s failed=%v, want False/non-terminal", plan.volumesReady, plan.volumesFailed)
+	if plan.volumeReady != metav1.ConditionFalse || plan.volumeFailed {
+		t.Fatalf("volumeReady=%s failed=%v, want False/non-terminal", plan.volumeReady, plan.volumeFailed)
 	}
 	if plan.readyStatus != metav1.ConditionFalse || plan.readyReason != snapshot.ReasonDataCapturePending {
 		t.Fatalf("ready=%s/%s, want False/%s", plan.readyStatus, plan.readyReason, snapshot.ReasonDataCapturePending)
@@ -203,9 +202,8 @@ func TestChildrenReadySuccessMessageReflectsState(t *testing.T) {
 
 func dataRefEntry(targetUID, vscName string) map[string]interface{} {
 	return map[string]interface{}{
-		"targetUID": targetUID,
-		"target": map[string]interface{}{
-			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": targetUID, "namespace": "default",
+		"source": map[string]interface{}{
+			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": targetUID, "namespace": "default", "uid": targetUID,
 		},
 		"artifact": map[string]interface{}{
 			"apiVersion": volumeSnapshotContentAPIVersion,

@@ -6,6 +6,7 @@ require (
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/state-snapshotter/lib/go/common v0.0.0-00010101000000-000000000000
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-00010101000000-000000000000
 	github.com/go-logr/logr v1.4.3
 	github.com/onsi/ginkgo/v2 v2.23.3
 	github.com/onsi/gomega v1.37.0
@@ -18,6 +19,7 @@ require (
 	k8s.io/client-go v0.32.10
 	k8s.io/component-base v0.32.10
 	k8s.io/klog/v2 v2.130.1
+	k8s.io/utils v0.0.0-20241210054802-24370beab758
 	sigs.k8s.io/controller-runtime v0.20.4
 	sigs.k8s.io/yaml v1.4.0
 )
@@ -25,6 +27,7 @@ require (
 replace (
 	github.com/deckhouse/state-snapshotter/api => ../../api
 	github.com/deckhouse/state-snapshotter/lib/go/common => ../../lib/go/common
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk => ../../pkg/snapshotsdk
 )
 
 require (
@@ -118,7 +121,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/kms v0.32.10 // indirect
 	k8s.io/kube-openapi v0.0.0-20241212222426-2c72e554b1e7 // indirect
-	k8s.io/utils v0.0.0-20241210054802-24370beab758 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.0 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.5.0 // indirect

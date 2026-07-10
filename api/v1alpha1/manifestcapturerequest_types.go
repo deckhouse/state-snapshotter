@@ -23,6 +23,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=mcr
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Checkpoint",type=string,JSONPath=`.status.checkpointName`
 type ManifestCaptureRequest struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -41,9 +42,21 @@ type ManifestCaptureRequestList struct {
 
 // +k8s:deepcopy-gen=true
 type ManifestCaptureRequestSpec struct {
-	// Targets specifies the objects to capture
-	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest
-	Targets []ManifestTarget `json:"targets"`
+	// Targets specifies the objects to capture.
+	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest, with a
+	// single exception: the capture's own Namespace object (core v1 Namespace whose name equals the
+	// ManifestCaptureRequest namespace) is the only allowed cluster-scoped target.
+	//
+	// Optional (may be empty): an MCR with no targets is a valid EMPTY capture. It is produced by the
+	// namespace-root aggregator when a namespace has no allowlisted objects to capture (a single-object
+	// domain snapshot always passes its own source identity, so it never hits this case). The executor
+	// (ManifestCheckpointController) already handles an empty target set end-to-end — it writes a single
+	// empty content chunk and marks the ManifestCheckpoint Ready=Completed — so an empty MCR converges to
+	// an empty, Ready MCP and the owning SnapshotContent becomes ManifestsReady=True. This field is
+	// therefore NOT required: the SDK sends a null/omitted targets for the empty aggregator MCR, and a
+	// required constraint would reject that create with "spec.targets: Required value".
+	// +optional
+	Targets []ManifestTarget `json:"targets,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -51,7 +64,9 @@ type ManifestTarget struct {
 	// APIVersion of the target object
 	APIVersion string `json:"apiVersion"`
 	// Kind of the target object
-	// Cluster-scoped resources (Namespace, Node, PersistentVolume, ClusterRole, etc.) are NOT allowed
+	// Cluster-scoped resources (Node, PersistentVolume, ClusterRole, etc.) are NOT allowed, with a single
+	// exception: the core v1 Namespace whose name equals the ManifestCaptureRequest namespace (the capture's
+	// own Namespace object).
 	Kind string `json:"kind"`
 	// Name of the target object
 	Name string `json:"name"`

@@ -30,25 +30,24 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
 const importRootSnapshotName = "import-root"
 
-// createImportRootSnapshot creates an import-mode root Snapshot (spec.source.import: {}). The controller
+// createImportRootSnapshot creates an import-mode root Snapshot (spec.mode: Import). The controller
 // holds it pending until the per-node manifests are uploaded, then materializes its SnapshotContent.
 func createImportRootSnapshot(ctx context.Context, ns, name string) error {
 	snap := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "storage.deckhouse.io/v1alpha1",
+		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 		"kind":       "Snapshot",
 		"metadata": map[string]interface{}{
 			"name":      name,
 			"namespace": ns,
 		},
 		"spec": map[string]interface{}{
-			"source": map[string]interface{}{
-				"import": map[string]interface{}{},
-			},
+			"mode": "Import",
 		},
 	}}
 	_, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
@@ -74,7 +73,7 @@ func buildUploadBody(ownManifests []byte, childRefs []childRef) ([]byte, error) 
 //
 // Scope note: this spec reconstructs only a structural root node (empty childRefs) as a minimal
 // upload-transport + import-orchestrator contract test. Full multi-node demo tree import (including
-// DemoVirtualMachineSnapshot as a structural intermediate node via spec.source.import) is client-drivable
+// DemoVirtualMachineSnapshot as a structural intermediate node via spec.mode: Import) is client-drivable
 // and covered by phase-5 importVariantsSpecs in backup_restore_test.go.
 func importSpecs() {
 	Context("Export -> import round-trip", func() {
@@ -128,6 +127,30 @@ func importSpecs() {
 
 			By("Asserting the reconstructed SnapshotContent reaches all leg conditions")
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
+
+			By("Asserting the aggregator projected the import manifest leg and the reconstructed checkpoint was handed off (MCP durability)")
+			// content-single-writer design §10 (w8-block6b-1): the SnapshotContentController aggregator, not
+			// the import orchestrator, is the single writer of status.manifestCheckpointName for imports.
+			co, err := getResource(ctx, snapshotContentGVR, "", content)
+			Expect(err).NotTo(HaveOccurred())
+			mcpName, _, _ := unstructured.NestedString(co.Object, "status", "manifestCheckpointName")
+			Expect(mcpName).NotTo(BeEmpty(), "aggregator must project status.manifestCheckpointName for the import root")
+
+			// MCP durability (w8-block6a): the per-CR upload creates the reconstructed ManifestCheckpoint
+			// GC-safe under a dedicated import ObjectKeeper (FollowObjects the import Snapshot), and once the
+			// content is bound the aggregator hands the checkpoint off to the SnapshotContent as its controller
+			// owner and sweeps the now-redundant import ObjectKeeper. After Ready the checkpoint must be owned
+			// by the content (the durable end-state), so deleting the content GCs the checkpoint.
+			mcp, err := getResource(ctx, manifestCheckpointGVR, "", mcpName)
+			Expect(err).NotTo(HaveOccurred(), "reconstructed ManifestCheckpoint %s must exist", mcpName)
+			ownedByContent := false
+			for _, o := range mcp.GetOwnerReferences() {
+				if o.Kind == "SnapshotContent" && o.Name == content {
+					ownedByContent = true
+				}
+			}
+			Expect(ownedByContent).To(BeTrue(),
+				"reconstructed ManifestCheckpoint %s must be owned by SnapshotContent %s after the durability handoff", mcpName, content)
 		})
 	})
 }
@@ -215,7 +238,14 @@ func waitControllerSnapshotRootOkTtlRolledOut(ctx context.Context, want *string,
 // re-aligns the OK TTL to the live config on every reconcile, so this confirms the new snapshotRootOkTtl
 // has actually propagated to a running controller before the GC timing assertions run.
 func waitRootOkTTL(ctx context.Context, ns, snap string, want, timeout time.Duration) error {
-	okName := fmt.Sprintf("ret-snap-%s-%s", ns, snap)
+	// The root ObjectKeeper name is UID-derived (nss-ok-<h16(snapshotUID)>, api/names.ObjectKeeperName),
+	// not a ns/name slug — resolve the live Snapshot's UID to address it. The UID is immutable, so a
+	// single lookup before the poll loop is sufficient.
+	snapObj, err := getResource(ctx, snapshotGVR, ns, snap)
+	if err != nil {
+		return fmt.Errorf("get root Snapshot %s/%s to resolve its ObjectKeeper name: %w", ns, snap, err)
+	}
+	okName := names.ObjectKeeperName(snapObj.GetUID())
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {

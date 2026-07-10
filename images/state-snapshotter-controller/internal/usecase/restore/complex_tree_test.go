@@ -101,7 +101,7 @@ func materializeMCP(mcpName string, manifests []map[string]interface{}) []client
 	data, checksum := encodeChunk(manifests)
 	mcpObj := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "source-ns"},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: mcpName + "-chunk-0", Index: 0, Checksum: checksum}},
 			TotalObjects: len(manifests),
@@ -151,9 +151,8 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 		childMCP := "mcp-vol-" + o.vsName
 		objs = append(objs, materializeMCP(childMCP, []map[string]interface{}{pvcManifestRaw(o.pvcName, o.pvcUID)})...)
 		objs = append(objs, orphanChildContent(childContentName, childMCP, o.vsName, &storagev1alpha1.SnapshotDataBinding{
-			TargetUID: o.pvcUID,
-			Target:    storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
-			Artifact:  storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
+			Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
+			Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
 		}))
 		objs = append(objs, volumeSnapshotObj(o.vsName, o.vscName, childContentName))
 		childRefs = append(childRefs, storagev1alpha1.SnapshotChildRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: o.vsName})

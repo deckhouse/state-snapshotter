@@ -30,8 +30,8 @@ import (
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/common"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/demo"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/domain-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/logger"
 	"github.com/deckhouse/state-snapshotter/images/domain-controller/internal/usecase/restore"
 	domainsdk "github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
@@ -104,7 +104,7 @@ func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, resou
 // a straight apply. visited guards against a run-tree cycle.
 //
 // The readiness gate is fail-closed per node: a snapshot's Ready mirrors its bound SnapshotContent.Ready
-// (ManifestsReady && VolumesReady && ChildrenReady), so requiring each visited node Ready=True prevents
+// (ManifestsReady && DataReady && ChildrenReady), so requiring each visited node Ready=True prevents
 // restoring stale data from a node that is mid-recapture.
 func (s *RestoreService) restoreNode(ctx context.Context, resource, namespace, name, targetNamespace string, visited map[string]struct{}) ([]unstructured.Unstructured, error) {
 	key := resource + "/" + name
@@ -238,7 +238,7 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 			if _, ok := covered[sanitized.GetName()]; ok {
 				continue
 			}
-			// A PVC not covered by a domain disk has no data capture here (the sanitizer stripped any
+			// A PVC not covered by a domain disk has no data leg here (the sanitizer stripped any
 			// dataSource/dataSourceRef and the domain path does not do generic orphan-PVC -> VolumeSnapshot
 			// binding). It would restore empty. This is unreachable in the current demo model (every demo
 			// PVC is disk-covered). Fail closed rather than emit a silent data-less PVC, matching the core
@@ -253,14 +253,14 @@ func (s *RestoreService) applyTransform(base []unstructured.Unstructured, namesp
 				// ownerSnapshotName, so owner == "" only happens if a VM node's own base unexpectedly
 				// carries a disk. The disk's PVC (if any) was dropped above as "covered", so emitting the
 				// disk without a spec.dataSource would silently restore it as an empty volume. Fail closed
-				// when the disk carries a data capture (a covered PVC), matching the core compiler's contract
-				// that restore never emits a data-less object. A disk with no PVC captures no data and is
+				// when the disk carries a data leg (a covered PVC), matching the core compiler's contract
+				// that restore never emits a data-less object. A disk with no PVC has no data leg and is
 				// safe to emit untouched.
 				if pvcName, _, _ := unstructured.NestedString(sanitized.Object, "spec", "persistentVolumeClaimName"); pvcName != "" {
-					return nil, fmt.Errorf("DemoVirtualDisk %s/%s captures data (PVC %q) but has no resolvable owning DemoVirtualDiskSnapshot; refusing to emit a data-less disk", effectiveNS, sanitized.GetName(), pvcName)
+					return nil, fmt.Errorf("DemoVirtualDisk %s/%s has a data leg (PVC %q) but no resolvable owning DemoVirtualDiskSnapshot; refusing to emit a data-less disk", effectiveNS, sanitized.GetName(), pvcName)
 				}
 				if s.log != nil {
-					s.log.Warning("[domainapi] DemoVirtualDisk has no PVC to capture as data and no owning disk snapshot; restored without a data source", "namespace", effectiveNS, "disk", sanitized.GetName())
+					s.log.Warning("[domainapi] DemoVirtualDisk has no PVC data leg and no owning disk snapshot; restored without a data source", "namespace", effectiveNS, "disk", sanitized.GetName())
 				}
 			} else {
 				node := &domainsdk.RestoreNode{

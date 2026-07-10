@@ -35,17 +35,18 @@ func ListOwnedPVCTargetsForLogicalContent(
 	c client.Reader,
 	snap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
+	dataBearing DataBearingKindFunc,
 ) ([]vcpkg.Target, error) {
 	namespace, err := snapshotNamespaceForOwnedTargets(snap, content)
 	if err != nil {
 		return nil, err
 	}
-	if content == nil {
-		return nil, nil
-	}
+	// content may be nil in the "late Planned" pre-barrier wave: the residual root scope is content-free
+	// (IsResidualRootPVCCaptureScope / listResidualRootOwnedPVCTargets ignore content), and the domain-node
+	// path is nil-safe (listDomainNodeOwnedPVCTargets returns no targets for a nil content).
 	var out []vcpkg.Target
 	if IsResidualRootPVCCaptureScope(snap, content) {
-		out, err = listResidualRootOwnedPVCTargets(ctx, c, namespace, snap, content)
+		out, err = listResidualRootOwnedPVCTargets(ctx, c, namespace, snap, content, dataBearing)
 	} else {
 		out, err = listDomainNodeOwnedPVCTargets(ctx, c, namespace, content)
 	}

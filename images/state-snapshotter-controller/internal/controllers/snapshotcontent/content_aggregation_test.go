@@ -73,7 +73,7 @@ func commonContentWithStatus(name, mcpName string, childNames ...string) *unstru
 // contentWithSnapshotRef builds a common SnapshotContent unstructured carrying spec.snapshotRef (the
 // binding-subject back-reference used by the declared-children fail-closed check) plus optional
 // manifestCheckpointName and published child content edges.
-func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childContentNames ...string) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
+func contentWithSnapshotRef(name, mcpName, ownerName string, childContentNames ...string) *unstructured.Unstructured {
 	status := map[string]interface{}{}
 	if mcpName != "" {
 		status["manifestCheckpointName"] = mcpName
@@ -94,7 +94,7 @@ func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childConte
 				"apiVersion": storagev1alpha1.SchemeGroupVersion.String(),
 				"kind":       "Snapshot",
 				"name":       ownerName,
-				"namespace":  ownerNS,
+				"namespace":  "ns1",
 			},
 		},
 		"status": status,
@@ -105,7 +105,7 @@ func contentWithSnapshotRef(name, mcpName, ownerNS, ownerName string, childConte
 
 // ownerSnapshotWithChildren builds a typed Snapshot that declares the given child Snapshots in
 // status.childrenSnapshotRefs (strict storage Snapshot refs).
-func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
+func ownerSnapshotWithChildren(name string, childSnapshotNames ...string) *storagev1alpha1.Snapshot {
 	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(childSnapshotNames))
 	for _, cn := range childSnapshotNames {
 		refs = append(refs, storagev1alpha1.SnapshotChildRef{
@@ -115,29 +115,27 @@ func ownerSnapshotWithChildren(ns, name string, childSnapshotNames ...string) *s
 		})
 	}
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: name},
 		Status:     storagev1alpha1.SnapshotStatus{ChildrenSnapshotRefs: refs},
 	}
 }
 
 // boundChildSnapshot builds a typed child Snapshot already bound to a content name.
-func boundChildSnapshot(ns, name, boundContentName string) *storagev1alpha1.Snapshot { //nolint:unparam // test fixture keeps uniform signature
+func boundChildSnapshot(boundContentName string) *storagev1alpha1.Snapshot {
 	return &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "child-snap"},
 		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: boundContentName},
 	}
 }
 
-// contentWithManifestsArchived builds a typed SnapshotContent carrying a single ManifestsArchived
-// condition (read back as a child content under CommonSnapshotContentGVK).
-func contentWithManifestsArchived(name string, status metav1.ConditionStatus, reason string) *storagev1alpha1.SnapshotContent {
-	c := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-		Type:   snapshot.ConditionManifestsArchived,
-		Status: status,
-		Reason: reason,
-	})
-	return c
+// contentWithSubtreeManifestsPersisted builds a typed SnapshotContent carrying the core-internal
+// status.subtreeManifestsPersisted latch (the successor of the former ManifestsArchived condition),
+// read back as a child content under CommonSnapshotContentGVK.
+func contentWithSubtreeManifestsPersisted(name string, persisted bool) *storagev1alpha1.SnapshotContent {
+	return &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status:     storagev1alpha1.SnapshotContentStatus{SubtreeManifestsPersisted: persisted},
+	}
 }
 
 func manifestCheckpointWithReady(name string, status metav1.ConditionStatus, reason, message string) *ssv1alpha1.ManifestCheckpoint {
@@ -152,7 +150,7 @@ func manifestCheckpointWithReady(name string, status metav1.ConditionStatus, rea
 	return mcp
 }
 
-// MCP ready, no data refs, no children -> ManifestsReady=True, VolumesReady=True, Ready=True/Completed.
+// MCP ready, no data refs, no children -> ManifestsReady=True, DataReady=True, Ready=True/Completed.
 func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -167,8 +165,8 @@ func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady = %s, want True", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionTrue {
-		t.Fatalf("volumesReady = %s, want True (no data refs)", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionTrue {
+		t.Fatalf("volumeReady = %s, want True (no data refs)", plan.volumeReady)
 	}
 	if plan.childrenReady != metav1.ConditionTrue {
 		t.Fatalf("childrenReady = %s, want True", plan.childrenReady)
@@ -192,8 +190,8 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionFalse || plan.manifestsFailed {
 		t.Fatalf("manifestsReady=%s failed=%v, want False/non-terminal", plan.manifestsReady, plan.manifestsFailed)
 	}
-	if plan.volumesReady != metav1.ConditionUnknown || plan.volumesReason != snapshot.ReasonManifestCapturePending {
-		t.Fatalf("volumesReady=%s/%s, want Unknown/%s", plan.volumesReady, plan.volumesReason, snapshot.ReasonManifestCapturePending)
+	if plan.volumeReady != metav1.ConditionUnknown || plan.volumeReason != snapshot.ReasonManifestCapturePending {
+		t.Fatalf("volumeReady=%s/%s, want Unknown/%s", plan.volumeReady, plan.volumeReason, snapshot.ReasonManifestCapturePending)
 	}
 	if plan.childrenReady != metav1.ConditionTrue {
 		t.Fatalf("childrenReady=%s, want True", plan.childrenReady)
@@ -203,7 +201,7 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumesReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
+// ManifestsReady=True, DataReady=True, ChildrenReady=False (pending child) -> Ready=False/ChildrenPending.
 func TestContentPlanChildrenPending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -219,8 +217,8 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True", plan.manifestsReady)
 	}
-	if plan.volumesReady != metav1.ConditionTrue {
-		t.Fatalf("volumesReady=%s, want True", plan.volumesReady)
+	if plan.volumeReady != metav1.ConditionTrue {
+		t.Fatalf("volumeReady=%s, want True", plan.volumeReady)
 	}
 	if plan.childrenReady != metav1.ConditionFalse || plan.childrenFailed {
 		t.Fatalf("childrenReady=%s failed=%v, want False/non-terminal", plan.childrenReady, plan.childrenFailed)
@@ -230,7 +228,7 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	}
 }
 
-// ManifestsReady=True, VolumesReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
+// ManifestsReady=True, DataReady=True, ChildrenReady=False (terminal child) -> Ready=False/ChildrenFailed.
 func TestContentPlanChildrenFailed(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
@@ -299,20 +297,20 @@ func TestContentPlanReadyPriorityChildrenFailedOverManifestsPending(t *testing.T
 	}
 }
 
-// ManifestsArchived must NOT latch True while the owning snapshot declares a child that is not yet linked
-// into status.childrenSnapshotContentRefs, even when this node's own manifest leg is ready. This is the
-// fail-closed guard against premature subtree-latch (root cause of the 409 duplicate root capture).
-func TestComputeManifestsArchived_DeclaredButUnlinkedChildPends(t *testing.T) {
+// subtreeManifestsPersisted must NOT latch True while the owning snapshot declares a child that is not yet
+// linked into status.childrenSnapshotContentRefs, even when this node's own manifest leg is ready. This is
+// the fail-closed guard against premature subtree-latch (root cause of the 409 duplicate root capture).
+func TestComputeSubtreeManifestsPersisted_DeclaredButUnlinkedChildPends(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner, childSnap).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	// Own MCP ready, but the declared child (child-snap -> child-content) is not in childrenSnapshotContentRefs.
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
@@ -320,56 +318,54 @@ func TestComputeManifestsArchived_DeclaredButUnlinkedChildPends(t *testing.T) {
 	if plan.manifestsReady != metav1.ConditionTrue {
 		t.Fatalf("manifestsReady=%s, want True (precondition)", plan.manifestsReady)
 	}
-	if plan.manifestsArchivedStatus == metav1.ConditionTrue {
-		t.Fatalf("manifestsArchived must NOT be True while a declared child is unlinked, got %s/%s",
-			plan.manifestsArchivedStatus, plan.manifestsArchivedReason)
+	if plan.subtreeManifestsPersisted {
+		t.Fatalf("subtreeManifestsPersisted must NOT be true while a declared child is unlinked")
 	}
 }
 
-// Once the declared child is both linked into childrenSnapshotContentRefs AND ManifestsArchived=True, the
-// node latches ManifestsArchived=True.
-func TestComputeManifestsArchived_DeclaredChildLinkedAndArchivedLatches(t *testing.T) {
+// Once the declared child is both linked into childrenSnapshotContentRefs AND its own
+// subtreeManifestsPersisted latch is true, the node latches subtreeManifestsPersisted=true.
+func TestComputeSubtreeManifestsPersisted_DeclaredChildLinkedAndPersistedLatches(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
-	childContent := contentWithManifestsArchived("child-content", metav1.ConditionTrue, snapshot.ReasonManifestsArchived)
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
+	childContent := contentWithSubtreeManifestsPersisted("child-content", true)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner, childSnap, childContent).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner", "child-content")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner", "child-content")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.manifestsArchivedStatus != metav1.ConditionTrue || plan.manifestsArchivedReason != snapshot.ReasonManifestsArchived {
-		t.Fatalf("manifestsArchived=%s/%s, want True/%s",
-			plan.manifestsArchivedStatus, plan.manifestsArchivedReason, snapshot.ReasonManifestsArchived)
+	if !plan.subtreeManifestsPersisted {
+		t.Fatalf("subtreeManifestsPersisted=%v, want true", plan.subtreeManifestsPersisted)
 	}
 }
 
-// A leaf node (owning snapshot declares no children) latches ManifestsArchived=True from its own MCP,
-// even with spec.snapshotRef set (no regression for the common no-children case).
-func TestComputeManifestsArchived_LeafLatchesWithSnapshotRef(t *testing.T) {
+// A leaf node (owning snapshot declares no children) latches subtreeManifestsPersisted=true from its own
+// MCP, even with spec.snapshotRef set (no regression for the common no-children case).
+func TestComputeSubtreeManifestsPersisted_LeafLatchesWithSnapshotRef(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner") // no declared children
+	owner := ownerSnapshotWithChildren("owner") // no declared children
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, owner).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	parent := contentWithSnapshotRef("leaf-content", "mcp-ok", "ns1", "owner")
+	parent := contentWithSnapshotRef("leaf-content", "mcp-ok", "owner")
 	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
-	if plan.manifestsArchivedStatus != metav1.ConditionTrue {
-		t.Fatalf("leaf manifestsArchived=%s/%s, want True", plan.manifestsArchivedStatus, plan.manifestsArchivedReason)
+	if !plan.subtreeManifestsPersisted {
+		t.Fatalf("leaf subtreeManifestsPersisted=%v, want true", plan.subtreeManifestsPersisted)
 	}
 }
 
-// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/VolumesReady/ChildrenReady/Ready)
+// reconcileCommonSnapshotContentStatus publishes all conditions (ManifestsReady/DataReady/ChildrenReady/Ready)
 // gen-gated on a real status update.
 func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	ctx := context.Background()
@@ -384,7 +380,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "")
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -401,7 +397,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionVolumesReady, snapshot.ConditionChildrenReady, snapshot.ConditionManifestsArchived, snapshot.ConditionReady} {
+	for _, ct := range []string{snapshot.ConditionManifestsReady, snapshot.ConditionDataReady, snapshot.ConditionChildrenReady, snapshot.ConditionReady} {
 		cond := snapshot.GetCondition(contentLike, ct)
 		if cond == nil {
 			t.Fatalf("condition %s missing", ct)
@@ -413,31 +409,44 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 			t.Fatalf("condition %s observedGeneration=%d, want 7", ct, cond.ObservedGeneration)
 		}
 	}
+
+	// The former ManifestsArchived condition was replaced by the core-internal status.subtreeManifestsPersisted
+	// bool latch; it must be persisted true here and must NOT resurface as a condition.
+	if persisted, _, _ := unstructured.NestedBool(fresh.Object, "status", "subtreeManifestsPersisted"); !persisted {
+		t.Fatalf("status.subtreeManifestsPersisted = false, want true")
+	}
+	if cond := snapshot.GetCondition(contentLike, "ManifestsArchived"); cond != nil {
+		t.Fatalf("legacy ManifestsArchived condition must no longer be published, got %#v", cond)
+	}
 }
 
-// Ready must stay False while the ManifestsArchived subtree latch is still Capturing (here: a declared
-// child is not yet linked into childrenSnapshotContentRefs), EVEN THOUGH the live legs (ManifestsReady /
-// VolumesReady / ChildrenReady) are all satisfied. ManifestsArchived is the lowest-priority Ready gate, so
-// the first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
+// Ready must stay False while the subtree-persist latch is still Capturing (here: a linked, Ready child
+// whose OWN subtree is not yet persisted), EVEN THOUGH the live legs (ManifestsReady / DataReady /
+// ChildrenReady) are all satisfied. The subtree-persist gate is the lowest-priority Ready gate, so the
+// first Ready=True is blocked until the whole subtree's manifests are archived. The resulting !ready is
 // what keeps the Reconcile loop requeuing until the archive wave converges.
 func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
-	owner := ownerSnapshotWithChildren("ns1", "owner", "child-snap")
-	childSnap := boundChildSnapshot("ns1", "child-snap", "child-content")
-	// Own MCP ready and no published child content edges -> own legs + ChildrenReady are True, but the
-	// declared child (child-snap -> child-content) is not yet linked -> archive latch still Capturing -> the
-	// archive gate must hold Ready False.
-	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "ns1", "owner")
+	owner := ownerSnapshotWithChildren("owner", "child-snap")
+	childSnap := boundChildSnapshot("child-content")
+	// The declared child IS linked into childrenSnapshotContentRefs and IS Ready (so the ChildrenReady
+	// read barrier is satisfied — see validateCommonContentChildren), but the child's own subtree is not yet
+	// persisted (subtreeManifestsPersisted=false). Own MCP ready + linked+Ready child => own legs and
+	// ChildrenReady are True, yet the subtree-persist latch is still Capturing -> the (lowest-priority)
+	// archive gate must hold Ready=False on SubtreeManifestCapturePending. This isolates the archive gate
+	// from the read barrier.
+	childContent := contentWithReadyCond("child-content", metav1.ConditionTrue, snapshot.ReasonCompleted, "ready")
+	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner", "child-content")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(mcp, owner, childSnap, parent).
+		WithObjects(mcp, owner, childSnap, childContent, parent).
 		WithStatusSubresource(parent).
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent, false, "", "")
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -458,19 +467,22 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 	if readyCond == nil || readyCond.Status != metav1.ConditionFalse {
 		t.Fatalf("Ready = %#v, want False", readyCond)
 	}
-	if readyCond.Reason != snapshot.ReasonManifestsCapturing {
-		t.Fatalf("Ready reason = %q, want %q (archive gate)", readyCond.Reason, snapshot.ReasonManifestsCapturing)
+	if readyCond.Reason != snapshot.ReasonSubtreeManifestCapturePending {
+		t.Fatalf("Ready reason = %q, want %q (subtree-persist gate)", readyCond.Reason, snapshot.ReasonSubtreeManifestCapturePending)
 	}
 }
 
-// A terminal subtree-archive failure must propagate up the tree as a ChildrenFailed: a child whose subtree
-// can never be archived makes the parent terminally failed too. ManifestsCapturing is transient (pending),
-// not terminal. This guards the terminal-reason set against a future Ready-priority change that could let a
-// child surface ManifestsArchiveFailed on Ready.
-func TestManifestsArchiveFailedIsTerminalChildFailure(t *testing.T) {
+// A terminal child-content failure must propagate up the tree as a ChildrenFailed: a child whose subtree
+// can never be captured makes the parent terminally failed too. The subtree-persist pending reason is
+// transient (pending), not terminal. This guards the terminal-reason set against a future Ready-priority
+// change that could let a transient child surface as a terminal failure on Ready.
+func TestTerminalChildContentFailureClassification(t *testing.T) {
 	terminal := []string{
-		snapshot.ReasonManifestsArchiveFailed,
 		snapshot.ReasonManifestCheckpointFailed,
+		snapshot.ReasonDataArtifactInvalid,
+		snapshot.ReasonDataArtifactNotSupported,
+		snapshot.ReasonArtifactMissing,
+		snapshot.ReasonVolumeCaptureFailed,
 		snapshot.ReasonChildrenFailed,
 	}
 	for _, reason := range terminal {
@@ -478,7 +490,94 @@ func TestManifestsArchiveFailedIsTerminalChildFailure(t *testing.T) {
 			t.Fatalf("isTerminalChildContentFailure(%q) = false, want true", reason)
 		}
 	}
-	if isTerminalChildContentFailure(snapshot.ReasonManifestsCapturing) {
-		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonManifestsCapturing)
+	if isTerminalChildContentFailure(snapshot.ReasonSubtreeManifestCapturePending) {
+		t.Fatalf("isTerminalChildContentFailure(%q) = true, want false (transient)", snapshot.ReasonSubtreeManifestCapturePending)
 	}
+}
+
+// Premature-Ready gate (content-single-writer §4 Slice 3 / §11.4): reconcileDataLegProjection is the single
+// writer of status.data and publishes it via a SEPARATE status patch, so during a pass where the data leg is
+// still converging (just published, or the VCR/VSC not ready) the in-memory content has an empty
+// status.dataRefs that resolveDataReadiness treats as volume N/A (DataReady=True). For a content that HAS
+// an expected data leg this must NOT let Ready escalate to True (and mirrorReadyToOwnerSnapshot propagate it)
+// before the bound VolumeSnapshotContent's readyToUse is validated. reconcileCommonSnapshotContentStatus
+// honours the dataLegPending signal by downgrading the stale-empty volume leg to a non-terminal
+// DataCapturePending and re-deriving Ready; with the signal off the same content is manifest-only and stays
+// Ready=True (N/A). This pins the Bugbot-flagged same-pass premature-Ready regression closed.
+func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	mcp := manifestCheckpointWithReady("mcp-ok", metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "ok")
+
+	build := func(name string) (*SnapshotContentController, *unstructured.Unstructured, client.Client) {
+		content := commonContentWithStatus(name, "mcp-ok")
+		cl := fake.NewClientBuilder().WithScheme(scheme).
+			WithObjects(mcp.DeepCopy(), content).WithStatusSubresource(content).Build()
+		return &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}, content, cl
+	}
+
+	condOf := func(t *testing.T, cl client.Client, name, condType string) *metav1.Condition {
+		t.Helper()
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+		if err := cl.Get(ctx, client.ObjectKey{Name: name}, fresh); err != nil {
+			t.Fatalf("get content: %v", err)
+		}
+		contentLike, err := snapshot.ExtractSnapshotContentLike(fresh)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		return snapshot.GetCondition(contentLike, condType)
+	}
+
+	t.Run("dataLegPending downgrades the stale-empty volume leg and blocks Ready", func(t *testing.T) {
+		r, content, cl := build("dlp-pending")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, "", "")
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if ready {
+			t.Fatalf("Ready must be False while the data leg is still pending (empty status.data must not read as volume N/A)")
+		}
+		if vol := condOf(t, cl, "dlp-pending", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonDataCapturePending {
+			t.Fatalf("DataReady = %#v, want False/%s", vol, snapshot.ReasonDataCapturePending)
+		}
+		if rd := condOf(t, cl, "dlp-pending", snapshot.ConditionReady); rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonDataCapturePending {
+			t.Fatalf("Ready = %#v, want False/%s", rd, snapshot.ReasonDataCapturePending)
+		}
+	})
+
+	t.Run("no data leg keeps Ready=True (manifest-only, empty dataRefs are N/A)", func(t *testing.T) {
+		r, content, cl := build("dlp-absent")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "")
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if !ready {
+			t.Fatalf("manifest-only content (no data leg) must stay Ready=True")
+		}
+		if vol := condOf(t, cl, "dlp-absent", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionTrue {
+			t.Fatalf("DataReady = %#v, want True (N/A, no data refs)", vol)
+		}
+	})
+
+	// vcr-watch-core-terminal (decision D2): a terminal data-leg reason (failed VCR / Variant-A fault)
+	// makes the CONTENT itself terminal: DataReady=False/VolumeCaptureFailed and Ready=False/VolumeCaptureFailed
+	// (terminal beats the pending downgrade). This is what lets the failure propagate up as ChildrenFailed.
+	t.Run("dataLegTerminal makes the content terminal (VolumeCaptureFailed beats pending)", func(t *testing.T) {
+		r, content, cl := build("dlp-terminal")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, snapshot.ReasonVolumeCaptureFailed, "data-leg volume capture failed: csi failed")
+		if err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if ready {
+			t.Fatalf("a terminal data leg must not be Ready")
+		}
+		if vol := condOf(t, cl, "dlp-terminal", snapshot.ConditionDataReady); vol == nil || vol.Status != metav1.ConditionFalse || vol.Reason != snapshot.ReasonVolumeCaptureFailed {
+			t.Fatalf("DataReady = %#v, want False/%s", vol, snapshot.ReasonVolumeCaptureFailed)
+		}
+		if rd := condOf(t, cl, "dlp-terminal", snapshot.ConditionReady); rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonVolumeCaptureFailed {
+			t.Fatalf("Ready = %#v, want False/%s", rd, snapshot.ReasonVolumeCaptureFailed)
+		}
+	})
 }

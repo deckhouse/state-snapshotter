@@ -25,6 +25,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=demovmsnap
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // DemoVirtualMachineSnapshot is an intermediate demo snapshot node (PR5b) under root Snapshot; disk snapshots may attach here.
 type DemoVirtualMachineSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -34,27 +35,24 @@ type DemoVirtualMachineSnapshot struct {
 	Status DemoVirtualMachineSnapshotStatus `json:"status,omitempty"`
 }
 
-// DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. Exactly one of
-// SourceRef (capture) or Source (import) is set.
+// DemoVirtualMachineSnapshotSpec defines the desired state of DemoVirtualMachineSnapshot. spec.mode
+// selects the content source: Capture (sourceRef) or Import (no source).
 // +k8s:deepcopy-gen=true
-// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) != has(self.source)",message="exactly one of spec.sourceRef (capture) or spec.source (import) must be set"
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Capture' ? has(self.sourceRef) : !has(self.sourceRef)",message="spec.sourceRef is required in Capture mode and forbidden otherwise"
 type DemoVirtualMachineSnapshotSpec struct {
-	// SourceRef identifies the DemoVirtualMachine captured by this snapshot in CAPTURE mode. It is the
-	// single source-of-truth for what the snapshot captures and is immutable once set. It is a pointer so
-	// its presence unambiguously selects capture mode for the exactly-one-of rule; an IMPORT-mode snapshot
-	// (spec.source.import) has no live source VM and omits it.
+	// Mode selects how this VM snapshot obtains its content (Capture|Import), immutable.
+	// Capture: capture the live source VM (spec.sourceRef) and plan children. Import: materialize from an
+	// uploaded payload plus child refs (no live capture).
+	// +kubebuilder:default=Capture
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.sourceRef is immutable"
-	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
+	Mode storagev1alpha1.SnapshotMode `json:"mode,omitempty"`
 
-	// Source, when set, switches this VM snapshot into IMPORT mode (spec.source.import: {} only — no static
-	// pre-provisioning on a demo leaf). In import mode the domain controller does NO capture planning (no
-	// source-VM lookup, no children planning, no MCR): the common controller materializes it from the
-	// uploaded manifests and child refs. Immutable once set.
+	// SourceRef identifies the DemoVirtualMachine captured by this snapshot in Capture mode. It is the
+	// single source-of-truth for what the snapshot captures and is immutable once set. Required in Capture
+	// mode and forbidden otherwise.
 	// +optional
-	// +kubebuilder:validation:XValidation:rule="has(self.import) && !has(self.snapshotContentName)",message="only spec.source.import: {} is supported on a demo snapshot leaf"
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.source is immutable"
-	Source *storagev1alpha1.SnapshotSource `json:"source,omitempty"`
+	SourceRef *SnapshotSourceRef `json:"sourceRef,omitempty"`
 }
 
 // DemoVirtualMachineSnapshotStatus defines the observed state of DemoVirtualMachineSnapshot.
@@ -63,16 +61,18 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped SnapshotContent name, once created.
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
-	// ManifestCaptureRequestName is the temporary MCR owned by this snapshot while own-scope capture runs.
-	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
+	// SourceRef is the full reference to the captured live source object (top-level, written by the
+	// domain controller via PublishSnapshotSource). Self-contained for import-mode recreation.
+	// +optional
+	SourceRef *storagev1alpha1.SnapshotSourceObjectRef `json:"sourceRef,omitempty"`
 
-	// ManifestCaptured is set by the common controller once this snapshot's manifest capture has been
-	// durably handed off to SnapshotContent (manifestCheckpointName published and the ManifestCheckpoint
-	// owned by the content). It is a domain-only suppression signal: the domain controller reads it to
-	// stop re-creating the MCR after the common controller deletes it, without ever reading SnapshotContent.
-	ManifestCaptured bool `json:"manifestCaptured,omitempty"`
+	// CaptureState collects internal capture signals. As a manifest-only aggregator, commonController
+	// carries only manifestCaptured (no dataCaptured), and domainSpecificController carries the MCR ref +
+	// phase (no volumeCaptureRequestName).
+	// +optional
+	CaptureState *storagev1alpha1.CaptureStateStatus `json:"captureState,omitempty"`
 
-	// Conditions report readiness (e.g. Ready=True for generic parent children-readiness aggregation).
+	// Conditions report readiness. Ready is the single user-facing condition, always derived by the core.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -85,13 +85,20 @@ type DemoVirtualMachineSnapshotStatus struct {
 	// +listMapKey=kind
 	// +listMapKey=name
 	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
+
+	// ExcludedRefs is the TOP-LEVEL MIRROR of the bound SnapshotContent's durable excludedRefs aggregate
+	// (source objects vetoed out of this VM snapshot's subtree — e.g. a disk labeled with the exclude
+	// veto). Written ONLY by the core, exactly as it mirrors Ready.
+	// +optional
+	// +listType=atomic
+	ExcludedRefs []storagev1alpha1.ExcludedObjectRef `json:"excludedRefs,omitempty"`
 }
 
-// IsImportMode reports whether this VM snapshot is an import target (spec.source.import set). Import
+// IsImportMode reports whether this VM snapshot is an import target (spec.mode == Import). Import
 // nodes are materialized from an uploaded payload + child refs and MUST NOT trigger live capture or
 // children planning (parity with Snapshot.IsImportMode).
 func (s *DemoVirtualMachineSnapshot) IsImportMode() bool {
-	return s != nil && s.Spec.Source != nil && s.Spec.Source.Import != nil
+	return s != nil && s.Spec.Mode == storagev1alpha1.SnapshotModeImport
 }
 
 // +kubebuilder:object:root=true

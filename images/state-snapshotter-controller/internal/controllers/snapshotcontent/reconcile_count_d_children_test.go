@@ -33,15 +33,15 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// readyArchivedChildContent builds a typed child SnapshotContent that is both Ready=True and
-// ManifestsArchived=True, so a parent aggregating it reaches Ready=True.
+// readyArchivedChildContent builds a typed child SnapshotContent that is both Ready=True and has its
+// subtreeManifestsPersisted latch set, so a parent aggregating it reaches Ready=True.
 func readyArchivedChildContent(name string) *storagev1alpha1.SnapshotContent {
-	c := &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	c := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status:     storagev1alpha1.SnapshotContentStatus{SubtreeManifestsPersisted: true},
+	}
 	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshot.ReasonCompleted, Message: "ready",
-	})
-	meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-		Type: snapshot.ConditionManifestsArchived, Status: metav1.ConditionTrue, Reason: snapshot.ReasonManifestsArchived, Message: "archived",
 	})
 	return c
 }
@@ -124,8 +124,8 @@ func TestOwnerSnapshotReadStaysOnAPIReaderForDeclaredChildren(t *testing.T) {
 	ctx := context.Background()
 	scheme := harnessTestScheme(t)
 
-	content := contentWithSnapshotRef("c", "", "ns1", "snap-1")
-	owner := ownerSnapshotWithChildren("ns1", "snap-1") // declares no non-leaf children
+	content := contentWithSnapshotRef("c", "", "snap-1")
+	owner := ownerSnapshotWithChildren("snap-1") // declares no non-leaf children
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owner).Build()
 
 	counters := newSplitCounters()

@@ -23,7 +23,11 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=csd
+// +kubebuilder:metadata:labels=module=state-snapshotter
+// +kubebuilder:printcolumn:name="Weight",type=integer,JSONPath=`.spec.weight`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.conditions[?(@.type=="Accepted")].status`
+// +kubebuilder:printcolumn:name="AccessGranted",type=string,JSONPath=`.status.conditions[?(@.type=="AccessGranted")].status`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // CustomSnapshotDefinition registers custom snapshot types for platform modules.
 // See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
 type CustomSnapshotDefinition struct {
@@ -46,9 +50,12 @@ type CustomSnapshotDefinitionList struct {
 // One CSD registers exactly one snapshot kind (flat schema): the snapshot apiVersion/kind live at the
 // top level, the domain resource being snapshotted is referenced by Source.
 type CustomSnapshotDefinitionSpec struct {
-	// Priority orders universal traversal across snapshot kinds. Higher values run first.
+	// Weight orders universal traversal across snapshot kinds by ascending value: lower weights run
+	// first (earlier traversal wave), like FlowSchema.spec.matchingPrecedence and the Deckhouse-native
+	// NodeGroupConfiguration.spec.weight. It is NOT a Kubernetes PriorityClass value (where a higher
+	// number wins) — the ordering here is the opposite.
 	// +kubebuilder:validation:Minimum=0
-	Priority int32 `json:"priority,omitempty"`
+	Weight int32 `json:"weight,omitempty"`
 	// APIVersion is the apiVersion of the snapshot resource that materializes Source.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -57,10 +64,11 @@ type CustomSnapshotDefinitionSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
-	// DataBacked marks that this snapshot kind carries a volume data leg: the generic controller must
-	// wait for the data artifact (capture) or the matching DataImport (import). Manifest-only snapshot
-	// kinds (no volume data) set false.
-	DataBacked bool `json:"dataBacked,omitempty"`
+	// RequiresDataArtifact marks that this snapshot kind carries a volume data leg: the generic
+	// controller must wait for the data artifact (capture, SnapshotContent.status.data.artifact) or the
+	// matching DataImport (import) before it reports Ready. Manifest-only snapshot kinds (no volume
+	// data) set false.
+	RequiresDataArtifact bool `json:"requiresDataArtifact,omitempty"`
 	// Source is the GVK of the domain resource being snapshotted.
 	// +kubebuilder:validation:Required
 	Source SnapshotGVKRef `json:"source"`
@@ -78,6 +86,11 @@ type SnapshotGVKRef struct {
 
 // +k8s:deepcopy-gen=true
 type CustomSnapshotDefinitionStatus struct {
-	// Conditions include Accepted, RBACReady, Ready (see ADR).
+	// Conditions carry three distinct signals, each with a single writer:
+	//   - Accepted — the spec is valid and registrable (written by the CSD reconciler);
+	//   - AccessGranted — the domain RBAC has been applied (written by the 030-domain-rbac hook);
+	//   - Ready — the aggregate Ready = Accepted && AccessGranted.
+	// Accepted and Ready diverge when Accepted=True but AccessGranted=False (spec accepted, RBAC not yet
+	// applied) → Ready=False; the printer columns surface all three so this is visible at a glance.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

@@ -98,13 +98,18 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 }
 
 // DomainCaptureSnapshotKinds lists dedicated Snapshot kinds whose domain controller plans capture
-// out-of-band (creates MCR/VCR/children, publishes demo.status, owns ChildrenSnapshotReady) but whose
-// cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
+// out-of-band (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase) but
+// whose cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
 // commit 2, D1). They are a strict subset of DedicatedSnapshotControllerKinds: the dedicated planning
 // controller is still activated for them, AND the generic binder additionally watches them (gated by
-// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent. A fully-dedicated kind that
-// also owns its own content (the namespace-root "Snapshot") is NOT in this set.
+// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent.
+//
+// wave5: the namespace-root "Snapshot" is now in this set too ("dogfooding" — the root reconciler drives
+// capture through the same snapshotsdk as external/demo domains and no longer owns its SnapshotContent;
+// the generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready).
+// See docs/wave5-namespace-domain-design.md.
 var DomainCaptureSnapshotKinds = []string{
+	"Snapshot",
 	"DemoVirtualDiskSnapshot",
 	"DemoVirtualMachineSnapshot",
 }
@@ -120,6 +125,20 @@ func IsDomainCaptureSnapshotKind(kind string) bool {
 	return false
 }
 
+// IsOutOfProcessDomainSnapshotKind reports whether kind is owned by a SEPARATE, out-of-process domain
+// controller that serves its own aggregated restore apiserver, so the core restore compiler must
+// DELEGATE that node's subtree to the domain apiserver instead of compiling it in-process.
+//
+// This is the domain-capture set (IsDomainCaptureSnapshotKind) MINUS the built-in root "Snapshot".
+// Since wave5 the namespace-root "Snapshot" is a domain-CAPTURE kind (planned via the in-process SDK,
+// its content owned by the generic binder), but its RESTORE is served by THIS core apiserver. Treating
+// the root as an out-of-process domain node makes the restore compiler delegate it back to core's own
+// manifests-with-data-restoration endpoint — an unbounded self-call that surfaces as a 500. Only the
+// demo/external kinds are genuinely out-of-process for restore, so the root is excluded here.
+func IsOutOfProcessDomainSnapshotKind(kind string) bool {
+	return kind != DefaultSnapshotPair().Snapshot.Kind && IsDomainCaptureSnapshotKind(kind)
+}
+
 // FilterGenericSnapshotGVKPairs returns parallel slices with dedicated snapshot kinds removed.
 func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKind) (snapOut, contentOut []schema.GroupVersionKind) {
 	if len(snapGVKs) != len(contentGVKs) {
@@ -133,6 +152,53 @@ func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKi
 		contentOut = append(contentOut, contentGVKs[i])
 	}
 	return snapOut, contentOut
+}
+
+// StartupDomainCaptureRootPair returns the built-in root Snapshot pair (DefaultSnapshotPair) from the
+// resolved parallel slices, if present. ok is false when the root pair is not in the resolved set
+// (CRDs absent) or the slices are mismatched.
+//
+// The generic binder MUST watch this pair at startup. Since wave5 the namespace-root "Snapshot" is a
+// domain-capture kind whose cluster-scoped SnapshotContent is created/bound/mirrored by the generic
+// binder (not by the root reconciler). But FilterGenericSnapshotGVKPairs strips every dedicated kind
+// (root included), and the only compensating registration — unifiedruntime.Syncer.Sync — runs on CSD
+// reconciles, never at pod boot. So without an explicit startup registration the binder never watches
+// the root Snapshot and root SnapshotContent is never created (the root capture path silently hangs
+// pre-bind). Unlike demo domain-capture kinds (which must stay deferred to Sync until their CSD grants
+// RBAC, to avoid a cache-sync deadlock), the built-in root is always present and needs no gating, so it
+// is safe to register directly at startup. Registration is idempotent, so a later Sync is a no-op.
+func StartupDomainCaptureRootPair(snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	return findResolvedPair(DefaultSnapshotPair().Snapshot, snapGVKs, contentGVKs)
+}
+
+// StartupBuiltInVolumeSnapshotPair returns the built-in CSI VolumeSnapshot pair (BuiltInVolumeSnapshotPair)
+// from the resolved parallel slices, if present (ok=false when the CSI VolumeSnapshot CRD is absent, so the
+// pair never resolved). Boot-wiring parallel to StartupDomainCaptureRootPair but for a NON-dedicated kind:
+//
+// FilterGenericSnapshotGVKPairs keeps VolumeSnapshot (it is not a dedicated kind), so the generic binder
+// already watches it at startup via genericSnapshotGVKs — no separate watch registration is needed here.
+// What IS missing at boot is the domain-capture MARK: without it the binder would treat VolumeSnapshot as a
+// fully-generic kind and eagerly create + bind a SnapshotContent shell before the out-of-process
+// storage-foundation VolumeSnapshot domain controller claims the object (a dual content writer). The only
+// compensating mark — unifiedruntime.Syncer.Sync's "CSD-derived kind => domain-capture" else-branch — runs
+// on CSD reconciles, never at pod boot, and would not fire at all in a cluster with zero CSDs. So main must
+// MarkDomainCaptureKind for this pair at boot; the later Sync re-asserts it idempotently.
+func StartupBuiltInVolumeSnapshotPair(snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	return findResolvedPair(BuiltInVolumeSnapshotPair().Snapshot, snapGVKs, contentGVKs)
+}
+
+// findResolvedPair returns the (snapshot, content) GVKs for target from the parallel resolved slices.
+// ok is false when target is absent or the slices are mismatched.
+func findResolvedPair(target schema.GroupVersionKind, snapGVKs, contentGVKs []schema.GroupVersionKind) (snap, content schema.GroupVersionKind, ok bool) {
+	if len(snapGVKs) != len(contentGVKs) {
+		return schema.GroupVersionKind{}, schema.GroupVersionKind{}, false
+	}
+	for i := range snapGVKs {
+		if snapGVKs[i] == target {
+			return snapGVKs[i], contentGVKs[i], true
+		}
+	}
+	return schema.GroupVersionKind{}, schema.GroupVersionKind{}, false
 }
 
 // FilterGenericSnapshotContentGVKs drops content GVKs whose snapshot side is handled by a dedicated

@@ -21,21 +21,25 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
+
+// The domain-capture request lifecycle (capture-leg eager-init, manifestCaptured/dataCaptured latches, the
+// subtreeManifestsPersisted snapshot-mirror, and the MCR/VCR reap) moved to the SnapshotContentController
+// aggregator (main-owned commonController, decision #10); its coverage lives in
+// snapshotcontent/capture_legs_test.go. What remains on the binder is the leaf status.data export mirror
+// (mirrorLeafDataFromContent) and the pure data-binding renderer — covered below.
 
 const (
 	domainTestNS      = "ns1"
@@ -49,7 +53,6 @@ const (
 )
 
 var demoDiskSnapshotGVK = demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualDiskSnapshot")
-var volumeSnapshotContentGVK = schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"}
 
 func domainTestVCRName() string { return vcpkg.SnapshotOwnedVCRName(types.UID(domainTestSnapUID)) }
 
@@ -65,21 +68,10 @@ func domainTestScheme(t *testing.T) *runtime.Scheme {
 	if err := demov1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add demo scheme: %v", err)
 	}
-	return scheme
-}
-
-func domainTestPVC() *corev1.PersistentVolumeClaim {
-	sc := "sc-a"
-	mode := corev1.PersistentVolumeFilesystem
-	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: domainTestNS, Name: domainTestPVCName, UID: types.UID(domainTestPVCUID)},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			StorageClassName: &sc,
-			VolumeMode:       &mode,
-			// No VolumeName: enrichment skips the bound-PV fsType read (no PV installed in this test).
-		},
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add ss scheme: %v", err)
 	}
+	return scheme
 }
 
 func domainTestSnapshotContent() *storagev1alpha1.SnapshotContent {
@@ -88,58 +80,17 @@ func domainTestSnapshotContent() *storagev1alpha1.SnapshotContent {
 	}
 }
 
-func domainTestVCRTarget() vcpkg.Target {
-	return vcpkg.Target{
-		UID:        domainTestPVCUID,
-		APIVersion: corev1.SchemeGroupVersion.String(),
-		Kind:       "PersistentVolumeClaim",
-		Name:       domainTestPVCName,
-		Namespace:  domainTestNS,
-	}
-}
-
-// domainTestReadyVCR builds a Ready VolumeCaptureRequest whose dataRefs bind the PVC target to the VSC.
-func domainTestReadyVCR(withDataRefs bool) *unstructured.Unstructured {
-	obj := vcctrl.NewVolumeCaptureRequestObject(domainTestNS, domainTestVCRName(), metav1.OwnerReference{}, []vcpkg.Target{domainTestVCRTarget()})
-	if withDataRefs {
-		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
-			map[string]interface{}{
-				"type":   vcpkg.ConditionTypeReady,
-				"status": string(metav1.ConditionTrue),
-				"reason": vcpkg.ConditionReasonCompleted,
-			},
-		}, "status", "conditions")
-		_ = unstructured.SetNestedSlice(obj.Object, []interface{}{
-			map[string]interface{}{
-				"targetUID": domainTestPVCUID,
-				"target": map[string]interface{}{
-					"uid": domainTestPVCUID, "apiVersion": corev1.SchemeGroupVersion.String(), "kind": "PersistentVolumeClaim",
-					"name": domainTestPVCName, "namespace": domainTestNS,
-				},
-				"artifact": map[string]interface{}{
-					"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": domainTestVSCName,
-				},
-			},
-		}, "status", "dataRefs")
-	}
-	return obj
-}
-
-// domainTestVSC builds a VolumeSnapshotContent at deletionPolicy=Delete with no owner (pre-handoff).
-func domainTestVSC() *unstructured.Unstructured {
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(volumeSnapshotContentGVK)
-	obj.SetName(domainTestVSCName)
-	_ = unstructured.SetNestedField(obj.Object, "Delete", "spec", "deletionPolicy")
-	_ = unstructured.SetNestedField(obj.Object, true, "status", "readyToUse")
-	return obj
-}
-
 func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructured.Unstructured {
 	t.Helper()
 	snap := &demov1alpha1.DemoVirtualDiskSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: domainTestNS, Name: domainTestSnap, UID: types.UID(domainTestSnapUID)},
-		Status:     demov1alpha1.DemoVirtualDiskSnapshotStatus{VolumeCaptureRequestName: vcrName},
+		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
+					VolumeCaptureRequestName: vcrName,
+				},
+			},
+		},
 	}
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(snap)
 	if err != nil {
@@ -150,174 +101,131 @@ func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructu
 	return obj
 }
 
-func domainTestVCRExists(t *testing.T, cl client.Client) bool {
-	t.Helper()
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
-	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: domainTestNS, Name: domainTestVCRName()}, obj); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false
-		}
-		t.Fatalf("get VCR: %v", err)
-	}
-	return true
-}
-
-// A Ready data-leg VCR is fully handed off by the binder: dataRefs are enriched + published onto the
-// SnapshotContent, the bound VolumeSnapshotContent is re-owned by the content at deletionPolicy=Retain,
-// the domain status.dataCaptured marker is stamped (clearing volumeCaptureRequestName), and the transient
-// VCR is deleted. This restores the data-leg handoff coverage that moved from demo to the common binder.
-func TestEnsureDomainContentLinks_DataLegHandoff(t *testing.T) {
+// mirrorLeafDataFromContent copies the bound SnapshotContent's self-contained data binding verbatim onto
+// the namespaced data leaf's top-level status.data (source + artifact + volume metadata) and writes NO
+// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data in wave5).
+func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
 	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), content, domainTestReadyVCR(true), domainTestVSC(), demoObj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-
-	requeue, treason, tmsg, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("unexpected terminal reason %q (msg=%q)", treason, tmsg)
-	}
-	if requeue {
-		t.Fatalf("handoff complete should not requeue")
-	}
-
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-	if got.Status.DataRef == nil {
-		t.Fatalf("expected 1 published dataRef, got none")
-	}
-	ref := *got.Status.DataRef
-	if ref.TargetUID != domainTestPVCUID || ref.Artifact.Name != domainTestVSCName {
-		t.Fatalf("unexpected dataRef: %#v", ref)
-	}
-	if ref.StorageClassName != "sc-a" || ref.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(ref.AccessModes) != 1 || ref.AccessModes[0] != string(corev1.ReadWriteOnce) {
-		t.Fatalf("dataRef not enriched with volume metadata: %#v", ref)
-	}
-
-	vsc := &unstructured.Unstructured{}
-	vsc.SetGroupVersionKind(volumeSnapshotContentGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestVSCName}, vsc); err != nil {
-		t.Fatalf("get VSC: %v", err)
-	}
-	policy, _, _ := unstructured.NestedString(vsc.Object, "spec", "deletionPolicy")
-	if policy != "Retain" {
-		t.Fatalf("VSC deletionPolicy not forced to Retain, got %q", policy)
-	}
-	ownedByContent := false
-	for _, o := range vsc.GetOwnerReferences() {
-		if o.Kind == "SnapshotContent" && o.Name == domainTestContent && o.UID == types.UID(domainTestConUID) {
-			ownedByContent = true
-		}
-	}
-	if !ownedByContent {
-		t.Fatalf("VSC not re-owned by content: %#v", vsc.GetOwnerReferences())
-	}
-
-	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
-	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "dataCaptured"); !captured {
-		t.Fatalf("expected status.dataCaptured=true after durable handoff")
-	}
-	if name, _, _ := unstructured.NestedString(fresh.Object, "status", "volumeCaptureRequestName"); name != "" {
-		t.Fatalf("expected status.volumeCaptureRequestName cleared after handoff, got %q", name)
-	}
-	if domainTestVCRExists(t, cl) {
-		t.Fatalf("expected the transient VCR to be deleted after durable handoff")
-	}
-}
-
-// A not-yet-Ready data-leg VCR must NOT be handed off: the binder requeues and leaves the VCR, the marker,
-// and the content dataRefs untouched (no premature deletion/marker that would mask an incomplete capture).
-func TestEnsureDomainContentLinks_DataLegPendingRequeues(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
-
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), domainTestSnapshotContent(), domainTestReadyVCR(false), demoObj).
-		Build()
-	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-
-	requeue, treason, _, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
-	}
-	if treason != "" {
-		t.Fatalf("pending VCR must not be terminal, got reason %q", treason)
-	}
-	if !requeue {
-		t.Fatalf("pending VCR should requeue")
-	}
-
-	got := &storagev1alpha1.SnapshotContent{}
-	if err := cl.Get(ctx, client.ObjectKey{Name: domainTestContent}, got); err != nil {
-		t.Fatalf("get content: %v", err)
-	}
-	if got.Status.DataRef != nil {
-		t.Fatalf("pending VCR must not publish dataRefs, got %#v", got.Status.DataRef)
-	}
-	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
-	}
-	if captured, _, _ := unstructured.NestedBool(fresh.Object, "status", "dataCaptured"); captured {
-		t.Fatalf("pending VCR must not set status.dataCaptured")
-	}
-	if !domainTestVCRExists(t, cl) {
-		t.Fatalf("pending VCR must not be deleted")
-	}
-}
-
-// A failed data-leg VCR surfaces an actionable terminal VolumeCaptureFailed condition (no marker, no
-// deletion, no endless silent requeue).
-func TestEnsureDomainContentLinks_DataLegFailedIsTerminal(t *testing.T) {
-	ctx := context.Background()
-	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
-
-	failedVCR := vcctrl.NewVolumeCaptureRequestObject(domainTestNS, domainTestVCRName(), metav1.OwnerReference{}, []vcpkg.Target{domainTestVCRTarget()})
-	_ = unstructured.SetNestedSlice(failedVCR.Object, []interface{}{
-		map[string]interface{}{
-			"type":    vcpkg.ConditionTypeReady,
-			"status":  string(metav1.ConditionFalse),
-			"reason":  "SnapshotCreationFailed",
-			"message": "csi failed",
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName,
+			Namespace: domainTestNS, UID: types.UID(domainTestPVCUID),
 		},
-	}, "status", "conditions")
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent",
+			Name: domainTestVSCName, UID: types.UID("vsc-uid-1"),
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		AccessModes:      []string{string(corev1.ReadWriteOnce)},
+		StorageClassName: "sc-a",
+		Size:             "10Gi",
+	}
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(domainTestPVC(), domainTestSnapshotContent(), failedVCR, demoObj).
+		WithObjects(content, demoObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	_, treason, _, err := r.ensureDomainContentLinks(ctx, demoObj, domainTestContent, "")
-	if err != nil {
-		t.Fatalf("ensureDomainContentLinks: %v", err)
+	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, ""); err != nil {
+		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
-	if treason != snapshot.ReasonVolumeCaptureFailed {
-		t.Fatalf("expected terminal VolumeCaptureFailed, got %q", treason)
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
+		t.Fatalf("get demo snapshot: %v", err)
 	}
-	if !domainTestVCRExists(t, cl) {
-		t.Fatalf("failed VCR must not be deleted (operator needs to see it)")
+	data, found, _ := unstructured.NestedMap(fresh.Object, "status", "data")
+	if !found {
+		t.Fatalf("expected status.data to be mirrored")
+	}
+	if srcUID, _, _ := unstructured.NestedString(data, "source", "uid"); srcUID != domainTestPVCUID {
+		t.Fatalf("status.data.source.uid = %q, want %q", srcUID, domainTestPVCUID)
+	}
+	if artName, _, _ := unstructured.NestedString(data, "artifact", "name"); artName != domainTestVSCName {
+		t.Fatalf("status.data.artifact.name = %q, want %q", artName, domainTestVSCName)
+	}
+	if sc, _, _ := unstructured.NestedString(data, "storageClassName"); sc != "sc-a" {
+		t.Fatalf("status.data.storageClassName = %q, want sc-a", sc)
+	}
+	if size, _, _ := unstructured.NestedString(data, "size"); size != "10Gi" {
+		t.Fatalf("status.data.size = %q, want 10Gi", size)
+	}
+	// The flat top-level mirrors must be gone (folded into status.data).
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "storageClassName"); found {
+		t.Fatalf("flat status.storageClassName must not be written")
+	}
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "volumeMode"); found {
+		t.Fatalf("flat status.volumeMode must not be written")
+	}
+	if _, found, _ := unstructured.NestedString(fresh.Object, "status", "size"); found {
+		t.Fatalf("flat status.size must not be written")
+	}
+}
+
+// On import the content data carries no storageClassName; the caller passes it from
+// DataImport.spec.storageClassName as scOverride, which must land in the mirrored status.data.
+func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
+	ctx := context.Background()
+	scheme := domainTestScheme(t)
+	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+	content := domainTestSnapshotContent()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
+		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
+		Size:     "5Gi",
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, demoObj).
+		Build()
+	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
+	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, "sc-import"); err != nil {
+		t.Fatalf("mirrorLeafDataFromContent: %v", err)
+	}
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
+		t.Fatalf("get demo snapshot: %v", err)
+	}
+	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != "sc-import" {
+		t.Fatalf("scOverride not applied: status.data.storageClassName = %q, want sc-import", sc)
+	}
+}
+
+// SnapshotDataBindingToUnstructuredMap renders source/artifact always, omits empty optionals, and
+// converts AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
+func TestSnapshotDataBindingToMap(t *testing.T) {
+	m := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
+		Source:      storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
+		Artifact:    storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+		AccessModes: []string{"ReadWriteOnce"},
+	})
+	if _, ok := m["source"].(map[string]interface{}); !ok {
+		t.Fatalf("source must be a map, got %#v", m["source"])
+	}
+	if _, ok := m["artifact"].(map[string]interface{}); !ok {
+		t.Fatalf("artifact must be a map, got %#v", m["artifact"])
+	}
+	am, ok := m["accessModes"].([]interface{})
+	if !ok || len(am) != 1 || am[0] != "ReadWriteOnce" {
+		t.Fatalf("accessModes must be []interface{}{\"ReadWriteOnce\"}, got %#v", m["accessModes"])
+	}
+	// Empty optionals are omitted.
+	if _, ok := m["storageClassName"]; ok {
+		t.Fatalf("empty storageClassName must be omitted")
+	}
+	if _, ok := m["size"]; ok {
+		t.Fatalf("empty size must be omitted")
+	}
+	// The Namespace on source was empty -> omitted.
+	if src := m["source"].(map[string]interface{}); func() bool { _, ok := src["namespace"]; return ok }() {
+		t.Fatalf("empty source.namespace must be omitted")
 	}
 }

@@ -57,14 +57,7 @@ func createTestCheckpoint(name string, ready bool, chunks []storagev1alpha1.Chun
 			Name: name,
 			UID:  types.UID("test-uid-" + name),
 		},
-		Spec: storagev1alpha1.ManifestCheckpointSpec{
-			SourceNamespace: "test-ns",
-			ManifestCaptureRequestRef: &storagev1alpha1.ObjectReference{
-				Name:      "test-mcr",
-				Namespace: "test-ns",
-				UID:       "mcr-uid",
-			},
-		},
+		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{
 			Chunks:         chunks,
 			TotalObjects:   len(chunks),
@@ -126,10 +119,8 @@ func TestGetArchiveFromCheckpoint_NotReady(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -156,10 +147,8 @@ func TestGetArchiveFromCheckpoint_ChunkMissing(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -188,10 +177,8 @@ func TestGetArchiveFromCheckpoint_InvalidChunkIndexSequence(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -222,10 +209,8 @@ func TestGetArchiveFromCheckpoint_ChunkBelongsToDifferentCheckpoint(t *testing.T
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -257,10 +242,8 @@ func TestGetArchiveFromCheckpoint_ChunkIndexMismatch(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -292,10 +275,8 @@ func TestGetArchiveFromCheckpoint_ChecksumMismatch(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -324,10 +305,8 @@ func TestGetArchiveFromCheckpoint_ObjectLimitExceeded(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	_, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -373,10 +352,8 @@ func TestGetArchiveFromCheckpoint_Success(t *testing.T) {
 	}
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	archiveData, checksum, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -429,10 +406,8 @@ func TestGetArchiveFromCheckpoint_Cache(t *testing.T) {
 	}
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	// First call
 	archiveData1, checksum1, err1 := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
@@ -617,10 +592,8 @@ func TestGetArchiveFromCheckpoint_UnsortedChunks(t *testing.T) {
 	}
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	archiveData, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -675,10 +648,8 @@ func TestGetArchiveFromCheckpoint_DuplicateYAMLKeys(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	archiveData, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 
@@ -721,10 +692,8 @@ func TestGetArchiveFromCheckpoint_CacheInvalidationOnUIDChange(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req1 := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   "uid1",
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  "uid1"}
 
 	// First call - should cache
 	archiveData1, _, err1 := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req1)
@@ -737,9 +706,8 @@ func TestGetArchiveFromCheckpoint_CacheInvalidationOnUIDChange(t *testing.T) {
 	_ = client.Update(context.Background(), checkpoint)
 
 	req2 := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   "uid2", // New UID
-		SourceNamespace: "test-ns",
+		CheckpointName: "test",
+		CheckpointUID:  "uid2", // New UID
 	}
 
 	// Second call with new UID - should NOT use old cache
@@ -787,10 +755,8 @@ func TestGetArchiveFromCheckpoint_OversizedArchiveWarning(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	// Should not fail, just log warning
 	archiveData, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
@@ -1273,10 +1239,8 @@ func TestGetArchiveFromCheckpoint_KeyValueFormatConversion(t *testing.T) {
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	archiveData, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 	if err != nil {
@@ -1542,10 +1506,8 @@ func TestGetArchiveFromCheckpoint_PreservesStatusAndManagedFields(t *testing.T) 
 	_ = client.Create(context.Background(), checkpoint)
 
 	req := &ArchiveRequest{
-		CheckpointName:  "test",
-		CheckpointUID:   string(checkpoint.UID),
-		SourceNamespace: "test-ns",
-	}
+		CheckpointName: "test",
+		CheckpointUID:  string(checkpoint.UID)}
 
 	archiveData, _, err := service.GetArchiveFromCheckpoint(context.Background(), checkpoint, req)
 	if err != nil {

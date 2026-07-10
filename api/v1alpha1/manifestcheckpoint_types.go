@@ -23,6 +23,7 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcp
+// +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Objects",type=integer,JSONPath=`.status.totalObjects`
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.totalSizeBytes`
 type ManifestCheckpoint struct {
@@ -40,15 +41,16 @@ type ManifestCheckpointList struct {
 	Items           []ManifestCheckpoint `json:"items"`
 }
 
+// ManifestCheckpointSpec is intentionally empty.
+//
+// A ManifestCheckpoint is a name-addressed, controller-created artifact: it is looked up by name
+// (from SnapshotContent and the aggregated API), never by a spec field. Source provenance — the
+// name of the originating (short-lived) ManifestCaptureRequest — is recorded on the
+// state-snapshotter.deckhouse.io/source-request label. There is deliberately no source-namespace
+// field or label so the type stays correct for future cluster-wide capture sources.
+//
 // +k8s:deepcopy-gen=true
 type ManifestCheckpointSpec struct {
-	// SourceNamespace is the namespace of the original ManifestCaptureRequest
-	// +kubebuilder:validation:Required
-	SourceNamespace string `json:"sourceNamespace"`
-
-	// ManifestCaptureRequestRef references the ManifestCaptureRequest that created this checkpoint
-	// +kubebuilder:validation:Required
-	ManifestCaptureRequestRef *ObjectReference `json:"manifestCaptureRequestRef"`
 }
 
 // +k8s:deepcopy-gen=true

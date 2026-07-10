@@ -40,9 +40,8 @@ func integrationArchiveObjectsFromMCP(ctx context.Context, mcpName string) []map
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
 	raw, _, err := arch.GetArchiveFromCheckpoint(ctx, mcp, &usecase.ArchiveRequest{
-		CheckpointName:  mcpName,
-		CheckpointUID:   string(mcp.UID),
-		SourceNamespace: mcp.Spec.SourceNamespace,
+		CheckpointName: mcpName,
+		CheckpointUID:  string(mcp.UID),
 	})
 	Expect(err).NotTo(HaveOccurred())
 	var objects []map[string]interface{}

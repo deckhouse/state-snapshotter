@@ -12,7 +12,7 @@ alwaysApply: false
   - For our CRD statuses, use conditions only (no custom phase/status strings).
 
 - This repo’s first-class resources (MUST):
-  - Unified **Snapshot** / **SnapshotContent** (unstructured) and **ManifestCheckpoint** / MCR — use `pkg/snapshot` condition and finalizer constants; follow `docs/architecture/controller-pattern.md`.
+  - Unified **Snapshot** / **SnapshotContent** (unstructured) and **ManifestCheckpoint** / MCR — use `pkg/snapshot` condition and finalizer constants; follow `docs/internal/architecture/controller-pattern.md`.
 
 - VolumeSnapshot state (MUST) — when code touches CSI **VolumeSnapshot**:
   - Keep state in annotations (phase strings).

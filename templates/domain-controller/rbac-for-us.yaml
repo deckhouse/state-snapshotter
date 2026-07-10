@@ -22,9 +22,9 @@ rules:
   resources: ["manifestcapturerequests"]
   verbs: ["get", "list", "watch", "create"]
 
-# VolumeCaptureRequest (storage.deckhouse.io): the disk controller ensures the data-leg VCR (create +
+# VolumeCaptureRequest (storage-foundation.deckhouse.io): the disk controller ensures the data-leg VCR (create +
 # ownerRef patch). The common controller in core deletes it after handoff, so no delete here.
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "patch"]
 
@@ -32,12 +32,12 @@ rules:
 # content-free stance for SNAPSHOT reconcilers only). The domain resource reconciler reads
 # SnapshotContent.status.dataRef to build a VolumeRestoreRequest; it never list/watch/mutates content.
 # Snapshot reconcilers remain content-free (zero snapshotcontents rights would suffice for them alone).
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["state-snapshotter.deckhouse.io"]
   resources: ["snapshotcontents"]
   verbs: ["get"]
 
 # VolumeRestoreRequest: DemoVirtualDisk restore materialization (create + lifecycle cleanup after PVC adoption).
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumerestorerequests"]
   verbs: ["get", "list", "watch", "create", "delete"]
 
@@ -106,7 +106,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ .Chart.Name }}-domain-controller-auth-reader
+  name: d8:{{ .Chart.Name }}:domain-controller-auth-reader
   namespace: kube-system
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 roleRef:

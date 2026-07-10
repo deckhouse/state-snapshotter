@@ -55,7 +55,7 @@ func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName string, object
 	}
 	mcp := &ssv1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{Name: mcpName, UID: types.UID("uid-" + mcpName)},
-		Spec:       ssv1alpha1.ManifestCheckpointSpec{SourceNamespace: "ns1"},
+		Spec:       ssv1alpha1.ManifestCheckpointSpec{},
 		Status: ssv1alpha1.ManifestCheckpointStatus{
 			Chunks:       []ssv1alpha1.ChunkInfo{{Name: chunk.Name, Index: 0, Checksum: checksum}},
 			TotalObjects: len(objects),

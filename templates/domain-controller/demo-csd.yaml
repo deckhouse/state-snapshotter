@@ -2,18 +2,27 @@
 # Reference demo CustomSnapshotDefinitions shipped with the module and applied by Deckhouse. They teach
 # the core CSD registry the demo snapshot graph and drive the 030-domain-rbac hook. Flat schema: one
 # snapshot kind per object (spec.apiVersion/kind), the snapshotted resource referenced by spec.source.
-# spec.dataBacked marks the kind that carries a volume data leg (the disk snapshot); the structural VM
-# snapshot is manifest-only.
+# spec.requiresDataArtifact marks the kind that carries a volume data leg (the disk snapshot); the
+# structural VM snapshot is manifest-only. spec.weight orders traversal ascending (lower runs first).
+#
+# ORDERING IS LOAD-BEARING: an AGGREGATE kind that owns leaves (the VM references its disks via
+# spec.virtualDiskName, without an ownerRef) MUST run BEFORE the leaf kind (the standalone disk). The
+# root's namespace planner covers a source only via already-planned children of an earlier weight layer
+# (parent_graph coverage walk: VM snapshot -> status.childrenSnapshotRefs -> disk snapshot -> sourceRef).
+# So the VM must plan first; then the disk layer sees a VM-owned disk as covered and skips it. If the
+# disk layer ran first (as it did with the earlier inverted weights disk=10 < VM=100), a VM-owned disk is
+# captured BOTH standalone at the root AND by the VM subtree — the same PVC UID ends up covered twice and
+# the root wedges at Ready=False/DuplicateCoveredPVCUID. Keep demo-virtual-machine weight < demo-virtual-disk.
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: CustomSnapshotDefinition
 metadata:
   name: demo-virtual-machine
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 spec:
-  priority: 100
+  weight: 10
   apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
   kind: DemoVirtualMachineSnapshot
-  dataBacked: false
+  requiresDataArtifact: false
   source:
     apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
     kind: DemoVirtualMachine
@@ -24,10 +33,10 @@ metadata:
   name: demo-virtual-disk
   {{- include "helm_lib_module_labels" (list . (dict "app" "domain-controller")) | nindent 2 }}
 spec:
-  priority: 10
+  weight: 100
   apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
   kind: DemoVirtualDiskSnapshot
-  dataBacked: true
+  requiresDataArtifact: true
   source:
     apiVersion: demo.state-snapshotter.deckhouse.io/v1alpha1
     kind: DemoVirtualDisk

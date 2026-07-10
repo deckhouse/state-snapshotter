@@ -4,7 +4,7 @@ alwaysApply: true
 ---
 
 - Stage-driven development (MUST):
-  - Implement features strictly within the **currently agreed stage model** documented in `docs/state-snapshotter-rework/operations/project-status.md`. Do not hardcode a fixed stage range in rules. Stage list is defined by current project-status and spec.
+  - Implement features strictly within the **currently agreed stage model** documented in `docs/internal/state-snapshotter-rework/operations/project-status.md`. Do not hardcode a fixed stage range in rules. Stage list is defined by current project-status and spec.
   - Each change MUST declare which stage it belongs to (in PR/commit/description).
   - Do NOT pull features from a later stage into the current change.
 

@@ -26,12 +26,21 @@ git_dirty := $(shell git diff --quiet 2>/dev/null || echo -dirty)
 build_ts := $(shell date -u +%Y%m%dT%H%M%SZ)
 app_version := $(git_sha)$(git_dirty)-$(build_ts)
 
+# Go toolchain version read from go.mod (the `go X.Y.Z` directive) so the dev image builder always matches
+# the required toolchain. Falls back to the Dockerfile ARG default if extraction fails.
+go_version := $(shell awk '/^go [0-9]/{print $$2; exit}' go.mod)
+
 # Variables
 GO := go
 GOFMT := gofmt
 GOLINT := golangci-lint
 TEST_TIMEOUT := 10m
 E2E_TIMEOUT := 30m
+# Ginkgo parallelism for the shared-manager integration pass. Each proc runs its own envtest
+# (etcd+apiserver+manager), so this is bounded well below nproc to avoid CPU contention that starves
+# reconciles and flakes latency-sensitive Eventually assertions (14-core dev box: 6 procs oversubscribed
+# and flaked the manager-driven bind specs; 4 is the stable sweet spot). Override: make test-integration GINKGO_PROCS=N
+GINKGO_PROCS := 4
 
 # Colors for output
 BLUE := \033[0;34m
@@ -87,9 +96,13 @@ test-integration: ## Run integration tests (requires envtest)
 				chmod +x $$KUBEBUILDER_ASSETS/etcd $$KUBEBUILDER_ASSETS/kube-apiserver $$KUBEBUILDER_ASSETS/kubectl 2>/dev/null || true; \
 			fi; \
 		fi && \
-		echo "$(BLUE)Pass 1/2: shared-manager suite (label-filter !isolated)...$(NC)" && \
-		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='!isolated' && \
-		echo "$(BLUE)Pass 2/2: isolation-sensitive specs in a fresh env (label-filter isolated)...$(NC)" && \
+		if [ ! -f $$GOPATH/bin/ginkgo ]; then \
+			echo "$(YELLOW)Installing ginkgo CLI (needed for the parallel -procs run)...$(NC)"; \
+			$(GO) install github.com/onsi/ginkgo/v2/ginkgo; \
+		fi && \
+		echo "$(BLUE)Pass 1/2: shared-manager suite in parallel ($(GINKGO_PROCS) procs, label-filter !isolated)...$(NC)" && \
+		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $$GOPATH/bin/ginkgo -procs=$(GINKGO_PROCS) -tags integration -timeout=$(TEST_TIMEOUT) -v --label-filter='!isolated' ./test/integration && \
+		echo "$(BLUE)Pass 2/2: isolation-sensitive specs serially in a fresh env (label-filter isolated)...$(NC)" && \
 		KUBEBUILDER_ASSETS=$$KUBEBUILDER_ASSETS $(GO) test -tags integration -v -count=1 -timeout $(TEST_TIMEOUT) ./test/integration -ginkgo.v -ginkgo.label-filter='isolated'
 	@echo "$(GREEN)Integration tests completed!$(NC)"
 
@@ -173,8 +186,8 @@ run: ## Run controller locally
 	$(GO) run -race ./cmd/main.go
 
 fox_build_and_push: ## Build dev image and push to fox registry
-	@echo "$(BLUE)Building image with version: $(app_version)$(NC)"
-	DOCKER_BUILDKIT=1 docker build --build-arg APP_VERSION=$(app_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
+	@echo "$(BLUE)Building image with version: $(app_version) (Go $(go_version))$(NC)"
+	DOCKER_BUILDKIT=1 docker build --build-arg APP_VERSION=$(app_version) --build-arg GO_VERSION=$(go_version) -t $(repo_fox)/$(image_name):$(image_tag) -f dev/Dockerfile-dev ../../.
 	docker push $(repo_fox)/$(image_name):$(image_tag)
 
 redeploy: ## Restart controller deployment, wait for rollout, and print the running build version
