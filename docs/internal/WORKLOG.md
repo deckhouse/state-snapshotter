@@ -1912,3 +1912,14 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
 - **Test** `capture_legs_test.go`: added `TestReconcileOwnerCaptureLegs_DataLegVCRRecoveryReapWhenAlreadyLatched`
   and `…_ManifestLegMCRRecoveryReapWhenAlreadyLatched` — owner pre-latched captured with a leftover
   request; reconcile must reap the request while keeping the latch true and not requeue.
+
+## e2e — reap the shared manifest-only `captured` namespace after Phase 1 & 2
+
+- **Bugfix (e2e)** `snapshotter_suite_test.go`: the manifest-only flow's shared source namespace
+  (`captured.namespace`, created in `captureSpecs` BeforeAll and read by aggregated-API/restore/import/
+  namespace-capture specs) had NO teardown — every other namespace has its own
+  `DeferCleanup(deleteNamespace)`, but this one was owned by no single spec, so it leaked after every run
+  (Active, never deleted) regardless of the keep knobs. Added an `AfterAll` at the `Context("Phase 1 & 2 …")`
+  level that `deleteNamespace(captured.namespace)` once the whole phase completes (runs after all nested
+  Contexts, before Phase 3). Uses the existing `deleteNamespace`, so it still honors
+  `E2E_KEEP_CLUSTER` / `E2E_KEEP_CLUSTER_ON_FAILURE`.

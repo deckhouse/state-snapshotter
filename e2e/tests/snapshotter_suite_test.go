@@ -89,6 +89,17 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
 		importSpecs()                   // import_gc_test.go: export -> import round-trip
 		gcSpecs()                       // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
+
+		// The shared manifest-only `captured` namespace (created in captureSpecs' BeforeAll) is read by every
+		// spec above but owned by none of them, so — unlike every other namespace, which has its own
+		// DeferCleanup(deleteNamespace) — it had no teardown and leaked after each run. Reap it once the whole
+		// phase completes: this AfterAll runs after all nested Contexts here (and before Phase 3), and
+		// deleteNamespace honors the keep-on-failure/keep-always knobs like every other cleanup.
+		AfterAll(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			deleteNamespace(ctx, captured.namespace)
+		})
 	})
 	resourceSelectorSpecs()     // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
 	volumeDataSpecs()           // volumedata_test.go: full volume-data flow (phase 3, env-gated)
