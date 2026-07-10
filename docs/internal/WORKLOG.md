@@ -1856,3 +1856,16 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   `spec.mode: Import` (+ `source: {}`) instead of the removed `spec.source.import: {}` marker.
 - Coordination: a cluster with the OLD VS CRD prunes `spec.mode` → import-VS silently degrades to
   Capture; deploy CRD + controllers together (same model as the other wave-2 renames).
+
+## e2e go.mod — consume storage-e2e via pinned pseudo-version (drop local replace)
+
+- **Update (e2e)** `e2e/go.mod` / `e2e/go.sum`: dropped the committed local filesystem replace
+  `github.com/deckhouse/storage-e2e => ../../../../e2e/repos/storage-e2e` and pinned the published
+  pseudo-version `v0.0.0-20260710061350-26cc4cb6ee25` (storage-e2e branch `fix/testkit-sds-module-pull-override`,
+  commit `26cc4cb`). That commit carries the companion testkit fix — `CreateDefaultStorageClass` now honors the
+  per-module `<MODULE>_MODULE_PULL_OVERRIDE` env vars when it re-enables `sds-node-configurator` /
+  `sds-local-volume`, so a runtime re-enable no longer clobbers a bring-up-pinned `pr<N>`/`mr<N>` image back to
+  `main`. `go mod tidy` also pulled the newer transitive deps storage-e2e's refactored `go.mod` requires
+  (ginkgo `v2.23.3`→`v2.28.2`, gomega `v1.37.0`→`v1.39.1`, `Masterminds/semver`→`v3.5.0`, plus pprof,
+  spdystream, spf13/pflag, golang.org/x/crypto|oauth2, protobuf, k8s.io/utils). The `state-snapshotter/api`
+  replace is unchanged (it is a sibling module in this repo). `go build ./...` + `go vet ./tests/` green.

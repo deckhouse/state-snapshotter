@@ -52,8 +52,10 @@ const (
 	vdProbeContainer   = "probe"
 
 	// localCSIDriver is the sds-local-volume CSI driver; used to create a VolumeSnapshotClass when the
-	// module does not ship a default one. Confirmed against the plan; provisioned SC uses this driver.
-	localCSIDriver = "local.csi.state-snapshotter.deckhouse.io"
+	// module does not ship a default one, and to match an existing module-shipped class. This MUST equal
+	// the provisioner sds-local-volume registers (AllowedProvisioners in sds-local-volume consts), because
+	// the CSI snapshotter refuses to snapshot a PV whose driver differs from the VolumeSnapshotClass driver.
+	localCSIDriver = "local.csi.storage.deckhouse.io"
 
 	// annStorageClassVSC is the StorageClass annotation the capture path resolves the VolumeSnapshotClass
 	// through (PVC -> StorageClass -> annotation -> VolumeSnapshotClass), mirroring
