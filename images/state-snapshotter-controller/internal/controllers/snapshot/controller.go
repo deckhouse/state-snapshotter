@@ -290,7 +290,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	// Import-mode Snapshots (spec.source.import) are materialized from an uploaded payload
+	// Import-mode Snapshots (spec.mode: Import) are materialized from an uploaded payload
 	// (manifests-and-children-refs-upload) — the controller MUST NOT capture the live namespace. The
 	// generic binder (creator, content-single-writer design §10) creates + binds the root SnapshotContent
 	// from the uploaded ManifestCheckpoint (owned by the root ObjectKeeper ensured above) and the aggregator

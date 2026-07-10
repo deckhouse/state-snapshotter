@@ -372,7 +372,7 @@ func main() {
 	}
 	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
-	// Import binder for extended generic-PVC VolumeSnapshots (spec.source.import marker; owning DataImport
+	// Import binder for extended generic-PVC VolumeSnapshots (spec.mode: Import; owning DataImport
 	// found by reverse-lookup of DataImport.spec.targetRef).
 	// The forked snapshot-controller skips these; this common controller materializes their SnapshotContent
 	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).

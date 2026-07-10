@@ -97,7 +97,7 @@ func (r *DemoVirtualMachineSnapshotReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, nil
 	}
 
-	// Import mode: spec.source.import switches this VM snapshot off capture. The domain controller does NO
+	// Import mode: spec.mode: Import switches this VM snapshot off capture. The domain controller does NO
 	// capture planning (no source-VM lookup, no children planning, no MCR) — the live DemoVirtualMachine
 	// and its disks may be absent on import. The common controller materializes the backing SnapshotContent
 	// from the uploaded manifests and child refs. Domain planning is trivially complete for an import node.

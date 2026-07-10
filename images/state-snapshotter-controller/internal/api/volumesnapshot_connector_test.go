@@ -56,8 +56,7 @@ func vsConnectorScheme() *runtime.Scheme {
 }
 
 // vsConnectorVolumeSnapshot builds an extended CSI VolumeSnapshot. importMode marks it as an import-mode
-// target via the unified empty marker spec.source.import: {}; ready sets status.readyToUse for the
-// restore path.
+// target via the unified enum spec.mode: Import; ready sets status.readyToUse for the restore path.
 func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMode, ready bool) *unstructured.Unstructured { //nolint:unparam // test fixture keeps uniform signature
 	status := map[string]interface{}{}
 	if boundVSC != "" {
@@ -76,7 +75,7 @@ func vsConnectorVolumeSnapshot(name, ns, boundVSC, boundContent string, importMo
 		"status":     status,
 	}
 	if importMode {
-		obj["spec"] = map[string]interface{}{"source": map[string]interface{}{"import": map[string]interface{}{}}}
+		obj["spec"] = map[string]interface{}{"mode": "Import", "source": map[string]interface{}{}}
 	}
 	return &unstructured.Unstructured{Object: obj}
 }

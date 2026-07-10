@@ -102,7 +102,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if !uploadTargetIsImportMode(cr) {
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("%s %s/%s is not in import mode (neither spec.mode: Import nor spec.source.import marker): refusing manifests upload", snapshotGVK.String(), namespace, name))
+			fmt.Sprintf("%s %s/%s is not in import mode (spec.mode is not Import): refusing manifests upload", snapshotGVK.String(), namespace, name))
 	}
 	uid := cr.GetUID()
 	if uid == "" {
@@ -195,25 +195,22 @@ func childRefSlicesEqual(current, desired []interface{}) bool {
 	return reflect.DeepEqual(current, desired)
 }
 
-// uploadTargetIsImportMode reports whether a snapshot CR is an import target. It accepts either family's
-// import marker so a single check covers every kind the upload endpoint sees: our snapshot CRDs
-// (core/structural nodes, domain data leaves) use the enum spec.mode: Import, while the generic-PVC
-// extended VolumeSnapshot (F1/F2) is a CSI-shaped fork that keeps the spec.source.import: {} marker.
-// This keeps the upload endpoint from clobbering a live-capture snapshot.
+// uploadTargetIsImportMode reports whether a snapshot CR is an import target. Every snapshot kind the
+// upload endpoint sees — our snapshot CRDs (core/structural nodes, domain data leaves) AND the extended
+// CSI VolumeSnapshot fork — carries the same enum spec.mode: Import (the former spec.source.import: {}
+// fork marker was replaced by spec.mode on the fork CRD). This keeps the upload endpoint from clobbering
+// a live-capture snapshot.
 func uploadTargetIsImportMode(obj *unstructured.Unstructured) bool {
 	return IsUnstructuredImportMode(obj)
 }
 
-// IsUnstructuredImportMode reports whether an unstructured snapshot object is in import mode, tolerating
-// both marker families: the enum spec.mode: Import used by our snapshot CRDs (root Snapshot and domain
-// XxxxSnapshot) and the legacy spec.source.import: {} marker kept by the CSI-shaped extended VolumeSnapshot
-// leaf (its structural CSI schema cannot host a top-level spec.mode). A live-capture snapshot has neither.
+// IsUnstructuredImportMode reports whether an unstructured snapshot object is in import mode: the enum
+// spec.mode: Import, uniform across ALL snapshot kinds (root Snapshot, domain XxxxSnapshot, and the
+// extended CSI VolumeSnapshot fork, whose CRD now hosts the same top-level spec.mode). A live-capture
+// snapshot carries mode: Capture (or omits it — the CRD default).
 func IsUnstructuredImportMode(obj *unstructured.Unstructured) bool {
-	if mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode"); mode == string(storagev1alpha1.SnapshotModeImport) {
-		return true
-	}
-	_, found, _ := unstructured.NestedFieldNoCopy(obj.Object, "spec", "source", "import")
-	return found
+	mode, _, _ := unstructured.NestedString(obj.Object, "spec", "mode")
+	return mode == string(storagev1alpha1.SnapshotModeImport)
 }
 
 // validateUploadManifests checks that manifests is present and is a JSON array (rejecting absent/null and

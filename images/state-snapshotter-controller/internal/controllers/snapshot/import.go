@@ -35,7 +35,7 @@ import (
 // watch is the primary wake-up; this only covers a missed event so the import does not stall.
 const importContentPollInterval = 2 * time.Second
 
-// reconcileImport holds an import-mode root Snapshot (spec.source.import) until the SnapshotContent that
+// reconcileImport holds an import-mode root Snapshot (spec.mode: Import) until the SnapshotContent that
 // backs it (materialized from the out-of-band uploaded payload) is created, bound, and Ready — it no longer
 // creates the content itself.
 //

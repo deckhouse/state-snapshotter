@@ -39,7 +39,7 @@ const importPendingMessage = "awaiting import materialization (upload manifests-
 // interval avoids per-snapshot requeue storms while still recovering from a missed watch event.
 const importPendingRequeueInterval = time.Minute
 
-// reconcileImportPending holds an import-mode Snapshot (spec.source.import) in a non-terminal pending
+// reconcileImportPending holds an import-mode Snapshot (spec.mode: Import) in a non-terminal pending
 // state instead of running dynamic namespace capture. Import content is materialized out-of-band: d8
 // uploads per-node manifests+children (manifests-and-children-refs-upload) and, for data leaves, creates
 // a DataImport; the import orchestrator then reconstructs SnapshotContent and binds it. Until that path

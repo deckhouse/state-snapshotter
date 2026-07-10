@@ -85,7 +85,7 @@ func (r *DemoVirtualDiskSnapshotReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, nil
 	}
 
-	// Import mode (C5): spec.source.import switches this disk snapshot off capture. The domain controller
+	// Import mode (C5): spec.mode: Import switches this disk snapshot off capture. The domain controller
 	// does NO capture planning (no source-disk lookup, no MCR/VCR) — the live DemoVirtualDisk may be
 	// absent on import. The common controller materializes the backing SnapshotContent from the uploaded
 	// manifests (reconstructed ManifestCheckpoint) and the data leg from the matching DataImport

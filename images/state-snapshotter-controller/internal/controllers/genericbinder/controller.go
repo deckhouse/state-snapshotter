@@ -234,7 +234,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// Import branch (C5): an import-mode leaf (spec.source.import: {}) has no live capture and no domain
+	// Import branch (C5): an import-mode leaf (spec.mode: Import) has no live capture and no domain
 	// planning, so it bypasses the Step-1 barrier below. The same common controller / SnapshotContent
 	// materializes its content (manifest leg from the reconstructed ManifestCheckpoint; for
 	// data-artifact kinds, the data leg from the reverse-looked-up DataImport's produced artifact) —

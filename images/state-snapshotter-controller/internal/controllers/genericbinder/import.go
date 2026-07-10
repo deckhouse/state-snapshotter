@@ -43,7 +43,7 @@ const importContentPollInterval = 5 * time.Second
 
 // snapshotIsImportMode reports whether a generic/domain snapshot leaf is in IMPORT mode. Our domain
 // snapshot CRDs signal it with the enum spec.mode: Import (parity with Snapshot.IsImportMode / domain
-// IsImportMode); the shared helper also tolerates the legacy spec.source.import marker kept by the
+// IsImportMode); the shared helper reads the same enum off the extended CSI VolumeSnapshot fork (its
 // CSI-shaped VolumeSnapshot fork. An import leaf is materialized from the uploaded payload and — for
 // data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef),
 // not from a name carried on the leaf.

@@ -55,22 +55,27 @@ func TestImportSnapshotSourceRef_TargetsPVC(t *testing.T) {
 	}
 }
 
-// isImportModeVolumeSnapshot keys solely on the unified empty marker spec.source.import: {} (parity with
-// every other snapshot kind); capture/pre-provisioned VS (other source fields) are not ours to bind.
+// isImportModeVolumeSnapshot keys solely on the unified enum spec.mode: Import (parity with every other
+// snapshot kind); capture/pre-provisioned VS (mode absent or Capture) are not ours to bind.
 func TestIsImportModeVolumeSnapshot(t *testing.T) {
 	cases := []struct {
 		name   string
+		mode   string
 		source map[string]interface{}
 		want   bool
 	}{
-		{name: "import marker present", source: map[string]interface{}{"import": map[string]interface{}{}}, want: true},
-		{name: "capture (persistentVolumeClaimName)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
-		{name: "pre-provisioned (volumeSnapshotContentName)", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
-		{name: "no source", source: nil, want: false},
+		{name: "mode Import (empty source)", mode: "Import", source: map[string]interface{}{}, want: true},
+		{name: "mode Capture (persistentVolumeClaimName)", mode: "Capture", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
+		{name: "mode absent (CRD default Capture)", source: map[string]interface{}{"persistentVolumeClaimName": "pvc-1"}, want: false},
+		{name: "pre-provisioned (volumeSnapshotContentName)", mode: "Capture", source: map[string]interface{}{"volumeSnapshotContentName": "vsc-1"}, want: false},
+		{name: "no source, no mode", source: nil, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := map[string]interface{}{}
+			if tc.mode != "" {
+				spec["mode"] = tc.mode
+			}
 			if tc.source != nil {
 				spec["source"] = tc.source
 			}

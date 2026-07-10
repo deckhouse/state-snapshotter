@@ -1787,3 +1787,72 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   exposed it. Fixed the writer to emit singular `spec.target` (namespace omitted — PVC lives in the VCR
   namespace) and updated `data_import_unit_test.go` to assert the single-target shape and forbid the list.
   Package `data-import` unit tests green.
+
+## e2e module-enable deadlock — cluster_config dependency was backwards
+
+- **Bugfix (e2e)** `alwaysCreateNew` runs deadlocked at the module-enable step (`storage-foundation`
+  stuck `turned off because of unmet module dependencies: dependency 'state-snapshotter' is disabled`).
+  Root cause: `e2e/tests/cluster_config.yml` declared the module dependency **inverted** vs the real
+  `storage-foundation/module.yaml` (`requirements.modules.state-snapshotter`). The e2e config had
+  `storage-foundation.dependencies: []` and `state-snapshotter.dependencies: [storage-foundation]`, so
+  storage-e2e's topological enable put storage-foundation at level 0 and waited for it Ready — but
+  Deckhouse holds SF off until state-snapshotter is enabled, and state-snapshotter (level 1) was only
+  to be enabled after SF became Ready → neither ever came up. Fixed the config to match module.yaml:
+  `state-snapshotter.dependencies: []` (it comes up first and tolerates SF's VCR/extended-VS CRDs being
+  absent via the dynamic RESTMappable VCR watch), `storage-foundation.dependencies: [state-snapshotter]`.
+  No storage-e2e (shared lib) change needed. Note: `storage-foundation/module.yaml` already correctly
+  requires `state-snapshotter` (no snapshot-controller module dependency — the snapshot-controller in that
+  repo is its own shipped fork image/templates, not an inter-module requirement); a live module object
+  still showing a snapshot-controller dep would be a stale pre-Jul-4 deployed version, not the source.
+
+## e2e volume-data VolumeCaptureFailed on fresh clusters — wrong CSI driver constant
+
+- **Bugfix (e2e)** All Phase 3 / 3b volume-data specs failed on `alwaysCreateNew` clusters with
+  `VolumeCaptureFailed: VolumeSnapshotClass e2e-local-thin driver local.csi.state-snapshotter.deckhouse.io
+  does not match PV CSI driver local.csi.storage.deckhouse.io`. Root cause: `e2e/tests/volumedata_test.go`
+  `localCSIDriver` constant was `local.csi.state-snapshotter.deckhouse.io`, but the sds-local-volume
+  provisioner (authoritative: `sds-local-volume/hooks/go/consts/consts.go` `AllowedProvisioners`) is
+  `local.csi.storage.deckhouse.io`. The CSI snapshotter refuses to snapshot a PV whose driver differs from
+  the VolumeSnapshotClass driver, so the data leg failed terminally. On the persistent existing cluster the
+  bug was masked: `e2e-local-thin` already existed with the correct driver, so `CreateVolumeSnapshotClass`
+  short-circuited on "already exists"; only a fresh cluster actually created the class with the bad driver.
+  Fixed the constant to `local.csi.storage.deckhouse.io` — this both creates a driver-matching class and
+  lets `resolveLocalVolumeSnapshotClass` correctly reuse any module-shipped class for the local driver. The
+  single constant is the shared source for every spec that wires the StorageClass -> VolumeSnapshotClass
+  (volumedata, resource_selector, ready_flap, get_load, backup_download), so one edit covers all of them.
+
+## e2e cluster_config — enable SDS storage backends at bring-up (pinnable image)
+
+- **Add (e2e)** `e2e/tests/cluster_config.yml` now enables `sds-node-configurator` and `sds-local-volume`
+  as first-class modules (previously they were only enabled lazily at phase-3 runtime by
+  `testkit.CreateDefaultStorageClass`, so their image tag could not be pinned per suite). Listing them in
+  the config makes storage-e2e's generic `<MODULE>_MODULE_PULL_OVERRIDE` channel apply to them, i.e.
+  `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE=pr<N>/mr<N>` (and `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE`)
+  now override the tag at config load — same convention already used for `STATE_SNAPSHOTTER_*`. Dependencies
+  mirror the modules' `module.yaml` requirements so storage-e2e's level-by-level enable does not deadlock:
+  `sds-node-configurator` deps `[]`; `sds-local-volume` deps `[sds-node-configurator, storage-foundation]`
+  (its module.yaml requires both). Enabling at bring-up only deploys the modules (they reach Ready with no
+  StorageClass); the actual provisioning (node labels, LVGs, LocalStorageClass, wired VolumeSnapshotClass)
+  still happens at runtime in the phase-3 setup, only under `E2E_VOLUME_DATA`. Paired with a storage-e2e
+  change: `CreateDefaultStorageClass` now reads the same per-module env vars when it re-enables the SDS
+  backends, so a runtime re-enable no longer clobbers the pinned tag back to `main`.
+
+### VolumeSnapshot spec.mode (wave-2 п.3: mode на всех снапшот-kind)
+
+- **Switch** the extended CSI VolumeSnapshot fork from the `spec.source.import: {}` marker to the same
+  `spec.mode: Capture | Import` enum every other snapshot kind carries (leadership wave-2 п.3: «в
+  VolumeSnapshot надо не забыть так же сделать»). Core readers are now mode-only:
+  `IsUnstructuredImportMode` dropped its marker fallback (uniform `spec.mode` across ALL kinds),
+  `volumesnapshotimport.isImportModeVolumeSnapshot` keys on `spec.mode: Import`; upload-endpoint error
+  text and all `spec.source.import` comments updated. Unit fixtures (vs connector, volumesnapshotimport)
+  and e2e fixtures (backup_restore `createImportVolumeSnapshot` → `mode: Import` + empty source;
+  diagnostics dump mode-only) switched. The envtest minimal VS CRD needs no change
+  (spec is x-kubernetes-preserve-unknown-fields).
+- **Companion changes** (storage-foundation, api-rework): fork patch 003 (types + skip predicates
+  `Spec.Mode == "Import"`), hand-curated VS CRD (spec.mode enum/default/immutable-CEL +
+  `mode=Import ⇒ source пуст`; `source.import` block removed, v1beta1 too), extended Go type +
+  deepcopy, domain reconciler skip.
+- **d8-cli follow-up (its separate sync plan)**: when creating an import VolumeSnapshot, set
+  `spec.mode: Import` (+ `source: {}`) instead of the removed `spec.source.import: {}` marker.
+- Coordination: a cluster with the OLD VS CRD prunes `spec.mode` → import-VS silently degrades to
+  Capture; deploy CRD + controllers together (same model as the other wave-2 renames).

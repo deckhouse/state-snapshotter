@@ -101,7 +101,7 @@ const (
 	// is a verbatim mirror of SnapshotContent.Ready and this reason is not used.
 	ReasonContentBindingPending = "ContentBindingPending"
 	ReasonDeleting              = "Deleting"
-	// ReasonImportPending is the non-terminal reason on an import-mode Snapshot (spec.source.import)
+	// ReasonImportPending is the non-terminal reason on an import-mode Snapshot (spec.mode: Import)
 	// whose content has not been materialized yet. The controller does NOT capture the live namespace
 	// for these; d8 uploads per-node manifests+children and (for data leaves) creates a DataImport, then
 	// the import orchestrator reconstructs SnapshotContent and binds it. Requeued, never terminal.

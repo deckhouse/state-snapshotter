@@ -15,10 +15,10 @@ limitations under the License.
 */
 
 // Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots that
-// carry the unified import marker spec.source.import: {} (the C2 extended-VS source fork). The owning
-// DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this VolumeSnapshot), not named on
-// the leaf. The forked snapshot-controller skips these VolumeSnapshots, so this common controller is the
-// sole binder for them.
+// carry the unified enum spec.mode: Import (parity with every other snapshot kind; the fork CRD hosts the
+// field). The owning DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this
+// VolumeSnapshot), not named on the leaf. The forked snapshot-controller skips import-mode
+// VolumeSnapshots, so this common controller is the sole binder for them.
 //
 // It is the generic-PVC twin of the domain data-leaf import branch in genericbinder: it materializes the
 // backing cluster-scoped SnapshotContent (deletionPolicy=Delete) from the uploaded ManifestCheckpoint and
@@ -109,8 +109,8 @@ func AddToManager(mgr ctrl.Manager) error {
 }
 
 // importVolumeSnapshotPredicate restricts the controller to extended VolumeSnapshots in import mode
-// (the unified marker spec.source.import is present). Capture VolumeSnapshots (persistentVolumeClaimName)
-// and plain pre-provisioned ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
+// (spec.mode: Import). Capture VolumeSnapshots (persistentVolumeClaimName) and plain pre-provisioned
+// ones (volumeSnapshotContentName) are ignored — those are not ours to bind.
 func importVolumeSnapshotPredicate() predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {
 		u, ok := o.(*unstructured.Unstructured)
@@ -122,11 +122,12 @@ func importVolumeSnapshotPredicate() predicate.Predicate {
 }
 
 // isImportModeVolumeSnapshot reports whether an extended VolumeSnapshot is in IMPORT mode, signalled by
-// the unified empty marker spec.source.import: {} (parity with every other state-snapshotter snapshot
-// kind). The owning DataImport is not named here; it is found by reverse-lookup (DataImport.spec.targetRef).
+// the unified enum spec.mode: Import (parity with every other state-snapshotter snapshot kind; the fork
+// CRD hosts the field). The owning DataImport is not named here; it is found by reverse-lookup
+// (DataImport.spec.targetRef).
 func isImportModeVolumeSnapshot(u *unstructured.Unstructured) bool {
-	_, found, _ := unstructured.NestedFieldNoCopy(u.Object, "spec", "source", "import")
-	return found
+	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
+	return mode == string(storagev1alpha1.SnapshotModeImport)
 }
 
 func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
