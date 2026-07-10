@@ -1850,8 +1850,9 @@ Driven by `заметки Давида/2.md` + decisions 2026-07-09. Plan:
   (spec is x-kubernetes-preserve-unknown-fields).
 - **Companion changes** (storage-foundation, api-rework): fork patch 003 (types + skip predicates
   `Spec.Mode == "Import"`), hand-curated VS CRD (spec.mode enum/default/immutable-CEL +
-  `mode=Import ⇒ source пуст`; `source.import` block removed, v1beta1 too), extended Go type +
-  deepcopy, domain reconciler skip.
+  `mode=Import ⇒ source пуст`; `source.import` block + its CEL removed) — **v1 only**: per the ADR,
+  v1beta1 stays fork-field-free (legacy, never a domain object; no spec.mode there, its stale
+  "or import" prose cleaned), extended Go type + deepcopy, domain reconciler skip.
 - **d8-cli follow-up (its separate sync plan)**: when creating an import VolumeSnapshot, set
   `spec.mode: Import` (+ `source: {}`) instead of the removed `spec.source.import: {}` marker.
 - Coordination: a cluster with the OLD VS CRD prunes `spec.mode` → import-VS silently degrades to
