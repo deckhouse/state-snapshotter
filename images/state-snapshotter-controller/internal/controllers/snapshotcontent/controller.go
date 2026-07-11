@@ -414,7 +414,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// and captureState...manifestCaptureRequestName / boundVolumeSnapshotContentName), so a single
 	// APIReader.Get keeps the aggregator's per-pass owner read at the Block 1 level. A second, redundant Get
 	// (one per projection) perturbed the Block 0 eager-shell ObjectKeeper create race enough to wedge the
-	// orphan wave. See WORKLOG w8-block2.
+	// orphan wave.
 	//
 	// Orphan/standalone VolumeSnapshot children are ordinary domain contents now (content-single-writer
 	// design §11.6): their owner (the VolumeSnapshot) carries captureState + boundVolumeSnapshotContentName,
