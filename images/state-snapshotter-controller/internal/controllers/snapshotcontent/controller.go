@@ -1758,44 +1758,49 @@ func (r *SnapshotContentController) ensureFinalizersOnChildrenForCascade(
 			childContentGVK = resolvedGVK
 		}
 
-		childObj := &unstructured.Unstructured{}
-		childObj.SetGroupVersionKind(childContentGVK)
 		childKey := client.ObjectKey{Name: childRef.Name}
 
-		// Try to get child Content
-		childGetErr := r.Get(ctx, childKey, childObj)
-		if childGetErr != nil {
-			if errors.IsNotFound(childGetErr) {
-				// Child already GC'd - nothing to protect (broken link, not an error)
+		// Add/confirm parent-protect on the live child. Do NOT reclaim it and do NOT remove any finalizer.
+		// The finalizer write retries optimistic-lock conflicts with a fresh re-read: child metadata/status
+		// is written concurrently (the aggregator patches child conditions, the child's own reconcile
+		// ensures its finalizer), and the caller HARD-GATES on any returned error, so a transient conflict
+		// must not escalate into a full parent requeue.
+		ensured := false
+		ensureErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			childObj := &unstructured.Unstructured{}
+			childObj.SetGroupVersionKind(childContentGVK)
+			if err := r.Get(ctx, childKey, childObj); err != nil {
+				return err
+			}
+			if !childObj.GetDeletionTimestamp().IsZero() {
+				// Child is already deleting: its own deletion handler is running with a durable window; do
+				// not touch its finalizer (adding a finalizer to a deleting object is rejected by the API
+				// server).
+				logger.V(1).Info("Child SnapshotContent already deleting, skipping finalizer ensure", "child", childRef.Name)
+				return nil
+			}
+			if !snapshot.AddFinalizer(childObj, snapshot.FinalizerParentProtect) {
+				return nil
+			}
+			if err := r.Update(ctx, childObj); err != nil {
+				return err
+			}
+			ensured = true
+			return nil
+		})
+		if ensureErr != nil {
+			if errors.IsNotFound(ensureErr) {
+				// Child already GC'd (or deleted between read and write) - its own handler owns teardown;
+				// nothing to protect (broken link, not an error).
 				logger.V(1).Info("Child SnapshotContent not found, skipping", "child", childRef.Name)
 				continue
 			}
-			logger.Error(childGetErr, "Failed to get child SnapshotContent", "child", childRef.Name)
-			childErrors = append(childErrors, fmt.Errorf("failed to get child %s: %w", childRef.Name, childGetErr))
+			logger.Error(ensureErr, "Failed to ensure finalizer on child", "child", childRef.Name)
+			childErrors = append(childErrors, fmt.Errorf("failed to ensure finalizer on child %s: %w", childRef.Name, ensureErr))
 			continue
 		}
-
-		if !childObj.GetDeletionTimestamp().IsZero() {
-			// Child is already deleting: its own deletion handler is running with a durable window; do not
-			// touch its finalizer (adding a finalizer to a deleting object is rejected by the API server).
-			logger.V(1).Info("Child SnapshotContent already deleting, skipping finalizer ensure", "child", childRef.Name)
-			continue
-		}
-
-		// Add/confirm parent-protect on the live child. Do NOT reclaim it and do NOT remove any finalizer.
-		if snapshot.AddFinalizer(childObj, snapshot.FinalizerParentProtect) {
+		if ensured {
 			logger.Info("Ensured parent-protect finalizer on child SnapshotContent", "child", childRef.Name)
-			childUpdateErr := r.Update(ctx, childObj)
-			if childUpdateErr != nil {
-				if errors.IsNotFound(childUpdateErr) {
-					// Child was deleted between Get and Update - its own handler now owns teardown; skip.
-					logger.V(1).Info("Child SnapshotContent was deleted, skipping update", "child", childRef.Name)
-					continue
-				}
-				logger.Error(childUpdateErr, "Failed to ensure finalizer on child", "child", childRef.Name)
-				childErrors = append(childErrors, fmt.Errorf("failed to update child %s: %w", childRef.Name, childUpdateErr))
-				continue
-			}
 		}
 	}
 
