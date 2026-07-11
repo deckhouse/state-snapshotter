@@ -41,7 +41,10 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 	// This test verifies that GenericSnapshotBinderController correctly handles Snapshot deletion:
 	// - GenericSnapshotBinderController NEVER deletes SnapshotContent directly
 	// - GenericSnapshotBinderController does NOT break Content lifecycle
-	// - GenericSnapshotBinderController removes SnapshotContent finalizer on Snapshot deletion
+	// - GenericSnapshotBinderController latches status.boundSnapshotDeleted=true on the bound SnapshotContent
+	//   and RETAINS its parent-protect finalizer (corrected teardown contract: the content is a durable node
+	//   whose GC owner is its ObjectKeeper / parent SnapshotContent, not this bound Snapshot, so parent-protect
+	//   is released only by the content's OWN deletion handler, never on bound-Snapshot deletion)
 	// - GenericSnapshotBinderController only propagates Ready=False to parent (if applicable)
 	//
 	// INTERFACE: controllers.GenericSnapshotBinderController.Reconcile
@@ -55,17 +58,18 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 	// 1. Delete Snapshot (sets deletionTimestamp)
 	// 2. GenericSnapshotBinderController.Reconcile(ctx, req)
 	// 3. Check SnapshotContent still exists
-	// 4. Check SnapshotContent finalizer removed
+	// 4. Check SnapshotContent boundSnapshotDeleted latched and parent-protect finalizer retained
 	// 5. Check SnapshotContent ownerRef unchanged
 	//
 	// EXPECTED BEHAVIOR:
 	// - SnapshotContent still exists (NOT deleted by GenericSnapshotBinderController)
-	// - SnapshotContent finalizer is removed by GenericSnapshotBinderController on parent deletion
+	// - SnapshotContent status.boundSnapshotDeleted is latched true by GenericSnapshotBinderController
+	// - SnapshotContent parent-protect finalizer is RETAINED (released only by the content's own teardown)
 	// - SnapshotContent ownerRef unchanged (lifecycle not broken)
-	// - SnapshotContent can be managed by SnapshotContentController (orphaning)
+	// - SnapshotContent can be managed by SnapshotContentController (own-teardown reclaim)
 	//
 	// POSTCONDITION:
-	// - SnapshotContent exists and is unblocked for GC by finalizer removal
+	// - SnapshotContent exists, boundSnapshotDeleted=true, still parent-protect'd until its own teardown
 	//
 	// INVARIANT:
 	// - See GLOBAL INVARIANTS G1 (Controllers MUST NOT delete objects directly, ONLY remove finalizers)
@@ -95,7 +99,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 	})
 
 	Describe("Snapshot Deletion - Content Lifecycle Preserved", func() {
-		It("should remove SnapshotContent finalizer on Snapshot deletion", func() {
+		It("should latch boundSnapshotDeleted and retain the content finalizer on Snapshot deletion", func() {
 			// PRECONDITION: Create Snapshot
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -244,23 +248,24 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				return err == nil
 			}, "10s", "100ms").Should(BeTrue(), "SnapshotContent should still exist (NOT deleted by GenericSnapshotBinderController)")
 
-			// ACTIONS Step 4: Check SnapshotContent finalizers
-			// GenericSnapshotBinderController removes parent-protect finalizer on Snapshot deletion
+			// ACTIONS Step 4: Check SnapshotContent finalizers + boundSnapshotDeleted latch.
+			// GenericSnapshotBinderController latches boundSnapshotDeleted and RETAINS parent-protect (the
+			// content is a durable node; only its own teardown handler releases the finalizer).
 			err = mgr.GetAPIReader().Get(ctx, types.NamespacedName{
 				Name: contentName,
 			}, contentObj)
 			Expect(err).NotTo(HaveOccurred())
 
-			// GenericSnapshotBinderController should NOT have removed finalizer directly
-			// (SnapshotContentController will handle it via orphaning, but that's separate)
-			// We verify that SnapshotContent still exists and wasn't deleted by GenericSnapshotBinderController
+			// The binder must not delete the content directly; it still exists.
 			Expect(contentObj.GetName()).To(Equal(contentName), "SnapshotContent should still exist (NOT deleted by GenericSnapshotBinderController)")
 
 			// ACTIONS Step 5: Check SnapshotContent ownerRef unchanged
 			Expect(contentObj.GetOwnerReferences()).To(Equal(originalOwnerRefs), "SnapshotContent ownerRef should be unchanged (lifecycle not broken)")
 
-			// EXPECTED BEHAVIOR: SnapshotContent exists and finalizer is removed
-			Expect(contentObj.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect), "Finalizer should be removed on Snapshot deletion")
+			// EXPECTED BEHAVIOR: boundSnapshotDeleted latched true, parent-protect RETAINED.
+			boundDeleted, _, _ := unstructured.NestedBool(contentObj.Object, "status", "boundSnapshotDeleted")
+			Expect(boundDeleted).To(BeTrue(), "boundSnapshotDeleted should be latched true on Snapshot deletion")
+			Expect(contentObj.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect), "parent-protect must be RETAINED on Snapshot deletion (released only by the content's own teardown)")
 
 			// Cleanup: remove test finalizer to allow snapshot deletion
 			err = k8sClient.Get(ctx, types.NamespacedName{
@@ -273,7 +278,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			}
 		})
 
-		It("should remove SnapshotContent finalizer even if boundSnapshotContentName is missing", func() {
+		It("should latch boundSnapshotDeleted via the deterministic-name fallback and retain the finalizer", func() {
 			// PRECONDITION: Create Snapshot
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -336,14 +341,17 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			_, err = snapshotCtrl.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Finalizer should be removed from SnapshotContent
+			// boundSnapshotDeleted latched via the deterministic-name fallback (status.boundSnapshotContentName
+			// was missing), and parent-protect is RETAINED.
 			contentObj2 := &unstructured.Unstructured{}
 			contentObj2.SetGroupVersionKind(contentGVK)
 			err = k8sClient.Get(ctx, types.NamespacedName{
 				Name: contentName,
 			}, contentObj2)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(contentObj2.GetFinalizers()).NotTo(ContainElement(snapshot.FinalizerParentProtect))
+			boundDeleted, _, _ := unstructured.NestedBool(contentObj2.Object, "status", "boundSnapshotDeleted")
+			Expect(boundDeleted).To(BeTrue(), "boundSnapshotDeleted should latch even via the deterministic-name fallback")
+			Expect(contentObj2.GetFinalizers()).To(ContainElement(snapshot.FinalizerParentProtect), "parent-protect must be RETAINED")
 
 			// Cleanup: remove test finalizer
 			err = k8sClient.Get(ctx, types.NamespacedName{
@@ -358,10 +366,12 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 
 		// Block 0 (eager shell): the content object is created AND bound as soon as the Snapshot exists,
 		// decoupled from the domain phase>=Planned barrier (content-single-writer design §9, the deadlock
-		// fix). A Snapshot deleted BEFORE Planned must still have its content parent-protect finalizer
-		// removed by the binder deletion path — the eager Retain shell lingers (recycle-bin clutter) but
-		// never wedges the Snapshot's deletion (hazard H7).
-		It("creates+binds the content shell before Planned and removes its finalizer on pre-Planned deletion", func() {
+		// fix). A Snapshot deleted BEFORE Planned latches boundSnapshotDeleted on its content and RETAINS the
+		// parent-protect finalizer regardless of phase — the durable Retain shell lingers (recycle-bin
+		// clutter) but never wedges the Snapshot's deletion (hazard H7): the content is a separate
+		// cluster-scoped object owned by its ObjectKeeper, not by this Snapshot, so its finalizer never gates
+		// the Snapshot's own GC.
+		It("creates+binds the content shell before Planned and latches boundSnapshotDeleted while retaining its finalizer on pre-Planned deletion", func() {
 			// PRECONDITION: Snapshot exists but the domain has NOT reached phase=Planned.
 			snapshotObj := &unstructured.Unstructured{}
 			snapshotObj.SetGroupVersionKind(snapshotGVK)
@@ -456,7 +466,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				return fresh.GetDeletionTimestamp() != nil
 			}, "10s", "100ms").Should(BeTrue(), "Snapshot should have deletionTimestamp set")
 
-			// The binder deletion path must remove the content parent-protect finalizer regardless of phase.
+			// The binder deletion path must latch boundSnapshotDeleted and RETAIN the content finalizer
+			// regardless of phase (the content is finalized only by its own teardown handler).
 			Eventually(func() bool {
 				if _, err := snapshotCtrl.Reconcile(ctx, req); err != nil {
 					return false
@@ -466,10 +477,11 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				if err := mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, fresh); err != nil {
 					return false
 				}
-				return !contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
-			}, "10s", "100ms").Should(BeTrue(), "pre-Planned deletion must remove the content finalizer (no wedge)")
+				boundDeleted, _, _ := unstructured.NestedBool(fresh.Object, "status", "boundSnapshotDeleted")
+				return boundDeleted && contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
+			}, "10s", "100ms").Should(BeTrue(), "pre-Planned deletion must latch boundSnapshotDeleted and RETAIN the content finalizer (no wedge; content is a separate object)")
 
-			// The Retain shell survives (recycle-bin clutter, not a wedge).
+			// The Retain shell survives with its finalizer (recycle-bin clutter, not a wedge).
 			Expect(mgr.GetAPIReader().Get(ctx, types.NamespacedName{Name: contentName}, contentObj)).To(Succeed())
 
 			// Cleanup: drop the test finalizer so the Snapshot can be GC'd.

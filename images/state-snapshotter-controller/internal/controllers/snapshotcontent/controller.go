@@ -300,12 +300,16 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Step 1: Ensure finalizer (manual deletion protection)
+	// Step 1: Ensure the parent-protect finalizer (durable-node teardown barrier).
+	//
+	// parent-protect holds every SnapshotContent until its OWN deletion handler completes its reclaim; it is
+	// NOT released when the logical bound Snapshot is deleted. On bound-Snapshot deletion the binder only
+	// latches status.boundSnapshotDeleted (see markBoundSnapshotDeletedOnContent). So ensure the finalizer
+	// FIRST, even when boundSnapshotDeleted=true: this also self-heals a content left finalizer-less by the
+	// old code, which stripped parent-protect on bound-Snapshot deletion. Only AFTER the finalizer is
+	// confirmed present do we honor the bound-deleted early return, which skips status aggregation against a
+	// gone owner while the durable node stays protected until its own teardown runs.
 	if obj.GetDeletionTimestamp().IsZero() {
-		if boundSnapshotDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "boundSnapshotDeleted"); boundSnapshotDeleted {
-			// Parent Snapshot is gone; don't re-add finalizer.
-			return ctrl.Result{}, nil
-		}
 		if snapshot.AddFinalizer(obj, snapshot.FinalizerParentProtect) {
 			logger.Info("Added finalizer to SnapshotContent", "finalizer", snapshot.FinalizerParentProtect)
 			if err := r.Update(ctx, obj); err != nil {
@@ -314,26 +318,38 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			}
 			return ctrl.Result{Requeue: true}, nil
 		}
+		if boundSnapshotDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "boundSnapshotDeleted"); boundSnapshotDeleted {
+			// Bound Snapshot is gone; the finalizer is confirmed present above. Skip status aggregation
+			// against a gone owner — the durable node stays protected until its own teardown handler runs.
+			return ctrl.Result{}, nil
+		}
 	} else {
 		// Object is being deleted - handle deletion (Phase 2: Cascade)
 		// Invariant Phase 2: SnapshotContent with DeletionTimestamp →
 		// first cascade finalizers → then GC via ownerRef
 
-		// Step 2.1: Cascade remove finalizers from children
-		// This unlocks GC for children, but does NOT initiate Delete(child-content)
-		// GC will handle deletion through ownerRef
-		if err := r.cascadeRemoveFinalizersFromChildren(ctx, contentLike, obj); err != nil {
-			// A child whose physical reclaim failed keeps its parent-protect finalizer; requeue and KEEP
-			// this parent's finalizer too, so the parent is not GC'd (and the subtree not orphaned) until
-			// every child's data artifact is reclaimed (C5 teardown: no orphaned physical CSI snapshots).
-			logger.Error(err, "Cascade child reclaim/finalizer removal incomplete; keeping finalizer and requeueing")
+		// Step 2.1: Ensure parent-protect on every live direct child BEFORE finalizing this node.
+		// We do NOT reclaim a child or strip its finalizer here: each child is a durable node that must run
+		// its OWN deletion handler (which recursively finalizes its subtree and reclaims its artifacts) once
+		// ownerRef GC deletes it after this parent is gone. Ensuring the finalizer makes that deletion a
+		// durable deletionTimestamp window rather than an immediate GC that could skip the handler. HARD GATE:
+		// any non-NotFound failure keeps this parent's finalizer and requeues, so the parent is never GC'd
+		// (and the subtree never orphaned) before every live child is confirmed protected.
+		if err := r.ensureFinalizersOnChildrenForCascade(ctx, contentLike, obj); err != nil {
+			logger.Error(err, "Ensuring child parent-protect finalizers incomplete; keeping finalizer and requeueing")
 			return ctrl.Result{}, err
 		}
 
-		// Step 2.1.1: Remove finalizers from linked artifacts (MCP/VSC)
+		// Step 2.1.1: Remove our artifact-protect finalizer from linked artifacts (MCP/VSC). HARD GATE:
+		// this content is the LAST writer able to strip artifact-protect — once its own parent-protect is
+		// removed below and GC deletes the content, no reconcile ever visits these artifacts again, so a
+		// swallowed failure here would leave the artifact wedged forever as a tombstone (deletionTimestamp
+		// set, a finalizer nobody removes). On any failure keep this content's finalizer and requeue;
+		// removal is idempotent (NotFound is success), so retries converge.
 		if mcpName := contentLike.GetStatusManifestCheckpointName(); mcpName != "" {
 			if err := r.removeArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
-				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer", "mcp", mcpName)
+				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer; keeping finalizer and requeueing", "mcp", mcpName)
+				return ctrl.Result{}, err
 			}
 		}
 		// Physical data reclaim (C5, unified import + capture teardown): the VSC was pinned to Retain for
@@ -351,8 +367,13 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
 				continue
 			}
+			// Same HARD GATE as the MCP leg above: a VSC left carrying artifact-protect after this content
+			// is GC'd is a permanent tombstone — the CSI sidecar reclaims the physical snapshot and removes
+			// its own bound-protection finalizer, but OUR finalizer has no writer left. Keep parent-protect
+			// and requeue until the removal succeeds.
 			if err := r.removeArtifactFinalizer(ctx, "VolumeSnapshotContent", binding.Artifact.Name, "snapshot.storage.k8s.io/v1"); err != nil {
-				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer", "vsc", binding.Artifact.Name)
+				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer; keeping finalizer and requeueing", "vsc", binding.Artifact.Name)
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -393,7 +414,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// and captureState...manifestCaptureRequestName / boundVolumeSnapshotContentName), so a single
 	// APIReader.Get keeps the aggregator's per-pass owner read at the Block 1 level. A second, redundant Get
 	// (one per projection) perturbed the Block 0 eager-shell ObjectKeeper create race enough to wedge the
-	// orphan wave. See WORKLOG w8-block2.
+	// orphan wave.
 	//
 	// Orphan/standalone VolumeSnapshot children are ordinary domain contents now (content-single-writer
 	// design §11.6): their owner (the VolumeSnapshot) carries captureState + boundVolumeSnapshotContentName,
@@ -1688,12 +1709,20 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 	return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcp.Name), nil
 }
 
-// cascadeRemoveFinalizersFromChildren removes finalizers from child SnapshotContent objects
-// This unlocks GC for children, but does NOT initiate Delete(child-content)
-// GC will handle deletion through ownerRef
+// ensureFinalizersOnChildrenForCascade ensures the parent-protect finalizer on every existing, non-deleting
+// direct child SnapshotContent BEFORE this parent node finalizes itself. It NEVER removes a child finalizer
+// and NEVER reclaims a child's data on the child's behalf: each child is a durable tree node whose
+// Kubernetes GC owner is this parent content, so once this parent is gone ownerRef GC requests deletion of
+// the child, the child's own parent-protect makes that a durable deletionTimestamp window, and the child's
+// own deletion handler runs the same sequence recursively over its subtree and artifacts. Reclaiming or
+// stripping a child here would let GC delete a deeper descendant without ever running its handler (the
+// depth-N teardown race this change fixes).
 //
-// Important: Handles broken links gracefully to avoid deadlock
-func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
+// HARD GATE: any non-NotFound failure (get or update) is returned so the caller keeps this parent's
+// finalizer and requeues — the parent must not be GC'd until every live child is confirmed protected. This
+// is stricter than the old all-children-failed gate. Children that are NotFound (already GC'd) or already
+// carry a deletionTimestamp (their own handler is already running) are skipped.
+func (r *SnapshotContentController) ensureFinalizersOnChildrenForCascade(
 	ctx context.Context,
 	contentLike snapshot.SnapshotContentLike,
 	obj *unstructured.Unstructured,
@@ -1702,11 +1731,11 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 	childrenRefs := contentLike.GetStatusChildrenSnapshotContentRefs()
 
 	if len(childrenRefs) == 0 {
-		// No children - nothing to cascade
+		// No children - nothing to protect
 		return nil
 	}
 
-	logger.Info("Cascading finalizer removal to children", "childrenCount", len(childrenRefs))
+	logger.Info("Ensuring parent-protect finalizer on children before parent teardown", "childrenCount", len(childrenRefs))
 
 	// Get Content GVK to derive child Content GVK
 	contentGVK := obj.GetObjectKind().GroupVersionKind()
@@ -1729,69 +1758,67 @@ func (r *SnapshotContentController) cascadeRemoveFinalizersFromChildren(
 			childContentGVK = resolvedGVK
 		}
 
-		childObj := &unstructured.Unstructured{}
-		childObj.SetGroupVersionKind(childContentGVK)
 		childKey := client.ObjectKey{Name: childRef.Name}
 
-		// Try to get child Content
-		childGetErr := r.Get(ctx, childKey, childObj)
-		if childGetErr != nil {
-			if errors.IsNotFound(childGetErr) {
-				// Child already deleted - skip (broken link, but not an error)
+		// Add/confirm parent-protect on the live child. Do NOT reclaim it and do NOT remove any finalizer.
+		// The finalizer write retries optimistic-lock conflicts with a fresh re-read: child metadata/status
+		// is written concurrently (the aggregator patches child conditions, the child's own reconcile
+		// ensures its finalizer), and the caller HARD-GATES on any returned error, so a transient conflict
+		// must not escalate into a full parent requeue.
+		ensured := false
+		ensureErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			childObj := &unstructured.Unstructured{}
+			childObj.SetGroupVersionKind(childContentGVK)
+			if err := r.Get(ctx, childKey, childObj); err != nil {
+				return err
+			}
+			if !childObj.GetDeletionTimestamp().IsZero() {
+				// Child is already deleting: its own deletion handler is running with a durable window; do
+				// not touch its finalizer (adding a finalizer to a deleting object is rejected by the API
+				// server).
+				logger.V(1).Info("Child SnapshotContent already deleting, skipping finalizer ensure", "child", childRef.Name)
+				return nil
+			}
+			if !snapshot.AddFinalizer(childObj, snapshot.FinalizerParentProtect) {
+				return nil
+			}
+			if err := r.Update(ctx, childObj); err != nil {
+				return err
+			}
+			ensured = true
+			return nil
+		})
+		if ensureErr != nil {
+			if errors.IsNotFound(ensureErr) {
+				// Child already GC'd (or deleted between read and write) - its own handler owns teardown;
+				// nothing to protect (broken link, not an error).
 				logger.V(1).Info("Child SnapshotContent not found, skipping", "child", childRef.Name)
 				continue
 			}
-			// Other error - log but continue
-			logger.Error(childGetErr, "Failed to get child SnapshotContent", "child", childRef.Name)
-			childErrors = append(childErrors, fmt.Errorf("failed to get child %s: %w", childRef.Name, childGetErr))
+			logger.Error(ensureErr, "Failed to ensure finalizer on child", "child", childRef.Name)
+			childErrors = append(childErrors, fmt.Errorf("failed to ensure finalizer on child %s: %w", childRef.Name, ensureErr))
 			continue
 		}
-
-		// Reclaim the child's physical data artifacts BEFORE removing its finalizer: stripping a direct
-		// child's parent-protect finalizer here lets GC delete it WITHOUT running its own deletion handler
-		// (and thus without its own reclaim). So reclaim is a gate: if it fails, DO NOT remove this child's
-		// finalizer — leave parent-protect in place so the child's own deletion handler runs as the backstop
-		// reclaim, and record the error so the parent cascade requeues. This keeps the unified teardown
-		// reclaim complete for every node (no orphaned physical CSI snapshot). Idempotent across retries.
-		if err := r.reclaimDataArtifactsFromContentObj(ctx, childObj); err != nil {
-			logger.Error(err, "Failed to reclaim child data artifacts during cascade; keeping child finalizer", "child", childRef.Name)
-			childErrors = append(childErrors, fmt.Errorf("reclaim child %s data artifacts: %w", childRef.Name, err))
-			continue
-		}
-
-		// Remove finalizer from child
-		if snapshot.RemoveFinalizer(childObj, snapshot.FinalizerParentProtect) {
-			logger.Info("Removed finalizer from child SnapshotContent", "child", childRef.Name)
-			childUpdateErr := r.Update(ctx, childObj)
-			if childUpdateErr != nil {
-				if errors.IsNotFound(childUpdateErr) {
-					// Child was deleted between Get and Update - skip
-					logger.V(1).Info("Child SnapshotContent was deleted, skipping update", "child", childRef.Name)
-					continue
-				}
-				logger.Error(childUpdateErr, "Failed to remove finalizer from child", "child", childRef.Name)
-				childErrors = append(childErrors, fmt.Errorf("failed to update child %s: %w", childRef.Name, childUpdateErr))
-				continue
-			}
-		} else {
-			// Finalizer already removed - child is already being processed
-			logger.V(1).Info("Child SnapshotContent finalizer already removed", "child", childRef.Name)
+		if ensured {
+			logger.Info("Ensured parent-protect finalizer on child SnapshotContent", "child", childRef.Name)
 		}
 	}
 
-	// Return error only if all children failed (partial success is acceptable)
-	if len(childErrors) > 0 && len(childErrors) == len(childrenRefs) {
-		return fmt.Errorf("failed to remove finalizers from all children: %v", childErrors)
-	}
-
+	// HARD GATE: ANY non-NotFound failure blocks this parent's finalization so no live child is left
+	// unprotected before the parent is GC'd (the subtree would otherwise be at risk of a handler-skipping GC).
 	if len(childErrors) > 0 {
-		logger.Info("Some children failed, but cascade continues", "failedCount", len(childErrors), "totalCount", len(childrenRefs))
+		return fmt.Errorf("failed to ensure finalizers on children: %v", childErrors)
 	}
 
 	return nil
 }
 
-// removeArtifactFinalizer removes artifact-protect finalizer from MCP/VSC if present.
+// removeArtifactFinalizer removes our artifact-protect finalizer from a linked artifact (MCP/VSC).
+// Idempotent: an artifact that is gone (NotFound on read, or deleted between read and write) is success.
+// The finalizer write retries optimistic-lock conflicts with a fresh re-read: artifact metadata is written
+// concurrently by other controllers (the CSI sidecar stamps finalizers/annotations on VSCs), and the
+// deletion-path caller HARD-GATES on the returned error, so a transient conflict must not escalate into a
+// full parent requeue.
 func (r *SnapshotContentController) removeArtifactFinalizer(ctx context.Context, kind, name, apiVersion string) error {
 	var gvk schema.GroupVersionKind
 	if idx := strings.Index(apiVersion, "/"); idx != -1 {
@@ -1808,22 +1835,31 @@ func (r *SnapshotContentController) removeArtifactFinalizer(ctx context.Context,
 		}
 	}
 
-	artifactObj := &unstructured.Unstructured{}
-	artifactObj.SetGroupVersionKind(gvk)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+	removed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		artifactObj := &unstructured.Unstructured{}
+		artifactObj.SetGroupVersionKind(gvk)
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+			return err
+		}
+		if !snapshot.RemoveFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
+			return nil
+		}
+		if err := r.Update(ctx, artifactObj); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
 		return err
 	}
-
-	if snapshot.RemoveFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
-		if err := r.Update(ctx, artifactObj); err != nil {
-			return err
-		}
+	if removed {
 		log.FromContext(ctx).Info("Removed artifact finalizer", "kind", kind, "name", name, "finalizer", snapshot.FinalizerArtifactProtect)
 	}
-
 	return nil
 }
 

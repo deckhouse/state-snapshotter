@@ -103,6 +103,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	})
 	resourceSelectorSpecs()     // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
 	volumeDataSpecs()           // volumedata_test.go: full volume-data flow (phase 3, env-gated)
+	volumeDataGcSpecs()         // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3, env-gated)
 	volumeSnapshotDomainSpecs() // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
 	childBridgeFailureSpecs()   // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
 	readyFlapSpecs()            // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
