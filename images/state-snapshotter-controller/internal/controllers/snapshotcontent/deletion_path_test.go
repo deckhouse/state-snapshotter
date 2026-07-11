@@ -36,8 +36,8 @@ import (
 
 // deletingNodeWithVSC seeds a common SnapshotContent that is being torn down (deletionTimestamp set, held by
 // parent-protect) with a single VolumeSnapshotContent data ref, plus the bound VSC (Retain + bound-protection
-// finalizer). It returns the built controller and client. The finalizer keeps both objects observable after
-// the fake client's finalizer-driven deletion.
+// + our artifact-protect finalizer, as pinned during capture). It returns the built controller and client.
+// The finalizers keep both objects observable after the fake client's finalizer-driven deletion.
 func deletingNodeWithVSC(t *testing.T, extraInterceptors interceptor.Funcs) (*SnapshotContentController, client.WithWatch) {
 	t.Helper()
 	ctx := context.Background()
@@ -51,7 +51,7 @@ func deletingNodeWithVSC(t *testing.T, extraInterceptors interceptor.Funcs) (*Sn
 		},
 	}
 	vsc := vscWithDeletionPolicy("vsc-x", volumeSnapshotContentRetainPolicy)
-	vsc.SetFinalizers([]string{vscBoundProtectionFinalizer})
+	vsc.SetFinalizers([]string{vscBoundProtectionFinalizer, snapshot.FinalizerArtifactProtect})
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(content, vsc).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
@@ -120,6 +120,52 @@ func TestReconcileDeletingNodeReclaimsOwnVSCAndRemovesOwnFinalizer(t *testing.T)
 	}
 	if v := vsc.GetAnnotations()[volumeSnapshotBeingDeletedAnnotation]; v != volumeSnapshotBeingDeletedValue {
 		t.Fatalf("vsc being-deleted annotation = %q, want %q", v, volumeSnapshotBeingDeletedValue)
+	}
+	// Our artifact-protect finalizer is gone (only the sidecar's bound-protection remains), so the VSC
+	// deletion completes as soon as the sidecar finishes the physical reclaim.
+	if snapshot.HasFinalizer(vsc, snapshot.FinalizerArtifactProtect) {
+		t.Fatalf("vsc artifact-protect finalizer should be removed during teardown: %v", vsc.GetFinalizers())
+	}
+}
+
+// If removing our artifact-protect finalizer from the node's own VSC fails, the node KEEPS parent-protect
+// and the reconcile errors so it is retried. This content is the LAST writer able to strip artifact-protect:
+// swallowing the failure (the pre-fix behavior) let the content proceed to its own finalizer removal and be
+// GC'd, leaving the VSC wedged forever as a tombstone — deletionTimestamp set, our finalizer never removed.
+func TestReconcileDeletingNodeKeepsFinalizerWhenArtifactFinalizerRemovalFails(t *testing.T) {
+	ctx := context.Background()
+	// Fail metadata updates on the VSC: the deletion path touches the VSC only via Patch (reclaim flip) and
+	// Delete, so an Update interceptor targets exactly the artifact-protect finalizer removal.
+	r, cl := deletingNodeWithVSC(t, interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if obj.GetObjectKind().GroupVersionKind().Kind == kindVolumeSnapshotContent {
+				return apierrors.NewServiceUnavailable("simulated VSC update failure")
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: "node"}}); err == nil {
+		t.Fatalf("expected reconcile to return an error when the VSC artifact-protect removal fails")
+	}
+
+	node := &unstructured.Unstructured{}
+	node.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
+	if err := cl.Get(ctx, client.ObjectKey{Name: "node"}, node); err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if !snapshot.HasFinalizer(node, snapshot.FinalizerParentProtect) {
+		t.Fatalf("node must RETAIN parent-protect when the artifact finalizer removal fails (retryable): %v", node.GetFinalizers())
+	}
+
+	// The VSC still carries our finalizer — the retried teardown remains the writer that will remove it.
+	vsc := &unstructured.Unstructured{}
+	vsc.SetGroupVersionKind(volumeSnapshotContentGVK())
+	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-x"}, vsc); err != nil {
+		t.Fatalf("get vsc: %v", err)
+	}
+	if !snapshot.HasFinalizer(vsc, snapshot.FinalizerArtifactProtect) {
+		t.Fatalf("vsc must still carry artifact-protect (removal failed): %v", vsc.GetFinalizers())
 	}
 }
 

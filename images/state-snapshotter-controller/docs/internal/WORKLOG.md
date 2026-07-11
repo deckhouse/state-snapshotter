@@ -57,7 +57,10 @@ both closed:
 - `snapshotcontent/finalizer_selfheal_test.go` — `boundSnapshotDeleted=true` + missing finalizer
   self-heals then early-returns (no stale-owner aggregation, no requeue).
 - `snapshotcontent/deletion_path_test.go` — a deleting node reclaims its own VSC and removes only its own
-  finalizer; a failed reclaim retains the finalizer and returns a retryable error.
+  finalizer; a failed reclaim retains the finalizer and returns a retryable error; a failed artifact-protect
+  removal (MCP/VSC) likewise retains parent-protect and errors — the content is the LAST writer able to
+  strip artifact-protect, so swallowing that failure would GC the content and wedge the artifact as a
+  tombstone (the removal is a HARD GATE, with RetryOnConflict + re-read inside `removeArtifactFinalizer`).
 - `snapshotcontent/controller_test.go` — parent teardown ensures/retains child finalizers, never strips
   them.
 - Integration (`test/integration`): `snapshot_deletion_test.go` (binder latches `boundSnapshotDeleted`

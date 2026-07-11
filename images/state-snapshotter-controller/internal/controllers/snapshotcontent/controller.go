@@ -340,10 +340,16 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, err
 		}
 
-		// Step 2.1.1: Remove finalizers from linked artifacts (MCP/VSC)
+		// Step 2.1.1: Remove our artifact-protect finalizer from linked artifacts (MCP/VSC). HARD GATE:
+		// this content is the LAST writer able to strip artifact-protect — once its own parent-protect is
+		// removed below and GC deletes the content, no reconcile ever visits these artifacts again, so a
+		// swallowed failure here would leave the artifact wedged forever as a tombstone (deletionTimestamp
+		// set, a finalizer nobody removes). On any failure keep this content's finalizer and requeue;
+		// removal is idempotent (NotFound is success), so retries converge.
 		if mcpName := contentLike.GetStatusManifestCheckpointName(); mcpName != "" {
 			if err := r.removeArtifactFinalizer(ctx, "ManifestCheckpoint", mcpName, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
-				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer", "mcp", mcpName)
+				logger.Error(err, "Failed to remove ManifestCheckpoint finalizer; keeping finalizer and requeueing", "mcp", mcpName)
+				return ctrl.Result{}, err
 			}
 		}
 		// Physical data reclaim (C5, unified import + capture teardown): the VSC was pinned to Retain for
@@ -361,8 +367,13 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 			if binding.Artifact.Kind != "VolumeSnapshotContent" || binding.Artifact.Name == "" {
 				continue
 			}
+			// Same HARD GATE as the MCP leg above: a VSC left carrying artifact-protect after this content
+			// is GC'd is a permanent tombstone — the CSI sidecar reclaims the physical snapshot and removes
+			// its own bound-protection finalizer, but OUR finalizer has no writer left. Keep parent-protect
+			// and requeue until the removal succeeds.
 			if err := r.removeArtifactFinalizer(ctx, "VolumeSnapshotContent", binding.Artifact.Name, "snapshot.storage.k8s.io/v1"); err != nil {
-				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer", "vsc", binding.Artifact.Name)
+				logger.Error(err, "Failed to remove VolumeSnapshotContent finalizer; keeping finalizer and requeueing", "vsc", binding.Artifact.Name)
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -1797,7 +1808,12 @@ func (r *SnapshotContentController) ensureFinalizersOnChildrenForCascade(
 	return nil
 }
 
-// removeArtifactFinalizer removes artifact-protect finalizer from MCP/VSC if present.
+// removeArtifactFinalizer removes our artifact-protect finalizer from a linked artifact (MCP/VSC).
+// Idempotent: an artifact that is gone (NotFound on read, or deleted between read and write) is success.
+// The finalizer write retries optimistic-lock conflicts with a fresh re-read: artifact metadata is written
+// concurrently by other controllers (the CSI sidecar stamps finalizers/annotations on VSCs), and the
+// deletion-path caller HARD-GATES on the returned error, so a transient conflict must not escalate into a
+// full parent requeue.
 func (r *SnapshotContentController) removeArtifactFinalizer(ctx context.Context, kind, name, apiVersion string) error {
 	var gvk schema.GroupVersionKind
 	if idx := strings.Index(apiVersion, "/"); idx != -1 {
@@ -1814,22 +1830,31 @@ func (r *SnapshotContentController) removeArtifactFinalizer(ctx context.Context,
 		}
 	}
 
-	artifactObj := &unstructured.Unstructured{}
-	artifactObj.SetGroupVersionKind(gvk)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+	removed := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		artifactObj := &unstructured.Unstructured{}
+		artifactObj.SetGroupVersionKind(gvk)
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, artifactObj); err != nil {
+			return err
+		}
+		if !snapshot.RemoveFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
+			return nil
+		}
+		if err := r.Update(ctx, artifactObj); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
 		return err
 	}
-
-	if snapshot.RemoveFinalizer(artifactObj, snapshot.FinalizerArtifactProtect) {
-		if err := r.Update(ctx, artifactObj); err != nil {
-			return err
-		}
+	if removed {
 		log.FromContext(ctx).Info("Removed artifact finalizer", "kind", kind, "name", name, "finalizer", snapshot.FinalizerArtifactProtect)
 	}
-
 	return nil
 }
 
