@@ -1,0 +1,5 @@
+Изменения:
+  - Релиз уровня General Availability. state-snapshotter переведён в GA и автовключается в бандлах
+    Default, Managed и Minimal (базовая функциональность резервного копирования доступна всегда).
+  - Эта версия v1.0.0 — базовая, на которую пинится модуль storage-foundation (requirements.modules
+    state-snapshotter >= 1.0.0), строящий поверх неё свой домен снимков.

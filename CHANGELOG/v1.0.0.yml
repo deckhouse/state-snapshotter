@@ -1,0 +1,5 @@
+Changes:
+- General Availability release. state-snapshotter is promoted to GA and auto-enabled in the Default,
+  Managed and Minimal bundles (base backup functionality is always available).
+- This v1.0.0 is the baseline pinned by the storage-foundation module (requirements.modules
+  state-snapshotter >= 1.0.0), which builds its snapshot domain on top of it.

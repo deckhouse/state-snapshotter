@@ -1,5 +1,5 @@
 name: state-snapshotter
-stage: "Experimental"
+stage: "General Availability"
 subsystems:
   - storage
 descriptions:
@@ -8,3 +8,11 @@ descriptions:
 requirements:
   deckhouse: ">= 1.72"
 namespace: d8-state-snapshotter
+accessibility:
+  editions:
+    _default:
+      available: true
+      enabledInBundles:
+        - Default
+        - Managed
+        - Minimal
