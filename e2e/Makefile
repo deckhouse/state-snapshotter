@@ -63,6 +63,52 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 	@echo "==> Deleting controller diagnostics logs in '$(LOGS_DIR)'..."
 	@if [ -d "$(LOGS_DIR)" ]; then rm -rf "$(LOGS_DIR)" && echo "  removed"; else echo "  none found"; fi
 
+# ---- Transition e2e (manual, dev-only; see tests/transition/README.md) ----
+
+# kubectl honoring KUBE_CONFIG_PATH (the kubeconfig var the transition suite / storage-e2e read);
+# falls back to the ambient kubeconfig when it is unset.
+KUBECTL ?= kubectl$(if $(KUBE_CONFIG_PATH), --kubeconfig $(KUBE_CONFIG_PATH),)
+
+# The four snapshot-stack modules the transition suite drives at runtime, and their namespaces.
+TRANSITION_MODULES       := snapshot-controller storage-volume-data-manager state-snapshotter storage-foundation
+TRANSITION_NS            := d8-snapshot-controller d8-storage-volume-data-manager d8-state-snapshotter d8-storage-foundation
+TRANSITION_WORKLOAD_NS   ?= transition-workload
+TRANSITION_CLEAN_TIMEOUT ?= 300
+
+.PHONY: test-transition
+test-transition: ## Run the transition e2e suite (manual: needs E2E_RUN_TRANSITION=true + the E2E_TRANSITION_* / *_MODULE_PULL_OVERRIDE env — see tests/transition/README.md)
+	go test -v -count=1 -timeout 200m ./tests/transition/ -ginkgo.timeout 180m -ginkgo.v
+
+.PHONY: transition-clean
+transition-clean: ## Reset the cluster to the transition phase-A start state: disable the 4 snapshot modules, drop their MPOs, drain their namespaces, remove the workload namespace + leftover domain RBAC
+	@echo "==> Disabling the snapshot-stack modules (ModuleConfig enabled=false) and dropping their ModulePullOverrides..."
+	@for m in $(TRANSITION_MODULES); do \
+		if $(KUBECTL) get moduleconfig $$m >/dev/null 2>&1; then \
+			$(KUBECTL) patch moduleconfig $$m --type merge -p '{"spec":{"enabled":false}}' >/dev/null && echo "  moduleconfig/$$m -> enabled=false"; \
+		else echo "  moduleconfig/$$m absent (already off)"; fi; \
+		$(KUBECTL) delete modulepulloverride $$m --ignore-not-found >/dev/null 2>&1 || true; \
+	done
+	@echo "==> Waiting up to $(TRANSITION_CLEAN_TIMEOUT)s for the snapshot-stack namespaces to drain..."
+	@deadline=$$(( $$(date +%s) + $(TRANSITION_CLEAN_TIMEOUT) )); \
+	for ns in $(TRANSITION_NS); do \
+		while $(KUBECTL) get ns $$ns >/dev/null 2>&1; do \
+			if [ $$(date +%s) -ge $$deadline ]; then echo "  TIMEOUT: $$ns still present"; break; fi; \
+			sleep 3; \
+		done; \
+		$(KUBECTL) get ns $$ns >/dev/null 2>&1 || echo "  $$ns: gone"; \
+	done
+	@echo "==> Removing the transition workload namespace '$(TRANSITION_WORKLOAD_NS)' (strip VS/PVC finalizers so it cannot wedge with the controllers gone)..."
+	@if $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; then \
+		for r in $$($(KUBECTL) -n $(TRANSITION_WORKLOAD_NS) get volumesnapshots.snapshot.storage.k8s.io,pvc -o name 2>/dev/null); do \
+			$(KUBECTL) -n $(TRANSITION_WORKLOAD_NS) patch $$r --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true; \
+		done; \
+		$(KUBECTL) delete ns $(TRANSITION_WORKLOAD_NS) --wait=false --ignore-not-found >/dev/null 2>&1 || true; \
+		echo "  deletion requested (async)"; \
+	else echo "  none"; fi
+	@echo "==> Sweeping leftover hook-created domain RBAC (state-snapshotter ClusterRoles/Bindings survive module disable — see docs/backlog.md #2)..."
+	@$(KUBECTL) delete clusterrole,clusterrolebinding -l heritage=deckhouse,module=state-snapshotter --ignore-not-found >/dev/null 2>&1 || true
+	@echo "==> Done. Re-check: none of [$(TRANSITION_NS)] should exist before re-running 'make test-transition'."
+
 .PHONY: vet
 vet: ## go vet (also type-checks the _test.go files -> compile gate)
 	go vet ./...
