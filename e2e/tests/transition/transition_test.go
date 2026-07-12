@@ -222,21 +222,42 @@ func requireEnv(names ...string) {
 // ModuleConfig + ModulePullOverride path, then waits for it to become Ready. Re-calling with a
 // different imageTag retags the live MPO — that is exactly how the svdm legacy->D1 migration is
 // triggered in phase C.
-func enableModule(name, imageTag string, deps ...string) {
-	GinkgoHelper()
-	specs := []storagekube.ModuleSpec{{
+// moduleSpec builds a ModuleSpec (enabled, chart version 1) with an image tag and optional
+// dependencies. IMPORTANT: a dependency name must refer to another module passed in the SAME
+// enableModules() call — the storage-e2e graph builder resolves dependencies only within the
+// provided spec set, so a cross-call dependency fails with "dependency module ... not found".
+// Batch co-dependent modules together instead of enabling them one-by-one.
+func moduleSpec(name, imageTag string, deps ...string) storagekube.ModuleSpec {
+	return storagekube.ModuleSpec{
 		Name:               name,
 		Version:            1,
 		Enabled:            true,
 		ModulePullOverride: imageTag,
 		Dependencies:       deps,
-	}}
-	// res.ClusterDefinition / res.SSHClient carry storage-e2e internal types; they are passed
-	// straight through to EnableModulesAndWait without being named here.
+	}
+}
+
+// enableModules enables (or retags) the given modules in ONE EnableModulesAndWait call, so the
+// framework builds their dependency graph and brings them up together — independent modules
+// concurrently, dependents after their dependencies — then waits for all of them to be Ready.
+// res.ClusterDefinition / res.SSHClient carry storage-e2e internal types passed straight through.
+func enableModules(specs ...storagekube.ModuleSpec) {
+	GinkgoHelper()
 	err := storagekube.EnableModulesAndWait(
 		suiteCtx(), suiteRes.Kubeconfig, suiteRes.SSHClient, suiteRes.ClusterDefinition, specs, moduleReadyTimeout,
 	)
-	Expect(err).NotTo(HaveOccurred(), "enable/retag module %s -> %s", name, imageTag)
+	names := make([]string, len(specs))
+	for i, s := range specs {
+		names[i] = s.Name
+	}
+	Expect(err).NotTo(HaveOccurred(), "enable/retag modules %v", names)
+}
+
+// enableModule enables (or retags) a single module with no cross-module dependency. To enable a
+// module together with a dependency, batch them via enableModules(moduleSpec(...), ...).
+func enableModule(name, imageTag string) {
+	GinkgoHelper()
+	enableModules(moduleSpec(name, imageTag))
 }
 
 var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
@@ -265,13 +286,17 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 	// ---- Phase B: legacy snapshot-controller + svdm ----
 	Context("Phase B: legacy stack (old group)", func() {
 		It("enables snapshot-controller, svdm(legacy) and sds-local-volume", func() {
-			enableModule(modSnapshotController, tagFrom(envSnapshotControllerTag))
-			// svdm legacy image (OLD storage.deckhouse.io group). The legacy tag is a scenario var
-			// because the standard STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE slot is reserved
-			// for the D1 image used by the phase-C retag.
-			enableModule(modSvdm, tagFrom(envSvdmLegacyTag))
-			// sds-local-volume depends on snapshot-controller (v0.4.x) — enable it only now.
-			enableModule(modSdsLocalVolume, tagFrom(envSdsLocalVolumeOverride), modSnapshotController)
+			// One batch: the framework brings snapshot-controller and svdm up concurrently (no
+			// interdependency) and sds-local-volume after snapshot-controller (its v0.4.x dependency,
+			// declared in-batch so the graph resolves — a separate call would fail graph-build).
+			// svdm uses the legacy old-group image via the scenario var E2E_TRANSITION_SVDM_LEGACY_TAG
+			// (the standard STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE slot is reserved for the
+			// D1 image the phase-C retag uses).
+			enableModules(
+				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerTag)),
+				moduleSpec(modSvdm, tagFrom(envSvdmLegacyTag)),
+				moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeOverride), modSnapshotController),
+			)
 		})
 
 		It("creates a PVC + pod, writes deterministic data and a CSI VolumeSnapshot", func(ctx SpecContext) {
@@ -381,8 +406,13 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 		})
 
 		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
-			enableModule(modStateSnapshotter, tagFrom(envStateSnapshotterOverride))
-			enableModule(modStorageFoundation, tagFrom(envStorageFoundationOverride), modStateSnapshotter)
+			// One batch: state-snapshotter first, then storage-foundation (its state-snapshotter
+			// dependency declared in-batch so the graph resolves — a separate call would fail
+			// graph-build with "dependency module state-snapshotter not found").
+			enableModules(
+				moduleSpec(modStateSnapshotter, tagFrom(envStateSnapshotterOverride)),
+				moduleSpec(modStorageFoundation, tagFrom(envStorageFoundationOverride), modStateSnapshotter),
+			)
 
 			// The legacy ModuleConfigs stay enabled:true — the test verifies Helm GUARDS, not
 			// uninstall. Once storage-foundation is enabled, snapshot-controller/svdm must render no
