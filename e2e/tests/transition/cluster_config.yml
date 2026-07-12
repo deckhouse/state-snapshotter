@@ -1,0 +1,77 @@
+# Transition e2e nested test cluster (manual, dev-only).
+#
+# Verifies the snapshot-controller + storage-volume-data-manager (svdm) -> state-snapshotter +
+# storage-foundation consolidation on ONE dev cluster, driving all module lifecycle at RUNTIME
+# (enable / MPO-retag / order) from the test — NOT from this file. See README.md.
+#
+# Why the snapshot stack is NOT enabled here:
+#   The whole point of the transition scenario is to START without state-snapshotter/
+#   storage-foundation and with the LEGACY stack (snapshot-controller + svdm) instead, then flip.
+#   A dev Deckhouse build does NOT enforce module requirements and DOES auto-enable modules from
+#   the bundle, so simply omitting them is not enough — the four snapshot-stack modules are
+#   preseeded here with `enabled: false` as an explicit auto-activation blocker. The test enables
+#   them itself, in order, via runtime ModuleConfig + ModulePullOverride (image tags come from the
+#   E2E_TRANSITION_* / <MODULE>_MODULE_PULL_OVERRIDE env vars, see README.md).
+#
+# Only sds-node-configurator is enabled at bootstrap (its image is pinnable via
+# SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE). sds-local-volume is NOT enabled at bootstrap: the
+# versions under test depend on snapshot-controller (v0.4.x) / storage-foundation, so bringing it
+# up before its dependency is enabled would deadlock the bootstrap module-wait. The test enables
+# sds-local-volume at runtime in phase B, after snapshot-controller is Ready.
+clusterDefinition:
+  masters:
+    - hostname: "master-1"
+      hostType: "vm"
+      osType: "Ubuntu 22.04 6.2.0-39-generic"
+      cpu: 4
+      coreFraction: 50
+      ram: 8
+      diskSize: 50
+  workers:
+    - hostname: "worker-1"
+      hostType: "vm"
+      osType: "Ubuntu 22.04 6.2.0-39-generic"
+      cpu: 4
+      coreFraction: 50
+      ram: 8
+      diskSize: 50
+    - hostname: "worker-2"
+      hostType: "vm"
+      osType: "Ubuntu 22.04 6.2.0-39-generic"
+      cpu: 4
+      coreFraction: 50
+      ram: 8
+      diskSize: 50
+  dkpParameters:
+    kubernetesVersion: "Automatic"
+    podSubnetCIDR: "10.112.0.0/16"
+    serviceSubnetCIDR: "10.225.0.0/16"
+    clusterDomain: "cluster.local"
+    registryRepo: "dev-registry.deckhouse.io/sys/deckhouse-oss"
+    devBranch: "main"
+    modules:
+      # Block device / LVM manager on the nodes; the sds-local-volume backend requires it.
+      # Enabled at bootstrap; image pinnable via SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE.
+      - name: "sds-node-configurator"
+        version: 1
+        enabled: true
+        modulePullOverride: "main"
+        dependencies: []
+      # Preseed the four snapshot-stack modules DISABLED as an auto-activation blocker. The test
+      # enables them at runtime in the required order; tags come from env (see README.md).
+      - name: "snapshot-controller"
+        version: 1
+        enabled: false
+        dependencies: []
+      - name: "storage-volume-data-manager"
+        version: 1
+        enabled: false
+        dependencies: []
+      - name: "state-snapshotter"
+        version: 1
+        enabled: false
+        dependencies: []
+      - name: "storage-foundation"
+        version: 1
+        enabled: false
+        dependencies: []

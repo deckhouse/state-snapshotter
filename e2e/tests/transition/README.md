@@ -1,0 +1,99 @@
+# Transition e2e — snapshot-controller + svdm → state-snapshotter + storage-foundation
+
+Manual, developer-run scenario that verifies the consolidation of the legacy snapshot stack
+(`snapshot-controller` + `storage-volume-data-manager`) into `state-snapshotter` +
+`storage-foundation` **on one dev cluster**, without deleting the legacy workload at the flip.
+
+It is a **separate Ginkgo suite** (own `cluster_config.yml`, own bootstrap) because the main
+state-snapshotter suite brings its cluster up with `storage-foundation`/`state-snapshotter`
+already enabled — the opposite of what this scenario needs. All module lifecycle
+(enable / MPO-retag / order) is driven at runtime from the test.
+
+## Scope
+
+- **In scope:** module Helm-guard behaviour (legacy modules stop rendering everything but their
+  deprecation alert once storage-foundation is enabled), the svdm legacy→v0.2.0 migration hook
+  (CR migration to the new API group, legacy CRD removal, legacy finalizer sweep incl. PVCs),
+  CSI snapshot / DataExport-DataImport / restore data integrity across the flip, and the existing
+  state-snapshotter e2e on the same cluster after the flip.
+- **Out of scope (tested by the runtime team, covered by canary channel rollout):** Deckhouse
+  `requirements.deckhouse`/`requirements.modules` gating, `ModuleRelease` Pending→activation,
+  bundle auto-enable. This suite runs on a **dev** Deckhouse build, which does not enforce
+  requirements — so `>= 1.76` and `storage-foundation >= 1.0.0` gates are intentionally NOT
+  exercised here.
+
+## Running
+
+```bash
+cd e2e
+E2E_RUN_TRANSITION=true \
+TEST_CLUSTER_CREATE_MODE=<as for the main suite> \
+  <plus the image-tag vars below> \
+  go test ./tests/transition/... -v -timeout 180m
+```
+
+Without `E2E_RUN_TRANSITION=true` the suite is skipped entirely (nothing bootstraps). It is **not**
+wired into CI — run it by hand from a workstation with dev-registry access.
+
+## Environment variables
+
+The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
+the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded. `snapshot-controller`
+and `svdm` need **scenario** variables (svdm needs two slots — the legacy old-group image and the
+v0.2.0/D1 new-group image); the rest use storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
+
+| Variable | Type | Phase | Role |
+|---|---|---|---|
+| `E2E_RUN_TRANSITION` | scenario gate | all | must be `true`, else the whole suite is skipped |
+| `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE` | standard | A (bootstrap) | sds-node-configurator image |
+| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller image (legacy stack) |
+| `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B | svdm image on the OLD `storage.deckhouse.io` group (pre-D1) |
+| `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | B | sds-local-volume image (enabled after snapshot-controller) |
+| `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
+| `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` | standard | C | state-snapshotter image (new stack) |
+| `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` | standard | C | storage-foundation image (new stack) |
+
+### Example
+
+```bash
+export E2E_RUN_TRANSITION=true
+
+# Phase A (bootstrap): only sds-node-configurator is enabled from cluster_config.yml.
+export SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE="main"
+
+# Phase B (legacy stack, driven at runtime):
+export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="main"          # guards already in main
+export E2E_TRANSITION_SVDM_LEGACY_TAG="<dev tag of a pre-D1 svdm build>"
+export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="main"
+
+# Phase C (migrate svdm + flip to the new stack):
+export E2E_TRANSITION_SVDM_TAG="pr<N>"                        # svdm D1 branch build
+export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE="pr<N>"
+export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE="pr<N>"
+```
+
+> Legacy-image caveat: after the svdm D1 branch is merged to `main`, no `main` build carries the
+> OLD API group any more, and dev-registry cleanup may drop old per-commit tags. Run this scenario
+> **before** merging D1 (legacy = a pre-D1 tag, D1 = the PR tag), or pin a still-present legacy tag
+> for `E2E_TRANSITION_SVDM_LEGACY_TAG`.
+
+## Phases
+
+- **A — bootstrap:** dev cluster with only `sds-node-configurator`; the four snapshot-stack modules
+  are preseeded `enabled: false` (auto-activation blocker); assert the cluster is clean (no
+  snapshot-stack workloads/namespaces).
+- **B — legacy stack:** enable `snapshot-controller` then `svdm` (legacy image) and
+  `sds-local-volume`; create a PVC + pod, write deterministic data (checksum), create a CSI
+  `VolumeSnapshot` and wait ready+bound; DataExport a PVC and the VolumeSnapshot and download over
+  the svdm HTTP API (not `d8`); DataImport/upload into new PVCs; CSI-restore a PVC from the
+  snapshot; verify every checksum; keep everything.
+- **C — migrate + flip:** retag the svdm MPO legacy→`E2E_TRANSITION_SVDM_TAG` (D1) and verify the
+  migration hook (unfinished CRs moved to the new group, legacy CRDs removed, legacy finalizers
+  incl. on PVCs swept, standalone svdm still works); then enable `state-snapshotter` →
+  `storage-foundation` **without disabling** the legacy modules; assert the legacy modules now
+  render only their deprecation alert (all workload/RBAC/webhook resources gone).
+- **D — invariants:** CSI + DataExport/DataImport CRDs stay Established (UID/`spec.mode` intact);
+  the legacy ready+bound VolumeSnapshot is untouched (no new-domain labels/status); all checksums
+  still match, incl. a fresh CSI restore from the legacy snapshot after the flip; a brand-new
+  PVC/VS drives the full new unified path; then the existing state-snapshotter e2e passes on the
+  same cluster.
