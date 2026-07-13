@@ -128,6 +128,23 @@ func ensureDataPlaneStorage(ctx context.Context) {
 	Expect(err).NotTo(HaveOccurred(), "annotate StorageClass %s with %s", scName, annStorageClassVSC)
 }
 
+// deletePodAndWait deletes a pod and waits until it is fully gone. svdm's PVC export rejects a source
+// PVC that is still occupied by a pod ("PVC isn't free"), so the probe pod that wrote the marker must
+// be removed — and confirmed gone — before the DataExport.
+func deletePodAndWait(ctx context.Context, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	err := suiteClientset.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return
+	}
+	Expect(err).NotTo(HaveOccurred(), "delete pod %s/%s", ns, name)
+	Eventually(func() bool {
+		_, gerr := suiteClientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		return apierrors.IsNotFound(gerr)
+	}).WithContext(ctx).WithTimeout(timeout).WithPolling(2*time.Second).Should(BeTrue(),
+		"pod %s/%s must be fully deleted before the source PVC is exported", ns, name)
+}
+
 // --- low-level helpers -----------------------------------------------------
 
 // execSh runs `sh -c script` in a pod container and returns stdout (trimmed).
