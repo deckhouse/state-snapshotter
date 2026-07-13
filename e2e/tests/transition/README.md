@@ -60,16 +60,19 @@ importer `UploadFinished` → populator rebind → target PVC Bound) is bounded 
 
 The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
 the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded. `snapshot-controller`
-and `svdm` need **scenario** variables (svdm needs two slots — the legacy old-group image and the
-v0.2.0/D1 new-group image); the rest use storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
+and `svdm` each need **two scenario** variables — a phase-B legacy image and a phase-C handoff image
+the test retags to — because the handoff builds gate on modules absent in phase B (snapshot-controller
+v0.2.0 requires `storage-foundation >= 1.0.0`; svdm v0.2.0/D1 moves to the new API group). The rest
+use storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 
 | Variable | Type | Phase | Role |
 |---|---|---|---|
 | `E2E_RUN_TRANSITION` | scenario gate | all | must be `true`, else the whole suite is skipped |
 | `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE` | standard | A (bootstrap) | sds-node-configurator image |
-| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller image — **must be the v0.2.0 handoff build** (`Deprecated` stage + `D8SnapshotControllerModuleDeprecated` alert), NOT `main`: the deprecation-alert assertion requires it |
+| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG` | scenario | B | snapshot-controller **legacy** image (e.g. `main`) — activates without sf; guards already present in `main` |
 | `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B | svdm image on the OLD `storage.deckhouse.io` group (pre-D1) |
 | `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | B | sds-local-volume image (enabled after snapshot-controller) |
+| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | C | snapshot-controller **v0.2.0 handoff** build (`Deprecated` + `D8SnapshotControllerModuleDeprecated` alert). Retagged AFTER the flip — it requires `storage-foundation >= 1.0.0` and would not activate in phase B. The deprecation-alert assertion requires this build |
 | `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
 | `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` | standard | C | state-snapshotter image (new stack) |
 | `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` | standard | C | storage-foundation image (new stack) |
@@ -87,13 +90,15 @@ export E2E_RUN_TRANSITION=true
 export SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE="main"
 
 # Phase B (legacy stack, driven at runtime):
-# snapshot-controller MUST be the v0.2.0 handoff build (Deprecated stage + deprecation alert),
-# e.g. the feat/deprecate-handoff PR tag — NOT main. The suite asserts the deprecation alerts fire.
-export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="pr<N of the v0.2.0 handoff PR>"
+# snapshot-controller LEGACY image — main is fine (guards already there; activates without sf).
+export E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG="main"
 export E2E_TRANSITION_SVDM_LEGACY_TAG="<dev tag of a pre-D1 svdm build>"
 export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="main"
 
-# Phase C (migrate svdm + flip to the new stack):
+# Phase C (migrate svdm + flip to the new stack; handoff builds retagged here):
+# snapshot-controller v0.2.0 handoff (Deprecated + alert). Retagged AFTER sf is enabled — it
+# requires storage-foundation >= 1.0.0, so it cannot be applied in phase B.
+export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="pr<N of the v0.2.0 handoff PR>"
 export E2E_TRANSITION_SVDM_TAG="pr<N>"                        # svdm D1 branch build
 export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE="pr<N>"
 export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE="pr<N>"
@@ -126,9 +131,11 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   DataExport (download + checksum) and **tear down the migrated export cleanly** — deleting it must
   recover the source PVC from `Lost` to `Bound` (svdm restores the reassigned PV), so no live export
   crosses the flip. Then enable `state-snapshotter` → `storage-foundation` **without disabling** the
-  legacy modules; assert the legacy modules render no workload (all Deployments/Services gone) and
-  that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
-  `D8*ModuleDeprecated`, for both modules).
+  legacy modules; assert both legacy modules render no workload (all Deployments/Services gone).
+  Finally **retag snapshot-controller legacy→v0.2.0** (`E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG`) —
+  this can only happen now, since v0.2.0 requires `storage-foundation >= 1.0.0`; assert it still
+  renders no workload (guard) and that **all four deprecation ClusterAlerts fire** (built-in
+  `ModuleIsDeprecated` + custom `D8*ModuleDeprecated`, for both modules).
 - **D — invariants:** every shared CRD (CSI `volumesnapshots`/`…contents`/`…classes` +
   unified `dataexports`/`dataimports.storage-foundation.deckhouse.io`) stays **Established with the
   same UID captured just before the flip** — proving the handoff re-applies them in place, not
