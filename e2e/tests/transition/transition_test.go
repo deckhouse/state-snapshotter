@@ -303,6 +303,10 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			if !dataPlaneEnabled() {
 				Skip("set " + envStorageClass + " and " + envVSClass + " (snapshot-capable SC + VolumeSnapshotClass) to run the data-plane steps")
 			}
+			// Provision the thin StorageClass + VolumeSnapshotClass (idempotent): a no-op on a cluster
+			// that already has them, full LVM-backend provisioning on a fresh alwaysCreateNew cluster.
+			// Runs here (not phase A) because it needs sds-local-volume Ready, enabled just above.
+			ensureDataPlaneStorage(ctx)
 			ensureNamespace(ctx, workloadNS)
 			DeferCleanup(func(ctx SpecContext) { _ = suiteDyn.Resource(nsGVR).Delete(ctx, workloadNS, metav1.DeleteOptions{}) })
 

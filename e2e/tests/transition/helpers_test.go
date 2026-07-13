@@ -33,10 +33,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
+	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // --- shared clients (initialized in BeforeSuite) ---------------------------
@@ -78,6 +80,52 @@ var moduleNamespace = map[string]string{
 	modSvdm:               "d8-storage-volume-data-manager",
 	modStateSnapshotter:   "d8-state-snapshotter",
 	modStorageFoundation:  "d8-storage-foundation",
+}
+
+// localCSIDriver / annStorageClassVSC mirror the main suite: the local CSI provisioner, and the
+// StorageClass annotation the state-snapshotter capture path resolves the VolumeSnapshotClass through
+// (it never falls back to the cluster default).
+const (
+	localCSIDriver     = "local.csi.storage.deckhouse.io"
+	annStorageClassVSC = "storage.deckhouse.io/volumesnapshotclass"
+)
+
+// ensureDataPlaneStorage provisions the thin, snapshot-capable StorageClass (E2E_TRANSITION_STORAGE_CLASS)
+// and its VolumeSnapshotClass (E2E_TRANSITION_VS_CLASS) that the data-plane phases need, mirroring the
+// main suite's phase-3 setup. Idempotent: a no-op where they already exist (existing cluster); on a
+// fresh alwaysCreateNew cluster it provisions the LVM backend (attaching disks to the worker VMs via
+// suiteRes.BaseKubeconfig) and creates the classes. MUST run after sds-local-volume is Ready (phase B),
+// since EnsureDefaultStorageClass drives LVGs / LocalStorageClass through it.
+func ensureDataPlaneStorage(ctx context.Context) {
+	GinkgoHelper()
+	scName := strings.TrimSpace(os.Getenv(envStorageClass))
+	vscName := strings.TrimSpace(os.Getenv(envVSClass))
+
+	// 1) StorageClass (+ LVM backend). BaseKubeconfig is set only for alwaysCreateNew; then disks are
+	//    attached to the worker VMs on the base cluster. For an already-present SC this is a no-op.
+	_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRes.Kubeconfig, testkit.DefaultStorageClassConfig{
+		StorageClassName:     scName,
+		LVMType:              "Thin",
+		ThinPoolName:         "thinpool",
+		BaseKubeconfig:       suiteRes.BaseKubeconfig,
+		VMNamespace:          strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
+		BaseStorageClassName: strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
+	})
+	Expect(err).NotTo(HaveOccurred(), "ensure StorageClass %s", scName)
+
+	// 2) VolumeSnapshotClass for the local CSI driver — create it if E2E_TRANSITION_VS_CLASS is absent.
+	if _, gerr := suiteDyn.Resource(storagekube.VolumeSnapshotClassGVR).Get(ctx, vscName, metav1.GetOptions{}); gerr != nil {
+		Expect(storagekube.CreateVolumeSnapshotClass(ctx, suiteRes.Kubeconfig, storagekube.VolumeSnapshotClassConfig{
+			Name:           vscName,
+			Driver:         localCSIDriver,
+			DeletionPolicy: "Delete",
+		})).To(Succeed(), "create VolumeSnapshotClass %s", vscName)
+	}
+
+	// 3) Wire the SC -> VSC annotation so the domain capture path (phase D) resolves the class.
+	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annStorageClassVSC, vscName))
+	_, err = suiteClientset.StorageV1().StorageClasses().Patch(ctx, scName, types.MergePatchType, patch, metav1.PatchOptions{})
+	Expect(err).NotTo(HaveOccurred(), "annotate StorageClass %s with %s", scName, annStorageClassVSC)
 }
 
 // --- low-level helpers -----------------------------------------------------
