@@ -207,7 +207,20 @@ func createProbePod(ctx context.Context, ns, name, image string, pvcs ...string)
 			return "", gerr
 		}
 		return p.Status.Phase, nil
-	}, 5*time.Minute, pollInterval).Should(Equal(corev1.PodRunning), "probe pod %s/%s Running", ns, name)
+	}, podRunningTimeout(), pollInterval).Should(Equal(corev1.PodRunning), "probe pod %s/%s Running", ns, name)
+}
+
+// podRunningTimeout bounds how long a probe pod may take to reach Running. For the import probe this
+// budget spans the WHOLE import completion (upload -> importer UploadFinished -> populator rebind of
+// the prime volume -> target PVC Bound -> pod schedule), which can exceed a few minutes on a busy or
+// slow cluster. Override with E2E_TRANSITION_PROBE_TIMEOUT (Go duration, e.g. 15m); default 10m.
+func podRunningTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("E2E_TRANSITION_PROBE_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 10 * time.Minute
 }
 
 // ensureNamespace creates a namespace if absent.
