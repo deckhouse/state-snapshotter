@@ -55,6 +55,65 @@ weight: 20
 
 Полные нормативные правила — в design-доке [`state-snapshotter-rework/design/snapshot-controller.md` §4.5](state-snapshotter-rework/design/snapshot-controller.md).
 
+## Сужение захвата через label selector
+
+По умолчанию `Snapshot` захватывает все пользовательские объекты своего namespace. Чтобы ограничить захват подмножеством, задайте `spec.resourceSelector` — стандартный [label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors) Kubernetes. Он применяется к динамически перечисляемым ресурсам захвата: манифестам namespace, доменным ресурсам верхнего уровня / standalone, которые разворачиваются через `CustomSnapshotDefinition`, и к `PersistentVolumeClaim` (ветка данных томов).
+
+Селектор **накладывается поверх встроенных исключений** (`matchLabels`/`matchExpressions` объединяются по И с правилами из раздела [Что попадает в снимок](#что-попадает-в-снимок)). Он может только **сузить** захват: он никогда не захватывает принудительно объекты, исключённые встроенными правилами (производные controller-owned, control-plane noise, машинерию модуля/снапшотов). Если поле не задано — захватываются все ресурсы.
+
+**Включить только подходящие объекты** — `matchLabels` (и/или выражения `In`/`Exists`):
+
+```yaml
+spec:
+  resourceSelector:
+    matchLabels:
+      app: myapp
+```
+
+**Исключить подходящие объекты** — `matchExpressions` с `NotIn` / `DoesNotExist`:
+
+```yaml
+spec:
+  resourceSelector:
+    matchExpressions:
+      - key: temporary
+        operator: NotIn
+        values: ["true"]
+      - key: debug
+        operator: DoesNotExist
+```
+
+**Комбинировать include и exclude в одном поле.** Один `LabelSelector` объединяет все свои условия по И, поэтому один селектор может одновременно включать и исключать — например, захватить объекты `app=myapp`, но отбросить те, что также несут `temporary=true` или лейбл `debug`:
+
+```yaml
+spec:
+  resourceSelector:
+    matchLabels:
+      app: myapp
+    matchExpressions:
+      - key: temporary
+        operator: NotIn
+        values: ["true"]
+      - key: debug
+        operator: DoesNotExist
+```
+
+Семантика операторов:
+
+- `In` / `Exists` (и `matchLabels`) **сужают** набор до подходящих объектов.
+- `NotIn [v]` исключает только объекты, где ключ есть **и** равен `v`; объекты **без** ключа всё равно проходят.
+- `DoesNotExist` исключает все объекты, у которых ключ присутствует.
+
+> **Только AND, без OR.** Один `LabelSelector` — это чистая конъюнкция (И) всех его `matchLabels` и `matchExpressions`. Семантику ИЛИ (OR) одним селектором выразить нельзя — чтобы захватить объединение двух непересекающихся наборов лейблов, создайте отдельные `Snapshot`.
+
+> **Запрещён в режиме Import.** `resourceSelector` влияет только на динамический захват по умолчанию. Import-снимок (`spec.mode: Import`) материализуется из загруженной нагрузки и не листит живой namespace, поэтому селектор бессмысленен — admission-вебхук отклоняет `Snapshot`, где заданы оба.
+
+### Граница области для вложенных доменных ресурсов
+
+Селектор фильтрует только ресурсы, которые разворачивает сам **корневой** `Snapshot`: плоские манифесты namespace, PVC и доменные ресурсы **верхнего уровня / standalone**. **Вложенные доменные дети**, которые создаёт доменный контроллер внутри поддерева (например, `VirtualDisk`, принадлежащий `VirtualMachine`), корневым селектором **не** фильтруются — дочерние снимки несут только ссылку на источник и не получают корневой селектор.
+
+Важный краевой случай: если `VirtualMachine` исключена селектором, но её диск селектор проходит, то диск — больше не покрытый поддеревом VM — может быть развёрнут корнем как standalone доменный ресурс.
+
 ## Создание Snapshot
 
 Создайте `Snapshot` в том namespace, который хотите захватить. Режим по умолчанию (без `spec.source`) выполняет динамический захват namespace:
