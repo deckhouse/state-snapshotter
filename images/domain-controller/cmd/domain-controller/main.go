@@ -121,6 +121,14 @@ func main() {
 	}
 	log.Info("[domain-main] kubernetes config has been successfully created.")
 
+	// Lift the client-go rate limiter above the default (QPS=5 / Burst=10): the default serializes the
+	// demo planning layer's reads and status patches under a multi-tree burst, capping reconcile latency
+	// regardless of MaxConcurrentReconciles. This is the demo planning controller; a production domain
+	// controller is expected to choose its own QPS/Burst — this value is not part of any contract.
+	kConfig.QPS = 200
+	kConfig.Burst = 400
+	log.Info(fmt.Sprintf("[domain-main] kubernetes client rate limiter set QPS=%.0f Burst=%d", kConfig.QPS, kConfig.Burst))
+
 	scheme := runtime.NewScheme()
 	for _, f := range resourcesSchemeFuncs {
 		if err := f(scheme); err != nil {
