@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
-	github.com/deckhouse/storage-e2e v0.0.0-20260710061350-26cc4cb6ee25
+	github.com/deckhouse/storage-e2e v0.0.0-20260713002947-5eee7ee652e9
 	github.com/onsi/ginkgo/v2 v2.28.2
 	github.com/onsi/gomega v1.39.1
 	k8s.io/api v0.34.2

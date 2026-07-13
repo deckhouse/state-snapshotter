@@ -1,0 +1,10 @@
+Changes:
+- General Availability level release. state-snapshotter has been translated into GA
+  and is automatically enabled in the Default, Managed and Minimal bundles (basic
+  backup functionality is always available).
+- This version v1.0.0 is the base version on which the storage-foundation module (requirements.modules
+  state-snapshotter >= 1.0.0) is pinned, building its own snapshot domain on top of
+  it.
+- Requires Deckhouse >= 1.76 (consistent with the unified snapshots stack that ships
+  the d8 compatible CLI). The module is no longer activated on clusters below 1.76,
+  including the Minimal bundle.

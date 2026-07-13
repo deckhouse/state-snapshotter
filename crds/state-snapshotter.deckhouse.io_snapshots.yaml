@@ -61,6 +61,7 @@ spec:
               spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
               UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
               no recapture (a new capture requires a new Snapshot).
+              resourceSelector is a capture-only input, so it is forbidden when mode is Import (see the field doc).
             properties:
               mode:
                 default: Capture
@@ -85,7 +86,10 @@ spec:
                   matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
                   When omitted, all resources are captured (no filtering).
 
-                  Ignored for non-Capture modes (Import): those do not list the live namespace.
+                  Forbidden in Import mode (rejected by CEL admission on create): Import materializes from an uploaded
+                  payload and does not list the live namespace, so a selector would be meaningless. This is symmetric
+                  with spec.sourceRef on domain snapshots and spec.source on the forked VolumeSnapshot, which are
+                  likewise forbidden on Import.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -134,6 +138,8 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable
               rule: self == oldSelf
+            - message: spec.resourceSelector is forbidden in Import mode
+              rule: self.mode != 'Import' || !has(self.resourceSelector)
           status:
             properties:
               boundSnapshotContentName:

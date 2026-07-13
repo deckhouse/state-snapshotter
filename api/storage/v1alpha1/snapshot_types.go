@@ -66,6 +66,8 @@ const (
 // UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
 // no recapture (a new capture requires a new Snapshot).
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+// resourceSelector is a capture-only input, so it is forbidden when mode is Import (see the field doc).
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Import' || !has(self.resourceSelector)",message="spec.resourceSelector is forbidden in Import mode"
 type SnapshotSpec struct {
 	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
 	//   - Capture (default): dynamic namespace capture from the live cluster.
@@ -85,7 +87,10 @@ type SnapshotSpec struct {
 	// matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
 	// When omitted, all resources are captured (no filtering).
 	//
-	// Ignored for non-Capture modes (Import): those do not list the live namespace.
+	// Forbidden in Import mode (rejected by CEL admission on create): Import materializes from an uploaded
+	// payload and does not list the live namespace, so a selector would be meaningless. This is symmetric
+	// with spec.sourceRef on domain snapshots and spec.source on the forked VolumeSnapshot, which are
+	// likewise forbidden on Import.
 	// +optional
 	ResourceSelector *metav1.LabelSelector `json:"resourceSelector,omitempty"`
 }

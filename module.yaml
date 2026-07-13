@@ -1,10 +1,18 @@
 name: state-snapshotter
-stage: "Experimental"
+stage: "General Availability"
 subsystems:
   - storage
 descriptions:
   en: "State snapshotter module"
   ru: "Модуль State snapshotter"
 requirements:
-  deckhouse: ">= 1.72"
+  deckhouse: ">= 1.76"
 namespace: d8-state-snapshotter
+accessibility:
+  editions:
+    _default:
+      available: true
+      enabledInBundles:
+        - Default
+        - Managed
+        - Minimal

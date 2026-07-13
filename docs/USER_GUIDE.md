@@ -55,6 +55,65 @@ The model is **default-include**: every namespaced object in the target namespac
 
 For the full normative rules, see the design doc [`state-snapshotter-rework/design/snapshot-controller.md` §4.5](state-snapshotter-rework/design/snapshot-controller.md).
 
+## Narrowing the capture with a label selector
+
+By default a `Snapshot` captures every user object in its namespace. To restrict the capture to a subset, set `spec.resourceSelector` — a standard Kubernetes [label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors). It is applied to the dynamically discovered resources of the capture: namespace manifests, top-level/standalone domain resources expanded via `CustomSnapshotDefinition`, and `PersistentVolumeClaim`s (the volume-data leg).
+
+The selector is **layered on top of the built-in exclusions** (`matchLabels`/`matchExpressions` are ANDed with the rules in [What gets captured](#what-gets-captured)). It can only **narrow** the capture: it never force-captures objects that the built-in rules exclude (controller-owned derivatives, control-plane noise, module/snapshot machinery). When omitted, all resources are captured.
+
+**Include only matching objects** — `matchLabels` (and/or `In`/`Exists` expressions):
+
+```yaml
+spec:
+  resourceSelector:
+    matchLabels:
+      app: myapp
+```
+
+**Exclude matching objects** — `matchExpressions` with `NotIn` / `DoesNotExist`:
+
+```yaml
+spec:
+  resourceSelector:
+    matchExpressions:
+      - key: temporary
+        operator: NotIn
+        values: ["true"]
+      - key: debug
+        operator: DoesNotExist
+```
+
+**Combine include and exclude in one field.** A single `LabelSelector` ANDs all of its conditions, so one selector can both include and exclude — e.g. capture `app=myapp` objects but drop any that also carry `temporary=true` or a `debug` label:
+
+```yaml
+spec:
+  resourceSelector:
+    matchLabels:
+      app: myapp
+    matchExpressions:
+      - key: temporary
+        operator: NotIn
+        values: ["true"]
+      - key: debug
+        operator: DoesNotExist
+```
+
+Operator semantics:
+
+- `In` / `Exists` (and `matchLabels`) **narrow** the set to objects that match.
+- `NotIn [v]` excludes only objects where the key is present **and** equals `v`; objects **without** the key still pass.
+- `DoesNotExist` excludes every object that has the key.
+
+> **AND-only, no OR.** A single `LabelSelector` is a pure conjunction (AND) of all its `matchLabels` and `matchExpressions`. OR semantics cannot be expressed in one selector — to capture the union of two disjoint label sets, create separate `Snapshot`s.
+
+> **Forbidden in Import mode.** `resourceSelector` only affects the default dynamic capture. An import `Snapshot` (`spec.mode: Import`) is materialized from an uploaded payload and never lists the live namespace, so a selector would be meaningless — the admission webhook rejects a `Snapshot` that sets both.
+
+### Scope boundary for nested domain resources
+
+The selector filters only the resources the **root** `Snapshot` expands itself: flat namespace manifests, PVCs, and **top-level/standalone** domain resources. **Nested domain children** created by a domain controller inside a sub-tree (for example, a `VirtualDisk` owned by a `VirtualMachine`) are **not** filtered by the root selector — the child snapshots carry only a source reference and never receive the root selector.
+
+A consequence worth noting: if a `VirtualMachine` is excluded by the selector but its disk passes the selector, the disk — no longer covered by the VM's sub-tree — may still be expanded by the root as a standalone domain resource.
+
 ## Creating a Snapshot
 
 Create a `Snapshot` in the namespace you want to capture. The default mode (no `spec.source`) performs dynamic namespace capture:
