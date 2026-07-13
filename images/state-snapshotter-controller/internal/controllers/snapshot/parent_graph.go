@@ -47,7 +47,11 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 	nsSnap *storagev1alpha1.Snapshot,
 	content *storagev1alpha1.SnapshotContent,
 ) (bool, bool, error) {
-	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
+	// CSD eligibility is served from the manager cache (the CSD controller keeps that informer running),
+	// not the uncached APIReader. This removes the per-planning-pass apiserver CustomSnapshotDefinition
+	// LIST (~208 LIST/tree audited) that the relay-driven root re-plans multiplied; spec/eligibility
+	// changes still reach planning through the informer cache. Correctness-neutral load/scalability cut.
+	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.Client, r.Mgr.GetRESTMapper())
 	if err != nil {
 		return false, false, err
 	}

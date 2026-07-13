@@ -169,6 +169,14 @@ func main() {
 	}
 	log.Info("[main] kubernetes config has been successfully created.")
 
+	// Raise the client-go rate limiter well above the library default (QPS=5 / Burst=10). The default
+	// serializes uncached reads and status patches on the shared manager client under a multi-tree
+	// snapshot burst, inflating a single reconcile to seconds regardless of MaxConcurrentReconciles.
+	// 200/400 is the measured saturation knee (500/1000 adds apiserver pressure for no gain).
+	kConfig.QPS = 200
+	kConfig.Burst = 400
+	log.Info(fmt.Sprintf("[main] kubernetes client rate limiter set QPS=%.0f Burst=%d", kConfig.QPS, kConfig.Burst))
+
 	// Create scheme for controller manager (includes all CRD types for informers)
 	scheme := runtime.NewScheme()
 	for _, f := range resourcesSchemeFuncs {

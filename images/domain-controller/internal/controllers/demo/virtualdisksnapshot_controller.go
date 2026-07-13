@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
@@ -57,6 +58,10 @@ func AddDemoVirtualDiskSnapshotControllerToManager(mgr ctrl.Manager, cfg *config
 	// DemoVirtualDisk resource restore reads SnapshotContent via APIReader only (get RBAC, no informer).
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&demov1alpha1.DemoVirtualDiskSnapshot{}).
+		// Independent disk snapshots (one per disk, several per set) fan out under a multi-set burst; a
+		// single worker serializes their planning + capture-request creation. Each reconcile writes only
+		// its own snapshot's status and keeps no shared mutable state, so parallel workers are safe.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(&DemoVirtualDiskSnapshotReconciler{
 			Client:    mgr.GetClient(),
 			APIReader: mgr.GetAPIReader(),
