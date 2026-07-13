@@ -142,7 +142,7 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 	@echo "==> Done. Re-check: none of [$(TRANSITION_NS)] and no '$(TRANSITION_WORKLOAD_NS)' should exist before re-running 'make test-transition'."
 
 .PHONY: transition-reset-snapc
-transition-reset-snapc: ## Un-freeze snapshot-controller if it is stuck on the gated v0.2.0 handoff build (the subset of transition-clean that fixes the 'depends on disabled module(s): storage-foundation' phase-B denial; safe to run standalone)
+transition-reset-snapc: ## Un-freeze snapshot-controller if it is stuck on the gated v0.2.0 handoff build (fixes the 'depends on disabled module(s): storage-foundation' phase-B denial). If it is DISABLED+frozen the dependency chain must be redeployed, so export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE + STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE (the run's tags) first. Safe to run standalone
 	@KUBECTL="$(KUBECTL)" TRANSITION_SNAPC_LEGACY_TAG="$(TRANSITION_SNAPC_LEGACY_TAG)" TRANSITION_CLEAN_TIMEOUT="$(TRANSITION_CLEAN_TIMEOUT)" sh tests/transition/reset-cluster.sh
 
 .PHONY: vet

@@ -76,15 +76,21 @@ Phase A now fails fast with an explicit message when it detects this, instead of
 
 - if snapshot-controller is still *enabled*, it retags the MPO to `TRANSITION_SNAPC_LEGACY_TAG`
   (default `main`) and waits for it to re-register non-gated;
-- if it is *disabled* and frozen on v0.2.0 (MPO alone is ignored), it briefly enables the dependency
-  chain (`state-snapshotter` → `storage-foundation`) to satisfy the gate, enables snapshot-controller
-  so the MPO re-pulls the legacy image, waits until it re-registers non-gated, then disables exactly
-  the modules it transiently enabled.
+- if it is *disabled* and frozen on v0.2.0 (an MPO alone is ignored, and Deckhouse checks a
+  dependency's *effective* state — a module with no MPO/release has no version to deploy), it
+  **redeploys the dependency chain**: it gives `state-snapshotter` then `storage-foundation` a
+  ModulePullOverride, enables each and waits until it is effectively enabled, then enables
+  snapshot-controller so its MPO re-pulls the legacy image, waits until it re-registers non-gated,
+  and disables exactly what it transiently enabled. This path **requires the dependency tags** —
+  export `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` and `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` (the
+  same tags the run uses); without them the script errors out with guidance instead of hanging.
 
 To run just the un-freeze without the full workload/namespace teardown:
 
 ```bash
-make transition-reset-snapc      # or: sh tests/transition/reset-cluster.sh
+# still-enabled case needs nothing extra; disabled+frozen case needs the dependency tags:
+STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr74 STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE=pr60 \
+  make transition-reset-snapc          # or: sh tests/transition/reset-cluster.sh
 ```
 
 ## Environment variables

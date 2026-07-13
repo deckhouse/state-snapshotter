@@ -8,20 +8,26 @@
 # apply) stays gated on storage-foundation, and the next transition run's phase-B enable is
 # webhook-denied ("depends on disabled module(s): storage-foundation").
 #
-# This script re-registers it on the non-gated legacy tag:
-#   - if it is still enabled, retagging the MPO is enough;
-#   - if it is disabled, the MPO is ignored, so it briefly enables the dependency chain
-#     (state-snapshotter -> storage-foundation) to satisfy the gate, enables snapshot-controller so
-#     the MPO re-pulls the legacy image, waits until it re-registers non-gated, then disables again
-#     exactly the modules it transiently enabled.
+# Re-registering it on the non-gated legacy tag:
+#   - if it is still ENABLED, retagging the MPO is enough;
+#   - if it is DISABLED, the MPO is ignored, so the dependency chain must actually be (re)deployed to
+#     satisfy the gate. Deckhouse checks the EFFECTIVE state of a dependency (EnabledByModuleManager),
+#     not just ModuleConfig.enabled — and a module with no MPO/ModuleRelease has no version to deploy,
+#     so enabling it alone is a no-op. This stages: give each of state-snapshotter -> storage-foundation
+#     a ModulePullOverride, enable it, WAIT until it is effectively enabled, then move on; finally
+#     enable snapshot-controller so its MPO re-pulls the legacy image, wait until it re-registers
+#     non-gated, and disable exactly the modules it transiently enabled.
 #
-# It is a no-op when snapshot-controller is not gated. Safe to run standalone or from `make
-# transition-clean`. Honors: KUBECTL, TRANSITION_SNAPC_LEGACY_TAG (default main),
-# TRANSITION_CLEAN_TIMEOUT (default 300).
+# No-op when snapshot-controller is not gated. Idempotent. Honors:
+#   KUBECTL, TRANSITION_SNAPC_LEGACY_TAG (default main), TRANSITION_CLEAN_TIMEOUT (default 300),
+#   and for the disabled-frozen case the standard dependency tags
+#   STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE, STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE.
 
 KUBECTL="${KUBECTL:-kubectl}"
 LEGACY_TAG="${TRANSITION_SNAPC_LEGACY_TAG:-main}"
 TIMEOUT="${TRANSITION_CLEAN_TIMEOUT:-300}"
+SS_TAG="${STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE:-}"
+SF_TAG="${STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE:-}"
 SNAPC="snapshot-controller"
 
 # gated: snapshot-controller's resolved requirements.modules reference storage-foundation.
@@ -32,6 +38,17 @@ gated() {
 # mc_enabled <module>: true when its ModuleConfig spec.enabled is true.
 mc_enabled() {
 	[ "$($KUBECTL get moduleconfig "$1" -o jsonpath='{.spec.enabled}' 2>/dev/null)" = "true" ]
+}
+
+# effectively_enabled <module>: true when Deckhouse actually turned it on (a release/override
+# deployed). This is what a dependent module's admission gate checks, not ModuleConfig.enabled.
+effectively_enabled() {
+	$KUBECTL get module "$1" -o jsonpath='{range .status.conditions[?(@.type=="EnabledByModuleManager")]}{.status}{end}' 2>/dev/null | grep -q True
+}
+
+# set_mpo <module> <tag>: create-or-update its ModulePullOverride so it has a version to deploy.
+set_mpo() {
+	printf 'apiVersion: deckhouse.io/v1alpha2\nkind: ModulePullOverride\nmetadata:\n  name: %s\nspec:\n  imageTag: %s\n  scanInterval: 30s\n' "$1" "$2" | $KUBECTL apply -f - >/dev/null 2>&1 || true
 }
 
 # enable_mc / disable_mc <module>: create-or-update the ModuleConfig enabled flag (best-effort).
@@ -46,31 +63,50 @@ disable_mc() {
 	$KUBECTL patch moduleconfig "$1" --type merge -p '{"spec":{"enabled":false}}' >/dev/null 2>&1 || true
 }
 
+# wait_effective <module>: block until it is effectively enabled, or TIMEOUT.
+wait_effective() {
+	deadline=$(( $(date +%s) + TIMEOUT ))
+	while ! effectively_enabled "$1"; do
+		if [ "$(date +%s)" -ge "$deadline" ]; then
+			echo "    WARN: $1 not effectively enabled after ${TIMEOUT}s"
+			return 1
+		fi
+		sleep 5
+	done
+	echo "    $1 effectively enabled"
+}
+
 if ! gated; then
 	echo "  snapshot-controller is not gated on storage-foundation — nothing to un-freeze"
 	exit 0
 fi
 
 echo "  snapshot-controller is registered on the gated v0.2.0 handoff build; re-registering on '$LEGACY_TAG'..."
-
-# Force the non-gated legacy image via MPO (ignored while disabled — handled by the enable chain below).
-printf 'apiVersion: deckhouse.io/v1alpha2\nkind: ModulePullOverride\nmetadata:\n  name: %s\nspec:\n  imageTag: %s\n  scanInterval: 30s\n' "$SNAPC" "$LEGACY_TAG" | $KUBECTL apply -f - >/dev/null 2>&1 || true
+set_mpo "$SNAPC" "$LEGACY_TAG"
 
 transient=""
 if ! mc_enabled "$SNAPC"; then
-	echo "  module disabled -> MPO ignored; briefly enabling the dependency chain so it can re-pull..."
-	# Order matters: storage-foundation depends on state-snapshotter, snapshot-controller on
-	# storage-foundation. Each admission passes once its dependency is enabled.
-	for dep in state-snapshotter storage-foundation; do
-		if ! mc_enabled "$dep"; then
-			enable_mc "$dep"
-			transient="$transient $dep"
-			echo "    enabled $dep (transient)"
-		fi
-	done
+	# Disabled: the MPO is ignored, so the gate (storage-foundation, and transitively
+	# state-snapshotter) must be satisfied by actually redeploying the chain.
+	if [ -z "$SS_TAG" ] || [ -z "$SF_TAG" ]; then
+		echo "  ERROR: snapshot-controller is DISABLED and frozen on the gated build, so it cannot re-pull"
+		echo "         without redeploying its dependency chain (state-snapshotter -> storage-foundation)."
+		echo "         Set STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE and STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE"
+		echo "         (the same tags the run uses) and re-run, or recreate the cluster. See README."
+		exit 1
+	fi
+	echo "  module disabled -> MPO ignored; redeploying the dependency chain so the gate clears..."
+	echo "    state-snapshotter -> $SS_TAG"
+	set_mpo state-snapshotter "$SS_TAG"
+	if ! mc_enabled state-snapshotter; then enable_mc state-snapshotter; transient="$transient state-snapshotter"; fi
+	wait_effective state-snapshotter || true
+	echo "    storage-foundation -> $SF_TAG"
+	set_mpo storage-foundation "$SF_TAG"
+	if ! mc_enabled storage-foundation; then enable_mc storage-foundation; transient="$transient storage-foundation"; fi
+	wait_effective storage-foundation || true
+	echo "    $SNAPC -> $LEGACY_TAG (re-pull)"
 	enable_mc "$SNAPC"
 	transient="$transient $SNAPC"
-	echo "    enabled $SNAPC (transient)"
 fi
 
 echo "  waiting up to ${TIMEOUT}s for $SNAPC to re-register non-gated..."
@@ -85,6 +121,8 @@ done
 gated || echo "  $SNAPC re-registered on '$LEGACY_TAG' (non-gated)"
 
 # Roll back exactly what we transiently enabled (leave everything disabled for the caller/cleanup).
+# MPOs are kept: a disabled module's registration is frozen at its last pull, so keeping the MPO
+# keeps it on the non-gated/satisfiable tag instead of reverting to the gated source release.
 for m in $transient; do
 	disable_mc "$m"
 	echo "  disabled $m (was transient)"
