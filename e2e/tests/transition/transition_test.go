@@ -307,8 +307,11 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// that already has them, full LVM-backend provisioning on a fresh alwaysCreateNew cluster.
 			// Runs here (not phase A) because it needs sds-local-volume Ready, enabled just above.
 			ensureDataPlaneStorage(ctx)
+			// The namespace + workload (source PVC, VS, imported/restored PVCs, curl pod) must survive
+			// across every phase-B/C/D spec of this Ordered scenario. Do NOT DeferCleanup it here — a
+			// spec-scoped DeferCleanup runs after THIS spec and would delete it before the next one
+			// (the next spec then hits "namespace is being terminated"). AfterAll tears it down.
 			ensureNamespace(ctx, workloadNS)
-			DeferCleanup(func(ctx SpecContext) { _ = suiteDyn.Resource(nsGVR).Delete(ctx, workloadNS, metav1.DeleteOptions{}) })
 
 			createPVC(ctx, workloadNS, srcPVCName, os.Getenv(envStorageClass), "1Gi")
 			createProbePod(ctx, workloadNS, probePodName, probeImage(), srcPVCName)
@@ -495,6 +498,11 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 	AfterAll(func(ctx SpecContext) {
 		// Best-effort teardown of the workload namespace (module teardown is handled in AfterSuite).
+		// Keep it, like the cluster, when E2E_KEEP_CLUSTER is set (always) or a spec failed and
+		// E2E_KEEP_CLUSTER_ON_FAILURE is set, so the workload can be inspected on the retained cluster.
+		if envTrue("E2E_KEEP_CLUSTER") || (anySpecFailed && envTrue("E2E_KEEP_CLUSTER_ON_FAILURE")) {
+			return
+		}
 		if namespaceExists(ctx, workloadNS) {
 			_ = suiteDyn.Resource(nsGVR).Delete(ctx, workloadNS, metav1.DeleteOptions{})
 		}
