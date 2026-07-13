@@ -50,6 +50,48 @@ var (
 
 const pollInterval = 3 * time.Second
 
+// progressLogInterval throttles the "still waiting …" progress lines the long waits emit while they
+// poll every pollInterval. The actual readiness check runs every pollInterval; only the logging is
+// throttled, so a multi-minute wait produces a readable trail instead of hundreds of lines.
+const progressLogInterval = 15 * time.Second
+
+// logf writes a timestamped progress line to the Ginkgo output (shown with -v and always on failure).
+// Used by the long waits so it is clear which step is running and what the cluster currently looks
+// like — instead of an opaque hang followed by a bare timeout.
+func logf(format string, args ...interface{}) {
+	fmt.Fprintf(GinkgoWriter, "[transition %s] "+format+"\n",
+		append([]interface{}{time.Now().Format("15:04:05")}, args...)...)
+}
+
+// pollUntil polls done() every pollInterval until it returns true or timeout elapses. It logs the
+// current state (describe()) immediately, then every progressLogInterval, and once more on success;
+// on timeout it fails with the final description. This makes every long wait self-narrating.
+func pollUntil(ctx context.Context, what string, timeout time.Duration, done func() bool, describe func() string) {
+	GinkgoHelper()
+	start := time.Now()
+	deadline := start.Add(timeout)
+	logf("waiting for %s (timeout %s, polling every %s) — %s", what, timeout, pollInterval, describe())
+	lastLog := start
+	for {
+		if done() {
+			logf("%s: ready after %s", what, time.Since(start).Round(time.Second))
+			return
+		}
+		if time.Now().After(deadline) {
+			Fail(fmt.Sprintf("timeout after %s waiting for %s — last state: %s", timeout, what, describe()))
+		}
+		if time.Since(lastLog) >= progressLogInterval {
+			logf("still waiting for %s (%s/%s) — %s", what, time.Since(start).Round(time.Second), timeout, describe())
+			lastLog = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+			Fail(fmt.Sprintf("context cancelled while waiting for %s: %v — last state: %s", what, ctx.Err(), describe()))
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
 // --- GVRs ------------------------------------------------------------------
 
 var (
@@ -201,13 +243,31 @@ func createProbePod(ctx context.Context, ns, name, image string, pvcs ...string)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred(), "create probe pod %s/%s", ns, name)
 	}
-	Eventually(func() (corev1.PodPhase, error) {
-		p, gerr := suiteClientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
-		if gerr != nil {
-			return "", gerr
-		}
-		return p.Status.Phase, nil
-	}, podRunningTimeout(), pollInterval).Should(Equal(corev1.PodRunning), "probe pod %s/%s Running", ns, name)
+	pollUntil(ctx, fmt.Sprintf("probe pod %s/%s Running", ns, name), podRunningTimeout(),
+		func() bool {
+			p, gerr := suiteClientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+			return gerr == nil && p.Status.Phase == corev1.PodRunning
+		},
+		func() string {
+			p, gerr := suiteClientset.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+			if gerr != nil {
+				return fmt.Sprintf("get err=%v", gerr)
+			}
+			return fmt.Sprintf("phase=%s%s | PVCs bound? %s", p.Status.Phase, podNotReadyReason(p), pvcsBoundSummary(ctx, ns, pvcs))
+		})
+}
+
+// pvcsBoundSummary renders "name=Phase" for the given PVCs — a probe pod stuck Pending is almost
+// always a PVC still binding, so surface that alongside the pod phase.
+func pvcsBoundSummary(ctx context.Context, ns string, pvcs []string) string {
+	if len(pvcs) == 0 {
+		return "n/a"
+	}
+	parts := make([]string, 0, len(pvcs))
+	for _, p := range pvcs {
+		parts = append(parts, fmt.Sprintf("%s=%s", p, pvcPhase(ctx, ns, p)))
+	}
+	return strings.Join(parts, ",")
 }
 
 // podRunningTimeout bounds how long a probe pod may take to reach Running. For the import probe this
@@ -223,16 +283,119 @@ func podRunningTimeout() time.Duration {
 	return 10 * time.Minute
 }
 
-// waitPVCBound blocks until the named PVC reaches Bound (import/populator completion) or timeout.
-func waitPVCBound(ctx context.Context, ns, name string, timeout time.Duration) {
+// waitImportComplete blocks until the DataImport's target PVC reaches Bound — the real import
+// completion gate (the lib-volume-populator rebinds the prime volume onto the target PVC; the
+// DataImport Ready condition flips True early and there is no Completed condition type, so the PVC
+// phase is what actually signals "done"). While waiting it logs, every progressLogInterval, the
+// DataImport conditions, the target PVC phase, any prime-* staging PVCs and the namespace's pods, so
+// a hang is diagnosable from the log (is the importer up? did UploadFinished fire? is the prime PVC
+// stuck Pending? is a pod unschedulable?) instead of an opaque timeout. timeout budgets the whole
+// chain: upload -> importer UploadFinished -> populator rebind -> target PVC Bound.
+func waitImportComplete(ctx context.Context, ns, diName, pvcName string, timeout time.Duration) {
 	GinkgoHelper()
-	Eventually(func() (corev1.PersistentVolumeClaimPhase, error) {
-		p, err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return "", err
+	gvr := dataImportGVR(legacyGroup)
+	describe := func() string {
+		return fmt.Sprintf("DI[%s] | PVC %s=%s | %s | pods[%s]",
+			crConditions(ctx, gvr, ns, diName),
+			pvcName, pvcPhase(ctx, ns, pvcName),
+			describePrimePVCs(ctx, ns),
+			podPhasesInNS(ctx, ns))
+	}
+	pollUntil(ctx, fmt.Sprintf("imported PVC %s/%s Bound", ns, pvcName), timeout,
+		func() bool { return pvcPhase(ctx, ns, pvcName) == string(corev1.ClaimBound) },
+		describe)
+}
+
+// crConditions renders "Type=Status(Reason)" for every status.condition of a CR (compact, for logs).
+func crConditions(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) string {
+	obj, err := getUnstr(ctx, gvr, ns, name)
+	if err != nil {
+		return fmt.Sprintf("get err=%v", err)
+	}
+	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if len(conds) == 0 {
+		return "no conditions yet"
+	}
+	parts := make([]string, 0, len(conds))
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
 		}
-		return p.Status.Phase, nil
-	}, timeout, pollInterval).Should(Equal(corev1.ClaimBound), "PVC %s/%s must become Bound (import complete)", ns, name)
+		t, _, _ := unstructured.NestedString(m, "type")
+		s, _, _ := unstructured.NestedString(m, "status")
+		r, _, _ := unstructured.NestedString(m, "reason")
+		parts = append(parts, fmt.Sprintf("%s=%s(%s)", t, s, r))
+	}
+	return strings.Join(parts, " ")
+}
+
+// pvcPhase returns a PVC's phase, or "NotFound"/"err=…" when it cannot be read (for logs).
+func pvcPhase(ctx context.Context, ns, name string) string {
+	p, err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "NotFound"
+		}
+		return fmt.Sprintf("err=%v", err)
+	}
+	return string(p.Status.Phase)
+}
+
+// describePrimePVCs lists the staging PVCs the volume-populator creates (name prefix "prime-") with
+// their phase, e.g. "prime: prime-abc=Pending" — the usual place an import stalls (WFFC/scheduling).
+func describePrimePVCs(ctx context.Context, ns string) string {
+	list, err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Sprintf("prime PVCs err=%v", err)
+	}
+	var parts []string
+	for i := range list.Items {
+		if strings.HasPrefix(list.Items[i].Name, "prime-") {
+			parts = append(parts, fmt.Sprintf("%s=%s", list.Items[i].Name, list.Items[i].Status.Phase))
+		}
+	}
+	if len(parts) == 0 {
+		return "no prime PVCs"
+	}
+	return "prime: " + strings.Join(parts, ",")
+}
+
+// podPhasesInNS returns "name=Phase<reason>" for every pod in ns (importer + populator pods), where
+// <reason> is a container-waiting/unschedulable hint when the pod is not yet Running.
+func podPhasesInNS(ctx context.Context, ns string) string {
+	pods, err := suiteClientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Sprintf("err=%v", err)
+	}
+	if len(pods.Items) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(pods.Items))
+	for i := range pods.Items {
+		parts = append(parts, fmt.Sprintf("%s=%s%s", pods.Items[i].Name, pods.Items[i].Status.Phase, podNotReadyReason(&pods.Items[i])))
+	}
+	return strings.Join(parts, ",")
+}
+
+// podNotReadyReason summarizes why a pod is not Running yet: container waiting reasons
+// (ContainerCreating/ImagePullBackOff/…) and an unsatisfied PodScheduled condition. Empty when none.
+func podNotReadyReason(p *corev1.Pod) string {
+	var parts []string
+	for _, cs := range p.Status.ContainerStatuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			parts = append(parts, fmt.Sprintf("%s:%s", cs.Name, cs.State.Waiting.Reason))
+		}
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status != corev1.ConditionTrue {
+			parts = append(parts, fmt.Sprintf("PodScheduled=%s(%s)", c.Status, c.Reason))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // ensureNamespace creates a namespace if absent.
@@ -299,21 +462,31 @@ func waitCSIVolumeSnapshotReady(ctx context.Context, ns, name string, timeout ti
 // waitStatusString waits until a nested status string field on an object becomes non-empty and
 // returns it (used for DataExport/DataImport status.url).
 func waitStatusString(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration, fields ...string) (string, error) {
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	deadline := start.Add(timeout)
 	path := append([]string{"status"}, fields...)
+	field := strings.Join(fields, ".")
+	what := fmt.Sprintf("%s %s/%s status.%s", gvr.Resource, ns, name, field)
+	logf("waiting for %s (timeout %s, polling every %s)", what, timeout, pollInterval)
+	lastLog := start
 	var last string
 	for {
 		obj, err := getUnstr(ctx, gvr, ns, name)
 		if err == nil {
 			if v, found, _ := unstructured.NestedString(obj.Object, path...); found && v != "" {
+				logf("%s ready after %s", what, time.Since(start).Round(time.Second))
 				return v, nil
 			}
-			last = "field empty"
+			last = "empty; conds: " + crConditions(ctx, gvr, ns, name)
 		} else {
 			last = fmt.Sprintf("get err=%v", err)
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout waiting for %s %s/%s status.%s; last: %s", gvr.Resource, ns, name, strings.Join(fields, "."), last)
+			return "", fmt.Errorf("timeout waiting for %s; last: %s", what, last)
+		}
+		if time.Since(lastLog) >= progressLogInterval {
+			logf("still waiting for %s (%s/%s) — %s", what, time.Since(start).Round(time.Second), timeout, last)
+			lastLog = time.Now()
 		}
 		time.Sleep(pollInterval)
 	}

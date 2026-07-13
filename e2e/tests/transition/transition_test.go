@@ -367,21 +367,25 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			if !dataPlaneEnabled() {
 				Skip("data-plane steps skipped (see previous spec)")
 			}
+
+			By("creating the legacy DataImport and waiting for the importer to publish status.url")
 			// DataImport (legacy schema, CreatePVC via targetRef.pvcTemplate) → importer publishes url.
 			Expect(createLegacyDataImport(ctx, workloadNS, "import-di", "imported-data", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
 			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di", 5*time.Minute)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Upload the previously downloaded marker and signal finished.
+			By("uploading the marker over the svdm HTTP API and signalling finished")
 			Expect(svdmUpload(ctx, workloadNS, url, caB64, "/tmp/marker", "marker")).To(Succeed())
+			logf("upload + POST finished done; DataImport conditions: %s", crConditions(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di"))
 
-			// The import is complete when the populator has rebound the prime volume onto the target
-			// PVC (imported-data becomes Bound). That is the real completion gate: the DataImport's
-			// Ready condition flips True early (server ready) and there is no Completed condition type,
-			// so a condition wait would return prematurely. podRunningTimeout() budgets the whole chain.
-			waitPVCBound(ctx, workloadNS, "imported-data", podRunningTimeout())
+			By("waiting for the populator to rebind the prime volume onto imported-data (PVC Bound)")
+			// Import completion = the target PVC becoming Bound: the DataImport Ready condition flips
+			// True early (server ready) and there is no Completed condition type, so the PVC phase is
+			// the real gate. waitImportComplete narrates DI conditions / prime PVC / pods every 15s so a
+			// stall is visible; podRunningTimeout() budgets the whole chain.
+			waitImportComplete(ctx, workloadNS, "import-di", "imported-data", podRunningTimeout())
 
-			// Mount the imported PVC and confirm the imported marker matches the source.
+			By("mounting imported-data and verifying the checksum")
 			createProbePod(ctx, workloadNS, "probe-imported", probeImage(), "imported-data")
 			got, err := checksumFile(ctx, workloadNS, "probe-imported", "probe", "/mnt/imported-data/marker")
 			Expect(err).NotTo(HaveOccurred())

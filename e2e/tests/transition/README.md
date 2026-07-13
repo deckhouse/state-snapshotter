@@ -35,6 +35,22 @@ TEST_CLUSTER_CREATE_MODE=<as for the main suite> \
 Without `E2E_RUN_TRANSITION=true` the suite is skipped entirely (nothing bootstraps). It is **not**
 wired into CI — run it by hand from a workstation with dev-registry access.
 
+### Reading the progress output
+
+Run with `-v` (as above): every long wait is self-narrating. Each `By(...)` step prints the phase it
+is in, and the waits emit `[transition HH:MM:SS] …` lines that poll every **3s** and log the current
+state **immediately, then every 15s**, and once on success. So a hang is diagnosable from the trail
+rather than an opaque timeout. In particular the Phase-B import step reports, at each tick:
+
+- the `DataImport` conditions (e.g. `UploadFinished=True(...) Ready=True(...)`),
+- the target PVC phase (`imported-data=Pending|Bound`),
+- any populator staging PVC (`prime-<uid>=Pending`),
+- the namespace's pods with a not-ready hint (`importer-…=Pending[…:ContainerCreating]`).
+
+On timeout the failure message carries that same last-observed state. The whole import (upload →
+importer `UploadFinished` → populator rebind → target PVC Bound) is bounded by
+`E2E_TRANSITION_PROBE_TIMEOUT` (default `10m`).
+
 ## Environment variables
 
 The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
