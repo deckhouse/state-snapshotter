@@ -685,6 +685,15 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			got, err = checksumFile(ctx, workloadNS, "probe-sf", "probe", "/mnt/imported-sf/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "unified import under storage-foundation must match the source")
+
+			By("tearing down the unified export/import so no in-flight CR lingers")
+			// storage-foundation's PVC export reassigns the source PV (new-pvc goes Lost); deleting the
+			// export must remove the CR AND recover new-pvc to Bound. Also drop the finished DataImport
+			// CR (its target PVC imported-sf stays Bound — that is the delivered result). Mirrors the
+			// phase-C teardown, so a kept cluster is left clean instead of with a stale in-flight export.
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 3*time.Minute)
+			waitPVCPhase(ctx, workloadNS, "new-pvc", corev1.ClaimBound, 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 3*time.Minute)
 		})
 	})
 
