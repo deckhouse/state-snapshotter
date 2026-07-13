@@ -51,16 +51,15 @@ const (
 	envRunTransition = "E2E_RUN_TRANSITION"
 
 	// Scenario image-tag vars for the two modules that exist ONLY in this scenario (not in the
-	// main suite's cluster_config). BOTH need two slots — a phase-B legacy image and a phase-C
-	// handoff/D1 image the test retags to — because the handoff builds gate on modules that are not
-	// present in phase B:
-	//   - snapshot-controller v0.2.0 requires storage-foundation >= 1.0.0, so it can only be applied
-	//     AFTER the flip; phase B runs the legacy (main) image, which activates without sf;
-	//   - svdm v0.2.0/D1 uses the new API group; phase B runs the legacy old-group image.
-	envSnapshotControllerLegacyTag = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG" // phase B (e.g. main)
-	envSnapshotControllerTag       = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"        // phase C handoff (v0.2.0)
-	envSvdmLegacyTag               = "E2E_TRANSITION_SVDM_LEGACY_TAG"
-	envSvdmTag                     = "E2E_TRANSITION_SVDM_TAG"
+	// main suite's cluster_config).
+	//   - snapshot-controller: ONE tag. Its single deprecated v0.2.0 build has no storage-foundation
+	//     requirement (only deckhouse >= 1.76), so it installs standalone in phase B and ships the
+	//     extended (storage-foundation) CRDs — no legacy/handoff split, no phase-C retag.
+	//   - svdm: two slots — the legacy old-group image (phase B) and the v0.2.0/D1 new-group image the
+	//     phase-C migration retags to.
+	envSnapshotControllerTag = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
+	envSvdmLegacyTag         = "E2E_TRANSITION_SVDM_LEGACY_TAG"
+	envSvdmTag               = "E2E_TRANSITION_SVDM_TAG"
 
 	// Standard storage-e2e <MODULE>_MODULE_PULL_OVERRIDE vars for modules the test enables at
 	// runtime (they are preseeded disabled in cluster_config.yml, so bootstrap does not read them).
@@ -189,7 +188,7 @@ var _ = BeforeSuite(func() {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
 	// Fail fast before provisioning if any required image-tag var is missing.
-	requireEnv(envSnapshotControllerLegacyTag, envSnapshotControllerTag, envSvdmLegacyTag, envSvdmTag)
+	requireEnv(envSnapshotControllerTag, envSvdmLegacyTag, envSvdmTag)
 
 	suiteRes = cluster.CreateOrConnectToTestCluster()
 	if suiteRes == nil || suiteRes.Kubeconfig == nil {
@@ -305,16 +304,16 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 					"namespace %s must be absent before the legacy phase (module %s must not be rolled out yet)", ns, m)
 			}
 
-			// The cluster must not carry a handoff build frozen from a prior run: snapshot-controller
-			// v0.2.0 requires storage-foundation, and Deckhouse ignores an MPO while a module is
-			// disabled — so a snapshot-controller still REGISTERED as v0.2.0 stays gated and the
-			// phase-B enable would be webhook-denied ("depends on disabled module(s):
-			// storage-foundation"). Fail here with an actionable message instead of a cryptic mid-B
-			// failure. Reset per README ("Resetting a reused cluster").
+			// The current snapshot-controller v0.2.0 build has NO storage-foundation requirement, so it
+			// installs standalone. But a cluster reused from BEFORE that change may still be REGISTERED
+			// as an older, sf-gated snapshot-controller build (Deckhouse ignores an MPO while a module
+			// is disabled, so it stays frozen on the gated version). That would webhook-deny the phase-B
+			// enable ("depends on disabled module(s): storage-foundation"). Fail here with an actionable
+			// message instead of a cryptic mid-B failure. Reset per README ("Resetting a reused cluster").
 			Expect(moduleRequiresModule(ctx, modSnapshotController, modStorageFoundation)).To(BeFalse(),
-				"cluster is contaminated: snapshot-controller is registered as a handoff build that requires "+
-					"storage-foundation (frozen from a prior run/manual pr101 apply); phase B cannot enable it while "+
-					"sf is off. Reset it before re-running — see README 'Resetting a reused cluster'.")
+				"cluster is contaminated: snapshot-controller is registered as an older build that requires "+
+					"storage-foundation (frozen from a prior run); the current v0.2.0 build drops that requirement, "+
+					"but the stale registration blocks the phase-B enable. Reset it — see README 'Resetting a reused cluster'.")
 		})
 	})
 
@@ -324,13 +323,13 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// One batch: the framework brings snapshot-controller and svdm up concurrently (no
 			// interdependency) and sds-local-volume after snapshot-controller (its v0.4.x dependency,
 			// declared in-batch so the graph resolves — a separate call would fail graph-build).
-			// Both legacy modules use their LEGACY images here: snapshot-controller via
-			// E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG (e.g. main — the v0.2.0 handoff build gates
-			// on sf >= 1.0.0 and cannot activate until after the flip), svdm via
-			// E2E_TRANSITION_SVDM_LEGACY_TAG (old API group). The non-legacy slots hold the phase-C
-			// handoff/D1 images the retags use.
+			// snapshot-controller runs its single deprecated v0.2.0 build (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG):
+			// no storage-foundation requirement, so it installs standalone here and ships the extended
+			// (storage-foundation) CRDs — the "vanilla controller + extended CRDs" combination the next
+			// spec verifies. svdm runs its legacy old-group image (E2E_TRANSITION_SVDM_LEGACY_TAG); the
+			// phase-C migration retags it to the D1 image.
 			enableModules(
-				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerLegacyTag)),
+				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerTag)),
 				moduleSpec(modSvdm, tagFrom(envSvdmLegacyTag)),
 				moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeOverride), modSnapshotController),
 			)
@@ -369,6 +368,18 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			vsUID = string(vs.GetUID())
 			Expect(vsUID).NotTo(BeEmpty())
+
+			// "Old controller + new CRDs" check. The deprecated snapshot-controller bundles the vanilla
+			// upstream external-snapshotter but ships the EXTENDED storage-foundation CRDs. Assert the
+			// served VolumeSnapshot CRD carries spec.mode (so it is the extended schema, not vanilla) and
+			// that the API server defaulted this user-created VS to mode=Capture — and note that the VS
+			// reached readyToUse+bound above, which proves the vanilla controller reconciled a
+			// Capture-mode snapshot against the extended CRD (it ignores the unknown spec.mode field).
+			Expect(crdSchemaHasField(ctx, "volumesnapshots.snapshot.storage.k8s.io", "spec", "mode")).To(BeTrue(),
+				"snapshot-controller must ship the extended VolumeSnapshot CRD (spec.mode) in phase B")
+			mode, _, _ := unstructured.NestedString(vs.Object, "spec", "mode")
+			Expect(mode).To(Equal("Capture"),
+				"the extended CRD must default spec.mode=Capture, and the vanilla controller must still bind such a VS")
 		})
 
 		It("exports the source PVC over the svdm HTTP API and verifies the downloaded checksum", func(ctx SpecContext) {
@@ -540,22 +551,11 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			}
 		})
 
-		It("hands snapshot-controller over to v0.2.0 and fires the deprecation alerts for both modules", func(ctx SpecContext) {
-			// snapshot-controller v0.2.0 requires storage-foundation >= 1.0.0, so it can only be
-			// applied NOW that sf is enabled (it would not activate in phase B). Retag the live MPO
-			// main->v0.2.0 (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG) — mirrors the svdm legacy->D1 retag.
-			enableModule(modSnapshotController, tagFrom(envSnapshotControllerTag))
-
-			// Still under the storage-foundation guard => no workload; only the deprecation alert
-			// (and the byte-for-byte CRDs, checked in phase D) remain.
-			ns := moduleNamespace[modSnapshotController]
-			Eventually(func(ctx SpecContext) (int, error) {
-				return workloadResourceCount(ctx, ns)
-			}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(Equal(0),
-				"snapshot-controller must still render no workload after the v0.2.0 handoff retag (guard)")
-
-			// Both legacy modules are now Deprecated (svdm since the phase-C retag, snapshot-controller
-			// since this one). Deckhouse must surface, for EACH, two firing ClusterAlerts:
+		It("fires the deprecation alerts for both legacy modules", func(ctx SpecContext) {
+			// Both legacy modules are now Deprecated: snapshot-controller since phase B (its single
+			// v0.2.0 build is Deprecated and needs no retag — it never required storage-foundation), and
+			// svdm since the phase-C retag. Deckhouse must surface, for EACH module, two firing
+			// ClusterAlerts:
 			//   - built-in ModuleIsDeprecated{module=<name>} — proves module.yaml stage=Deprecated took
 			//     effect;
 			//   - custom D8<Name>ModuleDeprecated (vector(1), severity 9) — proves the deprecation-alert
