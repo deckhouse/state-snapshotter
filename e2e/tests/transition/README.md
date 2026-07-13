@@ -52,6 +52,10 @@ v0.2.0/D1 new-group image); the rest use storage-e2e's standard `<MODULE>_MODULE
 | `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
 | `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` | standard | C | state-snapshotter image (new stack) |
 | `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` | standard | C | storage-foundation image (new stack) |
+| `E2E_TRANSITION_STORAGE_CLASS` | scenario | B–D | snapshot-capable StorageClass for the data-plane PVCs; **unset ⇒ all data-plane steps are skipped** |
+| `E2E_TRANSITION_VS_CLASS` | scenario | B–D | VolumeSnapshotClass for the CSI snapshots; **unset ⇒ all data-plane steps are skipped** |
+| `E2E_TRANSITION_PROBE_IMAGE` | scenario | B–D | probe-pod image (needs `sh` + `sha256sum`); default `busybox:1.36` |
+| `E2E_TRANSITION_PROBE_TIMEOUT` | scenario | B–D | Go duration bounding how long a probe pod may take to reach Running. For the import probe this budgets the WHOLE import completion (upload → importer `UploadFinished` → populator rebind → target PVC Bound → schedule). Default `10m` |
 
 ### Example
 
@@ -70,6 +74,11 @@ export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="main"
 export E2E_TRANSITION_SVDM_TAG="pr<N>"                        # svdm D1 branch build
 export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE="pr<N>"
 export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE="pr<N>"
+
+# Data-plane (needed to exercise PVC/VS/export/import/restore; unset ⇒ those steps are skipped):
+export E2E_TRANSITION_STORAGE_CLASS="e2e-thin"
+export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
+# export E2E_TRANSITION_PROBE_TIMEOUT="15m"                   # default 10m; bump for slow clusters
 ```
 
 > Legacy-image caveat: after the svdm D1 branch is merged to `main`, no `main` build carries the

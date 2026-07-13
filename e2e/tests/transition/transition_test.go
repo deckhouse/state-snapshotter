@@ -372,10 +372,14 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di", 5*time.Minute)
 			Expect(err).NotTo(HaveOccurred())
 
-			// Upload the previously downloaded marker, signal finished, wait for the import to complete.
+			// Upload the previously downloaded marker and signal finished.
 			Expect(svdmUpload(ctx, workloadNS, url, caB64, "/tmp/marker", "marker")).To(Succeed())
-			Expect(waitCRConditionTrue(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di",
-				[]string{"Completed", "Ready"}, 5*time.Minute)).To(Succeed())
+
+			// The import is complete when the populator has rebound the prime volume onto the target
+			// PVC (imported-data becomes Bound). That is the real completion gate: the DataImport's
+			// Ready condition flips True early (server ready) and there is no Completed condition type,
+			// so a condition wait would return prematurely. podRunningTimeout() budgets the whole chain.
+			waitPVCBound(ctx, workloadNS, "imported-data", podRunningTimeout())
 
 			// Mount the imported PVC and confirm the imported marker matches the source.
 			createProbePod(ctx, workloadNS, "probe-imported", probeImage(), "imported-data")

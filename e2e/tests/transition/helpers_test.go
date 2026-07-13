@@ -223,6 +223,18 @@ func podRunningTimeout() time.Duration {
 	return 10 * time.Minute
 }
 
+// waitPVCBound blocks until the named PVC reaches Bound (import/populator completion) or timeout.
+func waitPVCBound(ctx context.Context, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	Eventually(func() (corev1.PersistentVolumeClaimPhase, error) {
+		p, err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		return p.Status.Phase, nil
+	}, timeout, pollInterval).Should(Equal(corev1.ClaimBound), "PVC %s/%s must become Bound (import complete)", ns, name)
+}
+
 // ensureNamespace creates a namespace if absent.
 func ensureNamespace(ctx context.Context, name string) {
 	GinkgoHelper()
@@ -550,40 +562,6 @@ func createLegacyDataImport(ctx context.Context, ns, name, pvcName, storageClass
 			},
 		},
 	})
-}
-
-// waitCRConditionTrue polls status.conditions until any of condTypes has status "True".
-func waitCRConditionTrue(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, condTypes []string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	want := map[string]bool{}
-	for _, t := range condTypes {
-		want[t] = true
-	}
-	var last string
-	for {
-		obj, err := getUnstr(ctx, gvr, ns, name)
-		if err == nil {
-			conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-			for _, c := range conds {
-				m, ok := c.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				ct, _ := m["type"].(string)
-				st, _ := m["status"].(string)
-				if want[ct] && st == "True" {
-					return nil
-				}
-				last = fmt.Sprintf("%s=%s", ct, st)
-			}
-		} else {
-			last = fmt.Sprintf("get err=%v", err)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for %s %s/%s condition in %v; last: %s", gvr.Resource, ns, name, condTypes, last)
-		}
-		time.Sleep(pollInterval)
-	}
 }
 
 // pvcsWithFinalizer returns the ns/name of every PVC (all namespaces) still carrying the given
