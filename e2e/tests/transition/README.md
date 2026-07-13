@@ -129,7 +129,16 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   legacy modules; assert the legacy modules render no workload (all Deployments/Services gone) and
   that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
   `D8*ModuleDeprecated`, for both modules).
-- **D — invariants:** CSI + DataExport/DataImport CRDs stay Established (UID/`spec.mode` intact);
+- **D — invariants:** every shared CRD (CSI `volumesnapshots`/`…contents`/`…classes` +
+  unified `dataexports`/`dataimports.storage-foundation.deckhouse.io`) stays **Established with the
+  same UID captured just before the flip** — proving the handoff re-applies them in place, not
+  delete+recreate (which would cascade-delete instances). The served schemas are checked for their
+  storage-foundation marker fields (`spec.mode` on VolumeSnapshot, `targetRef.group` on DataExport,
+  `spec.mode` on DataImport) so the served CRD is the extended/unified shape, not a vanilla
+  reinstall. Full byte-for-byte CRD-manifest parity vs the repo YAML is **not** an e2e concern (the
+  API server augments the live CRD with defaults/pruning/managedFields, so a manifest hash would
+  never match) — it is verified by **storage-foundation CI** (`hack/check-consumer-crds.sh`, which
+  clones snapshot-controller/svdm at their latest tag and diffs `crds/`). Additionally:
   the legacy ready+bound VolumeSnapshot is untouched (no new-domain labels/status); all checksums
   still match, incl. a fresh CSI restore from the legacy snapshot after the flip; a brand-new
   PVC/VS reaches ready+bound under the new controller; **a full new-group DataExport+DataImport is

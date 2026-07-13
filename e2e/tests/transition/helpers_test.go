@@ -421,6 +421,81 @@ func crdExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
+// crdUID returns a CRD's metadata.uid — captured before the flip and re-checked after to prove a CRD
+// is UPDATED in place (ownership handoff), not delete+recreated (which would cascade-delete every
+// instance).
+func crdUID(ctx context.Context, name string) (string, error) {
+	obj, err := suiteDyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	return string(obj.GetUID()), nil
+}
+
+// crdEstablished reports whether a CRD's Established status condition is True (the API server serves
+// it). A delete+recreate would briefly drop this; a byte-for-byte re-apply keeps it True.
+func crdEstablished(ctx context.Context, name string) bool {
+	obj, err := suiteDyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		t, _, _ := unstructured.NestedString(m, "type")
+		s, _, _ := unstructured.NestedString(m, "status")
+		if t == "Established" && s == "True" {
+			return true
+		}
+	}
+	return false
+}
+
+// crdSchemaHasField reports whether the CRD's served schema (any version) has the property reachable
+// by walking properties.<p0>.properties.<p1>… — e.g. ("spec","mode") -> properties.spec.properties.mode.
+// Used to assert the SERVED CRD is the storage-foundation (extended/unified) shape, not a vanilla
+// reinstall. This is a served-schema sanity check, NOT a full manifest comparison: the live CRD is
+// augmented by the API server (defaults, structural pruning, managedFields), so byte-for-byte parity
+// against the repo YAML is verified separately by storage-foundation CI (hack/check-consumer-crds.sh).
+func crdSchemaHasField(ctx context.Context, name string, path ...string) bool {
+	obj, err := suiteDyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	versions, _, _ := unstructured.NestedSlice(obj.Object, "spec", "versions")
+	for _, v := range versions {
+		vm, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cur, found, _ := unstructured.NestedMap(vm, "schema", "openAPIV3Schema")
+		if !found {
+			continue
+		}
+		ok = true
+		for _, p := range path {
+			props, f, _ := unstructured.NestedMap(cur, "properties")
+			if !f {
+				ok = false
+				break
+			}
+			next, f2, _ := unstructured.NestedMap(props, p)
+			if !f2 {
+				ok = false
+				break
+			}
+			cur = next
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
 // getUnstr fetches a namespaced (ns != "") or cluster-scoped object.
 func getUnstr(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (*unstructured.Unstructured, error) {
 	if ns == "" {

@@ -111,7 +111,25 @@ var (
 	vsName         = "legacy-snap"
 	boundContent   string
 	vsUID          string
+
+	// Shared CRDs whose identity must survive the flip (updated in place during the ownership
+	// handoff, never delete+recreated). UIDs are captured just before storage-foundation is enabled
+	// and re-checked in phase D. CSI CRDs are installed by snapshot-controller (phase B); the unified
+	// DataExport/DataImport CRDs by svdm-D1 (phase-C retag) — sf then re-applies both byte-for-byte.
+	csiCRDNames = []string{
+		"volumesnapshots.snapshot.storage.k8s.io",
+		"volumesnapshotcontents.snapshot.storage.k8s.io",
+		"volumesnapshotclasses.snapshot.storage.k8s.io",
+	}
+	unifiedCRDNames = []string{
+		"dataexports.storage-foundation.deckhouse.io",
+		"dataimports.storage-foundation.deckhouse.io",
+	}
+	crdUIDBeforeFlip = map[string]string{}
 )
+
+// trackedCRDs is every CRD whose identity the flip must preserve (CSI + unified).
+func trackedCRDs() []string { return append(append([]string{}, csiCRDNames...), unifiedCRDNames...) }
 
 func probeImage() string {
 	if v := strings.TrimSpace(os.Getenv(envProbeImage)); v != "" {
@@ -427,6 +445,13 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
 
+			// After the migration — and while storage-foundation is STILL OFF, so snapshot-controller
+			// is Deprecated but ACTIVE — its deprecation alerts must already be firing (the alert is
+			// always-on while the module is enabled, independent of the guard). Requires the v0.2.0
+			// snapshot-controller image (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG).
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController, 6*time.Minute)
+			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "", 6*time.Minute)
+
 			if !dataPlaneEnabled() {
 				return
 			}
@@ -474,6 +499,16 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 		})
 
 		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
+			// Capture the shared CRD UIDs RIGHT BEFORE sf is enabled. sf re-applies the CSI and unified
+			// CRDs (byte-for-byte copies) as it takes ownership; the flip must UPDATE them in place, so
+			// their UIDs must be unchanged in phase D. A changed UID = delete+recreate = every
+			// VolumeSnapshot/DataExport instance cascade-deleted.
+			for _, n := range trackedCRDs() {
+				u, err := crdUID(ctx, n)
+				Expect(err).NotTo(HaveOccurred(), "read CRD %s UID before the flip", n)
+				crdUIDBeforeFlip[n] = u
+			}
+
 			// One batch: state-snapshotter first, then storage-foundation (its state-snapshotter
 			// dependency declared in-batch so the graph resolves — a separate call would fail
 			// graph-build with "dependency module state-snapshotter not found").
@@ -515,9 +550,32 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 	// ---- Phase D: invariants after the flip ----
 	Context("Phase D: invariants after the flip", func() {
-		It("keeps the CSI CRDs and the legacy VolumeSnapshot intact", func(ctx SpecContext) {
-			Expect(crdExists(ctx, "volumesnapshots.snapshot.storage.k8s.io")).To(BeTrue())
-			Expect(crdExists(ctx, "volumesnapshotcontents.snapshot.storage.k8s.io")).To(BeTrue())
+		It("keeps every shared CRD Established, same-UID and correctly-shaped after the flip", func(ctx SpecContext) {
+			// (1) Identity: each CSI + unified CRD must still exist, stay Established, and keep the UID
+			// captured before the flip — proving the handoff re-applied them in place, never
+			// delete+recreated (which would cascade-delete every instance).
+			for _, n := range trackedCRDs() {
+				Expect(crdExists(ctx, n)).To(BeTrue(), "CRD %s must still exist after the flip", n)
+				Expect(crdEstablished(ctx, n)).To(BeTrue(), "CRD %s must stay Established after the flip", n)
+				if want := crdUIDBeforeFlip[n]; want != "" {
+					got, err := crdUID(ctx, n)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(got).To(Equal(want),
+						"CRD %s UID must not change across the flip (in-place update, not delete+recreate)", n)
+				}
+			}
+
+			// (2) Served-schema correctness: the CRDs served after the flip must be the
+			// storage-foundation (extended/unified) shapes, not a vanilla reinstall. Assert their
+			// marker fields. Full byte-for-byte manifest parity vs the repo YAML is verified separately
+			// by storage-foundation CI (hack/check-consumer-crds.sh) — it cannot be checked against the
+			// live CRD, which the API server augments (defaults/pruning/managedFields).
+			Expect(crdSchemaHasField(ctx, "volumesnapshots.snapshot.storage.k8s.io", "spec", "mode")).To(BeTrue(),
+				"served VolumeSnapshot CRD must carry the storage-foundation fork field spec.mode")
+			Expect(crdSchemaHasField(ctx, "dataexports.storage-foundation.deckhouse.io", "spec", "targetRef", "group")).To(BeTrue(),
+				"served DataExport CRD must carry the unified targetRef.group field")
+			Expect(crdSchemaHasField(ctx, "dataimports.storage-foundation.deckhouse.io", "spec", "mode")).To(BeTrue(),
+				"served DataImport CRD must carry the unified spec.mode field")
 
 			if !dataPlaneEnabled() {
 				Skip("data-plane invariants skipped (no SC/VSC provided)")
