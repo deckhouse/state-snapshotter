@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -883,7 +884,11 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// No MCR watch: the binder no longer latches/reaps the capture legs (main-owned commonController,
 		// decision #10) — the aggregator carries its own MCR watch (mapMCRToBoundContent) for the
 		// projection + latch + reap lifecycle.
-		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind))
+		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind)).
+		// Independent XxxSnapshots (one per set + per child) fan out under a multi-tree burst; a single
+		// worker serializes their binding behind the queue. The binder writes only its own snapshot's
+		// status.boundSnapshotContentName and keeps no shared mutable state, so parallel workers are safe.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4})
 	return builder.Complete(r)
 }
 

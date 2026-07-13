@@ -27,6 +27,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -53,6 +55,31 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
+
+// Provenance labels stamped on a capture-path ManifestCheckpoint so it can be routed back to its
+// originating ManifestCaptureRequest by an event-driven watch instead of the MCR polling for the
+// checkpoint (see mapManifestCheckpointToMCR / SetupWithManager). The checkpoint is cluster-scoped and
+// the MCR is namespaced, so both the request name and its namespace are required to build the reconcile
+// key. The name label already existed; the namespace label is added for the reverse lookup.
+const (
+	labelKeySourceRequest          = "state-snapshotter.deckhouse.io/source-request"
+	labelKeySourceRequestNamespace = "state-snapshotter.deckhouse.io/source-request-namespace"
+)
+
+// mapManifestCheckpointToMCR routes a ManifestCheckpoint event to its originating ManifestCaptureRequest
+// using the provenance labels stamped at creation. This replaces the 500ms self-requeue handshake the MCR
+// used to wait on the checkpoint (Ready + SnapshotContent ownerRef handoff): a checkpoint status/ownerRef
+// change now wakes the owning MCR directly. Checkpoints without both labels (e.g. the import path) are
+// ignored.
+func mapManifestCheckpointToMCR(_ context.Context, obj client.Object) []ctrl.Request {
+	labels := obj.GetLabels()
+	name := labels[labelKeySourceRequest]
+	namespace := labels[labelKeySourceRequestNamespace]
+	if name == "" || namespace == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}}
+}
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first
 // This ensures that each condition type appears only once, preventing duplicates
@@ -146,6 +173,26 @@ type ManifestCheckpointController struct {
 	Scheme    *runtime.Scheme
 	Logger    logger.LoggerInterface
 	Config    *config.Options
+	// configMu guards the mutable fields of Config (MaxChunkSizeBytes, DefaultTTL) that
+	// loadConfigFromConfigMap rewrites at the start of every Reconcile. With MaxConcurrentReconciles>1
+	// one worker's config refresh would otherwise race concurrent reads in another worker's chunking /
+	// TTL path. Access those fields only via configMaxChunkSizeBytes / configDefaultTTL (reads) and hold
+	// the write lock around LoadFromConfigMap.
+	configMu sync.RWMutex
+}
+
+// configMaxChunkSizeBytes returns Config.MaxChunkSizeBytes under the read lock (see configMu).
+func (r *ManifestCheckpointController) configMaxChunkSizeBytes() int64 {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.Config.MaxChunkSizeBytes
+}
+
+// configDefaultTTL returns Config.DefaultTTL under the read lock (see configMu).
+func (r *ManifestCheckpointController) configDefaultTTL() time.Duration {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.Config.DefaultTTL
 }
 
 // NewManifestCheckpointController creates a new ManifestCheckpointController with validated dependencies.
@@ -429,7 +476,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		ObjectMeta: metav1.ObjectMeta{
 			Name: checkpointName,
 			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/source-request": mcr.Name,
+				labelKeySourceRequest:          mcr.Name,
+				labelKeySourceRequestNamespace: mcr.Namespace,
 			},
 			OwnerReferences: mcpOwnerRefs,
 		},
@@ -787,10 +835,13 @@ func (r *ManifestCheckpointController) sortObjects(objects []unstructured.Unstru
 }
 
 func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpointName string, checkpointUID string, objects []unstructured.Unstructured) ([]storagev1alpha1.ChunkInfo, error) {
+	// Snapshot the size limit once under the config lock (see configMu): a concurrent reconcile may be
+	// rewriting Config via loadConfigFromConfigMap while this chunking runs.
+	maxChunkSize := r.configMaxChunkSizeBytes()
 	r.Logger.Info("createChunks: Starting",
 		"checkpoint", checkpointName,
 		"objects", len(objects),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes)
+		"maxChunkSizeBytes", maxChunkSize)
 
 	createEmptyChunk := func() ([]storagev1alpha1.ChunkInfo, error) {
 		emptyJSON := []byte("[]")
@@ -925,7 +976,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 		// If compressed size exceeds limit, finalize current chunk first
 		// Compare gzip bytes size (not base64 string) to match etcd/apiserver object size limits
-		if len(gzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+		if len(gzipBytes) > int(maxChunkSize) {
 			// If current chunk is not empty, save it
 			if len(currentChunk.objects) > 0 {
 				chunks = append(chunks, currentChunk)
@@ -935,10 +986,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			// Now check if single object exceeds limit
 			singleObjJSON, _ := json.Marshal([]interface{}{obj})
 			singleGzipBytes, err := r.compressToBytes(singleObjJSON)
-			if err == nil && len(singleGzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+			if err == nil && len(singleGzipBytes) > int(maxChunkSize) {
 				r.Logger.Warning("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
 					"compressedSizeBytes", len(singleGzipBytes),
-					"maxSizeBytes", r.Config.MaxChunkSizeBytes)
+					"maxSizeBytes", maxChunkSize)
 				chunks = append(chunks, chunkData{objects: []interface{}{obj}})
 				continue
 			}
@@ -1183,19 +1234,24 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 				"configMap", configMapName,
 				"namespace", namespace,
 				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
-				"defaultMaxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-				"defaultTTL", r.Config.DefaultTTL)
+				"defaultMaxChunkSizeBytes", r.configMaxChunkSizeBytes(),
+				"defaultTTL", r.configDefaultTTL())
 			return nil
 		}
 		return fmt.Errorf("failed to get controller ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Load config from ConfigMap data (overrides defaults)
+	// Load config from ConfigMap data (overrides defaults) under the config write lock (see configMu),
+	// then snapshot the loaded values for logging so the read is consistent with the write.
+	r.configMu.Lock()
 	r.Config.LoadFromConfigMap(configMap.Data)
+	loadedMaxChunk := r.Config.MaxChunkSizeBytes
+	loadedTTL := r.Config.DefaultTTL
+	r.configMu.Unlock()
 	r.Logger.Info("Loaded controller configuration from ConfigMap",
 		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-		"defaultTTL", r.Config.DefaultTTL)
+		"maxChunkSizeBytes", loadedMaxChunk,
+		"defaultTTL", loadedTTL)
 
 	return nil
 }
@@ -1337,7 +1393,18 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		// Event-driven wake: a ManifestCheckpoint status/ownerRef change (chunk completion, then the
+		// SnapshotContent ownerRef handoff done by SnapshotContentController) enqueues the owning MCR
+		// directly, replacing the 500ms self-requeue handshake in finalizeMCRIfCheckpointHandedOff. The
+		// checkpoint is owned by the execution ObjectKeeper (not the MCR), so Owns() cannot route it;
+		// the mapper resolves the MCR from provenance labels. The 500ms requeue is kept as a backstop.
+		Watches(&storagev1alpha1.ManifestCheckpoint{}, handler.EnqueueRequestsFromMapFunc(mapManifestCheckpointToMCR)).
 		WithOptions(controller.Options{
+			// Independent MCRs (one per manifest-only snapshot in the fan-out) queue behind a single
+			// worker; parallel workers cut the multi-set capture wall. Config is now guarded by configMu
+			// (configMaxChunkSizeBytes / configDefaultTTL + the write lock in loadConfigFromConfigMap), so
+			// the per-reconcile config refresh no longer races concurrent readers.
+			MaxConcurrentReconciles: 4,
 			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
 			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
 			// which would stall a snapshot whose capture hit a momentary hiccup. Terminal failures
@@ -1420,8 +1487,10 @@ func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, clie
 func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
 	defaultTTL := config.DefaultTTL
-	if r.Config != nil && r.Config.DefaultTTL > 0 {
-		defaultTTL = r.Config.DefaultTTL
+	if r.Config != nil {
+		if ttl := r.configDefaultTTL(); ttl > 0 {
+			defaultTTL = ttl
+		}
 	}
 
 	// Guard: if TTL is disabled (<= 0), skip scanning
