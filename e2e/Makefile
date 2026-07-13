@@ -74,6 +74,11 @@ TRANSITION_MODULES       := snapshot-controller storage-volume-data-manager stat
 TRANSITION_NS            := d8-snapshot-controller d8-storage-volume-data-manager d8-state-snapshotter d8-storage-foundation
 TRANSITION_WORKLOAD_NS   ?= transition-workload
 TRANSITION_CLEAN_TIMEOUT ?= 300
+# The non-gated (legacy) snapshot-controller tag to un-freeze it back to before cleanup disables it.
+# A completed run leaves snapshot-controller on the v0.2.0 handoff build (requires storage-foundation);
+# disabling it while frozen there would make the NEXT phase-B enable webhook-denied. Retag it to this
+# (main) while it is still enabled so it re-registers non-gated. Match E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG.
+TRANSITION_SNAPC_LEGACY_TAG ?= main
 # DataExport/DataImport live under the legacy group (svdm pre-D1) and the unified group (svdm D1);
 # the workload may carry either depending on how far a run got.
 TRANSITION_DEDI          := dataexports.storage.deckhouse.io dataimports.storage.deckhouse.io dataexports.storage-foundation.deckhouse.io dataimports.storage-foundation.deckhouse.io
@@ -114,6 +119,16 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		sleep 3; \
 	done; \
 	echo "  $(TRANSITION_WORKLOAD_NS): gone"
+	@echo "==> [3/4] Un-gating snapshot-controller BEFORE disabling it: a completed run leaves it on the v0.2.0 handoff build (requires storage-foundation), and Deckhouse ignores an MPO on a DISABLED module — so disabling it now would freeze it gated and webhook-deny the next phase-B enable. Retag it to '$(TRANSITION_SNAPC_LEGACY_TAG)' while still enabled so it re-registers non-gated..."
+	@if [ "$$($(KUBECTL) get moduleconfig snapshot-controller -o jsonpath='{.spec.enabled}' 2>/dev/null)" = "true" ]; then \
+		printf 'apiVersion: deckhouse.io/v1alpha2\nkind: ModulePullOverride\nmetadata:\n  name: snapshot-controller\nspec:\n  imageTag: %s\n  scanInterval: 30s\n' "$(TRANSITION_SNAPC_LEGACY_TAG)" | $(KUBECTL) apply -f - >/dev/null 2>&1 || true; \
+		deadline=$$(( $$(date +%s) + $(TRANSITION_CLEAN_TIMEOUT) )); \
+		while $(KUBECTL) get module snapshot-controller -o jsonpath='{.properties.requirements.modules}' 2>/dev/null | grep -q storage-foundation; do \
+			if [ $$(date +%s) -ge $$deadline ]; then echo "  WARN: snapshot-controller still gated on storage-foundation after $(TRANSITION_CLEAN_TIMEOUT)s — may need a manual reset (see README)"; break; fi; \
+			sleep 5; \
+		done; \
+		echo "  snapshot-controller re-registered on '$(TRANSITION_SNAPC_LEGACY_TAG)' (non-gated)"; \
+	else echo "  snapshot-controller not enabled — cannot retag a disabled module; if it is frozen gated + disabled see README 'Resetting a reused cluster'"; fi
 	@echo "==> [3/4] Disabling the snapshot-stack modules (ModuleConfig enabled=false) + dropping their ModulePullOverrides..."
 	@for m in $(TRANSITION_MODULES); do \
 		if $(KUBECTL) get moduleconfig $$m >/dev/null 2>&1; then \

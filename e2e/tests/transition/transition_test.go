@@ -304,6 +304,17 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				Expect(namespaceExists(ctx, ns)).To(BeFalse(),
 					"namespace %s must be absent before the legacy phase (module %s must not be rolled out yet)", ns, m)
 			}
+
+			// The cluster must not carry a handoff build frozen from a prior run: snapshot-controller
+			// v0.2.0 requires storage-foundation, and Deckhouse ignores an MPO while a module is
+			// disabled — so a snapshot-controller still REGISTERED as v0.2.0 stays gated and the
+			// phase-B enable would be webhook-denied ("depends on disabled module(s):
+			// storage-foundation"). Fail here with an actionable message instead of a cryptic mid-B
+			// failure. Reset per README ("Resetting a reused cluster").
+			Expect(moduleRequiresModule(ctx, modSnapshotController, modStorageFoundation)).To(BeFalse(),
+				"cluster is contaminated: snapshot-controller is registered as a handoff build that requires "+
+					"storage-foundation (frozen from a prior run/manual pr101 apply); phase B cannot enable it while "+
+					"sf is off. Reset it before re-running — see README 'Resetting a reused cluster'.")
 		})
 	})
 

@@ -105,6 +105,9 @@ var (
 	// deprecation assertions read this instead of scraping PrometheusRule specs.
 	clusterAlertGVR = schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "clusteralerts"}
 
+	// modules.deckhouse.io carries each module's resolved properties (stage, requirements, version).
+	moduleGVR = schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "modules"}
+
 	// DataExport/DataImport live under the LEGACY group in phase B (svdm pre-D1) and under the
 	// unified group from phase C onward (svdm D1). dataExportGVR(group)/dataImportGVR(group) build
 	// the right GVR per phase.
@@ -413,6 +416,25 @@ func ensureNamespace(ctx context.Context, name string) {
 func namespaceExists(ctx context.Context, name string) bool {
 	_, err := suiteDyn.Resource(nsGVR).Get(ctx, name, metav1.GetOptions{})
 	return err == nil
+}
+
+// moduleRequiresModule reports whether the module's RESOLVED properties declare a
+// requirements.modules dependency on requiredModule. Used in phase A to detect a cluster left
+// contaminated by a handoff build: e.g. snapshot-controller frozen at its v0.2.0 registration
+// (requires storage-foundation) from a prior run — Deckhouse ignores an MPO while the module is
+// disabled, so it stays gated and the phase-B enable is webhook-denied ("depends on disabled
+// module(s): storage-foundation"). Returns false when the module object is absent (clean cluster).
+func moduleRequiresModule(ctx context.Context, name, requiredModule string) bool {
+	obj, err := suiteDyn.Resource(moduleGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	reqs, found, _ := unstructured.NestedMap(obj.Object, "properties", "requirements", "modules")
+	if !found {
+		return false
+	}
+	_, gated := reqs[requiredModule]
+	return gated
 }
 
 // crdExists reports whether a CRD by full name (plural.group) is present.

@@ -56,6 +56,44 @@ On timeout the failure message carries that same last-observed state. The whole 
 importer `UploadFinished` → populator rebind → target PVC Bound) is bounded by
 `E2E_TRANSITION_PROBE_TIMEOUT` (default `10m`).
 
+## Resetting a reused cluster
+
+The suite is re-runnable on the same dev cluster, but there is one sharp edge. `snapshot-controller`
+v0.2.0 (the phase-C handoff build) declares `requirements.modules.storage-foundation >= 1.0.0`, and
+**Deckhouse ignores a `ModulePullOverride` while the module is disabled**. So if snapshot-controller
+is left *registered* as v0.2.0 while disabled — after a completed run, or after manually applying the
+`pr101`/v0.2.0 tag to poke at it — it stays gated on storage-foundation, and the next run's phase-B
+enable is webhook-denied:
+
+```
+admission webhook "module-configs...": the 'snapshot-controller' module depends on disabled module(s): storage-foundation
+```
+
+Phase A now fails fast with an explicit message when it detects this, instead of a cryptic phase-B error.
+
+- **Normal reset:** `make transition-clean` handles it — while snapshot-controller is still *enabled*
+  it retags the MPO back to `TRANSITION_SNAPC_LEGACY_TAG` (default `main`) and waits for it to
+  re-register non-gated, then disables the modules. Always run `make transition-clean` between runs.
+- **Manual reset** (only if snapshot-controller is already *disabled* AND frozen on v0.2.0 — e.g. a
+  run failed in phase B, or you applied `pr101` by hand while sf was off — so an MPO alone won't take):
+  briefly enable storage-foundation so the gate is satisfied, re-register snapshot-controller on
+  `main`, then disable both again:
+
+  ```bash
+  kubectl apply -f - <<'EOF'
+  apiVersion: deckhouse.io/v1alpha2
+  kind: ModulePullOverride
+  metadata: { name: snapshot-controller }
+  spec: { imageTag: main, scanInterval: 30s }
+  EOF
+  kubectl patch mc storage-foundation  --type merge -p '{"spec":{"enabled":true}}'   # satisfies the gate
+  kubectl patch mc snapshot-controller --type merge -p '{"spec":{"enabled":true}}'   # now activates; MPO pulls main
+  # wait until it re-registers as main (no sf requirement):
+  kubectl get module snapshot-controller -o jsonpath='{.properties.version} {.properties.requirements}{"\n"}'
+  kubectl patch mc snapshot-controller --type merge -p '{"spec":{"enabled":false}}'
+  kubectl patch mc storage-foundation  --type merge -p '{"spec":{"enabled":false}}'
+  ```
+
 ## Environment variables
 
 The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
