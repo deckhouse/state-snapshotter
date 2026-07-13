@@ -12,10 +12,15 @@ already enabled — the opposite of what this scenario needs. All module lifecyc
 ## Scope
 
 - **In scope:** module Helm-guard behaviour (legacy modules stop rendering everything but their
-  deprecation alert once storage-foundation is enabled), the svdm legacy→v0.2.0 migration hook
-  (CR migration to the new API group, legacy CRD removal, legacy finalizer sweep incl. PVCs),
-  CSI snapshot / DataExport-DataImport / restore data integrity across the flip, and the existing
-  state-snapshotter e2e on the same cluster after the flip.
+  deprecation alert once storage-foundation is enabled) **and the firing deprecation alerts
+  themselves** (built-in `ModuleIsDeprecated` + the custom `D8*ModuleDeprecated` for both modules);
+  the svdm legacy→v0.2.0 migration hook (CR migration to the new API group — asserted on a real
+  in-flight `DataExport` — legacy CRD removal, legacy finalizer sweep incl. PVCs) plus
+  **svdm-D1-standalone serving a new-group export before the flip** and **its clean teardown**
+  (deleting the migrated export recovers the source PVC from `Lost`); CSI snapshot / DataExport-
+  DataImport / restore data integrity across the flip, **a full new-group DataExport+DataImport
+  served by storage-foundation after the flip**, and the existing state-snapshotter e2e on the same
+  cluster after the flip.
 - **Out of scope (tested by the runtime team, covered by canary channel rollout):** Deckhouse
   `requirements.deckhouse`/`requirements.modules` gating, `ModuleRelease` Pending→activation,
   bundle auto-enable. This suite runs on a **dev** Deckhouse build, which does not enforce
@@ -62,7 +67,7 @@ v0.2.0/D1 new-group image); the rest use storage-e2e's standard `<MODULE>_MODULE
 |---|---|---|---|
 | `E2E_RUN_TRANSITION` | scenario gate | all | must be `true`, else the whole suite is skipped |
 | `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE` | standard | A (bootstrap) | sds-node-configurator image |
-| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller image (legacy stack) |
+| `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller image — **must be the v0.2.0 handoff build** (`Deprecated` stage + `D8SnapshotControllerModuleDeprecated` alert), NOT `main`: the deprecation-alert assertion requires it |
 | `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B | svdm image on the OLD `storage.deckhouse.io` group (pre-D1) |
 | `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | B | sds-local-volume image (enabled after snapshot-controller) |
 | `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
@@ -82,7 +87,9 @@ export E2E_RUN_TRANSITION=true
 export SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE="main"
 
 # Phase B (legacy stack, driven at runtime):
-export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="main"          # guards already in main
+# snapshot-controller MUST be the v0.2.0 handoff build (Deprecated stage + deprecation alert),
+# e.g. the feat/deprecate-handoff PR tag — NOT main. The suite asserts the deprecation alerts fire.
+export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="pr<N of the v0.2.0 handoff PR>"
 export E2E_TRANSITION_SVDM_LEGACY_TAG="<dev tag of a pre-D1 svdm build>"
 export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="main"
 
@@ -113,12 +120,20 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   the svdm HTTP API (not `d8`); DataImport/upload into new PVCs; CSI-restore a PVC from the
   snapshot; verify every checksum; keep everything.
 - **C — migrate + flip:** retag the svdm MPO legacy→`E2E_TRANSITION_SVDM_TAG` (D1) and verify the
-  migration hook (unfinished CRs moved to the new group, legacy CRDs removed, legacy finalizers
-  incl. on PVCs swept, standalone svdm still works); then enable `state-snapshotter` →
-  `storage-foundation` **without disabling** the legacy modules; assert the legacy modules now
-  render only their deprecation alert (all workload/RBAC/webhook resources gone).
+  migration hook (legacy CRDs removed, legacy finalizers incl. on PVCs swept, **and the real
+  in-flight `DataExport` migrated onto the unified group with its `targetRef` preserved**). Then,
+  **while storage-foundation is still off**, prove svdm-D1-standalone serves a fresh new-group
+  DataExport (download + checksum) and **tear down the migrated export cleanly** — deleting it must
+  recover the source PVC from `Lost` to `Bound` (svdm restores the reassigned PV), so no live export
+  crosses the flip. Then enable `state-snapshotter` → `storage-foundation` **without disabling** the
+  legacy modules; assert the legacy modules render no workload (all Deployments/Services gone) and
+  that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
+  `D8*ModuleDeprecated`, for both modules).
 - **D — invariants:** CSI + DataExport/DataImport CRDs stay Established (UID/`spec.mode` intact);
   the legacy ready+bound VolumeSnapshot is untouched (no new-domain labels/status); all checksums
   still match, incl. a fresh CSI restore from the legacy snapshot after the flip; a brand-new
-  PVC/VS drives the full new unified path; then the existing state-snapshotter e2e passes on the
-  same cluster.
+  PVC/VS reaches ready+bound under the new controller; **a full new-group DataExport+DataImport is
+  served end-to-end by storage-foundation** (export → download → import → checksum); then the
+  existing state-snapshotter e2e passes on the same cluster. The deeper state-snapshotter *domain*
+  path (Snapshot + `processed`/`managed` + SnapshotContent via the d8/domain SDK) is left to that
+  suite.

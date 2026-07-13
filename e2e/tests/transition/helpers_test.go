@@ -101,6 +101,10 @@ var (
 
 	volumeSnapshotGVR = schema.GroupVersionResource{Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots"}
 
+	// Deckhouse surfaces every firing Prometheus alert as a cluster-scoped ClusterAlert; the
+	// deprecation assertions read this instead of scraping PrometheusRule specs.
+	clusterAlertGVR = schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "clusteralerts"}
+
 	// DataExport/DataImport live under the LEGACY group in phase B (svdm pre-D1) and under the
 	// unified group from phase C onward (svdm D1). dataExportGVR(group)/dataImportGVR(group) build
 	// the right GVR per phase.
@@ -291,9 +295,9 @@ func podRunningTimeout() time.Duration {
 // a hang is diagnosable from the log (is the importer up? did UploadFinished fire? is the prime PVC
 // stuck Pending? is a pod unschedulable?) instead of an opaque timeout. timeout budgets the whole
 // chain: upload -> importer UploadFinished -> populator rebind -> target PVC Bound.
-func waitImportComplete(ctx context.Context, ns, diName, pvcName string, timeout time.Duration) {
+func waitImportComplete(ctx context.Context, group, ns, diName, pvcName string, timeout time.Duration) {
 	GinkgoHelper()
-	gvr := dataImportGVR(legacyGroup)
+	gvr := dataImportGVR(group)
 	describe := func() string {
 		return fmt.Sprintf("DI[%s] | PVC %s=%s | %s | pods[%s]",
 			crConditions(ctx, gvr, ns, diName),
@@ -772,4 +776,145 @@ func workloadResourceCount(ctx context.Context, ns string) (int, error) {
 		return 0, err
 	}
 	return len(deps.Items) + len(svcs.Items), nil
+}
+
+// --- ClusterAlert (deprecation) helpers ------------------------------------
+
+// clusterAlertFiring reports whether a ClusterAlert with alert.name == alertName is firing. When
+// moduleLabel != "" it additionally requires alert.labels.module to equal it (the built-in
+// ModuleIsDeprecated alert carries the module name there; our custom vector(1) alerts carry no
+// module label, so pass "").
+func clusterAlertFiring(ctx context.Context, alertName, moduleLabel string) (bool, error) {
+	list, err := suiteDyn.Resource(clusterAlertGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for i := range list.Items {
+		obj := list.Items[i].Object
+		if name, _, _ := unstructured.NestedString(obj, "alert", "name"); name != alertName {
+			continue
+		}
+		if st, _, _ := unstructured.NestedString(obj, "status", "alertStatus"); st != "firing" {
+			continue
+		}
+		if moduleLabel == "" {
+			return true, nil
+		}
+		if m, _, _ := unstructured.NestedString(obj, "alert", "labels", "module"); m == moduleLabel {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// firingAlertNames lists the names of all currently-firing ClusterAlerts (for wait diagnostics).
+func firingAlertNames(ctx context.Context) string {
+	list, err := suiteDyn.Resource(clusterAlertGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Sprintf("list err=%v", err)
+	}
+	var names []string
+	for i := range list.Items {
+		obj := list.Items[i].Object
+		if st, _, _ := unstructured.NestedString(obj, "status", "alertStatus"); st != "firing" {
+			continue
+		}
+		n, _, _ := unstructured.NestedString(obj, "alert", "name")
+		if m, _, _ := unstructured.NestedString(obj, "alert", "labels", "module"); m != "" {
+			n += "{" + m + "}"
+		}
+		names = append(names, n)
+	}
+	if len(names) == 0 {
+		return "no firing alerts"
+	}
+	return strings.Join(names, ",")
+}
+
+// expectAlertFiring blocks until a ClusterAlert (alertName, optional moduleLabel) is firing, logging
+// the currently-firing set each tick. Alert evaluation lags a Prometheus scrape, so callers give it
+// a generous timeout.
+func expectAlertFiring(ctx context.Context, alertName, moduleLabel string, timeout time.Duration) {
+	GinkgoHelper()
+	what := "ClusterAlert " + alertName
+	if moduleLabel != "" {
+		what += "{module=" + moduleLabel + "}"
+	}
+	pollUntil(ctx, what+" firing", timeout,
+		func() bool { ok, _ := clusterAlertFiring(ctx, alertName, moduleLabel); return ok },
+		func() string { return "firing now: " + firingAlertNames(ctx) })
+}
+
+// --- unified-group (D1/storage-foundation) DataExport/DataImport -----------
+
+// createUnifiedDataExport creates a DataExport on the unified storage-foundation.deckhouse.io group
+// (targetRef{kind,name}; group omitted = core, as the migration hook emits for a PVC). Used to drive
+// svdm-D1-standalone (before the flip) and storage-foundation (after the flip).
+func createUnifiedDataExport(ctx context.Context, ns, name, targetKind, targetName string) error {
+	return applyUnstr(ctx, dataExportGVR(unifiedGroup), ns, map[string]interface{}{
+		"apiVersion": unifiedGroup + "/v1alpha1",
+		"kind":       "DataExport",
+		"metadata":   map[string]interface{}{"name": name, "namespace": ns},
+		"spec": map[string]interface{}{
+			"ttl":       "30m",
+			"publish":   false,
+			"targetRef": map[string]interface{}{"kind": targetKind, "name": targetName},
+		},
+	})
+}
+
+// createUnifiedDataImport creates a DataImport on the unified group with the D1/sf schema
+// (mode: CreatePVC + root pvcTemplate — no targetRef, unlike the legacy pre-D1 shape).
+func createUnifiedDataImport(ctx context.Context, ns, name, pvcName, storageClass, size string) error {
+	return applyUnstr(ctx, dataImportGVR(unifiedGroup), ns, map[string]interface{}{
+		"apiVersion": unifiedGroup + "/v1alpha1",
+		"kind":       "DataImport",
+		"metadata":   map[string]interface{}{"name": name, "namespace": ns},
+		"spec": map[string]interface{}{
+			"ttl":                  "30m",
+			"publish":              false,
+			"waitForFirstConsumer": false,
+			"mode":                 "CreatePVC",
+			"pvcTemplate": map[string]interface{}{
+				"metadata": map[string]interface{}{"name": pvcName},
+				"spec": map[string]interface{}{
+					"accessModes":      []interface{}{"ReadWriteOnce"},
+					"storageClassName": storageClass,
+					"volumeMode":       "Filesystem",
+					"resources":        map[string]interface{}{"requests": map[string]interface{}{"storage": size}},
+				},
+			},
+		},
+	})
+}
+
+// deleteCRAndWaitGone deletes a namespaced CR and blocks until it is fully gone (finalizers
+// released). Used to tear down DataExports so the reassigned source PV is recovered.
+func deleteCRAndWaitGone(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	err := suiteDyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "delete %s %s/%s", gvr.Resource, ns, name)
+	}
+	pollUntil(ctx, fmt.Sprintf("%s %s/%s deleted", gvr.Resource, ns, name), timeout,
+		func() bool {
+			_, gerr := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			return apierrors.IsNotFound(gerr)
+		},
+		func() string {
+			obj, gerr := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			if gerr != nil {
+				return fmt.Sprintf("get err=%v", gerr)
+			}
+			return "still present, finalizers=" + fmt.Sprint(obj.GetFinalizers())
+		})
+}
+
+// waitPVCPhase blocks until a PVC reaches the wanted phase (used to assert the source PVC recovers
+// from Lost->Bound after the export that reassigned its PV is deleted).
+func waitPVCPhase(ctx context.Context, ns, name string, want corev1.PersistentVolumeClaimPhase, timeout time.Duration) {
+	GinkgoHelper()
+	pollUntil(ctx, fmt.Sprintf("PVC %s/%s == %s", ns, name, want), timeout,
+		func() bool { return pvcPhase(ctx, ns, name) == string(want) },
+		func() string { return "phase=" + pvcPhase(ctx, ns, name) })
 }

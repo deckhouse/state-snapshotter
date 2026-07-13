@@ -35,6 +35,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
@@ -383,7 +384,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// True early (server ready) and there is no Completed condition type, so the PVC phase is
 			// the real gate. waitImportComplete narrates DI conditions / prime PVC / pods every 15s so a
 			// stall is visible; podRunningTimeout() budgets the whole chain.
-			waitImportComplete(ctx, workloadNS, "import-di", "imported-data", podRunningTimeout())
+			waitImportComplete(ctx, legacyGroup, workloadNS, "import-di", "imported-data", podRunningTimeout())
 
 			By("mounting imported-data and verifying the checksum")
 			createProbePod(ctx, workloadNS, "probe-imported", probeImage(), "imported-data")
@@ -425,6 +426,51 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			leftover, err := pvcsWithFinalizer(ctx, legacyFinalizer)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
+
+			if !dataPlaneEnabled() {
+				return
+			}
+			// The in-flight legacy DataExport (export-pvc, still serving from phase B) must be MIGRATED
+			// onto the unified group with its spec mapped (targetRef kind+name preserved) — not dropped.
+			// Poll: migration runs OnBeforeHelm and the unified CR appears a moment after the retag.
+			expGVR := dataExportGVR(unifiedGroup)
+			pollUntil(ctx, "in-flight DataExport export-pvc migrated to the unified group", 3*time.Minute,
+				func() bool { _, e := getUnstr(ctx, expGVR, workloadNS, "export-pvc"); return e == nil },
+				func() string { return "not on unified group yet" })
+			migrated, err := getUnstr(ctx, expGVR, workloadNS, "export-pvc")
+			Expect(err).NotTo(HaveOccurred())
+			kind, _, _ := unstructured.NestedString(migrated.Object, "spec", "targetRef", "kind")
+			tname, _, _ := unstructured.NestedString(migrated.Object, "spec", "targetRef", "name")
+			Expect(kind).To(Equal("PersistentVolumeClaim"), "migrated DataExport must keep its targetRef.kind")
+			Expect(tname).To(Equal(srcPVCName), "migrated DataExport must keep its targetRef.name")
+		})
+
+		It("serves a fresh new-group DataExport standalone and cleans up the migrated one (before the flip)", func(ctx SpecContext) {
+			if !dataPlaneEnabled() {
+				Skip("data-plane steps skipped (see phase B)")
+			}
+			// (a) svdm-D1 STANDALONE (storage-foundation still OFF) must serve a brand-new export on
+			// the unified group — proving the D1 controller works on the new group, not only that the
+			// migration hook ran. Export restored-pvc (it holds the marker from the phase-B CSI restore
+			// and is unused later); free it first — svdm rejects exporting a mounted PVC.
+			deletePodAndWait(ctx, workloadNS, "probe-restored", 2*time.Minute)
+			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
+			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
+			Expect(createUnifiedDataExport(ctx, workloadNS, "export-d1", "PersistentVolumeClaim", "restored-pvc")).To(Succeed())
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 5*time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-d1")).To(Succeed())
+			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-d1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(sourceChecksum), "svdm-D1 standalone must serve the new-group export")
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 3*time.Minute)
+
+			// (b) Tear down the MIGRATED in-flight export under the D1 controller (still standalone), so
+			// no live export is carried across the flip. Deleting it must remove the CR (finalizer
+			// released) AND recover the source PVC: svdm restores the reassigned PV, so src-data must
+			// return from Lost to Bound. This is the clean-teardown proof, not a lingering artifact.
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-pvc", 3*time.Minute)
+			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
 		})
 
 		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
@@ -446,6 +492,24 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(Equal(0),
 					"module %s must render no Deployments/Services once storage-foundation is enabled (guard)", m)
 			}
+		})
+
+		It("fires the deprecation alerts for both legacy modules", func(ctx SpecContext) {
+			// Both legacy modules are now Deprecated: snapshot-controller since phase B (the v0.2.0
+			// image — REQUIRES E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG to be the v0.2.0/pr build, NOT
+			// main; main is not Deprecated and would not fire these) and svdm since the phase-C retag.
+			// Deckhouse must surface, for EACH module, two firing ClusterAlerts:
+			//   - the built-in ModuleIsDeprecated{module=<name>} — proves module.yaml stage=Deprecated
+			//     took effect;
+			//   - our custom D8<Name>ModuleDeprecated (vector(1), severity 9) — proves the module's
+			//     deprecation-alert template renders (svdm's under the reverse guard "sf enabled",
+			//     snapshot-controller's always-on).
+			// Alert eval lags a scrape, so wait.
+			const alertTimeout = 6 * time.Minute
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController, alertTimeout)
+			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "", alertTimeout)
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm, alertTimeout)
+			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "", alertTimeout)
 		})
 	})
 
@@ -505,10 +569,43 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(content).NotTo(BeEmpty(), "new CSI VolumeSnapshot must be serviced by storage-foundation after the flip")
 
-			// NOTE(first-run): the deeper unified-domain path (state-snapshotter Snapshot with
-			// processed/managed labels + SnapshotContent + new-group DataExport/DataImport) is a
-			// larger domain-specific surface; validate it via the existing state-snapshotter e2e
-			// suite on the same cluster once the transition suite passes.
+			// NOTE: the new-group DataExport/DataImport data-plane under storage-foundation is covered by
+			// the next spec. The deeper state-snapshotter DOMAIN path (Snapshot with processed/managed
+			// labels + SnapshotContent driven via the d8/domain SDK) is a larger domain-specific
+			// surface; validate it via the existing state-snapshotter e2e suite on the same cluster.
+		})
+
+		It("drives a unified DataExport/DataImport through storage-foundation after the flip", func(ctx SpecContext) {
+			if !dataPlaneEnabled() {
+				Skip("data-plane invariants skipped (no SC/VSC provided)")
+			}
+			// After the flip svdm renders nothing; the unified DataExport/DataImport path must be served
+			// by storage-foundation itself. Export new-pvc over the unified group, download+checksum,
+			// then import into a fresh PVC and checksum — the new-group data-plane end-to-end under sf.
+			deletePodAndWait(ctx, workloadNS, "probe-new", 2*time.Minute)
+			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
+			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
+
+			By("exporting new-pvc over the unified group (served by storage-foundation)")
+			Expect(createUnifiedDataExport(ctx, workloadNS, "export-sf", "PersistentVolumeClaim", "new-pvc")).To(Succeed())
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 5*time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-sf")).To(Succeed())
+			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-sf")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(sourceChecksum), "storage-foundation must serve the unified export after the flip")
+
+			By("importing over the unified group into a fresh PVC (served by storage-foundation)")
+			Expect(createUnifiedDataImport(ctx, workloadNS, "import-sf", "imported-sf", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
+			iurl, icaB64, err := crStatusURLCA(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 5*time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(svdmUpload(ctx, workloadNS, iurl, icaB64, "/tmp/marker-sf", "marker")).To(Succeed())
+			waitImportComplete(ctx, unifiedGroup, workloadNS, "import-sf", "imported-sf", podRunningTimeout())
+
+			createProbePod(ctx, workloadNS, "probe-sf", probeImage(), "imported-sf")
+			got, err = checksumFile(ctx, workloadNS, "probe-sf", "probe", "/mnt/imported-sf/marker")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(sourceChecksum), "unified import under storage-foundation must match the source")
 		})
 	})
 
