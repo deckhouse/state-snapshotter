@@ -71,28 +71,21 @@ admission webhook "module-configs...": the 'snapshot-controller' module depends 
 
 Phase A now fails fast with an explicit message when it detects this, instead of a cryptic phase-B error.
 
-- **Normal reset:** `make transition-clean` handles it — while snapshot-controller is still *enabled*
-  it retags the MPO back to `TRANSITION_SNAPC_LEGACY_TAG` (default `main`) and waits for it to
-  re-register non-gated, then disables the modules. Always run `make transition-clean` between runs.
-- **Manual reset** (only if snapshot-controller is already *disabled* AND frozen on v0.2.0 — e.g. a
-  run failed in phase B, or you applied `pr101` by hand while sf was off — so an MPO alone won't take):
-  briefly enable storage-foundation so the gate is satisfied, re-register snapshot-controller on
-  `main`, then disable both again:
+**`make transition-clean` handles both cases** (always run it between runs) via
+`tests/transition/reset-cluster.sh`:
 
-  ```bash
-  kubectl apply -f - <<'EOF'
-  apiVersion: deckhouse.io/v1alpha2
-  kind: ModulePullOverride
-  metadata: { name: snapshot-controller }
-  spec: { imageTag: main, scanInterval: 30s }
-  EOF
-  kubectl patch mc storage-foundation  --type merge -p '{"spec":{"enabled":true}}'   # satisfies the gate
-  kubectl patch mc snapshot-controller --type merge -p '{"spec":{"enabled":true}}'   # now activates; MPO pulls main
-  # wait until it re-registers as main (no sf requirement):
-  kubectl get module snapshot-controller -o jsonpath='{.properties.version} {.properties.requirements}{"\n"}'
-  kubectl patch mc snapshot-controller --type merge -p '{"spec":{"enabled":false}}'
-  kubectl patch mc storage-foundation  --type merge -p '{"spec":{"enabled":false}}'
-  ```
+- if snapshot-controller is still *enabled*, it retags the MPO to `TRANSITION_SNAPC_LEGACY_TAG`
+  (default `main`) and waits for it to re-register non-gated;
+- if it is *disabled* and frozen on v0.2.0 (MPO alone is ignored), it briefly enables the dependency
+  chain (`state-snapshotter` → `storage-foundation`) to satisfy the gate, enables snapshot-controller
+  so the MPO re-pulls the legacy image, waits until it re-registers non-gated, then disables exactly
+  the modules it transiently enabled.
+
+To run just the un-freeze without the full workload/namespace teardown:
+
+```bash
+make transition-reset-snapc      # or: sh tests/transition/reset-cluster.sh
+```
 
 ## Environment variables
 

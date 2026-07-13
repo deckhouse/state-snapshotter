@@ -119,16 +119,8 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		sleep 3; \
 	done; \
 	echo "  $(TRANSITION_WORKLOAD_NS): gone"
-	@echo "==> [3/4] Un-gating snapshot-controller BEFORE disabling it: a completed run leaves it on the v0.2.0 handoff build (requires storage-foundation), and Deckhouse ignores an MPO on a DISABLED module — so disabling it now would freeze it gated and webhook-deny the next phase-B enable. Retag it to '$(TRANSITION_SNAPC_LEGACY_TAG)' while still enabled so it re-registers non-gated..."
-	@if [ "$$($(KUBECTL) get moduleconfig snapshot-controller -o jsonpath='{.spec.enabled}' 2>/dev/null)" = "true" ]; then \
-		printf 'apiVersion: deckhouse.io/v1alpha2\nkind: ModulePullOverride\nmetadata:\n  name: snapshot-controller\nspec:\n  imageTag: %s\n  scanInterval: 30s\n' "$(TRANSITION_SNAPC_LEGACY_TAG)" | $(KUBECTL) apply -f - >/dev/null 2>&1 || true; \
-		deadline=$$(( $$(date +%s) + $(TRANSITION_CLEAN_TIMEOUT) )); \
-		while $(KUBECTL) get module snapshot-controller -o jsonpath='{.properties.requirements.modules}' 2>/dev/null | grep -q storage-foundation; do \
-			if [ $$(date +%s) -ge $$deadline ]; then echo "  WARN: snapshot-controller still gated on storage-foundation after $(TRANSITION_CLEAN_TIMEOUT)s — may need a manual reset (see README)"; break; fi; \
-			sleep 5; \
-		done; \
-		echo "  snapshot-controller re-registered on '$(TRANSITION_SNAPC_LEGACY_TAG)' (non-gated)"; \
-	else echo "  snapshot-controller not enabled — cannot retag a disabled module; if it is frozen gated + disabled see README 'Resetting a reused cluster'"; fi
+	@echo "==> [3/4] Un-freezing snapshot-controller if it is registered on the gated v0.2.0 handoff build (else the next phase-B enable is webhook-denied). Handles both the still-enabled case and the disabled+frozen case (briefly enabling the dependency chain so the MPO can re-pull) — see tests/transition/reset-cluster.sh..."
+	@KUBECTL="$(KUBECTL)" TRANSITION_SNAPC_LEGACY_TAG="$(TRANSITION_SNAPC_LEGACY_TAG)" TRANSITION_CLEAN_TIMEOUT="$(TRANSITION_CLEAN_TIMEOUT)" sh tests/transition/reset-cluster.sh
 	@echo "==> [3/4] Disabling the snapshot-stack modules (ModuleConfig enabled=false) + dropping their ModulePullOverrides..."
 	@for m in $(TRANSITION_MODULES); do \
 		if $(KUBECTL) get moduleconfig $$m >/dev/null 2>&1; then \
@@ -148,6 +140,10 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 	@echo "==> [4/4] Sweeping leftover hook-created domain RBAC (state-snapshotter ClusterRoles/Bindings survive module disable — see docs/backlog.md #2)..."
 	@$(KUBECTL) delete clusterrole,clusterrolebinding -l heritage=deckhouse,module=state-snapshotter --ignore-not-found >/dev/null 2>&1 || true
 	@echo "==> Done. Re-check: none of [$(TRANSITION_NS)] and no '$(TRANSITION_WORKLOAD_NS)' should exist before re-running 'make test-transition'."
+
+.PHONY: transition-reset-snapc
+transition-reset-snapc: ## Un-freeze snapshot-controller if it is stuck on the gated v0.2.0 handoff build (the subset of transition-clean that fixes the 'depends on disabled module(s): storage-foundation' phase-B denial; safe to run standalone)
+	@KUBECTL="$(KUBECTL)" TRANSITION_SNAPC_LEGACY_TAG="$(TRANSITION_SNAPC_LEGACY_TAG)" TRANSITION_CLEAN_TIMEOUT="$(TRANSITION_CLEAN_TIMEOUT)" sh tests/transition/reset-cluster.sh
 
 .PHONY: vet
 vet: ## go vet (also type-checks the _test.go files -> compile gate)
