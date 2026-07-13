@@ -27,6 +27,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -172,6 +173,26 @@ type ManifestCheckpointController struct {
 	Scheme    *runtime.Scheme
 	Logger    logger.LoggerInterface
 	Config    *config.Options
+	// configMu guards the mutable fields of Config (MaxChunkSizeBytes, DefaultTTL) that
+	// loadConfigFromConfigMap rewrites at the start of every Reconcile. With MaxConcurrentReconciles>1
+	// one worker's config refresh would otherwise race concurrent reads in another worker's chunking /
+	// TTL path. Access those fields only via configMaxChunkSizeBytes / configDefaultTTL (reads) and hold
+	// the write lock around LoadFromConfigMap.
+	configMu sync.RWMutex
+}
+
+// configMaxChunkSizeBytes returns Config.MaxChunkSizeBytes under the read lock (see configMu).
+func (r *ManifestCheckpointController) configMaxChunkSizeBytes() int64 {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.Config.MaxChunkSizeBytes
+}
+
+// configDefaultTTL returns Config.DefaultTTL under the read lock (see configMu).
+func (r *ManifestCheckpointController) configDefaultTTL() time.Duration {
+	r.configMu.RLock()
+	defer r.configMu.RUnlock()
+	return r.Config.DefaultTTL
 }
 
 // NewManifestCheckpointController creates a new ManifestCheckpointController with validated dependencies.
@@ -814,10 +835,13 @@ func (r *ManifestCheckpointController) sortObjects(objects []unstructured.Unstru
 }
 
 func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpointName string, checkpointUID string, objects []unstructured.Unstructured) ([]storagev1alpha1.ChunkInfo, error) {
+	// Snapshot the size limit once under the config lock (see configMu): a concurrent reconcile may be
+	// rewriting Config via loadConfigFromConfigMap while this chunking runs.
+	maxChunkSize := r.configMaxChunkSizeBytes()
 	r.Logger.Info("createChunks: Starting",
 		"checkpoint", checkpointName,
 		"objects", len(objects),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes)
+		"maxChunkSizeBytes", maxChunkSize)
 
 	createEmptyChunk := func() ([]storagev1alpha1.ChunkInfo, error) {
 		emptyJSON := []byte("[]")
@@ -952,7 +976,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 
 		// If compressed size exceeds limit, finalize current chunk first
 		// Compare gzip bytes size (not base64 string) to match etcd/apiserver object size limits
-		if len(gzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+		if len(gzipBytes) > int(maxChunkSize) {
 			// If current chunk is not empty, save it
 			if len(currentChunk.objects) > 0 {
 				chunks = append(chunks, currentChunk)
@@ -962,10 +986,10 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			// Now check if single object exceeds limit
 			singleObjJSON, _ := json.Marshal([]interface{}{obj})
 			singleGzipBytes, err := r.compressToBytes(singleObjJSON)
-			if err == nil && len(singleGzipBytes) > int(r.Config.MaxChunkSizeBytes) {
+			if err == nil && len(singleGzipBytes) > int(maxChunkSize) {
 				r.Logger.Warning("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
 					"compressedSizeBytes", len(singleGzipBytes),
-					"maxSizeBytes", r.Config.MaxChunkSizeBytes)
+					"maxSizeBytes", maxChunkSize)
 				chunks = append(chunks, chunkData{objects: []interface{}{obj}})
 				continue
 			}
@@ -1210,19 +1234,24 @@ func (r *ManifestCheckpointController) loadConfigFromConfigMap(ctx context.Conte
 				"configMap", configMapName,
 				"namespace", namespace,
 				"note", "ConfigMap is optional - create it via Helm values (controller.config.*) to override defaults",
-				"defaultMaxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-				"defaultTTL", r.Config.DefaultTTL)
+				"defaultMaxChunkSizeBytes", r.configMaxChunkSizeBytes(),
+				"defaultTTL", r.configDefaultTTL())
 			return nil
 		}
 		return fmt.Errorf("failed to get controller ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Load config from ConfigMap data (overrides defaults)
+	// Load config from ConfigMap data (overrides defaults) under the config write lock (see configMu),
+	// then snapshot the loaded values for logging so the read is consistent with the write.
+	r.configMu.Lock()
 	r.Config.LoadFromConfigMap(configMap.Data)
+	loadedMaxChunk := r.Config.MaxChunkSizeBytes
+	loadedTTL := r.Config.DefaultTTL
+	r.configMu.Unlock()
 	r.Logger.Info("Loaded controller configuration from ConfigMap",
 		"configMap", fmt.Sprintf("%s/%s", namespace, configMapName),
-		"maxChunkSizeBytes", r.Config.MaxChunkSizeBytes,
-		"defaultTTL", r.Config.DefaultTTL)
+		"maxChunkSizeBytes", loadedMaxChunk,
+		"defaultTTL", loadedTTL)
 
 	return nil
 }
@@ -1371,6 +1400,11 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 		// the mapper resolves the MCR from provenance labels. The 500ms requeue is kept as a backstop.
 		Watches(&storagev1alpha1.ManifestCheckpoint{}, handler.EnqueueRequestsFromMapFunc(mapManifestCheckpointToMCR)).
 		WithOptions(controller.Options{
+			// Independent MCRs (one per manifest-only snapshot in the fan-out) queue behind a single
+			// worker; parallel workers cut the multi-set capture wall. Config is now guarded by configMu
+			// (configMaxChunkSizeBytes / configDefaultTTL + the write lock in loadConfigFromConfigMap), so
+			// the per-reconcile config refresh no longer races concurrent readers.
+			MaxConcurrentReconciles: 4,
 			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
 			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
 			// which would stall a snapshot whose capture hit a momentary hiccup. Terminal failures
@@ -1453,8 +1487,10 @@ func (r *ManifestCheckpointController) StartTTLScanner(ctx context.Context, clie
 func (r *ManifestCheckpointController) scanAndDeleteExpiredMCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
 	defaultTTL := config.DefaultTTL
-	if r.Config != nil && r.Config.DefaultTTL > 0 {
-		defaultTTL = r.Config.DefaultTTL
+	if r.Config != nil {
+		if ttl := r.configDefaultTTL(); ttl > 0 {
+			defaultTTL = ttl
+		}
 	}
 
 	// Guard: if TTL is disabled (<= 0), skip scanning
