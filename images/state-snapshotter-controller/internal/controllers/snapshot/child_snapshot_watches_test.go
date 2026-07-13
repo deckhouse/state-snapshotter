@@ -53,7 +53,9 @@ func TestFindParentsReferencingChildSnapshot_MatchesGVKAndName(t *testing.T) {
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefsFieldIndex, snapshotChildrenRefsIndexValues).
+		WithObjects(parent).Build()
 	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
 	if len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "parent" {
 		t.Fatalf("got %+v", reqs)
@@ -90,7 +92,9 @@ func TestFindParentsReferencingChildSnapshot_OnlySameNamespaceAsChild(t *testing
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parentSame, parentOther).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefsFieldIndex, snapshotChildrenRefsIndexValues).
+		WithObjects(parentSame, parentOther).Build()
 	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
 	if len(reqs) != 1 || reqs[0].Namespace != "ns-a" || reqs[0].Name != "root" {
 		t.Fatalf("expected only parent in ns-a, got %+v", reqs)
@@ -116,7 +120,9 @@ func TestBuildSyntheticDeletedChild_MatchesReferencingParent(t *testing.T) {
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefsFieldIndex, snapshotChildrenRefsIndexValues).
+		WithObjects(parent).Build()
 
 	// Synthetic child built only from GVK + namespace/name (the object itself no longer exists).
 	synthetic := buildSyntheticDeletedChild(gvk, "ns-a", "snap-1")
@@ -153,7 +159,9 @@ func TestFindParentsReferencingChildSnapshot_SameNameDifferentGVKNoFalsePositive
 	if err := storagev1alpha1.AddToScheme(sc); err != nil {
 		t.Fatal(err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(sc).WithObjects(parent).Build()
+	cl := fake.NewClientBuilder().WithScheme(sc).
+		WithIndex(&storagev1alpha1.Snapshot{}, SnapshotChildrenRefsFieldIndex, snapshotChildrenRefsIndexValues).
+		WithObjects(parent).Build()
 	reqs := findParentsReferencingChildSnapshot(ctx, cl, child)
 	if len(reqs) != 0 {
 		t.Fatalf("expected no parent, got %+v", reqs)

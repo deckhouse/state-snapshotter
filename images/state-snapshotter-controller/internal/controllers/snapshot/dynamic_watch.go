@@ -143,7 +143,7 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 			// rely only on the content-side ownerRef chain and the 30s polling fallback
 			// (INV-FAIL-PROP: a missing required descendant must wake the parent so Ready is recomputed).
 			logger.Info("nss child relay: child not found; waking referencing parents for deletion-driven recompute")
-			return r.enqueueParentsForDeletedChild(ctx, childReader, req)
+			return r.enqueueParentsForDeletedChild(ctx, req)
 		}
 		logger.Info("nss child relay: get child failed", "error", err.Error())
 		return ctrl.Result{}, err
@@ -151,7 +151,7 @@ func (r *nssChildSnapshotWatchRelay) Reconcile(ctx context.Context, req ctrl.Req
 	logger.Info("nss child relay: child fetched from reader",
 		"apiVersion", u.GetAPIVersion(), "kind", u.GetKind(), "rv", u.GetResourceVersion())
 
-	reqs := findParentsReferencingChildSnapshot(ctx, childReader, u)
+	reqs := findParentsReferencingChildSnapshot(ctx, r.client, u)
 	if len(reqs) == 0 {
 		bound, hasBound, _ := unstructured.NestedString(u.Object, "status", "boundSnapshotContentName")
 		// Only retry for a genuine create/registration race: a DIRECT child of a unified Snapshot
@@ -206,14 +206,14 @@ func childHasUnifiedSnapshotControllerOwner(u *unstructured.Unstructured) bool {
 // (apiVersion, kind, name, namespace) — and reconciles every parent Snapshot that still references it.
 // This makes child-Snapshot deletion an event-driven parent wake-up instead of relying solely on the
 // content-side ownerRef chain and the polling fallback.
-func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.Context, childReader client.Reader, req ctrl.Request) (ctrl.Result, error) {
+func (r *nssChildSnapshotWatchRelay) enqueueParentsForDeletedChild(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).V(1)
 	if req.Namespace == "" {
 		// Run tree is namespace-local; a cluster-scoped child key cannot match any namespaced parent.
 		return ctrl.Result{}, nil
 	}
 	synthetic := buildSyntheticDeletedChild(r.gvk, req.Namespace, req.Name)
-	reqs := findParentsReferencingChildSnapshot(ctx, childReader, synthetic)
+	reqs := findParentsReferencingChildSnapshot(ctx, r.client, synthetic)
 	if len(reqs) == 0 {
 		logger.Info("nss child relay: deleted child has no referencing parents (already pruned)")
 		return ctrl.Result{}, nil
