@@ -42,6 +42,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -53,6 +54,31 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
+
+// Provenance labels stamped on a capture-path ManifestCheckpoint so it can be routed back to its
+// originating ManifestCaptureRequest by an event-driven watch instead of the MCR polling for the
+// checkpoint (see mapManifestCheckpointToMCR / SetupWithManager). The checkpoint is cluster-scoped and
+// the MCR is namespaced, so both the request name and its namespace are required to build the reconcile
+// key. The name label already existed; the namespace label is added for the reverse lookup.
+const (
+	labelKeySourceRequest          = "state-snapshotter.deckhouse.io/source-request"
+	labelKeySourceRequestNamespace = "state-snapshotter.deckhouse.io/source-request-namespace"
+)
+
+// mapManifestCheckpointToMCR routes a ManifestCheckpoint event to its originating ManifestCaptureRequest
+// using the provenance labels stamped at creation. This replaces the 500ms self-requeue handshake the MCR
+// used to wait on the checkpoint (Ready + SnapshotContent ownerRef handoff): a checkpoint status/ownerRef
+// change now wakes the owning MCR directly. Checkpoints without both labels (e.g. the import path) are
+// ignored.
+func mapManifestCheckpointToMCR(_ context.Context, obj client.Object) []ctrl.Request {
+	labels := obj.GetLabels()
+	name := labels[labelKeySourceRequest]
+	namespace := labels[labelKeySourceRequestNamespace]
+	if name == "" || namespace == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}}
+}
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first
 // This ensures that each condition type appears only once, preventing duplicates
@@ -429,7 +455,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		ObjectMeta: metav1.ObjectMeta{
 			Name: checkpointName,
 			Labels: map[string]string{
-				"state-snapshotter.deckhouse.io/source-request": mcr.Name,
+				labelKeySourceRequest:          mcr.Name,
+				labelKeySourceRequestNamespace: mcr.Namespace,
 			},
 			OwnerReferences: mcpOwnerRefs,
 		},
@@ -1337,6 +1364,12 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).
+		// Event-driven wake: a ManifestCheckpoint status/ownerRef change (chunk completion, then the
+		// SnapshotContent ownerRef handoff done by SnapshotContentController) enqueues the owning MCR
+		// directly, replacing the 500ms self-requeue handshake in finalizeMCRIfCheckpointHandedOff. The
+		// checkpoint is owned by the execution ObjectKeeper (not the MCR), so Owns() cannot route it;
+		// the mapper resolves the MCR from provenance labels. The 500ms requeue is kept as a backstop.
+		Watches(&storagev1alpha1.ManifestCheckpoint{}, handler.EnqueueRequestsFromMapFunc(mapManifestCheckpointToMCR)).
 		WithOptions(controller.Options{
 			// Bound the per-item retry backoff so transient chunk-creation requeues (apiserver/network
 			// blips) re-run quickly instead of backing off to the controller-runtime default (~16min),
