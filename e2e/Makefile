@@ -100,14 +100,20 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		echo "  Namespace..."; \
 		$(KUBECTL) delete ns $(TRANSITION_WORKLOAD_NS) --timeout=120s 2>/dev/null || true; \
 	else echo "  namespace absent"; fi
-	@echo "==> [2/4] Force-clearing anything still stuck in '$(TRANSITION_WORKLOAD_NS)' (strip finalizers, then delete)..."
-	@if $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; then \
+	@echo "==> [2/4] Waiting for '$(TRANSITION_WORKLOAD_NS)' to be FULLY deleted before touching the modules (force-clearing finalizers while it lingers)..."
+	@deadline=$$(( $$(date +%s) + $(TRANSITION_CLEAN_TIMEOUT) )); \
+	while $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; do \
 		for res in $$($(KUBECTL) -n $(TRANSITION_WORKLOAD_NS) get $(TRANSITION_VS),pvc,$$(echo '$(TRANSITION_DEDI)' | tr ' ' ',') -o name 2>/dev/null); do \
 			$(KUBECTL) -n $(TRANSITION_WORKLOAD_NS) patch $$res --type merge -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true; \
 		done; \
 		$(KUBECTL) delete ns $(TRANSITION_WORKLOAD_NS) --wait=false --ignore-not-found >/dev/null 2>&1 || true; \
-		echo "  forced"; \
-	else echo "  clean"; fi
+		if [ $$(date +%s) -ge $$deadline ]; then \
+			echo "  TIMEOUT: $(TRANSITION_WORKLOAD_NS) still present — aborting BEFORE disabling modules (disabling now would strand finalizers)"; \
+			exit 1; \
+		fi; \
+		sleep 3; \
+	done; \
+	echo "  $(TRANSITION_WORKLOAD_NS): gone"
 	@echo "==> [3/4] Disabling the snapshot-stack modules (ModuleConfig enabled=false) + dropping their ModulePullOverrides..."
 	@for m in $(TRANSITION_MODULES); do \
 		if $(KUBECTL) get moduleconfig $$m >/dev/null 2>&1; then \
