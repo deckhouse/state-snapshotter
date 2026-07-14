@@ -26,24 +26,6 @@ properties:
           ca:
             type: string
             x-examples: ["YjY0ZW5jX3N0cmluZwo="]
-      domainApiServerCert:
-        type: object
-        default: {}
-        description: "Self-generated TLS serving certificate (own CA) for the domain controller's aggregated API server. Populated by tls-certificate hook. SANs cover the domain-controller service."
-        x-required-for-helm:
-          - crt
-          - key
-          - ca
-        properties:
-          crt:
-            type: string
-            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
-          key:
-            type: string
-            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
-          ca:
-            type: string
-            x-examples: ["YjY0ZW5jX3N0cmluZwo="]
   registry:
     type: object
     description: "System field, overwritten by Deckhouse. Don't use."

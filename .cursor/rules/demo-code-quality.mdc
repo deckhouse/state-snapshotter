@@ -1,18 +1,19 @@
 ---
-description: Demo/domain controllers are executable architecture documentation — reference-grade naming, package layout, intent-comments, and zero hidden magic. Demo code must be cleaner than production. Apply when editing demo/domain controllers or the snapshot SDK semantic layer, and when naming or placing any function/type/field/file a new engineer would read as a contract.
-globs: images/domain-controller/**/*.go,pkg/snapshotsdk/**/*.go
+description: The snapshot SDK is executable architecture documentation — reference-grade naming, package layout, intent-comments, and zero hidden magic. SDK code must be cleaner than production. Apply when editing the snapshot SDK semantic layer, and when naming or placing any function/type/field/file a new engineer would read as a contract.
+globs: pkg/snapshotsdk/**/*.go
 alwaysApply: false
 ---
 
-# Demo / SDK code quality contract
+# SDK code quality contract
 
-Demo (`images/domain-controller`) and the snapshot SDK (`pkg/snapshotsdk`) are **executable architecture
-documentation / reference implementation**. New engineers read them instead of ADRs, and copy-paste them
-into new domain controllers. A reader must, from this code alone and in ~30 minutes (no ADR / design doc),
-be able to explain the **happy path, the failure paths, the ownership boundaries, and the lifecycle** (the
-measurable bar — see §8). "It works" is not enough — it must be **impossible to misread**. These standards
-are therefore *stricter than production*: demo code must be cleaner than prod, because prod may carry
-legacy / compat hacks and demo never may.
+The snapshot SDK (`pkg/snapshotsdk`) is **executable architecture documentation / reference
+implementation**. New engineers read it instead of ADRs, and copy-paste it into new domain controllers
+(the reference demo domain controller itself now lives in the `sds-unified-snapshots-poc` repo). A reader
+must, from this code alone and in ~30 minutes (no ADR / design doc), be able to explain the **happy path,
+the failure paths, the ownership boundaries, and the lifecycle** (the measurable bar — see §8). "It works"
+is not enough — it must be **impossible to misread**. These standards are therefore *stricter than
+production*: SDK code must be cleaner than prod, because prod may carry legacy / compat hacks and the SDK
+never may.
 
 ## 1. Naming is architecture-grade (MUST)
 

@@ -32,100 +32,6 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// buildRules builds a deterministic (sorted by group, resources within group)
-// set of PolicyRules covering source and snapshot GVRs from all eligible CSDs.
-// Rules are classified as PERMANENT or TEMPORARY; see the package-level comment.
-func buildRules(sourceGVRs, snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
-	if len(sourceGVRs) == 0 && len(snapshotGVRs) == 0 {
-		return nil
-	}
-
-	type groupEntry struct {
-		sources   []string
-		snapshots []string
-	}
-	byGroup := make(map[string]*groupEntry)
-	var groupOrder []string
-
-	ensureGroup := func(g string) {
-		if _, ok := byGroup[g]; !ok {
-			byGroup[g] = &groupEntry{}
-			groupOrder = append(groupOrder, g)
-		}
-	}
-	for _, gvr := range sourceGVRs {
-		ensureGroup(gvr.Group)
-		byGroup[gvr.Group].sources = append(byGroup[gvr.Group].sources, gvr.Resource)
-	}
-	for _, gvr := range snapshotGVRs {
-		ensureGroup(gvr.Group)
-		byGroup[gvr.Group].snapshots = append(byGroup[gvr.Group].snapshots, gvr.Resource)
-	}
-
-	sort.Strings(groupOrder)
-
-	var rules []rbacv1.PolicyRule
-	for _, g := range groupOrder {
-		entry := byGroup[g]
-		// Two CSDs can map to the same GVR; dedup so the rule's Resources slice is deterministic and
-		// minimal (consistent with buildCoreReadRules / the subresource builders).
-		entry.sources = sortedUnique(entry.sources)
-		entry.snapshots = sortedUnique(entry.snapshots)
-
-		if len(entry.sources) > 0 {
-			// The domain snapshot controllers read each source object (referenced by the child
-			// snapshot's spec.sourceRef, e.g. DemoVirtualDisk/DemoVirtualMachine) to capture it.
-			// Read-only here; creation/ownership of the snapshot CRs is the snapshot-GVR rule below.
-			// The resource reconcilers (DemoVirtualDisk/DemoVirtualMachine materialization) patch
-			// source /status (phase/conditions/pvcRef/podRef), granted by the /status rule below.
-			// The CORE SA also needs source read for parent-graph planning — granted separately in
-			// buildCoreSourceReadRules.
-			sourceStatusResources := make([]string, len(entry.sources))
-			for i, r := range entry.sources {
-				sourceStatusResources[i] = r + "/status"
-			}
-			rules = append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{g},
-				Resources: entry.sources,
-				Verbs:     []string{"get", "list", "watch"},
-			})
-			rules = append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{g},
-				Resources: sourceStatusResources,
-				Verbs:     []string{"get", "update", "patch"},
-			})
-		}
-
-		if len(entry.snapshots) > 0 {
-			statusResources := make([]string, len(entry.snapshots))
-			finalizerResources := make([]string, len(entry.snapshots))
-			for i, r := range entry.snapshots {
-				statusResources[i] = r + "/status"
-				finalizerResources[i] = r + "/finalizers"
-			}
-
-			rules = append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{g},
-				Resources: entry.snapshots,
-				Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
-			})
-
-			rules = append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{g},
-				Resources: statusResources,
-				Verbs:     []string{"get", "update", "patch"},
-			})
-
-			rules = append(rules, rbacv1.PolicyRule{
-				APIGroups: []string{g},
-				Resources: finalizerResources,
-				Verbs:     []string{"update", "patch"},
-			})
-		}
-	}
-	return rules
-}
-
 // buildCoreReadRules builds rules for the CORE SA on the dynamic demo snapshot GVRs:
 //   - get/list/watch + create + patch on the snapshot resource. The core SnapshotReconciler is the
 //     parent-graph planner: it CREATES one parent-owned child snapshot per source object
@@ -217,46 +123,6 @@ func buildCoreSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1
 	return rules
 }
 
-// coreManifestsSubresourceRules grants the DOMAIN SA get on core's per-CR /manifests-download subresource
-// for each demo snapshot resource, so the domain apiserver can fetch each node's own (single-node) BASE
-// manifests from the core apiserver (over the kube-apiserver aggregation layer). C9 made restore per-CR:
-// the domain recurses children itself, fetching one node's base at a time, so it no longer reads core's
-// (removed) whole-subtree /manifests.
-func coreManifestsSubresourceRules(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
-	if len(snapshotGVRs) == 0 {
-		return nil
-	}
-	resources := make([]string, 0, len(snapshotGVRs))
-	for _, gvr := range snapshotGVRs {
-		resources = append(resources, gvr.Resource+"/manifests-download")
-	}
-	return []rbacv1.PolicyRule{{
-		APIGroups: []string{consts.CoreSubresourcesGroup},
-		Resources: sortedUnique(resources),
-		Verbs:     []string{"get"},
-	}}
-}
-
-// coreSubtreeManifestIdentitiesRule grants the DOMAIN SA get on core's SINGLE, fixed
-// snapshotcontents/subtree-manifest-identities aggregated subresource (core subresources group). Unlike
-// coreManifestsSubresourceRules this rule is NOT per-snapshot-GVR — the endpoint hangs off the core
-// SnapshotContent resource (all snapshot kinds bind to it), so one grant covers every domain. It backs
-// the reusable SDK ManifestExclude capability: an aggregator snapshot reconciler (e.g. a VM aggregating
-// disk children) calls it on each child's bound content to compute its own manifest MCR as
-// EnsureManifestCapture(base - exclude). Read-only and fail-closed (409 while any subtree checkpoint is
-// not Ready); it exposes captured identities only, granting neither ManifestCheckpoint nor generic
-// SnapshotContent reads. Gated on a registered domain (snapshotGVRs) to match coreManifestsSubresourceRules.
-func coreSubtreeManifestIdentitiesRule(snapshotGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
-	if len(snapshotGVRs) == 0 {
-		return nil
-	}
-	return []rbacv1.PolicyRule{{
-		APIGroups: []string{consts.CoreSubresourcesGroup},
-		Resources: []string{"snapshotcontents/subtree-manifest-identities"},
-		Verbs:     []string{"get"},
-	}}
-}
-
 // domainRestoreSubresourceRules grants the CORE SA get on the domain apiserver's
 // /manifests-with-data-restoration subresource for each demo snapshot resource, so core can delegate the
 // domain subtree restore. The subresource group is "subresources." + the snapshot's own API group.
@@ -336,14 +202,10 @@ func sortedUnique(in []string) []string {
 	return out
 }
 
-// applyDomainRBAC reconciles the three managed ClusterRoles + bindings of the split model:
-//   - DomainClusterRoleName               bound to the DOMAIN SA              (domainRules)
+// applyDomainRBAC reconciles the two managed ClusterRoles + bindings of the split model:
 //   - DomainCoreReadClusterRoleName       bound to the CORE SA               (coreReadRules)
 //   - DomainDataExportReadClusterRoleName bound to the DataExport (storage-foundation) SA (dataExportReadRules)
-func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, domainRules, coreReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
-	if err := applyManagedClusterRole(ctx, cl, consts.DomainClusterRoleName, domainRules, consts.DomainSAName, consts.ModuleNamespace); err != nil {
-		return err
-	}
+func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, coreReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
 	if err := applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName, consts.ModuleNamespace); err != nil {
 		return err
 	}

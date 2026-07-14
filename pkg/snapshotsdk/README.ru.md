@@ -6,7 +6,7 @@
 > snapshot-контроллером через `pkg/snapshotsdk`. Это «как пользоваться», а не нормативный контракт.
 > Нормативные источники: godoc в `pkg/snapshotsdk` (интерфейсы и инварианты) и
 > [`CLAUDE.md`](./CLAUDE.md) (контракт качества). Reference-реализация —
-> demo-контроллеры в `images/domain-controller/internal/controllers/demo`.
+> demo-контроллеры в репозитории `sds-unified-snapshots-poc` (`images/domain-controller/internal/controllers/demo`).
 >
 > Скоуп SDK v1 — **capture-only** (планирование снапшота: дочерние снапшоты + захват данных + захват
 > манифестов + барьер).

@@ -68,12 +68,6 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	resolver := restMapperResolver(cl.RESTMapper())
 	sourceGVRs, snapshotGVRs, pendingByName := resolveEligibleGVRs(eligible, resolver)
 
-	// DOMAIN SA: dynamic source/snapshot GVR rights + get on core's per-CR /manifests-download subresource
-	// + get on core's fixed snapshotcontents/subtree-manifest-identities subresource (SDK ManifestExclude).
-	domainRules := buildRules(sourceGVRs, snapshotGVRs)
-	domainRules = append(domainRules, coreManifestsSubresourceRules(snapshotGVRs)...)
-	domainRules = append(domainRules, coreSubtreeManifestIdentitiesRule(snapshotGVRs)...)
-
 	// CORE SA: read + create + patch + status-write on the dynamic demo snapshot GVRs (the core
 	// SnapshotReconciler is the parent-graph planner: it creates one child snapshot per source and patches
 	// its ownerRef), get + list on the demo source GVRs (list to enumerate sources during planning, get for
@@ -87,7 +81,7 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	// DataExport controller can GET the snapshot leaf (status.boundSnapshotContentName) when exporting.
 	dataExportReadRules := buildDataExportReadRules(snapshotGVRs)
 
-	applyErr := applyDomainRBAC(ctx, cl, domainRules, coreReadRules, dataExportReadRules)
+	applyErr := applyDomainRBAC(ctx, cl, coreReadRules, dataExportReadRules)
 
 	for i := range eligible {
 		csd := &eligible[i]

@@ -6,7 +6,7 @@
 > snapshot controller through `pkg/snapshotsdk`. This is *how to use it*, not the normative
 > contract. Normative sources are the godoc in `pkg/snapshotsdk` (interfaces and invariants)
 > and the code-quality contract in [`CLAUDE.md`](./CLAUDE.md). The reference implementation is
-> the demo controllers under `images/domain-controller/internal/controllers/demo`.
+> the demo controllers in the `sds-unified-snapshots-poc` repo (`images/domain-controller/internal/controllers/demo`).
 >
 > SDK v1 scope is **capture-only** (snapshot planning: child snapshots + data capture +
 > manifest capture + barrier). Restore is a separate sanctioned boundary

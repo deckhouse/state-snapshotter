@@ -2,7 +2,7 @@
 
 > Migrated from `.cursor/rules/*.mdc`. Repo-wide (always-apply) rules live here;
 > path-scoped rules live in nested `CLAUDE.md` files (`api/`, `images/state-snapshotter-controller/`,
-> `images/domain-controller/`, `pkg/snapshotsdk/`).
+> `pkg/snapshotsdk/`).
 
 ## Go formatting (MUST)
 
