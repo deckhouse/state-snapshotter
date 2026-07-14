@@ -24,11 +24,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
@@ -47,14 +47,25 @@ const (
 	domainTestSnapUID = "disk-snap-uid"
 	domainTestPVCName = "pvc-a"
 	domainTestPVCUID  = "pvc-a-uid"
-	domainTestContent = "demo-content"
-	domainTestConUID  = "demo-content-uid"
+	domainTestContent = "domain-content"
+	domainTestConUID  = "domain-content-uid"
 	domainTestVSCName = "vsc-1"
 )
 
-var demoDiskSnapshotGVK = demov1alpha1.SchemeGroupVersion.WithKind("DemoVirtualDiskSnapshot")
+// domainSnapshotGVK is a synthetic out-of-process domain snapshot kind. The binder handles domain leaves
+// generically (unstructured, by status shape), so the test uses a placeholder GVK rather than any concrete
+// domain's compiled types — the reference demo domain lives in the sds-unified-snapshots-poc repo.
+var domainSnapshotGVK = schema.GroupVersionKind{Group: "example.domain.test", Version: "v1alpha1", Kind: "WidgetSnapshot"}
 
 func domainTestVCRName() string { return vcpkg.SnapshotOwnedVCRName(types.UID(domainTestSnapUID)) }
+
+// domainSnapshotStatusStub is an empty typed carrier used to register domainSnapshotGVK as a
+// status-subresource kind on the fake client.
+func domainSnapshotStatusStub() *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(domainSnapshotGVK)
+	return u
+}
 
 func domainTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -64,9 +75,6 @@ func domainTestScheme(t *testing.T) *runtime.Scheme {
 	}
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add storage scheme: %v", err)
-	}
-	if err := demov1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add demo scheme: %v", err)
 	}
 	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add ss scheme: %v", err)
@@ -80,24 +88,19 @@ func domainTestSnapshotContent() *storagev1alpha1.SnapshotContent {
 	}
 }
 
-func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructured.Unstructured {
+// domainTestDomainSnapshotUnstructured builds an out-of-process domain snapshot leaf as the binder sees it:
+// an unstructured object whose status.captureState.domainSpecificController carries the VCR name.
+func domainTestDomainSnapshotUnstructured(t *testing.T, vcrName string) *unstructured.Unstructured {
 	t.Helper()
-	snap := &demov1alpha1.DemoVirtualDiskSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: domainTestNS, Name: domainTestSnap, UID: types.UID(domainTestSnapUID)},
-		Status: demov1alpha1.DemoVirtualDiskSnapshotStatus{
-			CaptureState: &storagev1alpha1.CaptureStateStatus{
-				DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
-					VolumeCaptureRequestName: vcrName,
-				},
-			},
-		},
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	obj.SetGroupVersionKind(domainSnapshotGVK)
+	obj.SetNamespace(domainTestNS)
+	obj.SetName(domainTestSnap)
+	obj.SetUID(types.UID(domainTestSnapUID))
+	if err := unstructured.SetNestedField(obj.Object, vcrName,
+		"status", "captureState", "domainSpecificController", "volumeCaptureRequestName"); err != nil {
+		t.Fatalf("set volumeCaptureRequestName: %v", err)
 	}
-	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(snap)
-	if err != nil {
-		t.Fatalf("convert demo snapshot to unstructured: %v", err)
-	}
-	obj := &unstructured.Unstructured{Object: raw}
-	obj.SetGroupVersionKind(demoDiskSnapshotGVK)
 	return obj
 }
 
@@ -107,7 +110,7 @@ func domainTestDemoSnapshotUnstructured(t *testing.T, vcrName string) *unstructu
 func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
 		Source: storagev1alpha1.SnapshotSubjectRef{
@@ -126,19 +129,19 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(content, demoObj).
+		WithStatusSubresource(domainSnapshotStatusStub(), &storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, domainObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, ""); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, ""); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 
 	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	fresh.SetGroupVersionKind(domainSnapshotGVK)
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
+		t.Fatalf("get domain snapshot: %v", err)
 	}
 	data, found, _ := unstructured.NestedMap(fresh.Object, "status", "data")
 	if !found {
@@ -173,7 +176,7 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
-	demoObj := domainTestDemoSnapshotUnstructured(t, domainTestVCRName())
+	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
 		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
@@ -182,17 +185,17 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&demov1alpha1.DemoVirtualDiskSnapshot{}, &storagev1alpha1.SnapshotContent{}).
-		WithObjects(content, demoObj).
+		WithStatusSubresource(domainSnapshotStatusStub(), &storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, domainObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-	if err := r.mirrorLeafDataFromContent(ctx, demoObj, domainTestContent, "sc-import"); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, "sc-import"); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 	fresh := &unstructured.Unstructured{}
-	fresh.SetGroupVersionKind(demoDiskSnapshotGVK)
+	fresh.SetGroupVersionKind(domainSnapshotGVK)
 	if err := cl.Get(ctx, client.ObjectKey{Namespace: domainTestNS, Name: domainTestSnap}, fresh); err != nil {
-		t.Fatalf("get demo snapshot: %v", err)
+		t.Fatalf("get domain snapshot: %v", err)
 	}
 	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != "sc-import" {
 		t.Fatalf("scOverride not applied: status.data.storageClassName = %q, want sc-import", sc)
