@@ -410,13 +410,55 @@ func deleteNamespace(ctx context.Context, name string) {
 
 // --- aggregated --raw helpers ----------------------------------------------
 
-// aggGet performs an aggregated-apiserver GET against an absolute API path, returning the raw body.
-func aggGet(ctx context.Context, path string, params map[string]string) ([]byte, error) {
-	req := suiteClientset.Discovery().RESTClient().Get().AbsPath(path)
-	for k, v := range params {
-		req = req.Param(k, v)
+// aggGetTransientRetryTO/Interval bound how long aggGet retries a transiently-unavailable
+// aggregated API. The state-snapshotter aggregated API (subresources.state-snapshotter.deckhouse.io)
+// is served by the SINGLE-replica controller Deployment, so any controller restart — VPA
+// InPlaceOrRecreate eviction, node reschedule, or a TTL-driven rollout — opens a brief window in
+// which the backing APIService has no ready endpoint and the aggregation layer answers 503
+// ServiceUnavailable. Real backup clients retry through that window; the suite must too, otherwise
+// a one-shot read that happens to land during a controller restart fails spuriously.
+const (
+	aggGetTransientRetryTO = 30 * time.Second
+	aggGetRetryInterval    = 1 * time.Second
+)
+
+// isTransientAggErr reports whether an aggregated-apiserver error is transient backend
+// unavailability worth retrying (the single-replica controller is restarting), as opposed to a
+// real 4xx / decode failure that a retry would never fix.
+func isTransientAggErr(err error) bool {
+	if err == nil {
+		return false
 	}
-	return req.DoRaw(ctx)
+	if apierrors.IsServiceUnavailable(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) || apierrors.IsInternalError(err) || apierrors.IsTooManyRequests(err) {
+		return true
+	}
+	// Connection-level errors while the sole endpoint is being torn down/replaced.
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "the server is currently unable to handle the request")
+}
+
+// aggGet performs an aggregated-apiserver GET against an absolute API path, returning the raw body.
+// It retries transient aggregation-layer unavailability (see isTransientAggErr) up to
+// aggGetTransientRetryTO, bounded by ctx, so a controller restart does not fail an otherwise-valid read.
+func aggGet(ctx context.Context, path string, params map[string]string) ([]byte, error) {
+	deadline := time.Now().Add(aggGetTransientRetryTO)
+	for attempt := 1; ; attempt++ {
+		req := suiteClientset.Discovery().RESTClient().Get().AbsPath(path)
+		for k, v := range params {
+			req = req.Param(k, v)
+		}
+		body, err := req.DoRaw(ctx)
+		if err == nil || !isTransientAggErr(err) || time.Now().After(deadline) {
+			return body, err
+		}
+		GinkgoWriter.Printf("aggGet %s: transient aggregated-API error on attempt %d (%v) — retrying in %s\n", path, attempt, err, aggGetRetryInterval)
+		if !sleepCtx(ctx, aggGetRetryInterval) {
+			return body, err
+		}
+	}
 }
 
 // aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path.

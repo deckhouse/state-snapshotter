@@ -49,13 +49,13 @@ No abstractions ahead of need. Forbidden: `ResourceManager`, `GenericHandler`, `
 
 Capture cardinality is a contract, not a convention; code MUST NOT let a degenerate capture plan successfully.
 - **Data capture:** at most one PVC per node — `VolumeCaptureSpec.DataRef` is a single optional pointer, never a slice. Multiple volumes are child snapshot nodes, never several data refs on one node.
-- **Manifest capture — forbidden state:** `ManifestCaptureRequest.spec.targets == []`. The final manifest set (domain targets + owned-PVC augmentation) MUST contain ≥1 target. If any path lets planning succeed (or a barrier rise) with an empty MCR, that's a **bug** — the SDK fails closed with `ErrEmptyManifest` before any cluster mutation. The SDK does NOT inject the source object; supplying ≥1 manifest target is the domain's responsibility.
+- **Manifest capture:** the SDK does NOT inject the source object; supplying ≥1 manifest target is the domain's responsibility for an ordinary node. An empty final target set is legal only for the special aggregator case (an empty MCR converges to an empty, Ready ManifestCheckpoint — see `api/v1alpha1` ManifestCaptureRequestSpec.Targets); a domain leaf/single-object snapshot MUST always pass its own source identity.
 
 ## 8. Litmus
 
 A new engineer opens the demo controller, reads no ADR, and within 30 minutes can explain **all four**:
 - **happy path** — how a snapshot node is normally planned (manifest capture, data capture, child snapshot planning, then the planning barrier);
-- **failure paths** — not-ready (`MarkNotReady`), planning-failed, drift (topology/manifest);
+- **failure paths** — recoverable waiting (`ReportProgress` + requeue), terminal domain failure (`Fail`/`Reject`), core-owned leg failure (terminal Ready reason → stop);
 - **ownership boundaries** — domain vs SDK vs core (who writes what);
 - **lifecycle** — create/adopt, barrier commit, suppression after the core handoff.
 

@@ -19,6 +19,6 @@ No reflection / `unstructured.Unstructured` / raw GVK assembly / `map[string]any
 ## Capture invariants (MUST)
 
 - **Data capture:** `VolumeCaptureSpec.DataRef` is a single optional pointer (≤1 PVC per node), never a slice; extra volumes are child snapshot nodes.
-- **Manifest capture:** the SDK fails closed with `ErrEmptyManifest` before any cluster mutation if the final manifest set is empty. The SDK does NOT inject the source object — supplying ≥1 manifest target is the domain's responsibility.
+- **Manifest capture:** the SDK does NOT inject the source object — supplying ≥1 manifest target is the domain's responsibility for an ordinary node. An empty final target set is legal only for the special aggregator case (an empty MCR converges to an empty, Ready ManifestCheckpoint — see `api/v1alpha1` ManifestCaptureRequestSpec.Targets).
 
 See the full 8-point contract (naming bans, file layout, no accidental abstractions, the 30-minute litmus) in `images/domain-controller/CLAUDE.md`.
