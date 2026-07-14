@@ -8,10 +8,11 @@ import round-trip, TTL/GC cascade, the full volume-data flow (phase 3), backup-s
 HTTP download via aggregated manifests + SVDM `DataExport` (phase 4), and backup-system
 restore import via `DataImport` into another namespace (phase 5) — all without d8-cli.
 
-The suite installs the `state-snapshotter` module with `enableDemoDomain: true`
-on a nested Deckhouse cluster brought up by
-[storage-e2e](../../../../e2e/repos/storage-e2e), mirroring the structure of the
-`sds-elastic` e2e suite.
+The suite installs the `state-snapshotter` module together with the
+`sds-unified-snapshots-poc` module (the reference demo domain: demo controller +
+demo CRDs + demo CSDs the suite captures/restores against) on a nested Deckhouse
+cluster brought up by [storage-e2e](../../../../e2e/repos/storage-e2e), mirroring
+the structure of the `sds-elastic` e2e suite.
 
 ## Phases
 
