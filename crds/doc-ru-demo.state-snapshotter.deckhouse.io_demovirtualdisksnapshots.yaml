@@ -1,8 +1,0 @@
-spec:
-  versions:
-    - name: v1alpha1
-      schema:
-        openAPIV3Schema:
-          description: |
-            DemoVirtualDiskSnapshot — минимальный узел demo-снимка (PR5a). Подключается к корневому Snapshot
-            через поля children*Refs.

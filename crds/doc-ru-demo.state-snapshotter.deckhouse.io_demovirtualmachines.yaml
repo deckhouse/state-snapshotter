@@ -1,8 +1,0 @@
-spec:
-  versions:
-    - name: v1alpha1
-      schema:
-        openAPIV3Schema:
-          description: |
-            DemoVirtualMachine — вычислительный ресурс demo-домена. Доменный контроллер материализует Pod,
-            который монтирует backing-PVC связанного DemoVirtualDisk.

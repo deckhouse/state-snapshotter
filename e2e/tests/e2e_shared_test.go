@@ -37,7 +37,6 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/storage-e2e/pkg/cluster"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
@@ -81,8 +80,13 @@ const (
 	defaultBackupClientImage = "curlimages/curl:8.11.1"
 
 	moduleName = "state-snapshotter"
-	// The demo domain ships two flat CSDs (one snapshot kind per object): the structural VM snapshot
-	// and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
+	// pocModuleName is the reference demo domain module (sds-unified-snapshots-poc). It is enabled
+	// alongside state-snapshotter in the e2e cluster and provides the demo domain controller + demo
+	// CRDs + demo CSDs that this suite captures/restores against (the demo domain no longer ships in
+	// state-snapshotter itself).
+	pocModuleName = "sds-unified-snapshots-poc"
+	// The demo domain (from the PoC module) ships two flat CSDs (one snapshot kind per object): the
+	// structural VM snapshot and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
@@ -130,7 +134,10 @@ const (
 )
 
 // Demo domain API group (the CRs and their snapshot kinds).
-var demoGroupVersion = demov1alpha1.SchemeGroupVersion.String()
+// demoGroupVersion is the demo domain apiVersion. The demo types live in the PoC module; the suite
+// accesses demo objects purely via unstructured + literal GVRs, so this is a plain constant (the group
+// is identical whether the types are compiled from state-snapshotter or the PoC).
+const demoGroupVersion = "demo.state-snapshotter.deckhouse.io/v1alpha1"
 
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
@@ -363,6 +370,11 @@ func cleanupNestedTestCluster() {
 func waitModuleAndCSDReady(ctx context.Context) error {
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
+	}
+	// The demo domain controller + demo CSDs are delivered by the PoC module now, so it must also be
+	// Ready before the CSDs can reach AccessGranted.
+	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, pocModuleName, suiteCfg.moduleReadyTO); err != nil {
+		return fmt.Errorf("module %s not Ready: %w", pocModuleName, err)
 	}
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
 		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
