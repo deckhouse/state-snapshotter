@@ -94,6 +94,11 @@ successfully.
   aggregator always includes its own Namespace object — so the target set is never empty. `EnsureManifestCapture`
   fails closed with `ErrEmptyManifest` before any cluster mutation, and the MCR CRD rejects an empty
   `spec.targets` via CEL.
+- **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT
+  declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that
+  wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). The
+  set is frozen once the MCR exists: a changed in-flight set is fail-closed `ErrManifestTargetsDrift`
+  (recommended reaction `Fail(GraphPlanningFailed)`); an identical/reordered re-declaration is a no-op.
 
 ## 8. Litmus
 
