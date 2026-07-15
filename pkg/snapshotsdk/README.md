@@ -173,8 +173,10 @@ barrier:
 1. **Child snapshots** (`EnsureChildren`) — e.g. a VM snapshot owns the snapshots of its disks.
 2. **Data capture** (`EnsureVolumeCapture`) — capture the contents of a **single** PVC (see the
    `DataRef` section).
-3. **Manifest capture** (`EnsureManifestCapture`) — capture the source manifest (+ the owned PVC
-   from data capture).
+3. **Manifest capture** (`EnsureManifestCapture`) — capture the manifests the domain declares for
+   this node. The manifest and data legs are **independent declarations**: if the domain also
+   captures a PVC's data and wants that PVC's YAML, it lists the PVC in the manifest targets
+   explicitly. The SDK never derives manifest targets from the data leg.
 4. **Barrier** (`MarkPlanningReady`) — "everything is planned"; the core controller waits for
    exactly this before it takes over the `SnapshotContent`.
 
@@ -294,10 +296,12 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 ```
 
-Order: the planning calls (`EnsureChildren` / `EnsureVolumeCapture` / `EnsureManifestCapture`) may
-run in any order relative to each other, but **`MarkPlanningReady` is always last**. On an error
-from any `Ensure*`, just `return err` and the reconcile retries (drift errors are additionally
-mapped to `MarkPlanningFailed`, see the sections below).
+Order: the planning calls (`EnsureChildren` / `EnsureVolumeCapture` / `EnsureManifestCapture`) are
+**independent** and may run in any order relative to each other. Each verb depends only on its own
+spec and never reads another leg's result, so the requests they produce are identical regardless of
+call order — in particular `EnsureManifestCapture` builds the MCR solely from its declared `Targets`
+and does not consult the data-leg VCR. The planning barrier is always last. On an error from any
+`Ensure*`, just `return err` and the reconcile retries.
 
 ---
 
@@ -322,8 +326,9 @@ exclude mechanism.
 
 The SDK does not decide for the domain which domain manifests belong to the node. It is only
 responsible for the transport mechanics: create/verify one MCR, set the ownerRef, publish
-`status.manifestCaptureRequestName`, preserve restart-safe behavior, and when needed add the
-technical owned-PVC target from data capture.
+`status.manifestCaptureRequestName`, and preserve restart-safe behavior. It captures **exactly** the
+targets the domain declares — it never derives or injects targets from the data leg. A PVC whose
+YAML must be captured is listed in `Targets` by the domain (see the disk controller).
 
 ### Manifest capture — fail-closed on drift (symmetric with children/data)
 
@@ -343,20 +348,15 @@ if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpe
 }
 ```
 
-The technical owned-PVC target (from data capture) is added to the desired set **before** the
-comparison, so it does not cause a false-positive drift.
+The compared set is exactly the domain's declared `Targets` — the manifest leg is not augmented from
+the data leg, so a data-backed PVC only participates in the comparison if the domain declared it in
+`Targets`.
 
-> ⚠️ **Manifest capture cannot be empty.** The final target set (your targets + the owned-PVC
-> augmentation from data capture) must contain **at least one** target. Nuances:
-> - the domain **may** pass an empty initial `Targets` set;
-> - the owned-PVC augmentation **may** make the final set valid (≥1) even with an empty input;
-> - the SDK checks the **final** set; if it is empty, `EnsureManifestCapture` returns
->   `snapshotsdk.ErrEmptyManifest` **before** any cluster access (no MCR is created, status is not
->   touched).
->
-> The SDK does **not** substitute the snapshotted resource for you — passing at least one manifest
-> target (at minimum the resource itself) is the domain's responsibility. An empty
-> `ErrEmptyManifest` is a signal of a planning bug in the controller, not a transient state.
+> ⚠️ **Manifest capture cannot be empty.** The declared target set must contain **at least one**
+> target. The SDK does **not** substitute the snapshotted resource for you and does **not** inject a
+> PVC from the data leg — passing at least one manifest target (at minimum the resource itself, plus
+> any PVC whose YAML must be captured) is the domain's responsibility. An empty set is a signal of a
+> planning bug in the controller, not a transient state.
 
 ---
 
@@ -450,8 +450,9 @@ type Target struct {
 
 The domain finds its own PVC and makes its own readiness decisions (no PVC → `MarkNotReady` with
 `ArtifactMissing`, and the domain arranges the re-check itself via `ctrl.Result`). From the
-`DataRef` the SDK creates a storage-foundation `VolumeCaptureRequest` (VCR), publishes its name in
-`status.volumeCaptureRequestName`, and later mixes the owned PVC into the manifest capture.
+`DataRef` the SDK creates a storage-foundation `VolumeCaptureRequest` (VCR) and publishes its name
+in `status.volumeCaptureRequestName`. This is the data leg only — it does **not** feed the manifest
+leg; if the PVC's YAML must also be captured, the domain lists it in the manifest `Targets`.
 
 ### Invariant: a snapshot's data is EXACTLY ONE (optional) data ref
 

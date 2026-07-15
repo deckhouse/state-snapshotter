@@ -35,8 +35,9 @@ type VolumeCaptureProvider interface {
 	// EnsureVCR reconciles the snapshot's capture request toward the desired owner reference and single
 	// data-leg PVC target (a snapshot node binds at most one data artifact).
 	EnsureVCR(ctx context.Context, namespace, name string, ownerRef metav1.OwnerReference, dataRef Target) error
-	// OwnedPVCTarget returns the single PVC target recorded on the snapshot's capture request (for the
-	// manifest leg), or nil when the request is absent or has no target.
+	// OwnedPVCTarget returns the single PVC target recorded on the snapshot's capture request, or nil when
+	// the request is absent or has no target. It is the volume leg's OWN idempotency probe (EnsureVolumeCapture
+	// uses it to detect an already-created request); it is never consulted to build the manifest leg.
 	OwnedPVCTarget(ctx context.Context, namespace, vcrName string) (*Target, error)
 }
 

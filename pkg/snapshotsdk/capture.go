@@ -63,18 +63,22 @@ type Planning interface {
 	// hands both halves here. Pass nil when nothing is excluded; the wire value is normalized to [].
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error
 
-	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
-	// name. An empty target set is a manifest-only snapshot (no request, no published name). The operation
-	// is suppressed once the core controller has stamped the data leg captured.
+	// EnsureVolumeCapture ensures the data-leg capture request for the snapshot's single PVC (VolumeCaptureSpec.DataRef)
+	// and publishes its name. A nil DataRef is a manifest-only snapshot (no request, no published name). The
+	// operation is suppressed once the core controller has stamped the data leg captured. It depends ONLY on
+	// VolumeCaptureSpec and never reads the manifest leg.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
-	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the base target SET plus any
-	// owned-PVC targets discovered from the data leg) and publishes its name. The operation is suppressed
-	// once the core controller has stamped the manifest leg captured.
+	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest from the domain's declared
+	// target SET (ManifestCaptureSpec.Targets) and publishes its name. It depends ONLY on ManifestCaptureSpec:
+	// the SDK never reads the data-leg VCR to derive or inject targets, so EnsureManifestCapture and
+	// EnsureVolumeCapture are two independent declarations whose call order does not affect the result. A
+	// domain that wants a PVC's YAML captured lists that PVC in Targets explicitly. The operation is
+	// suppressed once the core controller has stamped the manifest leg captured.
 	//
-	// The base target set MUST be non-empty: every snapshot captures at least its own source object's
-	// manifest (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest
-	// before any cluster mutation; the MCR CRD enforces the same invariant via CEL.
+	// The target set MUST be non-empty: every snapshot captures at least its own source object's manifest
+	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
+	// cluster mutation; the MCR CRD enforces the same invariant via CEL.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -367,8 +371,8 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
 	// A manifest capture must always carry at least the snapshotted object's own manifest; the SDK never
-	// injects the source, so an empty target set is a domain bug. Fail closed before any cluster mutation
-	// (owned-PVC augmentation only ADDS to this set, so checking the domain-provided base is sufficient).
+	// injects the source (the manifest leg is built solely from in.Targets — see EnsureManifestCapture doc),
+	// so an empty target set is a domain bug. Fail closed before any cluster mutation.
 	if len(in.Targets) == 0 {
 		return ErrEmptyManifest
 	}
@@ -400,10 +404,6 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		if t.CoreCaptureState().manifestCaptured() {
 			return nil
 		}
-		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
-		if err != nil {
-			return err
-		}
 		owner, err := s.ownerRef(t)
 		if err != nil {
 			return err
@@ -415,7 +415,10 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-				Targets: manifest.Targets(in.Targets, ownedPVC, namespace),
+				// The manifest leg is built solely from the domain's declared targets — the SDK never reads
+				// the data-leg VCR to derive or inject targets. EnsureManifestCapture and EnsureVolumeCapture
+				// are therefore order-independent (see ManifestCaptureSpec / VolumeCaptureSpec).
+				Targets: manifest.Targets(in.Targets),
 			},
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {

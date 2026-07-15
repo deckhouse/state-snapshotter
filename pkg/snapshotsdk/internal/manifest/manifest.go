@@ -14,20 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package manifest builds the ManifestCaptureRequest target set: the base manifest target plus the
-// owned-PVC targets derived from the snapshot's own data-leg VolumeCaptureRequest.
+// Package manifest builds the ManifestCaptureRequest target set from the domain's declared manifest
+// targets. The manifest leg is independent of the data leg: the domain declares EVERY object it wants
+// captured as YAML (including any PVC whose data it also captures), and the SDK never derives or injects
+// targets from the data-leg VolumeCaptureRequest.
 package manifest
 
 import (
 	"fmt"
 	"sort"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/deckhouse/state-snapshotter/api/names"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
 // RequestName returns the deterministic ManifestCaptureRequest name for a snapshot, keyed by its UID
@@ -37,40 +37,14 @@ func RequestName(snapshotUID types.UID) string {
 	return names.ManifestCaptureRequestName(snapshotUID)
 }
 
-// Targets merges the base manifest target(s) with the snapshot's single owned data-leg PVC (derived from
-// the data-leg VCR), deduplicated by (apiVersion|kind|namespace|name) and sorted deterministically. A nil
-// ownedPVC (manifest-only snapshot) returns the base unchanged.
-func Targets(base []ssv1alpha1.ManifestTarget, ownedPVC *storagefoundation.Target, namespace string) []ssv1alpha1.ManifestTarget {
-	owned := ownedPVCManifestTarget(ownedPVC)
-	return appendOwnedPVCManifestTargets(base, owned, namespace)
-}
-
-func ownedPVCManifestTarget(t *storagefoundation.Target) []ssv1alpha1.ManifestTarget {
-	if t == nil || t.Kind != "PersistentVolumeClaim" {
-		return nil
-	}
-	apiVersion := t.APIVersion
-	if apiVersion == "" {
-		apiVersion = corev1.SchemeGroupVersion.String()
-	}
-	return []ssv1alpha1.ManifestTarget{{
-		APIVersion: apiVersion,
-		Kind:       t.Kind,
-		Name:       t.Name,
-	}}
-}
-
-func appendOwnedPVCManifestTargets(base, owned []ssv1alpha1.ManifestTarget, namespace string) []ssv1alpha1.ManifestTarget {
-	if len(owned) == 0 {
-		return append([]ssv1alpha1.ManifestTarget(nil), base...)
-	}
-	seen := make(map[string]struct{}, len(base)+len(owned))
-	for _, t := range base {
-		seen[dedupKey(namespace, t)] = struct{}{}
-	}
-	out := append([]ssv1alpha1.ManifestTarget(nil), base...)
-	for _, t := range owned {
-		k := dedupKey(namespace, t)
+// Targets normalizes the domain's declared manifest targets: deduplicated by (apiVersion|kind|name) and
+// sorted deterministically so the resulting MCR spec is stable across reconciles. It is a pure function of
+// its input — it depends on nothing but the declared set (no data-leg / VolumeCaptureRequest read).
+func Targets(declared []ssv1alpha1.ManifestTarget) []ssv1alpha1.ManifestTarget {
+	seen := make(map[string]struct{}, len(declared))
+	out := make([]ssv1alpha1.ManifestTarget, 0, len(declared))
+	for _, t := range declared {
+		k := dedupKey(t)
 		if _, dup := seen[k]; dup {
 			continue
 		}
@@ -94,10 +68,6 @@ func sortTargets(targets []ssv1alpha1.ManifestTarget) {
 	})
 }
 
-func dedupKey(namespace string, t ssv1alpha1.ManifestTarget) string {
-	ns := namespace
-	if ns == "" {
-		ns = "_cluster"
-	}
-	return fmt.Sprintf("%s|%s|%s|%s", t.APIVersion, t.Kind, ns, t.Name)
+func dedupKey(t ssv1alpha1.ManifestTarget) string {
+	return fmt.Sprintf("%s|%s|%s", t.APIVersion, t.Kind, t.Name)
 }
