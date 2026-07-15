@@ -96,9 +96,12 @@ successfully.
   `spec.targets` via CEL.
 - **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT
   declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that
-  wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). The
-  set is frozen once the MCR exists: a changed in-flight set is fail-closed `ErrManifestTargetsDrift`
-  (recommended reaction `Fail(GraphPlanningFailed)`); an identical/reordered re-declaration is a no-op.
+  wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once
+  the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches
+  `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a
+  decision (a domain reacts with `Fail(GraphPlanningFailed)`; the namespace-root ignores it, first plan
+  wins). `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips
+  re-planning the leg via `ManifestCaptureNeeded`.
 
 ## 8. Litmus
 

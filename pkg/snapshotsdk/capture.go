@@ -80,10 +80,13 @@ type Planning interface {
 	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
 	// cluster mutation; the MCR CRD enforces the same invariant via CEL.
 	//
-	// The target set is FROZEN once the request exists: a snapshot is point-in-time, so while the manifest
-	// leg is in flight a declared set that differs (as a set keyed by apiVersion/kind/name) from the
-	// already-created MCR returns ErrManifestTargetsDrift, fail-closed and BEFORE any patch/status write
-	// (recommended domain reaction sdk.Fail(GraphPlanningFailed)). An identical re-declaration is a no-op.
+	// The request is created ONCE with the frozen point-in-time target set. When the MCR already exists the
+	// SDK ADOPTS it — it (idempotently) publishes the name into status and never patches spec.targets — and
+	// then SIGNALS ErrManifestTargetsDrift if the caller's freshly-declared set differs from the frozen one
+	// (compared as a set). Drift is a signal, not a decision: the name is already published, so the leg is
+	// established; the caller decides (a domain typically Fails; the namespace root ignores it and freezes to
+	// the first plan). Immutability of spec.targets is separately enforced at the apiserver via a CEL rule.
+	// Callers that want to skip building targets once the leg is planned gate on ManifestCaptureNeeded.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -235,20 +238,20 @@ var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phas
 // errors.Is(err, ErrEmptyManifest).
 var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at least one target (the snapshotted object's own manifest)")
 
-// ErrManifestTargetsDrift is returned by EnsureManifestCapture when the ManifestCaptureRequest for this
-// snapshot already exists (the manifest leg is in flight, the captured latch not yet set) but the domain
-// now declares a DIFFERENT target set than the one the request was created with. A snapshot is
-// point-in-time: the MCR target set is the frozen capture plan and is never patched, so a changed set is a
-// domain planning drift, not a valid update. The guard is fail-closed and side-effect-free — it rejects
-// BEFORE any patch or status write. Targets are compared as SETS keyed by (apiVersion, kind, name), so
-// reordering or duplicates never count as drift. Recommended domain reaction: sdk.Fail(GraphPlanningFailed)
-// (no new api reason). Callers match it with errors.Is(err, ErrManifestTargetsDrift).
-var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets drifted from the in-flight ManifestCaptureRequest (the point-in-time capture plan is frozen)")
+// ErrManifestTargetsDrift is a SIGNAL (not a decision) returned by EnsureManifestCapture when the
+// ManifestCaptureRequest already exists (its target set is the frozen point-in-time capture plan) and the
+// caller now declares a DIFFERENT set. The MCR name is ALWAYS published first (adopt), so the leg is
+// established regardless; this only reports that the freshly-declared set diverges from the frozen plan.
+// The caller decides: a domain typically reacts with sdk.Fail(GraphPlanningFailed); the namespace root
+// ignores it (it recomputes a shifting set over a live namespace and the first plan wins). Immutability of
+// the MCR targets is separately enforced at the apiserver by the CRD's CEL rule. Targets are compared as a
+// SET keyed by (apiVersion, kind, name), so reordering/duplicates never count as drift. Callers match it
+// with errors.Is(err, ErrManifestTargetsDrift).
+var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets differ from the frozen ManifestCaptureRequest (point-in-time plan already set)")
 
-// manifestTargetsDrifted reports whether the desired and existing manifest target sets differ, compared as
-// SETS keyed by (apiVersion, kind, name). Order and duplicates are irrelevant (the SDK normalizes targets
-// before create), so only a genuine add/remove of a distinct target counts as drift.
-func manifestTargetsDrifted(existing, desired []ssv1alpha1.ManifestTarget) bool {
+// manifestTargetsDrifted reports whether the desired and stored manifest target sets differ, compared as
+// SETS keyed by (apiVersion, kind, name). Order and duplicates are irrelevant.
+func manifestTargetsDrifted(stored, desired []ssv1alpha1.ManifestTarget) bool {
 	key := func(t ssv1alpha1.ManifestTarget) string { return t.APIVersion + "|" + t.Kind + "|" + t.Name }
 	asSet := func(ts []ssv1alpha1.ManifestTarget) map[string]struct{} {
 		m := make(map[string]struct{}, len(ts))
@@ -257,16 +260,25 @@ func manifestTargetsDrifted(existing, desired []ssv1alpha1.ManifestTarget) bool 
 		}
 		return m
 	}
-	e, d := asSet(existing), asSet(desired)
-	if len(e) != len(d) {
+	a, b := asSet(stored), asSet(desired)
+	if len(a) != len(b) {
 		return true
 	}
-	for k := range d {
-		if _, ok := e[k]; !ok {
+	for k := range b {
+		if _, ok := a[k]; !ok {
 			return true
 		}
 	}
 	return false
+}
+
+// ManifestCaptureNeeded reports whether the manifest leg still needs planning: true iff the
+// ManifestCaptureRequest name has not been published yet AND the core has not latched the manifest leg
+// captured. A caller uses it to skip the (potentially expensive) target computation once the leg is
+// established — e.g. the namespace-root gates its live-namespace re-list on it. Pure read of the adapter
+// status; no cluster access.
+func ManifestCaptureNeeded(t SnapshotAdapter) bool {
+	return t.GetDomainCaptureState().ManifestCaptureRequestName == "" && !t.CoreCaptureState().manifestCaptured()
 }
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
@@ -433,6 +445,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
+	mcrExisted := getErr == nil
 	if apierrors.IsNotFound(getErr) {
 		if err := s.refresh(ctx, obj); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -463,17 +476,11 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
-	} else {
-		// The MCR already exists and the manifest leg is still in flight (the captured latch was false at
-		// entry). Its target set is the frozen point-in-time capture plan and is never patched. If the domain
-		// now declares a different set, that is a planning drift: fail closed (no patch, no status write) so
-		// the domain surfaces it via sdk.Fail(GraphPlanningFailed) instead of silently diverging from the
-		// request that was already created.
-		if manifestTargetsDrifted(existing.Spec.Targets, in.Targets) {
-			return ErrManifestTargetsDrift
-		}
 	}
-	return patch.Status(ctx, s.client, obj, func() bool {
+	// ADOPT: publish the MCR name into the snapshot status (idempotent — no write if already set). Done for
+	// BOTH the just-created and the pre-existing MCR, so the leg always establishes even when the caller's
+	// freshly-declared set differs from the frozen plan (no wedge on a create-then-publish-failed retry).
+	if err := patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
 		if st.ManifestCaptureRequestName == mcrName {
 			return false
@@ -481,7 +488,18 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		st.ManifestCaptureRequestName = mcrName
 		t.SetDomainCaptureState(st)
 		return true
-	})
+	}); err != nil {
+		return err
+	}
+	// DRIFT signal (AFTER adopt): the MCR pre-existed (its target set is the frozen point-in-time plan) and
+	// the caller now declares a DIFFERENT set — set-compared from the cached object, no apiserver call. The
+	// name is already published, so the leg is established; the caller decides (a domain typically Fails; the
+	// namespace root ignores it — it recomputes a shifting set over a live namespace and the first plan
+	// wins). MCR-target immutability is separately enforced at the apiserver by the CRD's CEL rule.
+	if mcrExisted && manifestTargetsDrifted(existing.Spec.Targets, in.Targets) {
+		return ErrManifestTargetsDrift
+	}
+	return nil
 }
 
 func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error {

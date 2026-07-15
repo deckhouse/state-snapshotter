@@ -340,6 +340,14 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	if manifestLegCaptured(nsSnap) {
 		return ctrl.Result{}, nil
 	}
+	// Point-in-time freeze gate: once the manifest leg is planned (its MCR name is published) the plan is
+	// frozen — do NOT re-list the live namespace or recompute spec.targets. This (not just the captured latch
+	// above) is what keeps the root off the API server between MCR creation and the captured latch, and it
+	// means the root never re-declares a shifted set to EnsureManifestCapture (so it never trips the drift
+	// signal). The idempotent name-publish inside EnsureManifestCapture already made this durable.
+	if !snapshotsdk.ManifestCaptureNeeded(adapter) {
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
 	if r.Dynamic == nil || r.Discovery == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic/Discovery client is nil")
 	}
@@ -409,6 +417,14 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 		return ctrl.Result{}, err
 	}
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: namespaceSDKManifestTargets(targets)}); err != nil {
+		// A namespace snapshot is point-in-time: if the MCR was created on a prior pass whose name-publish
+		// failed and the live namespace shifted before this retry, EnsureManifestCapture adopts the frozen MCR
+		// (republishes its name) and signals ErrManifestTargetsDrift. For the root that is expected — the first
+		// plan wins — so ignore it and requeue; the name is now published, so the gate above short-circuits
+		// the next pass. (Non-drift errors still propagate.)
+		if stderrors.Is(err, snapshotsdk.ErrManifestTargetsDrift) {
+			return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	// MCR published: the binder chases manifestCaptureRequestName -> MCP -> content ManifestsReady, and main's

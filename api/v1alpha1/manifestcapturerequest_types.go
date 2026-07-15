@@ -42,6 +42,7 @@ type ManifestCaptureRequestList struct {
 
 // +k8s:deepcopy-gen=true
 // +kubebuilder:validation:XValidation:rule="has(self.targets) && size(self.targets) > 0",message="spec.targets must list at least one object to capture (at minimum the snapshotted object's own manifest)"
+// +kubebuilder:validation:XValidation:rule="self.targets == oldSelf.targets",message="spec.targets is immutable: the capture plan is frozen once the ManifestCaptureRequest is created"
 type ManifestCaptureRequestSpec struct {
 	// Targets specifies the objects to capture. It MUST contain at least one target — at minimum the
 	// snapshotted object's own manifest. A single-object domain snapshot passes its own source identity,
@@ -49,6 +50,10 @@ type ManifestCaptureRequestSpec struct {
 	// is never empty. An empty (or omitted) target set is a contract violation: the SDK fails closed with
 	// ErrEmptyManifest before creating the request, and the CRD rejects it via the spec-level CEL rule
 	// above ("has(self.targets) && size(self.targets) > 0").
+	// The set is the FROZEN point-in-time capture plan: it is IMMUTABLE once the request is created (the
+	// spec-level CEL transition rule "self.targets == oldSelf.targets" rejects any change). The SDK creates
+	// the request once and never patches it; a caller that recomputes a shifting set (e.g. the namespace
+	// root over a live namespace) is silently frozen to the first plan.
 	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest, with a
 	// single exception: the capture's own Namespace object (core v1 Namespace whose name equals the
 	// ManifestCaptureRequest namespace) is the only allowed cluster-scoped target.

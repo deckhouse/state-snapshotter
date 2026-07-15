@@ -85,4 +85,25 @@ var _ = Describe("Integration: ManifestCaptureRequest non-empty-targets CEL", fu
 		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mcr) })
 	})
+
+	It("rejects changing spec.targets after creation (immutable)", func() {
+		mcr := &ssv1alpha1.ManifestCaptureRequest{
+			ObjectMeta: metav1.ObjectMeta{Namespace: nsName, Name: "mcr-immutable"},
+			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
+				Targets: []ssv1alpha1.ManifestTarget{
+					{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-a"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, mcr)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mcr) })
+
+		// The capture plan is frozen: any change to spec.targets is rejected by the CRD's CEL transition rule.
+		mcr.Spec.Targets = []ssv1alpha1.ManifestTarget{
+			{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-b"},
+		}
+		err := k8sClient.Update(ctx, mcr)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.targets is immutable"))
+	})
 })
