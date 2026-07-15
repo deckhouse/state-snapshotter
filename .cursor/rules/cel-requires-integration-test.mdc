@@ -1,0 +1,26 @@
+---
+description: CEL / apiserver-enforced CRD validations require an integration test. Apply when adding or changing an XValidation (x-kubernetes-validations) rule or a structural CRD constraint (required, minItems, enum) — a unit test with a fake client cannot verify them.
+globs: api/**/*.go,crds/**/*.yaml,images/state-snapshotter-controller/test/integration/**/*.go
+alwaysApply: false
+---
+
+# CEL / apiserver validation requires an integration test
+
+CEL rules (`+kubebuilder:validation:XValidation` → `x-kubernetes-validations`) and structural CRD
+constraints (`required`, `minItems`, `enum`) are enforced by the **kube-apiserver**, not by client-go.
+A unit test using `sigs.k8s.io/controller-runtime/pkg/client/fake` does NO schema/CEL admission, so it
+bypasses these rules entirely — a passing unit test proves nothing about a CEL rule.
+
+**MUST — whenever you add or change such a rule:**
+- Add an integration test (`//go:build integration`, under `images/state-snapshotter-controller/test/integration/`,
+  envtest = real kube-apiserver with the CRD installed) that:
+  - creates an object that VIOLATES the rule and asserts `Create` fails with the rule's message
+    (`Expect(err).To(HaveOccurred())` + `ContainSubstring("<message>")`); and
+  - creates a VALID object and asserts `Create` succeeds.
+- Regenerate first (`bash hack/generate_code.sh`) — envtest loads CRDs from `crds/`, so the CEL rule under
+  test must already be in the generated CRD.
+- Keep any SDK/controller-side guard (e.g. a fail-closed sentinel error) covered by a unit test too:
+  the SDK guard and the CEL rule are complementary defense-in-depth, not substitutes.
+
+Reference: the `ManifestCaptureRequest` non-empty-`targets` CEL rule — SDK guard `ErrEmptyManifest`
+(unit) + apiserver rejection (integration, `test/integration/manifestcapturerequest_cel_test.go`).

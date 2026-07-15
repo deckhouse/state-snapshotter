@@ -1,9 +1,15 @@
 ---
-description: Kubebuilder marker policy for this repo. Apply when editing kubebuilder markers under api/v*/. XValidation is not supported.
-globs: api/v*/**/*.go
+description: Kubebuilder marker & CEL policy for this repo. Apply when editing kubebuilder validation markers under api/**.
+globs: api/**/*.go
 alwaysApply: false
 ---
 
-- XValidation (MUST NOT):
-  - Do NOT use `+kubebuilder:validation:XValidation` in this repo.
-  - Use standard validation markers instead (e.g., `Enum`, `MinLength`, `Minimum`).
+- Prefer standard markers (`Enum`, `MinLength`, `Minimum`, `MinItems`, `Required`) when they suffice.
+- `+kubebuilder:validation:XValidation` (CEL → `x-kubernetes-validations`) is ALLOWED and used for
+  invariants standard markers can't express — cross-field / transition rules (immutability on
+  `api/storage`; the `ManifestCaptureRequest` non-empty-`targets` rule on `api/v1alpha1`). Reach for CEL
+  only when a standard marker cannot express the constraint.
+- **CEL needs an integration test (MUST):** CEL is enforced by the kube-apiserver; a fake-client unit
+  test bypasses it and proves nothing. Any added/changed CEL rule requires an envtest asserting
+  apiserver reject-on-violation + accept-on-valid — see `cel-requires-integration-test`.
+- After any marker change: `bash hack/generate_code.sh` (from repo root) and commit the regenerated CRDs.
