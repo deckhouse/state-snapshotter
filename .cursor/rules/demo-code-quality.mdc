@@ -88,11 +88,12 @@ successfully.
 
 - **Data capture:** at most one PVC per node (`VolumeCaptureSpec.DataRef` is a single optional pointer — never
   a slice). Multiple volumes are modeled as child snapshot nodes, never as several data refs on one node.
-- **Manifest capture:** the SDK does NOT inject the source object; supplying ≥1 manifest target is the
-  domain's responsibility for an ordinary node. An empty final target set is legal only for the special
-  aggregator case (an empty MCR converges to an empty, Ready ManifestCheckpoint — see `api/v1alpha1`
-  ManifestCaptureRequestSpec.Targets); a domain leaf/single-object snapshot MUST always pass its own
-  source identity.
+- **Manifest capture — never empty:** the SDK does NOT inject the source object; supplying ≥1 manifest
+  target is the domain's responsibility. Every snapshot MUST capture at least its own source object's
+  manifest — a domain leaf/single-object snapshot passes its own source identity, and the namespace-root
+  aggregator always includes its own Namespace object — so the target set is never empty. `EnsureManifestCapture`
+  fails closed with `ErrEmptyManifest` before any cluster mutation, and the MCR CRD rejects an empty
+  `spec.targets` via CEL.
 
 ## 8. Litmus
 

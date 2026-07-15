@@ -18,6 +18,7 @@ package snapshotsdk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -191,6 +192,37 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	}
 	if n := countMCRs(t, ctx, cl); n != 0 {
 		t.Fatalf("phase3: MCR count = %d, want 0 (must not re-create a captured request)", n)
+	}
+}
+
+// TestEnsureManifestCapture_EmptyTargetsFailsClosed pins the manifest-mandatory invariant: a snapshot
+// must capture at least its own source object's manifest, so an empty ManifestCaptureSpec.Targets is a
+// domain contract violation. The SDK fails closed with ErrEmptyManifest and creates no MCR (the MCR CRD
+// enforces the same invariant via CEL as a second line of defense).
+func TestEnsureManifestCapture_EmptyTargetsFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "snap-empty", UID: types.UID("snap-empty-uid")},
+	}
+	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		Build()
+
+	sdk := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-a"})
+	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+
+	err := sdk.EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: nil})
+	if !errors.Is(err, ErrEmptyManifest) {
+		t.Fatalf("empty targets must return ErrEmptyManifest, got %v", err)
+	}
+	if n := countMCRs(t, ctx, cl); n != 0 {
+		t.Fatalf("no MCR must be created for an empty target set, got %d", n)
 	}
 }
 

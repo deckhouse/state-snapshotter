@@ -71,6 +71,10 @@ type Planning interface {
 	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the base target SET plus any
 	// owned-PVC targets discovered from the data leg) and publishes its name. The operation is suppressed
 	// once the core controller has stamped the manifest leg captured.
+	//
+	// The base target set MUST be non-empty: every snapshot captures at least its own source object's
+	// manifest (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest
+	// before any cluster mutation; the MCR CRD enforces the same invariant via CEL.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -212,6 +216,16 @@ type sdk struct {
 // match it with errors.Is(err, ErrChildrenSetFrozen).
 var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phase>=Planned): EnsureChildren cannot grow the declared child set")
 
+// ErrEmptyManifest is returned by EnsureManifestCapture when the ManifestCaptureSpec carries no targets.
+// Every snapshot must capture at least its own source object's manifest — a single-object domain snapshot
+// passes its own source identity, the namespace-root aggregator always includes its own Namespace object —
+// and the SDK never injects the source on the domain's behalf. So an empty target set is a domain contract
+// violation (recommended reaction sdk.Fail(GraphPlanningFailed)), not a valid empty capture. Fail-closed
+// and side-effect-free: it rejects BEFORE the ManifestCaptureRequest is created. The MCR CRD enforces the
+// same invariant via a CEL rule as a second line of defense. Callers match it with
+// errors.Is(err, ErrEmptyManifest).
+var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at least one target (the snapshotted object's own manifest)")
+
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
 
@@ -352,6 +366,12 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 }
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
+	// A manifest capture must always carry at least the snapshotted object's own manifest; the SDK never
+	// injects the source, so an empty target set is a domain bug. Fail closed before any cluster mutation
+	// (owned-PVC augmentation only ADDS to this set, so checking the domain-provided base is sufficient).
+	if len(in.Targets) == 0 {
+		return ErrEmptyManifest
+	}
 	obj := t.Object()
 	if t.CoreCaptureState().manifestCaptured() {
 		return nil
