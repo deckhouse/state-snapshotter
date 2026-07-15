@@ -169,8 +169,10 @@ core-контроллеру**.
 
 1. **Дочерние снапшоты** (`EnsureChildren`) — например VM-снапшот владеет снапшотами своих дисков.
 2. **Захват данных** (`EnsureVolumeCapture`) — захват содержимого **одного** PVC (см. раздел про `DataRef`).
-3. **Захват манифестов** (`EnsureManifestCapture`) — захват манифеста источника (+ owned-PVC из захвата
-   данных).
+3. **Захват манифестов** (`EnsureManifestCapture`) — захват манифестов, которые домен объявил для этого
+   узла. Manifest- и data-ноги — **независимые декларации**: если домен также снимает данные PVC и хочет
+   сохранить YAML этого PVC, он **явно** перечисляет PVC в manifest-таргетах. SDK никогда не выводит
+   manifest-таргеты из data-ноги.
 4. **Барьер** (`MarkPlanningReady`) — «всё спланировано»; core-контроллер ждёт именно его, прежде чем
    забрать `SnapshotContent`.
 
@@ -284,10 +286,12 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 ```
 
-Порядок: планирующие вызовы (`EnsureChildren`/`EnsureVolumeCapture`/`EnsureManifestCapture`) — между собой в
-любом порядке, но **`MarkPlanningReady` всегда последним**. На ошибку из любого `Ensure*` — просто
-`return err`, reconcile повторится (drift-ошибки дополнительно маппятся в `MarkPlanningFailed`, см. разделы
-ниже).
+Порядок: планирующие вызовы (`EnsureChildren`/`EnsureVolumeCapture`/`EnsureManifestCapture`) **независимы** и
+могут идти между собой в любом порядке. Каждый глагол зависит только от своего spec и никогда не читает
+результат другой ноги, поэтому создаваемые запросы идентичны при любом порядке вызова — в частности,
+`EnsureManifestCapture` строит MCR исключительно из своих объявленных `Targets` и не обращается к data-ноге
+VCR. Планирующий барьер — всегда последним. На ошибку из любого `Ensure*` — просто `return err`, reconcile
+повторится.
 
 ---
 
@@ -310,8 +314,10 @@ manifestTargets := []snapshotsdk.ManifestTarget{{
 сможет исключить их из своего MCR через существующий subtree exclude-механизм.
 
 SDK не решает за домен, какие доменные манифесты принадлежат узлу. Он отвечает только за transport-механику:
-создать/проверить один MCR, проставить ownerRef, опубликовать `status.manifestCaptureRequestName`,
-сохранить restart-safe поведение и при необходимости добавить technical owned-PVC target из захвата данных.
+создать/проверить один MCR, проставить ownerRef, опубликовать `status.manifestCaptureRequestName`, сохранить
+restart-safe поведение. Он захватывает **ровно** те таргеты, которые объявил домен, — и никогда не выводит и
+не подмешивает таргеты из data-ноги. PVC, чей YAML нужно сохранить, домен перечисляет в `Targets` сам (см.
+disk-контроллер).
 
 ### Захват манифестов — fail-closed на drift (симметрично детям/данным)
 
@@ -330,18 +336,13 @@ if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpe
 }
 ```
 
-Технический owned-PVC target (из захвата данных) добавляется в desired-set **до** сравнения, поэтому он не
-даёт false-positive drift.
+Сравниваемый набор — это ровно объявленные доменом `Targets`: manifest-нога не augment-ится из data-ноги,
+поэтому data-backed PVC участвует в сравнении, только если домен сам объявил его в `Targets`.
 
-> ⚠️ **Захват манифестов не может быть пустым.** Финальный target-set (твои таргеты + augmentation owned-PVC
-> из захвата данных) обязан содержать **минимум один** target. Нюансы:
-> - домен **может** передать пустой начальный набор `Targets`;
-> - owned-PVC augmentation **может** сделать финальный набор валидным (≥1) даже при пустом входе;
-> - SDK проверяет именно **финальный** набор; если он пуст — `EnsureManifestCapture` возвращает
->   `snapshotsdk.ErrEmptyManifest` **до** любых обращений к кластеру (MCR не создаётся, status не трогается).
->
-> SDK **не подставляет** сам снапшотируемый ресурс за тебя — передать хотя бы один manifest target (как
-> минимум сам ресурс) обязан домен. Пустой `ErrEmptyManifest` — это сигнал бага планирования в контроллере,
+> ⚠️ **Захват манифестов не может быть пустым.** Объявленный target-set обязан содержать **минимум один**
+> target. SDK **не подставляет** сам снапшотируемый ресурс за тебя и **не** подмешивает PVC из data-ноги —
+> передать хотя бы один manifest target (как минимум сам ресурс плюс любой PVC, чей YAML нужно сохранить)
+> обязан домен. Пустой набор — это сигнал бага планирования в контроллере,
 > а не временное состояние.
 
 ---
@@ -434,8 +435,9 @@ type Target struct {
 
 Домен сам находит свой PVC и сам принимает решения о готовности (нет PVC → `MarkNotReady` с
 `ArtifactMissing`, а повторную проверку домен организует сам через `ctrl.Result`). SDK из `DataRef` создаёт
-storage-foundation `VolumeCaptureRequest` (VCR), публикует его имя в `status.volumeCaptureRequestName`, а
-позже подмешивает owned-PVC в захват манифестов.
+storage-foundation `VolumeCaptureRequest` (VCR) и публикует его имя в `status.volumeCaptureRequestName`. Это
+только data-нога — она **не** питает manifest-ногу; если YAML этого PVC тоже нужно сохранить, домен
+перечисляет его в manifest-таргетах `Targets`.
 
 ### Инвариант: данные снапшота — это РОВНО ОДИН (опциональный) data ref
 

@@ -217,12 +217,14 @@ type VolumeCaptureSpec struct {
 // adapters, and the SDK reference a single definition.
 type ManifestTarget = ssv1alpha1.ManifestTarget
 
-// ManifestCaptureSpec is the domain's manifest-leg intent: the SET of base manifest targets (source
-// object identities). A single-object domain (e.g. a disk/VM snapshot) passes exactly one target; an
-// aggregator that captures many objects at once (e.g. the namespace-root Snapshot, whose manifest leg is
-// the whole namespace target set) passes the full set. The SDK merges any owned-PVC targets discovered
-// from the data-leg VolumeCaptureRequest, then deduplicates and sorts deterministically.
+// ManifestCaptureSpec is the domain's manifest-leg intent: the COMPLETE set of manifest targets (source
+// object identities) whose YAML this snapshot captures. A single-object domain (e.g. a disk/VM snapshot)
+// passes its own object; an aggregator (e.g. the namespace-root Snapshot) passes the full namespace target
+// set. The set is authoritative and self-contained: the SDK captures EXACTLY these targets (deduplicated
+// and sorted deterministically) and never derives or injects targets from the data leg. If a snapshot also
+// captures a PVC's data (VolumeCaptureSpec.DataRef) and wants that PVC's YAML restored, the domain lists
+// the PVC here explicitly — the manifest and data legs are two independent declarations.
 type ManifestCaptureSpec struct {
-	// Targets are the base manifest capture targets. Non-empty for a manifest-capturing snapshot.
+	// Targets are the manifest capture targets. Non-empty for a manifest-capturing snapshot.
 	Targets []ManifestTarget
 }
