@@ -69,9 +69,9 @@ type Syncer struct {
 // config.EffectiveUnifiedBootstrapPairs (by default just the core Snapshot pair,
 // unifiedbootstrap.DefaultGraphRegistryBuiltInPairs); eligible CSD pairs are merged on each Sync.
 //
-// dedicatedActivators maps a snapshot Kind (e.g. "DemoVirtualDiskSnapshot") to a function that
-// registers its dedicated controller at runtime. It may be nil/empty: then dedicated kinds are only
-// marked active (legacy behavior) and the caller is responsible for registering their controllers.
+// dedicatedActivators maps a snapshot Kind (e.g. the namespace-root "Snapshot") to a function that
+// registers its dedicated in-process controller at runtime. It may be nil/empty: then dedicated kinds are
+// only marked active (legacy behavior) and the caller is responsible for registering their controllers.
 func NewSyncer(
 	mgr ctrl.Manager,
 	log logr.Logger,
@@ -256,12 +256,11 @@ func (s *Syncer) Sync(ctx context.Context) error {
 // present in the eligible resolved set and have a wired activator, iterating in
 // unifiedbootstrap.DedicatedSnapshotControllerKinds order.
 //
-// That order is dependency order (children before parents): a parent controller (e.g. the demo VM
-// snapshot controller) Watches a child kind (DemoVirtualDiskSnapshot), and starting that Watch starts
-// the child's typed informer. The child's controller registers a typed field index, which
-// controller-runtime rejects once the informer has already started ("indexer conflict"). Activating
-// the child first guarantees its field index is registered before any parent Watch can start the
-// child informer.
+// That order is dependency order (children before parents): a parent in-process controller Watches a
+// child snapshot kind, and starting that Watch starts the child's typed informer. The child's controller
+// registers a typed field index, which controller-runtime rejects once the informer has already started
+// ("indexer conflict"). Activating the child first guarantees its field index is registered before any
+// parent Watch can start the child informer.
 //
 // Each kind is activated at most once (guarded by activeSnapshotGVKKeys). On activation failure the key
 // is left unset so the next Sync retries. The caller must hold s.mu.

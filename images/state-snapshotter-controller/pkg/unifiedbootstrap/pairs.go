@@ -20,6 +20,8 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // ResolveAvailableUnifiedPairs returns bootstrap/CSD pairs where both sides exist in the API (RESTMapper).
@@ -69,22 +71,20 @@ func PairsExcludingSnapshotKinds(pairs []UnifiedGVKPair, skipKinds ...string) []
 	return out
 }
 
-// DedicatedSnapshotControllerKinds lists Snapshot root kinds reconciled outside the generic
-// GenericSnapshotBinderController. Unified runtime sync must not call AddWatchForPair for these.
+// DedicatedSnapshotControllerKinds lists Snapshot root kinds reconciled IN-PROCESS by a dedicated
+// controller instead of the generic GenericSnapshotBinderController. Unified runtime sync must not call
+// AddWatchForPair for these. Only the namespace-root "Snapshot" is in-process; out-of-process domain
+// kinds (e.g. the PoC demo domain, or virtualization) are NOT listed here — they enter discovery purely
+// through eligible CustomSnapshotDefinition resources and flow through the generic domain-capture path
+// (see unifiedruntime.Syncer.Sync).
 //
-// Order is significant: it is the deferred-activation dependency order (children before parents)
-// consumed by unifiedruntime.Syncer.activateDedicatedControllersLocked. A child kind must precede any
-// parent kind whose controller Watches it, so the child's typed informer + field index are registered
+// Order is significant: it is the deferred-activation dependency order (children before parents) consumed
+// by unifiedruntime.Syncer.activateDedicatedControllersLocked. A child kind must precede any parent kind
+// whose in-process controller Watches it, so the child's typed informer + field index are registered
 // before the parent Watch starts that informer (controller-runtime rejects IndexField after an informer
-// has started). DemoVirtualDiskSnapshot therefore must stay before DemoVirtualMachineSnapshot (the VM
-// controller Watches the disk snapshot type). Do not reorder without preserving children-before-parents.
+// has started). Do not reorder without preserving children-before-parents.
 var DedicatedSnapshotControllerKinds = []string{
 	"Snapshot",
-	// PR5a demo domain: reconciled by DemoVirtualDiskSnapshotReconciler, not GenericSnapshotBinderController.
-	"DemoVirtualDiskSnapshot",
-	// PR5b demo domain: reconciled by DemoVirtualMachineSnapshotReconciler, not GenericSnapshotBinderController.
-	// Activated after DemoVirtualDiskSnapshot because its controller Watches DemoVirtualDiskSnapshot.
-	"DemoVirtualMachineSnapshot",
 }
 
 // IsDedicatedSnapshotControllerKind reports whether kind is handled by a dedicated reconciler.
@@ -97,21 +97,19 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 	return false
 }
 
-// DomainCaptureSnapshotKinds lists dedicated Snapshot kinds whose domain controller plans capture
-// out-of-band (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase) but
-// whose cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController (content-ownership
-// commit 2, D1). They are a strict subset of DedicatedSnapshotControllerKinds: the dedicated planning
-// controller is still activated for them, AND the generic binder additionally watches them (gated by
-// MarkDomainCaptureKind) to create/project/mirror their SnapshotContent.
+// DomainCaptureSnapshotKinds lists IN-PROCESS dedicated Snapshot kinds whose domain controller plans
+// capture out-of-band (creates MCR/VCR/children, publishes captureState.domainSpecificController incl.
+// phase) but whose cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController
+// (content-ownership commit 2, D1). It is a strict subset of DedicatedSnapshotControllerKinds.
 //
-// wave5: the namespace-root "Snapshot" is now in this set too ("dogfooding" — the root reconciler drives
-// capture through the same snapshotsdk as external/demo domains and no longer owns its SnapshotContent;
-// the generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready).
-// See docs/wave5-namespace-domain-design.md.
+// wave5: the namespace-root "Snapshot" is the only member ("dogfooding" — the root reconciler drives
+// capture through the same snapshotsdk as external domains and no longer owns its SnapshotContent; the
+// generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready). See
+// docs/wave5-namespace-domain-design.md. Out-of-process domain kinds (PoC demo, virtualization) are NOT
+// listed here; they are marked domain-capture at runtime from their CustomSnapshotDefinition (the generic
+// else branch in unifiedruntime.Syncer.Sync), exactly like the built-in CSI VolumeSnapshot pair.
 var DomainCaptureSnapshotKinds = []string{
 	"Snapshot",
-	"DemoVirtualDiskSnapshot",
-	"DemoVirtualMachineSnapshot",
 }
 
 // IsDomainCaptureSnapshotKind reports whether kind is dedicated for planning but uses the generic binder
@@ -129,14 +127,28 @@ func IsDomainCaptureSnapshotKind(kind string) bool {
 // controller that serves its own aggregated restore apiserver, so the core restore compiler must
 // DELEGATE that node's subtree to the domain apiserver instead of compiling it in-process.
 //
-// This is the domain-capture set (IsDomainCaptureSnapshotKind) MINUS the built-in root "Snapshot".
-// Since wave5 the namespace-root "Snapshot" is a domain-CAPTURE kind (planned via the in-process SDK,
-// its content owned by the generic binder), but its RESTORE is served by THIS core apiserver. Treating
-// the root as an out-of-process domain node makes the restore compiler delegate it back to core's own
-// manifests-with-data-restoration endpoint — an unbounded self-call that surfaces as a 500. Only the
-// demo/external kinds are genuinely out-of-process for restore, so the root is excluded here.
-func IsOutOfProcessDomainSnapshotKind(kind string) bool {
-	return kind != DefaultSnapshotPair().Snapshot.Kind && IsDomainCaptureSnapshotKind(kind)
+// The rule is CSD-ORIGIN driven, not a hardcoded kind list: a kind that is registered in the live GVK
+// registry (reg) but is NOT one of the built-in in-process pairs (DefaultGraphRegistryBuiltInPairs: the
+// namespace-root "Snapshot" and the CSI "VolumeSnapshot") can only have entered discovery through an
+// eligible CustomSnapshotDefinition. Such a kind is an external domain that serves its own restore
+// apiserver, so it must be delegated. This treats the PoC demo domain and a real virtualization domain
+// identically — the core carries no domain-specific kind names.
+//
+// The built-in kinds are excluded on purpose: the namespace-root "Snapshot" is a domain-CAPTURE kind but
+// its RESTORE is served by THIS core apiserver (delegating it back would be an unbounded self-call → 500),
+// and the built-in CSI "VolumeSnapshot" restore is core behavior too. A nil reg (registry not yet
+// populated) and unregistered kinds return false — never delegate an unknown kind.
+func IsOutOfProcessDomainSnapshotKind(reg *snapshot.GVKRegistry, kind string) bool {
+	if reg == nil {
+		return false
+	}
+	for _, p := range DefaultGraphRegistryBuiltInPairs() {
+		if p.Snapshot.Kind == kind {
+			return false
+		}
+	}
+	_, err := reg.ResolveSnapshotGVK(kind)
+	return err == nil
 }
 
 // FilterGenericSnapshotGVKPairs returns parallel slices with dedicated snapshot kinds removed.

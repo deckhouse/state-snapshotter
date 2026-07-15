@@ -250,11 +250,11 @@ func main() {
 	}
 	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
-	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) run in the
-	// separate domain-controller pod/binary, not in core (commit "core-remove-demo"). Core no longer
-	// reconciles demo CRs nor serves an in-process restore transform: it owns SnapshotContent for the
-	// demo kinds (see the unified runtime Syncer wiring below) and delegates demo restore subtrees to
-	// the domain aggregated apiserver (see the domain restore client passed to api.NewServer).
+	// Out-of-process domain controllers (the PoC demo domain, and real domains such as virtualization) run
+	// in a separate pod/binary, not in core. Core carries no domain-specific kind names: it discovers such
+	// kinds purely from their CustomSnapshotDefinition, owns their SnapshotContent (see the unified runtime
+	// Syncer wiring below), and delegates their restore subtrees to the domain aggregated apiserver by
+	// CSD-origin (see the isOutOfProcessDomainKind predicate passed to api.NewServer).
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
@@ -483,12 +483,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The restore delegate predicate must be the OUT-OF-PROCESS domain set, NOT the domain-CAPTURE set:
-	// since wave5 the root "Snapshot" is a domain-capture kind, but its restore is served in-process by
-	// this very apiserver. Passing the capture set would make the compiler delegate the root back to core's
-	// own manifests-with-data-restoration endpoint (self-recursion, HTTP 500). Only demo/external kinds
-	// are truly out-of-process for restore.
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsOutOfProcessDomainSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
+	// The restore delegate predicate is CSD-origin driven: a snapshot kind that is registered in the live
+	// graph registry but is NOT a built-in in-process pair (root "Snapshot" / CSI "VolumeSnapshot") can only
+	// have come from an eligible CustomSnapshotDefinition — i.e. an out-of-process domain that serves its own
+	// restore apiserver, so the compiler delegates it. Built-in kinds restore in-process (delegating the root
+	// back to core's own endpoint would be self-recursion → HTTP 500). graphRegProvider.Current() is live
+	// (refreshed on CSD changes), so this needs no hardcoded domain kind names.
+	isOutOfProcessDomainKind := func(kind string) bool {
+		return unifiedbootstrap.IsOutOfProcessDomainSnapshotKind(graphRegProvider.Current(), kind)
+	}
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, isOutOfProcessDomainKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

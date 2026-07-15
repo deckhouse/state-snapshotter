@@ -20,31 +20,58 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// TestIsOutOfProcessDomainSnapshotKind_excludesRootSnapshot guards the restore-delegation regression:
-// since wave5 the namespace-root "Snapshot" is a domain-CAPTURE kind, but its restore is served
-// in-process by the core apiserver. The restore compiler must NOT treat the root as an out-of-process
-// domain node (doing so delegates the root back to core's own endpoint — a self-recursion / HTTP 500).
-func TestIsOutOfProcessDomainSnapshotKind_excludesRootSnapshot(t *testing.T) {
+// TestIsOutOfProcessDomainSnapshotKind_csdOrigin guards the CSD-origin restore-delegation rule and its
+// regression: the predicate delegates a kind iff it is registered in the live GVK registry AND is not a
+// built-in in-process pair. The namespace-root "Snapshot" is a domain-CAPTURE kind, but its restore is
+// served in-process by the core apiserver — treating it as out-of-process would delegate the root back to
+// core's own endpoint (self-recursion / HTTP 500). The built-in CSI "VolumeSnapshot" restores in-process
+// too. A registered non-built-in kind can only have come from an eligible CustomSnapshotDefinition, so it
+// is an out-of-process domain (the core carries no domain-specific kind names).
+func TestIsOutOfProcessDomainSnapshotKind_csdOrigin(t *testing.T) {
 	rootKind := DefaultSnapshotPair().Snapshot.Kind
+	vsKind := BuiltInVolumeSnapshotPair().Snapshot.Kind
 
-	if IsOutOfProcessDomainSnapshotKind(rootKind) {
-		t.Fatalf("root %q must NOT be an out-of-process domain restore kind (it is compiled in-process)", rootKind)
+	// A live registry as it looks once an external domain's CustomSnapshotDefinition is registered: the two
+	// built-in pairs plus one CSD-derived domain kind (a synthetic stand-in for the PoC demo or a real
+	// virtualization domain — deliberately NOT a demo-specific name).
+	const domainKind = "WidgetSnapshot"
+	reg := snapshot.NewGVKRegistry()
+	if err := reg.RegisterSnapshotGVK(rootKind, "state-snapshotter.deckhouse.io/v1alpha1"); err != nil {
+		t.Fatalf("register root: %v", err)
 	}
-	// Sanity: the root is still a domain-CAPTURE kind — the two predicates intentionally diverge on it.
+	if err := reg.RegisterSnapshotGVK(vsKind, "snapshot.storage.k8s.io/v1"); err != nil {
+		t.Fatalf("register VolumeSnapshot: %v", err)
+	}
+	if err := reg.RegisterSnapshotGVK(domainKind, "domain.example.com/v1alpha1"); err != nil {
+		t.Fatalf("register domain kind: %v", err)
+	}
+
+	// Built-in kinds restore in-process — never delegated.
+	if IsOutOfProcessDomainSnapshotKind(reg, rootKind) {
+		t.Errorf("root %q must NOT be an out-of-process domain restore kind (compiled in-process)", rootKind)
+	}
+	if IsOutOfProcessDomainSnapshotKind(reg, vsKind) {
+		t.Errorf("built-in %q must NOT be an out-of-process domain restore kind (restored in-process)", vsKind)
+	}
+	// A registered, non-built-in (CSD-derived) kind is an out-of-process domain — delegated.
+	if !IsOutOfProcessDomainSnapshotKind(reg, domainKind) {
+		t.Errorf("CSD-derived kind %q must be an out-of-process domain restore kind (delegated to its apiserver)", domainKind)
+	}
+	// Unregistered / nil-registry never delegate (unknown kind).
+	if IsOutOfProcessDomainSnapshotKind(reg, "ConfigMap") {
+		t.Errorf("an unregistered kind must not be an out-of-process domain restore kind")
+	}
+	if IsOutOfProcessDomainSnapshotKind(nil, domainKind) {
+		t.Errorf("a nil registry must not classify any kind as out-of-process")
+	}
+
+	// Sanity: the root is still a domain-CAPTURE kind — the capture and restore predicates diverge on it.
 	if !IsDomainCaptureSnapshotKind(rootKind) {
 		t.Fatalf("root %q is expected to remain a domain-capture kind (capture planned via the SDK)", rootKind)
-	}
-
-	for _, demo := range []string{"DemoVirtualDiskSnapshot", "DemoVirtualMachineSnapshot"} {
-		if !IsOutOfProcessDomainSnapshotKind(demo) {
-			t.Errorf("demo kind %q must be an out-of-process domain restore kind (delegated to the domain apiserver)", demo)
-		}
-	}
-
-	if IsOutOfProcessDomainSnapshotKind("ConfigMap") {
-		t.Errorf("a non-snapshot kind must not be an out-of-process domain restore kind")
 	}
 }
 
