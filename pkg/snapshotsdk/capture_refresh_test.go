@@ -226,6 +226,101 @@ func TestEnsureManifestCapture_EmptyTargetsFailsClosed(t *testing.T) {
 	}
 }
 
+// TestEnsureManifestCapture_TargetsDrift pins the frozen-plan guard: an in-flight MCR's target set is the
+// point-in-time capture plan; re-declaring the SAME set is a no-op, but a DIFFERENT set fails closed with
+// ErrManifestTargetsDrift and neither patches nor recreates the MCR.
+func TestEnsureManifestCapture_TargetsDrift(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "snap-drift", UID: types.UID("snap-drift-uid")},
+	}
+	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		Build()
+
+	sdk := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-a"})
+	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+
+	setA := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+	}}
+
+	// Create the MCR with set A.
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setA); err != nil {
+		t.Fatalf("create with set A: %v", err)
+	}
+	if n := countMCRs(t, ctx, cl); n != 1 {
+		t.Fatalf("MCR count = %d, want 1", n)
+	}
+
+	// Re-declaring the identical set (even reordered/duplicated) is a no-op — no drift, no error.
+	setAReordered := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+	}}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setAReordered); err != nil {
+		t.Fatalf("idempotent re-declare must be a no-op, got %v", err)
+	}
+
+	// A different set drifts: fail closed, no patch/recreate.
+	setB := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+	}}
+	err := sdk.EnsureManifestCapture(ctx, adapter, setB)
+	if !errors.Is(err, ErrManifestTargetsDrift) {
+		t.Fatalf("changed target set must return ErrManifestTargetsDrift, got %v", err)
+	}
+	if n := countMCRs(t, ctx, cl); n != 1 {
+		t.Fatalf("drift must not recreate the MCR: count = %d, want 1", n)
+	}
+}
+
+// TestEnsureManifestCapture_DriftSuppressedAfterLatch pins that once the core stamps the manifest leg
+// captured, EnsureManifestCapture short-circuits — a later changed target set is suppressed, not a drift.
+func TestEnsureManifestCapture_DriftSuppressedAfterLatch(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "snap-latched", UID: types.UID("snap-latched-uid")},
+	}
+	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		Build()
+
+	sdk := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-a"})
+	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+
+	setA := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+	}}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setA); err != nil {
+		t.Fatalf("create with set A: %v", err)
+	}
+
+	// Core captured the manifest leg — the latch is now true.
+	adapter.core = CoreCaptureState{ManifestCaptured: refreshBoolPtr(true)}
+
+	// A changed set after the latch is suppressed (the leg is done), NOT reported as drift.
+	setB := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+	}}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setB); err != nil {
+		t.Fatalf("post-latch call must be suppressed (nil), got %v", err)
+	}
+}
+
 func TestEnsureVolumeCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	ctx := context.Background()
 	scheme := newRefreshTestScheme(t)

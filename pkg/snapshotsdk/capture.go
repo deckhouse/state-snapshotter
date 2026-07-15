@@ -79,6 +79,11 @@ type Planning interface {
 	// The target set MUST be non-empty: every snapshot captures at least its own source object's manifest
 	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
 	// cluster mutation; the MCR CRD enforces the same invariant via CEL.
+	//
+	// The target set is FROZEN once the request exists: a snapshot is point-in-time, so while the manifest
+	// leg is in flight a declared set that differs (as a set keyed by apiVersion/kind/name) from the
+	// already-created MCR returns ErrManifestTargetsDrift, fail-closed and BEFORE any patch/status write
+	// (recommended domain reaction sdk.Fail(GraphPlanningFailed)). An identical re-declaration is a no-op.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -229,6 +234,40 @@ var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phas
 // same invariant via a CEL rule as a second line of defense. Callers match it with
 // errors.Is(err, ErrEmptyManifest).
 var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at least one target (the snapshotted object's own manifest)")
+
+// ErrManifestTargetsDrift is returned by EnsureManifestCapture when the ManifestCaptureRequest for this
+// snapshot already exists (the manifest leg is in flight, the captured latch not yet set) but the domain
+// now declares a DIFFERENT target set than the one the request was created with. A snapshot is
+// point-in-time: the MCR target set is the frozen capture plan and is never patched, so a changed set is a
+// domain planning drift, not a valid update. The guard is fail-closed and side-effect-free — it rejects
+// BEFORE any patch or status write. Targets are compared as SETS keyed by (apiVersion, kind, name), so
+// reordering or duplicates never count as drift. Recommended domain reaction: sdk.Fail(GraphPlanningFailed)
+// (no new api reason). Callers match it with errors.Is(err, ErrManifestTargetsDrift).
+var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets drifted from the in-flight ManifestCaptureRequest (the point-in-time capture plan is frozen)")
+
+// manifestTargetsDrifted reports whether the desired and existing manifest target sets differ, compared as
+// SETS keyed by (apiVersion, kind, name). Order and duplicates are irrelevant (the SDK normalizes targets
+// before create), so only a genuine add/remove of a distinct target counts as drift.
+func manifestTargetsDrifted(existing, desired []ssv1alpha1.ManifestTarget) bool {
+	key := func(t ssv1alpha1.ManifestTarget) string { return t.APIVersion + "|" + t.Kind + "|" + t.Name }
+	asSet := func(ts []ssv1alpha1.ManifestTarget) map[string]struct{} {
+		m := make(map[string]struct{}, len(ts))
+		for _, t := range ts {
+			m[key(t)] = struct{}{}
+		}
+		return m
+	}
+	e, d := asSet(existing), asSet(desired)
+	if len(e) != len(d) {
+		return true
+	}
+	for k := range d {
+		if _, ok := e[k]; !ok {
+			return true
+		}
+	}
+	return false
+}
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
@@ -423,6 +462,15 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
+		}
+	} else {
+		// The MCR already exists and the manifest leg is still in flight (the captured latch was false at
+		// entry). Its target set is the frozen point-in-time capture plan and is never patched. If the domain
+		// now declares a different set, that is a planning drift: fail closed (no patch, no status write) so
+		// the domain surfaces it via sdk.Fail(GraphPlanningFailed) instead of silently diverging from the
+		// request that was already created.
+		if manifestTargetsDrifted(existing.Spec.Targets, in.Targets) {
+			return ErrManifestTargetsDrift
 		}
 	}
 	return patch.Status(ctx, s.client, obj, func() bool {
