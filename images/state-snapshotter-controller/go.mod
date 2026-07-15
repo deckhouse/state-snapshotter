@@ -3,7 +3,6 @@ module github.com/deckhouse/state-snapshotter/images/state-snapshotter-controlle
 go 1.26.5
 
 require (
-	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/state-snapshotter/lib/go/common v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-00010101000000-000000000000
@@ -32,7 +31,6 @@ replace (
 
 require (
 	cel.dev/expr v0.25.1 // indirect
-	github.com/Masterminds/semver/v3 v3.3.1 // indirect
 	github.com/NYTimes/gziphandler v1.1.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
