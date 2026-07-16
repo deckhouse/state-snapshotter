@@ -27,15 +27,15 @@ func TestModuleTagPattern(t *testing.T) {
 	}
 
 	rejected := []string{
-		"ает",       // Cyrillic ("main" typed in a RU keyboard layout) — the bug this guards against
-		"v0.1.25",   // prod tag: not in the dev registry the nested cluster pulls
-		"v0.2.0",    // prod tag
-		"MR153",     // wrong case
-		"mr",        // no number
-		"pr",        // no number
-		"mr153-rc1", // suffix
-		"feature-x", // arbitrary branch
-		"",          // empty
+		"\u0430\u0435\u0442", // Cyrillic U+0430 U+0435 U+0442 (a tag entered in a non-Latin keyboard layout instead of "main") — the bug this guards against
+		"v0.1.25",            // prod tag: not in the dev registry the nested cluster pulls
+		"v0.2.0",             // prod tag
+		"MR153",              // wrong case
+		"mr",                 // no number
+		"pr",                 // no number
+		"mr153-rc1",          // suffix
+		"feature-x",          // arbitrary branch
+		"",                   // empty
 	}
 	for _, v := range rejected {
 		if moduleTagPattern.MatchString(v) {
@@ -48,8 +48,8 @@ func TestIsASCII(t *testing.T) {
 	if !isASCII("main") || !isASCII("mr153") {
 		t.Error("plain Latin tags must be ASCII")
 	}
-	// "ает" is Cyrillic (multi-byte UTF-8) — the exact wrong-keyboard-layout value that wedged a run.
-	if isASCII("ает") {
-		t.Error(`Cyrillic "ает" must be flagged as non-ASCII`)
+	// "\u0430\u0435\u0442" is Cyrillic (multi-byte UTF-8) — the exact wrong-keyboard-layout value that wedged a run.
+	if isASCII("\u0430\u0435\u0442") {
+		t.Error("Cyrillic runes must be flagged as non-ASCII")
 	}
 }
