@@ -79,7 +79,7 @@ func BuiltInVolumeSnapshotPair() UnifiedGVKPair {
 // CustomSnapshotDefinition resources (+ the module RBAC hook that sets RBACReady=True).
 //
 // This is the single source of built-in pairs: it seeds both the Snapshot graph registry and the
-// generic unified runtime bootstrap default (see config.EffectiveUnifiedBootstrapPairs). A hardcoded pair
+// generic unified runtime bootstrap default (used directly by cmd/main and BuildRegistry). A hardcoded pair
 // here is only safe because its RBAC contract is met by the controller's static rbac-for-us.yaml (root
 // Snapshot + PVC/PV/SC/VolumeSnapshot/VolumeSnapshotContent/VolumeSnapshotClass); a domain pair without a
 // static RBAC contract would silently widen the watch surface and produce forbidden list/watch loops.

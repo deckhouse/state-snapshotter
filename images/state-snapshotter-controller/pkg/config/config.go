@@ -26,7 +26,6 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/consts"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/logger"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 const (
@@ -44,19 +43,17 @@ const (
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 
-	// DefaultSnapshotRootOKTTL is spec.ttl on root ObjectKeeper (ret-snap-* and unified ret-* snapshot OK)
-	// when neither STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL nor STATE_SNAPSHOTTER_NS_ROOT_OK_TTL is set.
+	// DefaultSnapshotTTLAfterDelete is spec.ttl on the root ObjectKeeper (ret-snap-* and unified ret-* snapshot)
+	// when STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE is not set.
 	//
 	// Production default: 30 days (720h). This is the "recycle bin" retention window (wave4B) — how long the
 	// durable cluster-scoped SnapshotContent tree survives after its namespaced Snapshot is deleted, during
-	// which the captured data remains recoverable. Override per install with the snapshotRootOkTtl
-	// module parameter (env STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL). Keep this comfortably long: retained
+	// which the captured data remains recoverable. Override per install with the snapshotTtlAfterDelete
+	// module parameter (env STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE). Keep this comfortably long: retained
 	// root content disappears once the window elapses, so a short value silently shrinks the recovery window.
-	DefaultSnapshotRootOKTTL = 30 * 24 * time.Hour // 720h
-	// EnvSnapshotRootOKTTL: optional override (Go duration, must be >0). Empty or invalid → try EnvSnapshotRootOKTTLAlt, then default.
-	EnvSnapshotRootOKTTL = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
-	// EnvSnapshotRootOKTTLAlt: second env var name for the same duration; read when EnvSnapshotRootOKTTL is unset or non-positive.
-	EnvSnapshotRootOKTTLAlt = "STATE_SNAPSHOTTER_NS_ROOT_OK_TTL"
+	DefaultSnapshotTTLAfterDelete = 30 * 24 * time.Hour // 720h
+	// EnvSnapshotTTLAfterDelete: optional override (Go duration, must be >0). Empty or invalid → default.
+	EnvSnapshotTTLAfterDelete = "STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE"
 )
 
 type Options struct {
@@ -70,14 +67,10 @@ type Options struct {
 	DefaultTTL        time.Duration
 	DefaultTTLStr     string // String representation for annotation (e.g., "168h", "7d")
 
-	// UnifiedBootstrapMode + UnifiedBootstrapCustomPairs: static bootstrap before merge with eligible CSD (R5).
-	// See EffectiveUnifiedBootstrapPairs().
-	UnifiedBootstrapMode        UnifiedBootstrapMode
-	UnifiedBootstrapCustomPairs []unifiedbootstrap.UnifiedGVKPair
-
-	// SnapshotRootOKTTL: duration for root snapshot ObjectKeeper FollowObjectWithTTL (Snapshot + unified XxxxSnapshot).
-	// Resolved at startup: env override if >0, else built-in DefaultSnapshotRootOKTTL.
-	SnapshotRootOKTTL time.Duration
+	// SnapshotTTLAfterDelete: how long the durable root SnapshotContent tree is retained after its
+	// namespaced Snapshot is deleted (spec.ttl on the root ObjectKeeper, FollowObjectWithTTL mode).
+	// Resolved at startup: env override if >0, else built-in DefaultSnapshotTTLAfterDelete.
+	SnapshotTTLAfterDelete time.Duration
 }
 
 func NewConfig() *Options {
@@ -116,27 +109,15 @@ func NewConfig() *Options {
 	opts.DefaultTTL = DefaultTTL
 	opts.DefaultTTLStr = formatDurationForAnnotation(DefaultTTL)
 
-	mode, pairs, perr := ParseUnifiedBootstrapPairsEnv(os.Getenv(EnvUnifiedBootstrapPairs))
-	if perr != nil {
-		log.Printf("Invalid %s (%v); using default bootstrap list", EnvUnifiedBootstrapPairs, perr)
-		mode = UnifiedBootstrapDefault
-		pairs = nil
-	}
-	opts.UnifiedBootstrapMode = mode
-	opts.UnifiedBootstrapCustomPairs = pairs
-
-	opts.SnapshotRootOKTTL = resolveSnapshotRootOKTTL()
+	opts.SnapshotTTLAfterDelete = resolveSnapshotTTLAfterDelete()
 	return &opts
 }
 
-func resolveSnapshotRootOKTTL() time.Duration {
-	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTL); ok {
+func resolveSnapshotTTLAfterDelete() time.Duration {
+	if d, ok := positiveDurationFromEnv(EnvSnapshotTTLAfterDelete); ok {
 		return d
 	}
-	if d, ok := positiveDurationFromEnv(EnvSnapshotRootOKTTLAlt); ok {
-		return d
-	}
-	return DefaultSnapshotRootOKTTL
+	return DefaultSnapshotTTLAfterDelete
 }
 
 func positiveDurationFromEnv(key string) (time.Duration, bool) {

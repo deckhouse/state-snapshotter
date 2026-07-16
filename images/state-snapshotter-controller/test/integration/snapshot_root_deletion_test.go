@@ -312,7 +312,7 @@ var _ = Describe("Integration: Snapshot deletion semantics", func() {
 		Expect(ok.Spec.FollowObjectRef.UID).To(Equal(string(rootUID)))
 		Expect(ok.Spec.Mode).To(Equal("FollowObjectWithTTL"))
 		Expect(ok.Spec.TTL).NotTo(BeNil())
-		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotRootOKTTL))
+		Expect(ok.Spec.TTL.Duration).To(Equal(config.DefaultSnapshotTTLAfterDelete))
 		Expect(ok.OwnerReferences).To(BeEmpty(), "root ObjectKeeper must follow Snapshot via spec.followObjectRef, not ownerRef")
 		Expect(objectKeeperHasControllerOwnerRefToSnapshotContent(ok.OwnerReferences, contentName, content.UID)).To(BeFalse(),
 			"root ObjectKeeper must not list SnapshotContent as a controlling ownerRef; retained anchor is SnapshotContent→OK")

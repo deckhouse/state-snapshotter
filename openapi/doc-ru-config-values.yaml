@@ -2,10 +2,8 @@ type: object
 properties:
   logLevel:
     description: Уровень логирования модуля.
-  unifiedBootstrapPairs:
-    description: Статический bootstrap списка пар GVK до merge с DSC. Пусто/unset — единственная встроенная пара (core Snapshot → SnapshotContent), доменные типы только через eligible DSC; empty/none/dsc-only — вообще без статических пар (чистый DSC-only); иначе кастомная строка (см. англ. описание в config-values).
-  snapshotRootOkTtl:
+  snapshotTtlAfterDelete:
     description: |
-      Окно хранения «корзины»: длительность TTL для корневого ObjectKeeper (FollowObjectWithTTL) у Snapshot и unified XxxxSnapshot.
-      Это то, сколько живёт долговечное дерево SnapshotContent после удаления namespaced-объекта Snapshot — в течение этого окна захваченные данные остаются восстановимыми.
-      Пусто — в Pod не передаётся env, в контроллере действует встроенный дефолт 30 дней (720h). Иначе строка длительности Go.
+      Окно хранения «корзины»: сколько долговечные данные снапшота хранятся после удаления Snapshot — в течение этого окна их ещё можно восстановить.
+      Строка длительности Go, например "24h", "168h".
+      Если не задано, то в контроллере действует встроенный дефолт 30 дней (720h).

@@ -276,7 +276,8 @@ func main() {
 	}
 	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
 
-	// Unified runtime is always on in v0; bootstrap list comes from env defaults or STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
+	// Unified runtime is always on in v0; the static bootstrap list is the hardcoded built-in default
+	// (unifiedbootstrap.DefaultGraphRegistryBuiltInPairs) — domain kinds come only from eligible CSD.
 	csdBootstrapClient, err := client.New(kConfig, client.Options{
 		Scheme: scheme,
 		Mapper: mgr.GetRESTMapper(),
@@ -293,8 +294,8 @@ func main() {
 	} else {
 		log.Info("[main] CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
 	}
-	bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
-	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
+	bootstrapPairs := unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
+	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs))
 	mergedPairs := unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrapPairs, csdPairs)
 	log.Info("[main] unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
 	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
@@ -410,7 +411,7 @@ func main() {
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
-		cfgParams.EffectiveUnifiedBootstrapPairs(),
+		unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(),
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,

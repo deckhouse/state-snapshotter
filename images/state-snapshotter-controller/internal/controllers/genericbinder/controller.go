@@ -624,9 +624,9 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 
 func (r *GenericSnapshotBinderController) desiredUnifiedRootObjectKeeperSpec(obj *unstructured.Unstructured) deckhousev1alpha1.ObjectKeeperSpec {
 	gvk := obj.GetObjectKind().GroupVersionKind()
-	ttl := config.DefaultSnapshotRootOKTTL
-	if r.Config != nil && r.Config.SnapshotRootOKTTL > 0 {
-		ttl = r.Config.SnapshotRootOKTTL
+	ttl := config.DefaultSnapshotTTLAfterDelete
+	if r.Config != nil && r.Config.SnapshotTTLAfterDelete > 0 {
+		ttl = r.Config.SnapshotTTLAfterDelete
 	}
 	return deckhousev1alpha1.ObjectKeeperSpec{
 		Mode: controllercommon.ObjectKeeperModeFollowObjectWithTTL,

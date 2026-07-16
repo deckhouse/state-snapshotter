@@ -33,7 +33,6 @@ import (
 
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
 
@@ -102,10 +101,9 @@ var _ = Describe("Integration: snapshot graph registry (CSD-driven refresh)", Se
 
 	It("adds a CSD-gated snapshot kind after eligible CSD without restarting the process", func() {
 		testCtx := context.Background()
-		localCfg := *testCfg
-		localCfg.UnifiedBootstrapMode = config.UnifiedBootstrapEmpty
-
-		p, err := snapshotgraphregistry.NewProvider(&localCfg, mgr.GetRESTMapper(), k8sClient, ctrl.Log.WithName("dynamic-graph-registry-test"))
+		// The graph registry is built from the hardcoded built-in default pairs merged with eligible CSD;
+		// the CSD-gated test kind is absent until its CSD becomes eligible below.
+		p, err := snapshotgraphregistry.NewProvider(testCfg, mgr.GetRESTMapper(), k8sClient, ctrl.Log.WithName("dynamic-graph-registry-test"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(p.Refresh(testCtx)).To(Succeed())
 		Expect(p.Current().RegisteredSnapshotKinds()).NotTo(ContainElement(registryTestSnapshotKind))

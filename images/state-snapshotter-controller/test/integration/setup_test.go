@@ -778,7 +778,7 @@ var _ = BeforeSuite(func() {
 
 	runtimeSnapGVKs, runtimeContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
-		testCfg.EffectiveUnifiedBootstrapPairs(),
+		unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(),
 		ctrl.Log.WithName("integration-unified-runtime-bootstrap"),
 	)
 	genericSnapGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(runtimeSnapGVKs, runtimeContentGVKs)
@@ -845,7 +845,7 @@ var _ = BeforeSuite(func() {
 	unifiedSyncer = unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
-		testCfg.EffectiveUnifiedBootstrapPairs(),
+		unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(),
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,

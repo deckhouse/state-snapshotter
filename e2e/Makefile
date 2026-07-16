@@ -180,7 +180,7 @@ check-env: ## Print the relevant env vars for the nested flow
 	@echo "E2E_SNAPSHOTTER_NS_PREFIX:              $${E2E_SNAPSHOTTER_NS_PREFIX}  # namespace prefix for source/restore namespaces (default snap-e2e)"
 	@echo "E2E_SNAPSHOT_READY_TIMEOUT:             $${E2E_SNAPSHOT_READY_TIMEOUT}  # Go duration, default 10m"
 	@echo "E2E_MODULE_READY_TIMEOUT:               $${E2E_MODULE_READY_TIMEOUT}  # Go duration, default 15m"
-	@echo "E2E_GC_TTL:                             $${E2E_GC_TTL}  # snapshotRootOkTtl for the GC spec (default 60s)"
+	@echo "E2E_GC_TTL:                             $${E2E_GC_TTL}  # snapshotTtlAfterDelete for the GC spec (default 60s)"
 	@echo "E2E_VOLUME_DATA:                        $${E2E_VOLUME_DATA}  # true|1|yes -> run phase 3 (full volume-data flow)"
 	@echo "E2E_GET_LOAD:                           $${E2E_GET_LOAD}  # true|1|yes -> run the opt-in GET-load measurement (provisions own SC; ~minutes)"
 	@echo "E2E_GET_LOAD_ITERATIONS:                $${E2E_GET_LOAD_ITERATIONS}  # GET-load capture waves to run (default 5)"

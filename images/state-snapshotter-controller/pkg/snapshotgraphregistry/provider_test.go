@@ -31,7 +31,6 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -60,14 +59,9 @@ func snapshotRESTMapper(t *testing.T) meta.RESTMapper {
 func TestProvider_CurrentNilBeforeRefresh(t *testing.T) {
 	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	pair := unifiedbootstrap.UnifiedGVKPair{
-		Snapshot:        schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "Snapshot"},
-		SnapshotContent: schema.GroupVersionKind{Group: storagev1alpha1.APIGroup, Version: storagev1alpha1.APIVersion, Kind: "SnapshotContent"},
-	}
-	cfg := &config.Options{
-		UnifiedBootstrapMode:        config.UnifiedBootstrapCustom,
-		UnifiedBootstrapCustomPairs: []unifiedbootstrap.UnifiedGVKPair{pair},
-	}
+	// The registry is built from the hardcoded built-in default pairs (BuildRegistry) merged with
+	// eligible CSD; with an empty fake client the default core Snapshot pair resolves via the mapper.
+	cfg := &config.Options{}
 	p, err := NewProvider(cfg, mapper, cl, logr.Discard())
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -86,7 +80,7 @@ func TestProvider_CurrentNilBeforeRefresh(t *testing.T) {
 func TestProvider_ReplaceCurrentSwapsAtomically(t *testing.T) {
 	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	cfg := &config.Options{UnifiedBootstrapMode: config.UnifiedBootstrapEmpty}
+	cfg := &config.Options{}
 	p, err := NewProvider(cfg, mapper, cl, logr.Discard())
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -106,7 +100,7 @@ func TestProvider_ReplaceCurrentSwapsAtomically(t *testing.T) {
 func TestProvider_ConcurrentCurrentDuringReplaceCurrent(t *testing.T) {
 	mapper := snapshotRESTMapper(t)
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	cfg := &config.Options{UnifiedBootstrapMode: config.UnifiedBootstrapEmpty}
+	cfg := &config.Options{}
 	p, err := NewProvider(cfg, mapper, cl, logr.Discard())
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)

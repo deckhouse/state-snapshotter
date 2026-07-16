@@ -113,7 +113,7 @@ pseudo-version. `state-snapshotter/api` is always consumed via
   readiness waits. Defaults to `10m`.
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
-- `E2E_GC_TTL`: `snapshotRootOkTtl` applied for the GC spec. Defaults to `60s`.
+- `E2E_GC_TTL`: `snapshotTtlAfterDelete` applied for the GC spec. Defaults to `60s`.
 - `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-5 (full
   volume-data flow, backup download, and backup restore). Off by default (phases 1-2 only).
 - `E2E_CHILD_BRIDGE_FAILURE`: opt-in regression for the child-Snapshot terminal-failure

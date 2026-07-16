@@ -38,7 +38,7 @@ const (
 	// then its ObjectKeeper, so it must not share the phase-3 capture tree).
 	vdGcRootSnapshotName = "vol-tree-gc"
 
-	// vdGcLargeTTL is an explicitly large snapshotRootOkTtl so the durable content tree survives
+	// vdGcLargeTTL is an explicitly large snapshotTtlAfterDelete so the durable content tree survives
 	// source-namespace deletion for the whole spec window (the ObjectKeeper TTL countdown must not reclaim it
 	// out from under Spec 1); the teardown in Spec 2 is driven by deleting the ObjectKeeper directly, not by
 	// waiting out the TTL.
@@ -257,7 +257,7 @@ func assertTreeAlive(ctx context.Context, g Gomega, tree gcTree) {
 }
 
 // volumeDataGcSpecs registers the durable-teardown flow (env-gated by E2E_VOLUME_DATA, hard local-CSI
-// dependency): with a large snapshotRootOkTtl a data-bearing tree survives its source-namespace deletion
+// dependency): with a large snapshotTtlAfterDelete a data-bearing tree survives its source-namespace deletion
 // intact (every content keeps parent-protect naturally), and deleting the root ObjectKeeper — after
 // simulating the lost being-deleted stamp on the wired-ref VSCs — reclaims the whole tree including the
 // physical llvs, with no synthetic finalizer barrier anywhere.
@@ -282,10 +282,10 @@ func volumeDataGcSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Reading the current module snapshotRootOkTtl and registering its restore BEFORE changing it")
+			By("Reading the current module snapshotTtlAfterDelete and registering its restore BEFORE changing it")
 			mc, err := getResource(ctx, moduleConfigGVR, "", moduleName)
 			Expect(err).NotTo(HaveOccurred(), "read ModuleConfig")
-			prevTTL, prevTTLSet, _ = unstructured.NestedString(mc.Object, "spec", "settings", "snapshotRootOkTtl")
+			prevTTL, prevTTLSet, _ = unstructured.NestedString(mc.Object, "spec", "settings", "snapshotTtlAfterDelete")
 			DeferCleanup(func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 2*suiteCfg.moduleReadyTO+5*time.Minute)
 				defer ccancel()
@@ -299,7 +299,7 @@ func volumeDataGcSpecs() {
 				deleteNamespace(cctx, srcNS)
 			})
 
-			By("Setting a large snapshotRootOkTtl (" + vdGcLargeTTL + ") and waiting for the controller to roll out")
+			By("Setting a large snapshotTtlAfterDelete (" + vdGcLargeTTL + ") and waiting for the controller to roll out")
 			ttl := vdGcLargeTTL
 			Expect(patchModuleSnapshotRootOkTTL(ctx, &ttl)).To(Succeed())
 			Expect(storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)).To(Succeed())
