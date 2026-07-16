@@ -364,9 +364,59 @@ func cleanupNestedTestCluster() {
 
 // --- module / CSD readiness ------------------------------------------------
 
+// ensureModulesEnabled enables the modules this suite needs (idempotently: create-or-update each
+// module's ModuleConfig + ModulePullOverride at its env-pinned tag, in dependency order) so the suite
+// converges regardless of the cluster's starting state — a fresh alwaysCreateNew cluster, an
+// alwaysUseExisting one, or a cluster where a module happened to be disabled. Image tags come from
+// the standard <MODULE>_MODULE_PULL_OVERRIDE convention (default "main"), matching what the
+// cluster_config path would apply. It only enables; the WaitForModuleReady calls below do the waiting.
+func ensureModulesEnabled(ctx context.Context) error {
+	specs := []storagekube.ModuleSpec{
+		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
+		// The PoC module (demo controller + demo CRDs + demo CSDs) depends on state-snapshotter: its
+		// CSDs are CustomSnapshotDefinition (state-snapshotter.deckhouse.io group), so the core CSD CRD
+		// must exist first. The dependency is declared in-batch so the graph resolves. The demo domain
+		// deploys unconditionally (the module's only config setting is logLevel), so no Settings needed.
+		{Name: pocModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(pocModuleName), Dependencies: []string{moduleName}},
+	}
+	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
+		return fmt.Errorf("ensure required modules enabled: %w", err)
+	}
+	return nil
+}
+
+// moduleTagFromEnv returns a module's image tag from its <MODULE>_MODULE_PULL_OVERRIDE env var (the
+// module name upper-cased, every non-alphanumeric rune replaced with '_'), defaulting to "main".
+// Mirrors storage-e2e's per-module override convention so a runtime enable pins the same tag the
+// alwaysCreateNew cluster_config path would.
+func moduleTagFromEnv(moduleName string) string {
+	key := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r - ('a' - 'A')
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			return r
+		default:
+			return '_'
+		}
+	}, moduleName) + "_MODULE_PULL_OVERRIDE"
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return "main"
+}
+
 // waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
 // AccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
 func waitModuleAndCSDReady(ctx context.Context) error {
+	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
+	// The suite does not otherwise enable modules — it relies on storage-e2e applying
+	// tests/cluster_config.yml, which only happens on alwaysCreateNew. Enabling here (idempotently)
+	// lets an alwaysUseExisting run — or a cluster where a module was left disabled for any reason —
+	// converge instead of sitting in WaitForModuleReady until the timeout on a NotInstalled module.
+	if err := ensureModulesEnabled(ctx); err != nil {
+		return err
+	}
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
 	}

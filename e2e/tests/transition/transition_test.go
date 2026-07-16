@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -204,6 +205,13 @@ func TestSnapshotterTransition(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// Validate the module image-tag env vars first (before any provisioning): every one that is set
+	// must be a plain-ASCII tag matching mr<N>/pr<N>/main. This catches a prod v* tag (absent from
+	// the dev registry the nested cluster pulls) and — the real footgun — a tag typed in a non-Latin
+	// keyboard layout (e.g. the Cyrillic "ает" instead of "main"), which otherwise only surfaces
+	// minutes later as a wedged converge in a mid-run phase.
+	validateModuleTagEnvVars()
+
 	if strings.TrimSpace(os.Getenv("TEST_CLUSTER_CREATE_MODE")) == "" {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
@@ -260,6 +268,57 @@ func envTrue(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// moduleTagPattern is the set of image tags this suite accepts for its module ModulePullOverrides:
+// GitLab MR builds (mr<IID>), GitHub PR builds (pr<N>), or the main build. The nested cluster pulls
+// module images from the DEV registry, where builds land under exactly these tags — a prod v* tag
+// is not there, so it is rejected on purpose (fail fast, not on a later image pull).
+var moduleTagPattern = regexp.MustCompile(`^(mr[0-9]+|pr[0-9]+|main)$`)
+
+// moduleTagEnvVars are the image-tag / ModulePullOverride env vars the transition suite consumes.
+var moduleTagEnvVars = []string{
+	envSnapshotControllerTag,
+	envSvdmLegacyTag,
+	envSvdmTag,
+	envSdsLocalVolumeLegacyTag,
+	envSdsLocalVolumeOverride,
+	envStateSnapshotterOverride,
+	envStorageFoundationOverride,
+	"SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE",
+}
+
+// isASCII reports whether s contains only ASCII bytes. A value typed in a non-Latin keyboard layout
+// (e.g. the Cyrillic "ает") carries multi-byte UTF-8 runes and fails this check.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// validateModuleTagEnvVars fails the suite up front if any SET module image-tag env var is not a
+// plain-ASCII tag matching mr<N>/pr<N>/main. Presence of required vars is enforced separately by
+// requireEnv; unset optional vars default to "main" via tagFrom and are skipped here.
+func validateModuleTagEnvVars() {
+	var problems []string
+	for _, name := range moduleTagEnvVars {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
+		switch {
+		case !isASCII(v):
+			problems = append(problems, fmt.Sprintf("%s=%q contains non-ASCII characters — check the keyboard layout (a Latin tag typed in another layout?)", name, v))
+		case !moduleTagPattern.MatchString(v):
+			problems = append(problems, fmt.Sprintf("%s=%q must match one of: mr<N>, pr<N>, main (dev-registry image tags)", name, v))
+		}
+	}
+	if len(problems) > 0 {
+		Fail("invalid module image-tag env var(s):\n  - " + strings.Join(problems, "\n  - "))
 	}
 }
 

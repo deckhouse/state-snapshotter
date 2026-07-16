@@ -111,6 +111,12 @@ needs a single tag (its v0.2.0 build has no storage-foundation requirement, so i
 in phase B and is only guard-flipped by the phase-C enable — no retag). Everything else uses
 storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 
+> **Tag format is validated up front.** `BeforeSuite` rejects any set image-tag / MPO env var that
+> is not a plain-ASCII tag matching `mr<N>` / `pr<N>` / `main` (the dev-registry image tags). This
+> fails the run immediately with a clear message instead of wedging a mid-run phase — it catches a
+> prod `v*` tag (not in the dev registry) and, notably, a tag typed in a non-Latin keyboard layout
+> (e.g. the Cyrillic `ает` for `main`). Set these variables with an EN/Latin layout.
+
 | Variable | Type | Phase | Role |
 |---|---|---|---|
 | `E2E_RUN_TRANSITION` | scenario gate | all | must be `true`, else the whole suite is skipped |
