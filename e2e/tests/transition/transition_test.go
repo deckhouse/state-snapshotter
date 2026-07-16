@@ -27,6 +27,7 @@ package transition
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -34,7 +35,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -101,6 +101,13 @@ const (
 	workloadNS   = "transition-workload"
 	srcPVCName   = "src-data"
 	probePodName = "probe"
+
+	// two-owner migration-race fixtures (phase-C race leg; see the race section in helpers_test.go).
+	// raceImportName is the ACTIVE legacy DataImport re-seeded before the flip; raceImportPVCName is
+	// the target PVC its pvcTemplate names; racePVCName is the PVC seeded with the legacy finalizer.
+	raceImportName    = "race-import"
+	raceImportPVCName = "race-imported-data"
+	racePVCName       = "race-pvc"
 )
 
 var markerPath = "/mnt/" + srcPVCName + "/marker"
@@ -520,6 +527,41 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
 		})
 
+		It("re-seeds a legacy epoch (CRDs + active DataImport + PVC finalizer) to stage the two-owner migration race", func(ctx SpecContext) {
+			// The svdm-D1 025-migrate-legacy-crds hook is mirrored by an identical hook in
+			// storage-foundation (same OnBeforeHelm order, idempotent, gated on legacy-CRD presence):
+			// whichever module converges first migrates, the other must cleanly no-op. The first
+			// phase-C spec exercised the svdm hook alone; this leg re-creates the legacy epoch RIGHT
+			// BEFORE the flip, because enabling storage-foundation triggers a global converge that
+			// re-runs svdm's beforeHelm hooks too — so BOTH owners see the legacy CRDs in the same
+			// converge window. Which one wins varies per run; the next spec asserts the outcome
+			// winner-agnostically. Both hooks are transitional/expiring — drop this leg with them.
+			Expect(crdExists(ctx, "dataexports."+legacyGroup)).To(BeFalse(),
+				"the real legacy epoch must already be migrated before re-seeding the race one")
+			Expect(crdExists(ctx, "dataimports."+legacyGroup)).To(BeFalse(),
+				"the real legacy epoch must already be migrated before re-seeding the race one")
+
+			By("installing minimal legacy dataexports/dataimports CRDs (stand-ins for the pre-D1 svdm CRDs)")
+			createLegacyCRD(ctx, "DataExport", "dataexports")
+			createLegacyCRD(ctx, "DataImport", "dataimports")
+
+			// An ACTIVE legacy DataImport (no status yet => active): the winner must RE-CREATE it under
+			// the unified group with the spec mapped, not just delete it with the CRD. The legacy
+			// finalizer is seeded by hand — the pre-D1 controller that used to set it is gone.
+			By("creating an active legacy DataImport carrying the legacy finalizer")
+			ensureNamespace(ctx, workloadNS)
+			Expect(createLegacyDataImport(ctx, workloadNS, raceImportName, raceImportPVCName,
+				os.Getenv(envStorageClass), "1Gi")).To(Succeed())
+			addFinalizer(ctx, dataImportGVR(legacyGroup), workloadNS, raceImportName, legacyFinalizer)
+
+			// A PVC stuck with the legacy finalizer (storageClassName "" => stays Pending, so this leg
+			// runs with or without the data-plane env). The sweep must strip exactly the legacy
+			// finalizer; kubernetes.io/pvc-protection stays.
+			By("creating a PVC carrying the legacy finalizer")
+			createPVC(ctx, workloadNS, racePVCName, "", "1Gi")
+			addFinalizer(ctx, pvcGVR, workloadNS, racePVCName, legacyFinalizer)
+		})
+
 		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
 			// Capture the shared CRD UIDs RIGHT BEFORE sf is enabled. sf re-applies the CSI and unified
 			// CRDs (byte-for-byte copies) as it takes ownership; the flip must UPDATE them in place, so
@@ -549,6 +591,78 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(Equal(0),
 					"module %s must render no Deployments/Services once storage-foundation is enabled (guard)", m)
 			}
+		})
+
+		It("migrates the re-seeded legacy epoch through the two-owner race and stays converged", func(ctx SpecContext) {
+			// The flip in the previous spec ran the race: enabling storage-foundation triggered a
+			// global converge in which BOTH 025 hooks (svdm-D1 and storage-foundation) executed
+			// against the legacy epoch seeded two specs ago. Which hook won varies per run — every
+			// assertion below is winner-agnostic: it checks the shared migration contract's OUTCOME
+			// plus the loser's clean no-op (module health + outcome stability).
+			By("waiting for both legacy CRDs to be removed by whichever hook won the race")
+			pollUntil(ctx, "legacy CRDs removed by the migration race", 5*time.Minute,
+				func() bool {
+					return !crdExists(ctx, "dataexports."+legacyGroup) && !crdExists(ctx, "dataimports."+legacyGroup)
+				},
+				func() string {
+					return fmt.Sprintf("dataexports present=%v dataimports present=%v",
+						crdExists(ctx, "dataexports."+legacyGroup), crdExists(ctx, "dataimports."+legacyGroup))
+				})
+
+			By("asserting the active DataImport was re-created under the unified group with the mapped spec")
+			impGVR := dataImportGVR(unifiedGroup)
+			pollUntil(ctx, "race DataImport re-created under the unified group", 3*time.Minute,
+				func() bool { _, e := getUnstr(ctx, impGVR, workloadNS, raceImportName); return e == nil },
+				func() string { return "not on the unified group yet" })
+			migrated, err := getUnstr(ctx, impGVR, workloadNS, raceImportName)
+			Expect(err).NotTo(HaveOccurred())
+			mode, _, _ := unstructured.NestedString(migrated.Object, "spec", "mode")
+			Expect(mode).To(Equal("CreatePVC"), "migrated DataImport must get spec.mode=CreatePVC")
+			tmpl, found, _ := unstructured.NestedMap(migrated.Object, "spec", "pvcTemplate")
+			Expect(found).To(BeTrue(), "migrated DataImport must carry spec.pvcTemplate (hoisted out of targetRef)")
+			tmplName, _, _ := unstructured.NestedString(tmpl, "metadata", "name")
+			Expect(tmplName).To(Equal(raceImportPVCName), "pvcTemplate must be carried over verbatim")
+			_, found, _ = unstructured.NestedMap(migrated.Object, "spec", "targetRef")
+			Expect(found).To(BeFalse(), "migrated DataImport must not carry the legacy spec.targetRef")
+			Expect(migrated.GetFinalizers()).NotTo(ContainElement(legacyFinalizer),
+				"the unified counterpart must not inherit the legacy finalizer")
+			migratedUID := string(migrated.GetUID())
+
+			By("asserting the legacy finalizer was swept off every PVC")
+			leftover, err := pvcsWithFinalizer(ctx, legacyFinalizer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
+
+			By("asserting both owners stayed Ready after the race (the loser's no-op must not error-loop)")
+			for _, m := range []string{modSvdm, modStorageFoundation} {
+				Expect(storagekube.WaitForModuleReady(suiteCtx(), suiteRes.Kubeconfig, m, 3*time.Minute)).To(Succeed(),
+					"module %s must stay Ready after the migration race", m)
+			}
+
+			// Follow-up converges are no-ops. The flip itself already re-converged both modules
+			// several times after the migration (module Ready transitions, the Helm-guard re-render of
+			// the legacy modules) — each re-run saw no legacy CRDs and had to no-op. Hold the outcome
+			// stable for another window: the CRDs must stay gone and the migrated CR must keep its UID
+			// (a re-run that wrongly re-migrated would delete/recreate or duplicate it).
+			By("holding the migrated state stable (no-op on repeated converges)")
+			Consistently(func() bool {
+				if crdExists(ctx, "dataexports."+legacyGroup) || crdExists(ctx, "dataimports."+legacyGroup) {
+					return false
+				}
+				cur, gerr := getUnstr(ctx, impGVR, workloadNS, raceImportName)
+				return gerr == nil && string(cur.GetUID()) == migratedUID
+			}).WithTimeout(45*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+				"legacy CRDs must stay gone and the migrated DataImport must keep its identity")
+
+			By("deleting the swept PVC — it must go away cleanly, not hang in Terminating")
+			deletePVCAndWaitGone(ctx, workloadNS, racePVCName, 2*time.Minute)
+
+			// Teardown so no in-flight import crosses into phase D: the CR first (the controller
+			// releases its finalizers), then the import target PVC the controller may have created
+			// from pvcTemplate (it survives the CR by design — it is the import's product).
+			By("tearing down the migrated DataImport and its target PVC")
+			deleteCRAndWaitGone(ctx, impGVR, workloadNS, raceImportName, 3*time.Minute)
+			deletePVCAndWaitGone(ctx, workloadNS, raceImportPVCName, 2*time.Minute)
 		})
 
 		It("fires the deprecation alerts for both legacy modules", func(ctx SpecContext) {

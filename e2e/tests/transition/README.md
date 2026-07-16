@@ -18,7 +18,10 @@ already enabled — the opposite of what this scenario needs. All module lifecyc
   firing deprecation alerts themselves** (built-in `ModuleIsDeprecated` + the custom
   `D8*ModuleDeprecated` for both modules);
   the svdm legacy→v0.2.0 migration hook (CR migration to the new API group — asserted on a real
-  in-flight `DataExport` — legacy CRD removal, legacy finalizer sweep incl. PVCs) plus
+  in-flight `DataExport` — legacy CRD removal, legacy finalizer sweep incl. PVCs) **and the
+  two-owner migration race** (the same hook is mirrored in storage-foundation; a legacy epoch is
+  re-seeded right before the flip so both 025 hooks see it in the same converge window — whichever
+  wins must migrate, the other must cleanly no-op) plus
   **svdm-D1-standalone serving a new-group export before the flip** and **its clean teardown**
   (deleting the migrated export recovers the source PVC from `Lost`); CSI snapshot / DataExport-
   DataImport / restore data integrity across the flip, **a full new-group DataExport+DataImport
@@ -171,8 +174,16 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   **while storage-foundation is still off**, prove svdm-D1-standalone serves a fresh new-group
   DataExport (download + checksum) and **tear down the migrated export cleanly** — deleting it must
   recover the source PVC from `Lost` to `Bound` (svdm restores the reassigned PV), so no live export
-  crosses the flip. Then enable `state-snapshotter` → `storage-foundation` **without disabling** the
-  legacy modules; assert both legacy modules render no workload (all Deployments/Services gone), and
+  crosses the flip. Then **re-seed a legacy epoch** for the two-owner migration race (minimal legacy
+  CRDs standing in for the pre-D1 ones + an ACTIVE legacy `DataImport` carrying the legacy finalizer
+  + a Pending PVC with the legacy finalizer — this leg needs no data-plane env). Then enable
+  `state-snapshotter` → `storage-foundation` **without disabling** the legacy modules — the enable
+  doubles as the race trigger: it re-converges svdm-D1 too, so BOTH 025 migration hooks run against
+  the seeded epoch in the same converge window. After the flip, assert the race outcome
+  winner-agnostically: legacy CRDs gone, the `DataImport` re-created on the unified group
+  (`mode: CreatePVC` + `pvcTemplate` hoisted, `targetRef` dropped), the legacy finalizer swept (the
+  swept PVC then deletes cleanly), both modules stay Ready (the loser's no-op must not error-loop),
+  and the outcome holds stable across follow-up converges. Also assert both legacy modules render no workload (all Deployments/Services gone), and
   that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
   `D8*ModuleDeprecated`, for both modules). snapshot-controller needs no retag — it is already the
   Deprecated v0.2.0 build from phase B; enabling storage-foundation just flips it from full workload

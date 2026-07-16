@@ -25,7 +25,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1014,4 +1013,105 @@ func waitPVCPhase(ctx context.Context, ns, name string, want corev1.PersistentVo
 	pollUntil(ctx, fmt.Sprintf("PVC %s/%s == %s", ns, name, want), timeout,
 		func() bool { return pvcPhase(ctx, ns, name) == string(want) },
 		func() string { return "phase=" + pvcPhase(ctx, ns, name) })
+}
+
+// --- two-owner migration race (phase C race leg) -----------------------------
+//
+// The svdm 025-migrate-legacy-crds hook is mirrored by an identical storage-foundation hook: both
+// run OnBeforeHelm, are idempotent, and gate on the presence of the legacy CRDs, so whichever
+// module converges first migrates and the other must cleanly no-op. The race leg re-seeds a legacy
+// epoch AFTER the first phase-C spec migrated the real one, so that enabling storage-foundation —
+// which triggers a global converge re-running svdm's beforeHelm hooks too — makes BOTH owners see
+// the legacy CRDs in the same converge window. Both hooks are transitional/expiring; drop this leg
+// together with them.
+
+// createLegacyCRD installs a minimal stand-in for a pre-D1 svdm CRD (namespaced, v1alpha1,
+// x-kubernetes-preserve-unknown-fields) and waits until it is Established. Minimal is enough: the
+// migration hooks are schema-agnostic — they list the CRs unstructured, read/patch metadata and
+// spec, and delete the CRD; nothing else watches the legacy group at this point (svdm is already
+// the D1 build).
+func createLegacyCRD(ctx context.Context, kind, plural string) {
+	GinkgoHelper()
+	name := plural + "." + legacyGroup
+	crd := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apiextensions.k8s.io/v1",
+		"kind":       "CustomResourceDefinition",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec": map[string]interface{}{
+			"group": legacyGroup,
+			"scope": "Namespaced",
+			"names": map[string]interface{}{
+				"plural":   plural,
+				"singular": strings.ToLower(kind),
+				"kind":     kind,
+				"listKind": kind + "List",
+			},
+			"versions": []interface{}{map[string]interface{}{
+				"name":    "v1alpha1",
+				"served":  true,
+				"storage": true,
+				"schema": map[string]interface{}{
+					"openAPIV3Schema": map[string]interface{}{
+						"type":                                 "object",
+						"x-kubernetes-preserve-unknown-fields": true,
+					},
+				},
+			}},
+		},
+	}}
+	_, err := suiteDyn.Resource(crdGVR).Create(ctx, crd, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred(), "create legacy CRD %s", name)
+	}
+	pollUntil(ctx, fmt.Sprintf("legacy CRD %s Established", name), 2*time.Minute,
+		func() bool { return crdEstablished(ctx, name) },
+		func() string { return "not Established yet" })
+}
+
+// addFinalizer appends a finalizer to a namespaced object (PVC or CR) via the dynamic client,
+// retrying on write conflicts. Used to seed the legacy storage-manager finalizer the migration
+// hooks must sweep — there is no legacy controller left to put it there for real.
+func addFinalizer(ctx context.Context, gvr schema.GroupVersionResource, ns, name, finalizer string) {
+	GinkgoHelper()
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		obj, err := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred(), "get %s %s/%s to add finalizer", gvr.Resource, ns, name)
+		for _, f := range obj.GetFinalizers() {
+			if f == finalizer {
+				return
+			}
+		}
+		obj.SetFinalizers(append(obj.GetFinalizers(), finalizer))
+		_, lastErr = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+		if lastErr == nil {
+			return
+		}
+		if !apierrors.IsConflict(lastErr) {
+			break
+		}
+	}
+	Expect(lastErr).NotTo(HaveOccurred(), "add finalizer %s to %s %s/%s", finalizer, gvr.Resource, ns, name)
+}
+
+// deletePVCAndWaitGone deletes a PVC and blocks until it is fully gone — the "deletes cleanly"
+// proof: with the legacy finalizer swept, nothing may hold the PVC in Terminating.
+func deletePVCAndWaitGone(ctx context.Context, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "delete PVC %s/%s", ns, name)
+	}
+	pollUntil(ctx, fmt.Sprintf("PVC %s/%s deleted", ns, name), timeout,
+		func() bool {
+			_, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+			return apierrors.IsNotFound(gerr)
+		},
+		func() string {
+			pvc, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+			if gerr != nil {
+				return fmt.Sprintf("get err=%v", gerr)
+			}
+			return "still present, finalizers=" + fmt.Sprint(pvc.Finalizers)
+		})
 }
