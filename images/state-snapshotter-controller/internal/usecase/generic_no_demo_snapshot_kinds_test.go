@@ -24,8 +24,10 @@ import (
 	"testing"
 )
 
-// Demo snapshot CRD identifiers must not appear in non-test .go sources: generic usecase stays
-// abstract (GVKRegistry + unstructured); demo domain lives under domain controllers and integration tests.
+// Demo snapshot CRD identifiers must not appear in non-test .go sources: generic layers stay abstract
+// (GVKRegistry + unstructured), and core carries no domain-specific kind names. The demo domain itself
+// lives in the sds-unified-snapshots-poc module; test files may keep demo kind names as synthetic
+// stand-ins (hence the _test.go exclusion below).
 func TestProductionSourcesDoNotNameDemoSnapshotKinds(t *testing.T) {
 	t.Helper()
 	forbidden := []string{

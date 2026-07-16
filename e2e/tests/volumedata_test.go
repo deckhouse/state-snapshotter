@@ -770,7 +770,7 @@ func volumeDataSpecs() {
 			// INV-CONTENT-WRITER-1: the content exists + is bound because the BINDER created it, not the ns domain.
 			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
 
-			// The orphan-VS ADOPTION pipeline (domain-controller managed latch -> binder shell -> aggregator
+			// The orphan-VS ADOPTION pipeline (VS-domain controller's managed latch -> binder shell -> aggregator
 			// manifest+data legs -> Ready mirror) is a multi-controller convergence, NOT pure snapshot
 			// creation, so every wait is budgeted at the generous snapshotReadyTO — identical to the parallel
 			// user-VS pipeline in volumesnapshot_domain_test.go. captureReadyTO (a few tens of seconds, sized
