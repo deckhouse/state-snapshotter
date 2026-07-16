@@ -57,12 +57,19 @@ const (
 	//     extended (storage-foundation) CRDs — no legacy/handoff split, no phase-C retag.
 	//   - svdm: two slots — the legacy old-group image (phase B) and the v0.2.0/D1 new-group image the
 	//     phase-C migration retags to.
-	envSnapshotControllerTag = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
-	envSvdmLegacyTag         = "E2E_TRANSITION_SVDM_LEGACY_TAG"
-	envSvdmTag               = "E2E_TRANSITION_SVDM_TAG"
+	//   - sds-local-volume: two slots as well. Its current build depends on storage-foundation (absent
+	//     in phase B), so phase B enables a LEGACY image that depends on snapshot-controller
+	//     (E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG) and phase C retags it to the storage-foundation-
+	//     integrated build (the standard SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE) after the flip.
+	envSnapshotControllerTag   = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
+	envSvdmLegacyTag           = "E2E_TRANSITION_SVDM_LEGACY_TAG"
+	envSvdmTag                 = "E2E_TRANSITION_SVDM_TAG"
+	envSdsLocalVolumeLegacyTag = "E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG"
 
 	// Standard storage-e2e <MODULE>_MODULE_PULL_OVERRIDE vars for modules the test enables at
 	// runtime (they are preseeded disabled in cluster_config.yml, so bootstrap does not read them).
+	// For sds-local-volume this is the phase-C (storage-foundation-integrated) target the flip retags
+	// to; its phase-B legacy image comes from envSdsLocalVolumeLegacyTag above.
 	envStateSnapshotterOverride  = "STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE"
 	envStorageFoundationOverride = "STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE"
 	envSdsLocalVolumeOverride    = "SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE"
@@ -111,6 +118,12 @@ const (
 )
 
 var markerPath = "/mnt/" + srcPVCName + "/marker"
+
+// sdsLocalVolumePhaseCTag holds the phase-C (storage-foundation-integrated) sds-local-volume tag,
+// captured in BeforeSuite before SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE is repointed at the legacy
+// tag for phase B (so the storage-e2e testkit's lazy sds-local-volume enable uses the legacy image).
+// The phase-C retag restores the var to this value and retags to it.
+var sdsLocalVolumePhaseCTag string
 
 var (
 	suiteRes         *cluster.TestClusterResources
@@ -196,6 +209,21 @@ var _ = BeforeSuite(func() {
 	}
 	// Fail fast before provisioning if any required image-tag var is missing.
 	requireEnv(envSnapshotControllerTag, envSvdmLegacyTag, envSvdmTag)
+	// sds-local-volume is only enabled for the data-plane steps, and its phase-B legacy image has no
+	// safe default ("main" now depends on storage-foundation, which is disabled in phase B), so it is
+	// required only when the data plane is exercised.
+	if dataPlaneEnabled() {
+		requireEnv(envSdsLocalVolumeLegacyTag)
+		// The storage-e2e testkit (EnsureDefaultStorageClass, phase B) ALSO enables sds-local-volume
+		// and reads its tag from SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE — so if that var held the
+		// phase-C (storage-foundation-dependent) tag, the testkit would retag sds-local-volume to it
+		// mid-phase-B and Deckhouse would deny it ("dependency 'storage-foundation' is disabled").
+		// Repoint the var at the legacy tag for the whole legacy phase; capture the phase-C target
+		// first and restore+retag to it after the flip (phase C).
+		sdsLocalVolumePhaseCTag = tagFrom(envSdsLocalVolumeOverride)
+		Expect(os.Setenv(envSdsLocalVolumeOverride, tagFrom(envSdsLocalVolumeLegacyTag))).To(Succeed(),
+			"repoint %s at the legacy tag for phase B", envSdsLocalVolumeOverride)
+	}
 
 	suiteRes = cluster.CreateOrConnectToTestCluster()
 	if suiteRes == nil || suiteRes.Kubeconfig == nil {
@@ -328,18 +356,26 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 	Context("Phase B: legacy stack (old group)", func() {
 		It("enables snapshot-controller, svdm(legacy) and sds-local-volume", func() {
 			// One batch: the framework brings snapshot-controller and svdm up concurrently (no
-			// interdependency) and sds-local-volume after snapshot-controller (its v0.4.x dependency,
+			// interdependency) and sds-local-volume after snapshot-controller (its legacy dependency,
 			// declared in-batch so the graph resolves — a separate call would fail graph-build).
 			// snapshot-controller runs its single deprecated v0.2.0 build (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG):
 			// no storage-foundation requirement, so it installs standalone here and ships the extended
 			// (storage-foundation) CRDs — the "vanilla controller + extended CRDs" combination the next
 			// spec verifies. svdm runs its legacy old-group image (E2E_TRANSITION_SVDM_LEGACY_TAG); the
 			// phase-C migration retags it to the D1 image.
-			enableModules(
+			specs := []storagekube.ModuleSpec{
 				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerTag)),
 				moduleSpec(modSvdm, tagFrom(envSvdmLegacyTag)),
-				moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeOverride), modSnapshotController),
-			)
+			}
+			// sds-local-volume is the CSI backend for the data-plane steps only, so enable it just for
+			// those runs. Use its LEGACY image (E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG), which
+			// depends on snapshot-controller: the current build depends on storage-foundation, disabled
+			// in phase B, and would be webhook-denied ("dependency 'storage-foundation' is disabled").
+			// Phase C retags it to the storage-foundation-integrated build after the flip.
+			if dataPlaneEnabled() {
+				specs = append(specs, moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeLegacyTag), modSnapshotController))
+			}
+			enableModules(specs...)
 		})
 
 		It("creates a PVC + pod, writes deterministic data and a CSI VolumeSnapshot", func(ctx SpecContext) {
@@ -679,6 +715,24 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "")
 			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm)
 			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "")
+		})
+
+		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(ctx SpecContext) {
+			if !dataPlaneEnabled() {
+				Skip("sds-local-volume is only enabled for the data-plane steps (see phase B)")
+			}
+			// In phase B sds-local-volume ran its legacy image (depends on snapshot-controller). Its
+			// current image depends on storage-foundation, now enabled by the flip, so retag the live
+			// MPO to the phase-C target (SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE, default "main") and wait
+			// Ready — the sds-local-volume analog of the svdm legacy->D1 retag. Do this LAST in phase C,
+			// after the migration race and alert assertions have observed the flip's converge, and
+			// before the phase-D data steps that exercise the storage-foundation-integrated CSI path
+			// (unified DataImport populator, VRR-based restore).
+			//
+			// Restore SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE (repointed at the legacy tag in BeforeSuite
+			// so the phase-B testkit used it) back to the captured phase-C target before retagging.
+			Expect(os.Setenv(envSdsLocalVolumeOverride, sdsLocalVolumePhaseCTag)).To(Succeed())
+			enableModule(modSdsLocalVolume, sdsLocalVolumePhaseCTag)
 		})
 	})
 

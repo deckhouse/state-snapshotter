@@ -102,11 +102,14 @@ STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr74 STORAGE_FOUNDATION_MODULE_PULL_OVERR
 ## Environment variables
 
 The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
-the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded. `snapshot-controller`
-and `svdm` each need **two scenario** variables — a phase-B legacy image and a phase-C handoff image
-the test retags to — because the handoff builds gate on modules absent in phase B (snapshot-controller
-v0.2.0 requires `storage-foundation >= 1.0.0`; svdm v0.2.0/D1 moves to the new API group). The rest
-use storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
+the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded. `svdm` and
+`sds-local-volume` each need **two** image slots — a phase-B legacy image and a phase-C image the
+test retags to — because their current builds gate on something absent in phase B (svdm v0.2.0/D1
+moves to the new API group; sds-local-volume's current build requires `storage-foundation`, which is
+disabled in phase B, whereas its legacy build requires only `snapshot-controller`). `snapshot-controller`
+needs a single tag (its v0.2.0 build has no storage-foundation requirement, so it installs standalone
+in phase B and is only guard-flipped by the phase-C enable — no retag). Everything else uses
+storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 
 | Variable | Type | Phase | Role |
 |---|---|---|---|
@@ -114,8 +117,9 @@ use storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 | `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE` | standard | A (bootstrap) | sds-node-configurator image |
 | `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller **v0.2.0** build (`Deprecated` + `D8SnapshotControllerModuleDeprecated` alert + extended storage-foundation CRDs). ONE tag: it has no storage-foundation requirement, so it installs standalone in phase B (no legacy/handoff split, no phase-C retag). Phase B asserts the vanilla controller works against the extended CRDs |
 | `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B | svdm image on the OLD `storage.deckhouse.io` group (pre-D1) |
-| `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | B | sds-local-volume image (enabled after snapshot-controller) |
+| `E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG` | scenario | B | sds-local-volume **legacy** image that depends on `snapshot-controller` (NOT storage-foundation). Required only when the data plane is enabled (sds-local-volume is the CSI backend for the data-plane steps); the current build requires storage-foundation and would be webhook-denied in phase B |
 | `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
+| `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | C | sds-local-volume storage-foundation-integrated image — MPO is retagged to this after the flip (default `main`). NOTE: the suite repoints this var at the legacy tag for phase B (the storage-e2e StorageClass testkit reads it when it lazily enables sds-local-volume), then restores it here — so during phase B its effective value is the legacy tag, by design |
 | `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` | standard | C | state-snapshotter image (new stack) |
 | `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` | standard | C | storage-foundation image (new stack) |
 | `E2E_TRANSITION_STORAGE_CLASS` | scenario | B–D | snapshot-capable StorageClass for the data-plane PVCs; **unset ⇒ all data-plane steps are skipped** |
@@ -136,12 +140,16 @@ export SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE="main"
 # standalone here; ONE tag, no phase-C retag.
 export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="pr<N of the snapshot-controller v0.2.0 PR>"
 export E2E_TRANSITION_SVDM_LEGACY_TAG="<dev tag of a pre-D1 svdm build>"
-export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="main"
+# sds-local-volume legacy image (depends on snapshot-controller, NOT storage-foundation). Required
+# only when the data plane is enabled (see below). Its current build requires storage-foundation and
+# would be webhook-denied in phase B.
+export E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG="<dev tag of an sf-independent sds-local-volume build>"
 
 # Phase C (migrate svdm + flip to the new stack):
 export E2E_TRANSITION_SVDM_TAG="pr<N>"                        # svdm D1 branch build
 export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE="pr<N>"
 export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE="pr<N>"
+export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="pr<N>"          # sf-integrated build; retagged after the flip
 
 # Data-plane (needed to exercise PVC/VS/export/import/restore; unset ⇒ those steps are skipped):
 export E2E_TRANSITION_STORAGE_CLASS="e2e-thin"
@@ -161,7 +169,9 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   snapshot-stack workloads/namespaces).
 - **B — legacy stack:** enable `snapshot-controller` (its single **v0.2.0** build — Deprecated, no
   storage-foundation requirement, so it installs **standalone** and ships the extended sf CRDs) then
-  `svdm` (legacy image) and `sds-local-volume`; create a PVC + pod, write deterministic data
+  `svdm` (legacy image) and — only when the data plane is enabled — `sds-local-volume` on its
+  **legacy image** (`E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG`, depends on `snapshot-controller`,
+  NOT storage-foundation; the current build would be webhook-denied here); create a PVC + pod, write deterministic data
   (checksum), create a CSI `VolumeSnapshot` and wait ready+bound. This doubles as the **"vanilla
   controller + extended CRDs" check**: assert the served VolumeSnapshot CRD carries `spec.mode`, that
   the API server defaulted the VS to `mode=Capture`, and that the bundled vanilla external-snapshotter
@@ -187,7 +197,10 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
   `D8*ModuleDeprecated`, for both modules). snapshot-controller needs no retag — it is already the
   Deprecated v0.2.0 build from phase B; enabling storage-foundation just flips it from full workload
-  to alert-only via the guard.
+  to alert-only via the guard. Finally (data plane only), **retag `sds-local-volume`** legacy→
+  `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` (the storage-foundation-integrated build) now that
+  storage-foundation is up — the sds-local-volume analog of the svdm legacy→D1 retag, so the phase-D
+  data steps run against the sf-integrated CSI path.
 - **D — invariants:** every shared CRD (CSI `volumesnapshots`/`…contents`/`…classes` +
   unified `dataexports`/`dataimports.storage-foundation.deckhouse.io`) stays **Established with the
   same UID captured just before the flip** — proving the handoff re-applies them in place, not
