@@ -357,7 +357,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			ensureNamespace(ctx, workloadNS)
 
 			createPVC(ctx, workloadNS, srcPVCName, os.Getenv(envStorageClass), "1Gi")
-			createProbePod(ctx, workloadNS, probePodName, probeImage(), srcPVCName)
+			createProbePod(ctx, probePodName, probeImage(), srcPVCName)
 
 			var err error
 			sourceChecksum, err = writeMarkerChecksum(ctx, workloadNS, probePodName, "probe", markerPath)
@@ -406,14 +406,14 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 			// DataExport the source PVC on the LEGACY group/schema; wait for status.url + status.ca.
 			Expect(createLegacyDataExport(ctx, workloadNS, "export-pvc", "PersistentVolumeClaim", srcPVCName)).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), workloadNS, "export-pvc", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), "export-pvc")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(url).NotTo(BeEmpty())
 			Expect(caB64).NotTo(BeEmpty())
 
 			// Download the marker file (PVC root) and confirm its checksum matches the source.
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "downloaded marker checksum must match the source")
 		})
@@ -426,7 +426,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			By("creating the legacy DataImport and waiting for the importer to publish status.url")
 			// DataImport (legacy schema, CreatePVC via targetRef.pvcTemplate) → importer publishes url.
 			Expect(createLegacyDataImport(ctx, workloadNS, "import-di", "imported-data", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), "import-di")
 			Expect(err).NotTo(HaveOccurred())
 
 			By("uploading the marker over the svdm HTTP API and signalling finished")
@@ -441,8 +441,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			waitImportComplete(ctx, legacyGroup, workloadNS, "import-di", "imported-data", podRunningTimeout())
 
 			By("mounting imported-data and verifying the checksum")
-			createProbePod(ctx, workloadNS, "probe-imported", probeImage(), "imported-data")
-			got, err := checksumFile(ctx, workloadNS, "probe-imported", "probe", "/mnt/imported-data/marker")
+			createProbePod(ctx, "probe-imported", probeImage(), "imported-data")
+			got, err := checksumFile(ctx, "probe-imported", "probe", "/mnt/imported-data/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "imported marker checksum must match the source")
 		})
@@ -452,8 +452,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				Skip("data-plane steps skipped (see previous spec)")
 			}
 			createPVCFromSnapshot(ctx, workloadNS, "restored-pvc", os.Getenv(envStorageClass), vsName, "1Gi")
-			createProbePod(ctx, workloadNS, "probe-restored", probeImage(), "restored-pvc")
-			got, err := checksumFile(ctx, workloadNS, "probe-restored", "probe", "/mnt/restored-pvc/marker")
+			createProbePod(ctx, "probe-restored", probeImage(), "restored-pvc")
+			got, err := checksumFile(ctx, "probe-restored", "probe", "/mnt/restored-pvc/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "CSI-restored marker checksum must match the source")
 		})
@@ -511,19 +511,19 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
 			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
 			Expect(createUnifiedDataExport(ctx, workloadNS, "export-d1", "PersistentVolumeClaim", "restored-pvc")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), "export-d1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-d1")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-d1")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-d1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "svdm-D1 standalone must serve the new-group export")
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-d1")
 
 			// (b) Tear down the MIGRATED in-flight export under the D1 controller (still standalone), so
 			// no live export is carried across the flip. Deleting it must remove the CR (finalizer
 			// released) AND recover the source PVC: svdm restores the reassigned PV, so src-data must
 			// return from Lost to Bound. This is the clean-teardown proof, not a lingering artifact.
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-pvc", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-pvc")
 			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
 		})
 
@@ -661,7 +661,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// releases its finalizers), then the import target PVC the controller may have created
 			// from pvcTemplate (it survives the CR by design — it is the import's product).
 			By("tearing down the migrated DataImport and its target PVC")
-			deleteCRAndWaitGone(ctx, impGVR, workloadNS, raceImportName, 3*time.Minute)
+			deleteCRAndWaitGone(ctx, impGVR, raceImportName)
 			deletePVCAndWaitGone(ctx, workloadNS, raceImportPVCName, 2*time.Minute)
 		})
 
@@ -674,12 +674,11 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			//     effect;
 			//   - custom D8<Name>ModuleDeprecated (vector(1), severity 9) — proves the deprecation-alert
 			//     template renders (svdm's under the reverse "sf enabled" guard, snapc's always-on).
-			// Alert eval lags a scrape, so wait.
-			const alertTimeout = 6 * time.Minute
-			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController, alertTimeout)
-			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "", alertTimeout)
-			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm, alertTimeout)
-			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "", alertTimeout)
+			// Alert eval lags a scrape, so expectAlertFiring waits at the package-level alertTimeout.
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController)
+			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "")
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm)
+			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "")
 		})
 	})
 
@@ -741,8 +740,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			}
 			// The legacy plain-CSI snapshot must remain restorable under the new stack.
 			createPVCFromSnapshot(ctx, workloadNS, "restored-postflip", os.Getenv(envStorageClass), vsName, "1Gi")
-			createProbePod(ctx, workloadNS, "probe-postflip", probeImage(), "restored-postflip")
-			got, err := checksumFile(ctx, workloadNS, "probe-postflip", "probe", "/mnt/restored-postflip/marker")
+			createProbePod(ctx, "probe-postflip", probeImage(), "restored-postflip")
+			got, err := checksumFile(ctx, "probe-postflip", "probe", "/mnt/restored-postflip/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "post-flip CSI restore from the legacy VS must match the source")
 		})
@@ -754,7 +753,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// A brand-new PVC + CSI VolumeSnapshot created after the flip must reach ready+bound —
 			// i.e. the storage-foundation snapshot-controller now services CSI snapshots.
 			createPVC(ctx, workloadNS, "new-pvc", os.Getenv(envStorageClass), "1Gi")
-			createProbePod(ctx, workloadNS, "probe-new", probeImage(), "new-pvc")
+			createProbePod(ctx, "probe-new", probeImage(), "new-pvc")
 			_, err := writeMarkerChecksum(ctx, workloadNS, "probe-new", "probe", "/mnt/new-pvc/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(createCSIVolumeSnapshot(ctx, workloadNS, "new-snap", os.Getenv(envVSClass), "new-pvc")).To(Succeed())
@@ -781,22 +780,22 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 			By("exporting new-pvc over the unified group (served by storage-foundation)")
 			Expect(createUnifiedDataExport(ctx, workloadNS, "export-sf", "PersistentVolumeClaim", "new-pvc")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), "export-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-sf")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-sf")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "storage-foundation must serve the unified export after the flip")
 
 			By("importing over the unified group into a fresh PVC (served by storage-foundation)")
 			Expect(createUnifiedDataImport(ctx, workloadNS, "import-sf", "imported-sf", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			iurl, icaB64, err := crStatusURLCA(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 5*time.Minute)
+			iurl, icaB64, err := crStatusURLCA(ctx, dataImportGVR(unifiedGroup), "import-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmUpload(ctx, workloadNS, iurl, icaB64, "/tmp/marker-sf", "marker")).To(Succeed())
 			waitImportComplete(ctx, unifiedGroup, workloadNS, "import-sf", "imported-sf", podRunningTimeout())
 
-			createProbePod(ctx, workloadNS, "probe-sf", probeImage(), "imported-sf")
-			got, err = checksumFile(ctx, workloadNS, "probe-sf", "probe", "/mnt/imported-sf/marker")
+			createProbePod(ctx, "probe-sf", probeImage(), "imported-sf")
+			got, err = checksumFile(ctx, "probe-sf", "probe", "/mnt/imported-sf/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "unified import under storage-foundation must match the source")
 
@@ -805,9 +804,9 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// export must remove the CR AND recover new-pvc to Bound. Also drop the finished DataImport
 			// CR (its target PVC imported-sf stays Bound — that is the delivered result). Mirrors the
 			// phase-C teardown, so a kept cluster is left clean instead of with a stale in-flight export.
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-sf")
 			waitPVCPhase(ctx, workloadNS, "new-pvc", corev1.ClaimBound, 3*time.Minute)
-			deleteCRAndWaitGone(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataImportGVR(unifiedGroup), "import-sf")
 		})
 	})
 

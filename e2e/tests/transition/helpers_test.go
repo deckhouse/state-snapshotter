@@ -214,14 +214,17 @@ func writeMarkerChecksum(ctx context.Context, ns, pod, container, path string) (
 	return execSh(ctx, ns, pod, container, script)
 }
 
-// checksumFile returns the sha256 of a file inside the pod.
-func checksumFile(ctx context.Context, ns, pod, container, path string) (string, error) {
-	return execSh(ctx, ns, pod, container, fmt.Sprintf("sha256sum %s | awk '{print $1}'", path))
+// checksumFile returns the sha256 of a file inside a pod in the transition workload namespace
+// (the whole suite operates in the single workloadNS).
+func checksumFile(ctx context.Context, pod, container, path string) (string, error) {
+	return execSh(ctx, workloadNS, pod, container, fmt.Sprintf("sha256sum %s | awk '{print $1}'", path))
 }
 
-// createProbePod creates a sleeping pod mounting the given PVCs at /mnt/<pvc> and waits for Running.
-// image must provide `sh`, `sha256sum` and (for the svdm HTTP steps) `curl`.
-func createProbePod(ctx context.Context, ns, name, image string, pvcs ...string) {
+// createProbePod creates a sleeping pod in the transition workload namespace mounting the given PVCs
+// at /mnt/<pvc> and waits for Running. image must provide `sh`, `sha256sum` and (for the svdm HTTP
+// steps) `curl`.
+func createProbePod(ctx context.Context, name, image string, pvcs ...string) {
+	ns := workloadNS
 	GinkgoHelper()
 	var mounts []corev1.VolumeMount
 	var volumes []corev1.Volume
@@ -738,8 +741,15 @@ func createHTTPClientPod(ctx context.Context, ns, name, sa string) {
 	}, 5*time.Minute, pollInterval).Should(Equal(corev1.PodRunning), "http client pod Running")
 }
 
-// crStatusURLCA reads status.url and status.ca (base64) from a DataExport/DataImport CR.
-func crStatusURLCA(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) (url, caB64 string, err error) {
+// crStatusTimeout bounds the wait for a DataExport/DataImport to publish status.url/status.ca (the
+// controller has to provision the exporter/importer endpoint behind it).
+const crStatusTimeout = 5 * time.Minute
+
+// crStatusURLCA reads status.url and status.ca (base64) from a DataExport/DataImport CR in the
+// transition workload namespace.
+func crStatusURLCA(ctx context.Context, gvr schema.GroupVersionResource, name string) (url, caB64 string, err error) {
+	ns := workloadNS
+	timeout := crStatusTimeout
 	url, err = waitStatusString(ctx, gvr, ns, name, timeout, "url")
 	if err != nil {
 		return "", "", err
@@ -927,10 +937,14 @@ func firingAlertNames(ctx context.Context) string {
 	return strings.Join(names, ",")
 }
 
+// alertTimeout bounds every ClusterAlert-firing wait: alert evaluation lags a Prometheus scrape, so
+// the budget is deliberately generous.
+const alertTimeout = 6 * time.Minute
+
 // expectAlertFiring blocks until a ClusterAlert (alertName, optional moduleLabel) is firing, logging
-// the currently-firing set each tick. Alert evaluation lags a Prometheus scrape, so callers give it
-// a generous timeout.
-func expectAlertFiring(ctx context.Context, alertName, moduleLabel string, timeout time.Duration) {
+// the currently-firing set each tick.
+func expectAlertFiring(ctx context.Context, alertName, moduleLabel string) {
+	timeout := alertTimeout
 	GinkgoHelper()
 	what := "ClusterAlert " + alertName
 	if moduleLabel != "" {
@@ -984,9 +998,14 @@ func createUnifiedDataImport(ctx context.Context, ns, name, pvcName, storageClas
 	})
 }
 
-// deleteCRAndWaitGone deletes a namespaced CR and blocks until it is fully gone (finalizers
-// released). Used to tear down DataExports so the reassigned source PV is recovered.
-func deleteCRAndWaitGone(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) {
+// crDeleteTimeout bounds the wait for a deleted CR to fully disappear (finalizer release).
+const crDeleteTimeout = 3 * time.Minute
+
+// deleteCRAndWaitGone deletes a CR in the transition workload namespace and blocks until it is fully
+// gone (finalizers released). Used to tear down DataExports so the reassigned source PV is recovered.
+func deleteCRAndWaitGone(ctx context.Context, gvr schema.GroupVersionResource, name string) {
+	ns := workloadNS
+	timeout := crDeleteTimeout
 	GinkgoHelper()
 	err := suiteDyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
