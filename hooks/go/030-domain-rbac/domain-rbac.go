@@ -18,7 +18,10 @@ package domain_rbac
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/deckhouse/module-sdk/pkg"
 	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
@@ -26,7 +29,6 @@ import (
 	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	"github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var _ = registry.RegisterFunc(
@@ -46,13 +48,15 @@ var _ = registry.RegisterFunc(
 // reconcileDomainRBAC is the main reconcile function. On every CSD change it:
 //  1. Lists all CSDs and selects those with Accepted=True at current generation.
 //  2. Resolves source and snapshot GVKs → GVRs for each eligible CSD.
-//  3. Creates/updates the split ClusterRoles + bindings: the DOMAIN SA gets source/snapshot GVR rights
-//     (incl. /status, /finalizers) + get on core's per-CR /manifests-download; the CORE SA gets read +
-//     create + patch + status-write on the snapshot GVRs (it is the parent-graph planner: creates and
-//     ownerRef-patches one child snapshot per source), get + list on the source GVRs (list to enumerate
-//     sources during planning, get to capture each target's manifest), and get on the domain
-//     /manifests-with-data-restoration subresource.
+//  3. Creates/updates the split ClusterRoles + bindings: the CORE SA gets read + create + patch +
+//     status-write on the snapshot GVRs (it is the parent-graph planner: creates and ownerRef-patches one
+//     child snapshot per source), get + list on the source GVRs (list to enumerate sources during
+//     planning, get to capture each target's manifest), and get on the domain
+//     /manifests-with-data-restoration subresource; the DataExport SA gets read-only snapshot GVR access.
+//     (The out-of-process domain controller's OWN RBAC ships with its module, e.g.
+//     sds-unified-snapshots-poc — core grants nothing to domain SAs.)
 //  4. Writes AccessGranted (True / Pending / ApplyFailed) on each eligible CSD.
+//  5. Deletes legacy artifacts of the removed in-repo demo domain-controller (see cleanup-legacy.go).
 func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	cl := input.DC.MustGetK8sClient(sdkk8s.WithSchemeBuilder(v1alpha1.SchemeBuilder))
 
@@ -105,5 +109,13 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 		}
 	}
 
-	return applyErr
+	// Legacy demo domain-controller leftovers (hook-managed, helm never GCs them). Runs after the RBAC
+	// apply so a cleanup failure never blocks granting access; the returned error still fails the hook so
+	// the module-sdk queue retries the delete.
+	cleanupErr := cleanupLegacyDomainControllerArtifacts(ctx, cl)
+	if cleanupErr != nil {
+		input.Logger.Error("cleanup legacy domain-controller artifacts", "err", cleanupErr)
+	}
+
+	return errors.Join(applyErr, cleanupErr)
 }
