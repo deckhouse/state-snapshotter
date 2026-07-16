@@ -71,3 +71,27 @@ func sortTargets(targets []ssv1alpha1.ManifestTarget) {
 func dedupKey(t ssv1alpha1.ManifestTarget) string {
 	return fmt.Sprintf("%s|%s|%s", t.APIVersion, t.Kind, t.Name)
 }
+
+// SameSet reports whether two target lists denote the same SET of objects, keyed by the single canonical
+// target identity (apiVersion, kind, name) that dedupKey defines. Order and duplicates are irrelevant.
+// This is the one place the identity rule lives: Targets dedups by it, and the SDK's drift signal
+// (ErrManifestTargetsDrift) compares by it — keep both on this helper so they can never diverge.
+func SameSet(a, b []ssv1alpha1.ManifestTarget) bool {
+	asSet := func(ts []ssv1alpha1.ManifestTarget) map[string]struct{} {
+		m := make(map[string]struct{}, len(ts))
+		for _, t := range ts {
+			m[dedupKey(t)] = struct{}{}
+		}
+		return m
+	}
+	sa, sb := asSet(a), asSet(b)
+	if len(sa) != len(sb) {
+		return false
+	}
+	for k := range sb {
+		if _, ok := sa[k]; !ok {
+			return false
+		}
+	}
+	return true
+}

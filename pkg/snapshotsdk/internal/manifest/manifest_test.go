@@ -81,3 +81,28 @@ func TestTargetsEmpty(t *testing.T) {
 		t.Fatalf("nil declared set must yield empty, got %#v", got)
 	}
 }
+
+// SameSet is the single identity rule shared by Targets dedup and the SDK drift signal: set semantics
+// keyed by (apiVersion, kind, name) — order and duplicates never matter.
+func TestSameSet(t *testing.T) {
+	disk := ssv1alpha1.ManifestTarget{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}
+	pvc := ssv1alpha1.ManifestTarget{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
+
+	cases := []struct {
+		name string
+		a, b []ssv1alpha1.ManifestTarget
+		want bool
+	}{
+		{"both empty", nil, []ssv1alpha1.ManifestTarget{}, true},
+		{"reordered", []ssv1alpha1.ManifestTarget{disk, pvc}, []ssv1alpha1.ManifestTarget{pvc, disk}, true},
+		{"duplicates collapse", []ssv1alpha1.ManifestTarget{disk, disk}, []ssv1alpha1.ManifestTarget{disk}, true},
+		{"extra element", []ssv1alpha1.ManifestTarget{disk}, []ssv1alpha1.ManifestTarget{disk, pvc}, false},
+		{"different name", []ssv1alpha1.ManifestTarget{disk}, []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "other"}}, false},
+		{"empty vs non-empty", nil, []ssv1alpha1.ManifestTarget{disk}, false},
+	}
+	for _, tc := range cases {
+		if got := SameSet(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: SameSet = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

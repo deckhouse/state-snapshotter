@@ -437,7 +437,9 @@ Every snapshot captures at least its own source object's manifest. The declared 
 inject a PVC from the data leg. An empty `Targets` returns `snapshotsdk.ErrEmptyManifest` **before**
 any cluster mutation (the MCR CRD enforces the same invariant via CEL as a second line of defense).
 An empty set is a domain planning bug, not a transient state — recommended reaction
-`sdk.Fail(GraphPlanningFailed)`.
+`sdk.Fail(GraphPlanningFailed)`. The captured-latch suppression wins over this guard: once the core
+has stamped the manifest leg captured, the call is a no-op (`nil`) regardless of input — a late
+post-capture recomputation that came up empty must not fail an already-captured snapshot.
 
 ### Manifest capture is adopt-then-drift (`ErrManifestTargetsDrift`)
 

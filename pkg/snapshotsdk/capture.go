@@ -78,7 +78,8 @@ type Planning interface {
 	//
 	// The target set MUST be non-empty: every snapshot captures at least its own source object's manifest
 	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
-	// cluster mutation; the MCR CRD enforces the same invariant via CEL.
+	// cluster mutation; the MCR CRD enforces the same invariant via CEL. The captured-latch suppression wins
+	// over this guard: once the leg is captured the call is a no-op (nil) regardless of input.
 	//
 	// The request is created ONCE with the frozen point-in-time target set. When the MCR already exists the
 	// SDK ADOPTS it — it (idempotently) publishes the name into status and never patches spec.targets — and
@@ -233,9 +234,11 @@ var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phas
 // passes its own source identity, the namespace-root aggregator always includes its own Namespace object —
 // and the SDK never injects the source on the domain's behalf. So an empty target set is a domain contract
 // violation (recommended reaction sdk.Fail(GraphPlanningFailed)), not a valid empty capture. Fail-closed
-// and side-effect-free: it rejects BEFORE the ManifestCaptureRequest is created. The MCR CRD enforces the
-// same invariant via a CEL rule as a second line of defense. Callers match it with
-// errors.Is(err, ErrEmptyManifest).
+// and side-effect-free: it rejects BEFORE the ManifestCaptureRequest is created. The captured-latch
+// suppression wins over this guard: once the core has stamped the manifest leg captured the call is a
+// no-op (nil) regardless of input — nothing can be created anymore, so a late empty recomputation must
+// not fail an already-captured snapshot. The MCR CRD enforces the same invariant via a CEL rule as a
+// second line of defense. Callers match it with errors.Is(err, ErrEmptyManifest).
 var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at least one target (the snapshotted object's own manifest)")
 
 // ErrManifestTargetsDrift is a SIGNAL (not a decision) returned by EnsureManifestCapture when the
@@ -248,29 +251,6 @@ var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at lea
 // SET keyed by (apiVersion, kind, name), so reordering/duplicates never count as drift. Callers match it
 // with errors.Is(err, ErrManifestTargetsDrift).
 var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets differ from the frozen ManifestCaptureRequest (point-in-time plan already set)")
-
-// manifestTargetsDrifted reports whether the desired and stored manifest target sets differ, compared as
-// SETS keyed by (apiVersion, kind, name). Order and duplicates are irrelevant.
-func manifestTargetsDrifted(stored, desired []ssv1alpha1.ManifestTarget) bool {
-	key := func(t ssv1alpha1.ManifestTarget) string { return t.APIVersion + "|" + t.Kind + "|" + t.Name }
-	asSet := func(ts []ssv1alpha1.ManifestTarget) map[string]struct{} {
-		m := make(map[string]struct{}, len(ts))
-		for _, t := range ts {
-			m[key(t)] = struct{}{}
-		}
-		return m
-	}
-	a, b := asSet(stored), asSet(desired)
-	if len(a) != len(b) {
-		return true
-	}
-	for k := range b {
-		if _, ok := a[k]; !ok {
-			return true
-		}
-	}
-	return false
-}
 
 // ManifestCaptureNeeded reports whether the manifest leg still needs planning: true iff the
 // ManifestCaptureRequest name has not been published yet AND the core has not latched the manifest leg
@@ -421,15 +401,18 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 }
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
+	obj := t.Object()
+	// Suppression first: once the core has stamped the manifest leg captured the call is a no-op — even for
+	// invalid input. Nothing can be created anymore, so a late (post-capture) empty recomputation by a
+	// domain that skipped the ManifestCaptureNeeded gate must not fail a captured snapshot.
+	if t.CoreCaptureState().manifestCaptured() {
+		return nil
+	}
 	// A manifest capture must always carry at least the snapshotted object's own manifest; the SDK never
 	// injects the source (the manifest leg is built solely from in.Targets — see EnsureManifestCapture doc),
 	// so an empty target set is a domain bug. Fail closed before any cluster mutation.
 	if len(in.Targets) == 0 {
 		return ErrEmptyManifest
-	}
-	obj := t.Object()
-	if t.CoreCaptureState().manifestCaptured() {
-		return nil
 	}
 	namespace := obj.GetNamespace()
 	mcrName := manifest.RequestName(obj.GetUID())
@@ -496,7 +479,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	// name is already published, so the leg is established; the caller decides (a domain typically Fails; the
 	// namespace root ignores it — it recomputes a shifting set over a live namespace and the first plan
 	// wins). MCR-target immutability is separately enforced at the apiserver by the CRD's CEL rule.
-	if mcrExisted && manifestTargetsDrifted(existing.Spec.Targets, in.Targets) {
+	if mcrExisted && !manifest.SameSet(existing.Spec.Targets, in.Targets) {
 		return ErrManifestTargetsDrift
 	}
 	return nil

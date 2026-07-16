@@ -115,7 +115,7 @@ func newRefreshTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func countMCRs(t *testing.T, ctx context.Context, cl client.Client) int {
+func countMCRs(ctx context.Context, t *testing.T, cl client.Client) int {
 	t.Helper()
 	list := &ssv1alpha1.ManifestCaptureRequestList{}
 	if err := cl.List(ctx, list); err != nil {
@@ -157,7 +157,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if adapter.domain.ManifestCaptureRequestName == "" {
 		t.Fatal("phase1: manifest capture request name was not published")
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("phase1: MCR count = %d, want 1", n)
 	}
 
@@ -170,7 +170,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if reader.gets != 1 {
 		t.Fatalf("phase2: in-flight polls performed %d uncached reads, want to stay at 1 (cache hit must skip refresh)", reader.gets)
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("phase2: MCR count = %d, want 1 (no duplicate creation)", n)
 	}
 
@@ -190,7 +190,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if reader.gets != 2 {
 		t.Fatalf("phase3: uncached reads = %d, want 2 (absent MCR must consult the latch once)", reader.gets)
 	}
-	if n := countMCRs(t, ctx, cl); n != 0 {
+	if n := countMCRs(ctx, t, cl); n != 0 {
 		t.Fatalf("phase3: MCR count = %d, want 0 (must not re-create a captured request)", n)
 	}
 }
@@ -221,8 +221,16 @@ func TestEnsureManifestCapture_EmptyTargetsFailsClosed(t *testing.T) {
 	if !errors.Is(err, ErrEmptyManifest) {
 		t.Fatalf("empty targets must return ErrEmptyManifest, got %v", err)
 	}
-	if n := countMCRs(t, ctx, cl); n != 0 {
+	if n := countMCRs(ctx, t, cl); n != 0 {
 		t.Fatalf("no MCR must be created for an empty target set, got %d", n)
+	}
+
+	// Suppression wins over the guard: once the core has latched the leg captured, the call is a no-op
+	// even for the invalid (empty) input — a late post-capture recomputation that came up empty must not
+	// fail an already-captured snapshot.
+	adapter.core = CoreCaptureState{ManifestCaptured: refreshBoolPtr(true)}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: nil}); err != nil {
+		t.Fatalf("captured latch must suppress the empty-targets guard (nil), got %v", err)
 	}
 }
 
@@ -273,7 +281,7 @@ func TestEnsureManifestCapture_AdoptThenDrift(t *testing.T) {
 	if err := sdk.EnsureManifestCapture(ctx, adapter, setA); err != nil {
 		t.Fatalf("create with set A: %v", err)
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("MCR count = %d, want 1", n)
 	}
 	wantName := adapter.domain.ManifestCaptureRequestName
@@ -302,7 +310,7 @@ func TestEnsureManifestCapture_AdoptThenDrift(t *testing.T) {
 	if adapter.domain.ManifestCaptureRequestName != wantName {
 		t.Fatalf("adopt must republish the name even on drift, got %q", adapter.domain.ManifestCaptureRequestName)
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("drift must not recreate the MCR: count = %d, want 1", n)
 	}
 
