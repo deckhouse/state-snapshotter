@@ -25,7 +25,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -115,7 +114,7 @@ func importSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			ulPath := coreSnapshotSubPath(importNS, importRootSnapshotName, subManifestsUpload)
 			Eventually(func() error {
-				_, postErr := aggPost(ctx, ulPath, uploadBody)
+				postErr := aggPost(ctx, ulPath, uploadBody)
 				return postErr
 			}).WithTimeout(2*time.Minute).WithPolling(pollInterval).Should(Succeed(), "POST %s", ulPath)
 
@@ -157,9 +156,9 @@ func importSpecs() {
 
 const gcRootSnapshotName = "gc-tree"
 
-// patchModuleSnapshotRootOkTtl sets (value != nil) or clears (value == nil) the module's
+// patchModuleSnapshotRootOkTTL sets (value != nil) or clears (value == nil) the module's
 // settings.snapshotRootOkTtl via a merge patch. Clearing uses a JSON null to drop the key.
-func patchModuleSnapshotRootOkTtl(ctx context.Context, value *string) error {
+func patchModuleSnapshotRootOkTTL(ctx context.Context, value *string) error {
 	var raw string
 	if value == nil {
 		raw = `{"spec":{"settings":{"snapshotRootOkTtl":null}}}`
@@ -170,7 +169,7 @@ func patchModuleSnapshotRootOkTtl(ctx context.Context, value *string) error {
 	return err
 }
 
-// waitControllerSnapshotRootOkTtlRolledOut blocks until the controller Deployment has fully rolled out the
+// waitControllerSnapshotRootOkTTLRolledOut blocks until the controller Deployment has fully rolled out the
 // desired snapshotRootOkTtl. Patching the ModuleConfig triggers an asynchronous Deployment roll (the value
 // is plumbed as the STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL env on the controller pod template), but
 // WaitForModuleReady only gates the Module CR phase, which flips Ready before the controller pod is
@@ -178,8 +177,8 @@ func patchModuleSnapshotRootOkTtl(ctx context.Context, value *string) error {
 // boundary and stalls the next phase's first captures. We confirm both that the desired env reached the
 // live pod template (present and equal for a non-empty duration, absent otherwise) and that the rollout is
 // complete (observedGeneration current; all replicas updated and available; old pods gone). want mirrors
-// patchModuleSnapshotRootOkTtl: a non-empty duration means the env must be present, nil/empty means absent.
-func waitControllerSnapshotRootOkTtlRolledOut(ctx context.Context, want *string, timeout time.Duration) error {
+// patchModuleSnapshotRootOkTTL: a non-empty duration means the env must be present, nil/empty means absent.
+func waitControllerSnapshotRootOkTTLRolledOut(ctx context.Context, want *string, timeout time.Duration) error {
 	const (
 		deployName = "controller"
 		envName    = "STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL"
@@ -254,9 +253,8 @@ func waitRootOkTTL(ctx context.Context, ns, snap string, want, timeout time.Dura
 			if ttlStr, found, _ := unstructured.NestedString(ok.Object, "spec", "ttl"); found {
 				if d, perr := time.ParseDuration(ttlStr); perr == nil && d == want {
 					return nil
-				} else {
-					last = fmt.Sprintf("ttl=%q", ttlStr)
 				}
+				last = fmt.Sprintf("ttl=%q", ttlStr)
 			} else {
 				last = "no spec.ttl"
 			}
@@ -318,21 +316,21 @@ func gcSpecs() {
 				if prevTTLSet {
 					want = &prevTTL
 				}
-				_ = patchModuleSnapshotRootOkTtl(cctx, want)
+				_ = patchModuleSnapshotRootOkTTL(cctx, want)
 				_ = storagekube.WaitForModuleReady(cctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)
 				// Block until the revert roll fully settles so the controller restart does not bleed into
 				// the next phase's first captures (WaitForModuleReady alone returns before the roll lands).
-				_ = waitControllerSnapshotRootOkTtlRolledOut(cctx, want, suiteCfg.moduleReadyTO)
+				_ = waitControllerSnapshotRootOkTTLRolledOut(cctx, want, suiteCfg.moduleReadyTO)
 				deleteNamespace(cctx, gcNS)
 			})
 
 			By("Setting a short snapshotRootOkTtl (" + suiteCfg.gcTTL + ") and waiting for the controller to roll out")
 			ttl := suiteCfg.gcTTL
-			Expect(patchModuleSnapshotRootOkTtl(ctx, &ttl)).To(Succeed())
+			Expect(patchModuleSnapshotRootOkTTL(ctx, &ttl)).To(Succeed())
 			Expect(storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)).To(Succeed())
 			// Gate on the controller Deployment fully rolling out the new TTL env before capturing, so the
 			// GC tree is captured by a settled (warm-cache) controller rather than racing the restart.
-			Expect(waitControllerSnapshotRootOkTtlRolledOut(ctx, &ttl, suiteCfg.moduleReadyTO)).To(Succeed())
+			Expect(waitControllerSnapshotRootOkTTLRolledOut(ctx, &ttl, suiteCfg.moduleReadyTO)).To(Succeed())
 		})
 
 		It("retains the root SnapshotContent then TTL-GCs it and cascades to children + checkpoint", func() {

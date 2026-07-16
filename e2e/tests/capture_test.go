@@ -23,7 +23,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -180,7 +179,7 @@ func captureSpecs() {
 				}
 				gvr, ok := gvrForSnapshotKind(node.kind)
 				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				node := node // capture for the closure
+				// capture for the closure
 				Eventually(func(g Gomega) {
 					expected, contentName, err := declaredChildContentNames(ctx, gvr, ns, node.name)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -241,7 +240,7 @@ func captureSpecs() {
 				}
 				gvr, ok := gvrForSnapshotKind(node.kind)
 				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				node := node // capture for the closure
+				// capture for the closure
 				Eventually(func(g Gomega) {
 					snap, err := getResource(ctx, gvr, ns, node.name)
 					g.Expect(err).NotTo(HaveOccurred())

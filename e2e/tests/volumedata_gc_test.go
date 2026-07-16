@@ -23,16 +23,14 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/state-snapshotter/api/names"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
-
-	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
 const (
@@ -295,17 +293,17 @@ func volumeDataGcSpecs() {
 				if prevTTLSet {
 					want = &prevTTL
 				}
-				_ = patchModuleSnapshotRootOkTtl(cctx, want)
+				_ = patchModuleSnapshotRootOkTTL(cctx, want)
 				_ = storagekube.WaitForModuleReady(cctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)
-				_ = waitControllerSnapshotRootOkTtlRolledOut(cctx, want, suiteCfg.moduleReadyTO)
+				_ = waitControllerSnapshotRootOkTTLRolledOut(cctx, want, suiteCfg.moduleReadyTO)
 				deleteNamespace(cctx, srcNS)
 			})
 
 			By("Setting a large snapshotRootOkTtl (" + vdGcLargeTTL + ") and waiting for the controller to roll out")
 			ttl := vdGcLargeTTL
-			Expect(patchModuleSnapshotRootOkTtl(ctx, &ttl)).To(Succeed())
+			Expect(patchModuleSnapshotRootOkTTL(ctx, &ttl)).To(Succeed())
 			Expect(storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)).To(Succeed())
-			Expect(waitControllerSnapshotRootOkTtlRolledOut(ctx, &ttl, suiteCfg.moduleReadyTO)).To(Succeed())
+			Expect(waitControllerSnapshotRootOkTTLRolledOut(ctx, &ttl, suiteCfg.moduleReadyTO)).To(Succeed())
 
 			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + sc + ")")
 			_, err = testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{

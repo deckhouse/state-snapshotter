@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -96,9 +95,9 @@ func hasSubtreeIdentity(ids []subtreeManifestIdentity, kind, name string) bool {
 	return false
 }
 
-// aggregatedApiSpecs registers the aggregated subresource read specs of the manifest-only flow: the
+// aggregatedAPISpecs registers the aggregated subresource read specs of the manifest-only flow: the
 // per-node manifests-download surface (core + demo groups) and the apply-ready manifests-with-data-restoration.
-func aggregatedApiSpecs() {
+func aggregatedAPISpecs() {
 	Context("Aggregated subresource APIs", func() {
 		var vmSnapshot childRef
 
@@ -287,7 +286,7 @@ func aggregatedApiSpecs() {
 				}
 				gvr, ok := gvrForSnapshotKind(node.kind)
 				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				node := node
+
 				Eventually(func(g Gomega) {
 					snap, err := getResource(ctx, gvr, ns, node.name)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -338,7 +337,7 @@ func aggregatedApiSpecs() {
 				}
 				gvr, ok := gvrForSnapshotKind(node.kind)
 				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				node := node
+
 				Eventually(func(g Gomega) {
 					snap, err := getResource(ctx, gvr, ns, node.name)
 					g.Expect(err).NotTo(HaveOccurred())

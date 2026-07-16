@@ -26,7 +26,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -473,8 +472,9 @@ func aggGet(ctx context.Context, path string, params map[string]string) ([]byte,
 	}
 }
 
-// aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path.
-func aggPost(ctx context.Context, path string, body []byte) ([]byte, error) {
+// aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path. No caller
+// consumes the response body, so only the (annotated) error is returned.
+func aggPost(ctx context.Context, path string, body []byte) error {
 	resp, err := suiteClientset.Discovery().RESTClient().Post().
 		AbsPath(path).
 		SetHeader("Content-Type", "application/json").
@@ -484,9 +484,9 @@ func aggPost(ctx context.Context, path string, body []byte) ([]byte, error) {
 		// DoRaw collapses any non-2xx into a generic error (e.g. POST+409 -> "the server reported a
 		// conflict" with reason AlreadyExists) and does not decode the body, which hides the aggregated
 		// apiserver's real Status message. Append the raw response body so failures are actionable.
-		return resp, fmt.Errorf("%w (response body: %s)", err, truncate(resp, 1024))
+		return fmt.Errorf("%w (response body: %s)", err, truncate(resp, 1024))
 	}
-	return resp, nil
+	return nil
 }
 
 func coreSnapshotSubPath(ns, name, sub string) string {
@@ -601,11 +601,11 @@ func waitObjectCondition(ctx context.Context, gvr schema.GroupVersionResource, n
 	for {
 		obj, err := getResource(ctx, gvr, ns, name)
 		if err == nil {
-			if st, reason, found := conditionStatus(obj, condType); found && st == wantStatus {
+			st, reason, found := conditionStatus(obj, condType)
+			if found && st == wantStatus {
 				return nil
-			} else {
-				last = fmt.Sprintf("found=%v status=%q reason=%q", found, st, reason)
 			}
+			last = fmt.Sprintf("found=%v status=%q reason=%q", found, st, reason)
 		} else {
 			last = fmt.Sprintf("get err=%v", err)
 		}
