@@ -180,18 +180,15 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				}
 				continue
 			}
-			// Domain-capture kind (demo): the dedicated planning controller owns MCR/VCR/children +
-			// PlanningReady, while the generic binder owns its SnapshotContent. The binder uses
-			// its own unstructured informer and registers no field index, so it can be wired
-			// independently of the planning controller — EXCEPT in a single manager that runs both: there
-			// the planning controller's typed informer + field index must be registered first to avoid an
-			// indexer conflict on the shared informer. So the gate only applies when this manager owns the
-			// planning controller (an activator is wired for the kind).
-			//
-			// Two-pod split (core): the planning controller runs in the domain-controller pod, so no
-			// activator is wired here. Core then owns the SnapshotContent directly with no ordering
-			// hazard. This keeps the cutover invariant (exactly one SnapshotContent owner — the generic
-			// binder) while the demo CR is reconciled solely by the out-of-process domain controller.
+			// Dedicated domain-capture kind (today only the namespace-root "Snapshot", wave5 dogfooding):
+			// the dedicated planning controller owns MCR/VCR/children + PlanningReady, while the generic
+			// binder owns its SnapshotContent. The binder uses its own unstructured informer and registers
+			// no field index, so it can be wired independently of the planning controller — EXCEPT in a
+			// single manager that runs both via a wired activator: there the planning controller's typed
+			// informer + field index must be registered first to avoid an indexer conflict on the shared
+			// informer, so the gate below waits for activation. With no activator wired (core registers the
+			// root's controller statically at startup, cmd/main.go), the binder is wired directly with no
+			// ordering hazard — the invariant stays "exactly one SnapshotContent owner: the generic binder".
 			if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; hasActivator {
 				if _, planningActive := s.activeSnapshotGVKKeys[snapGVK.String()]; !planningActive {
 					continue
@@ -206,7 +203,8 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			// VolumeSnapshot, content-single-writer design §11.5): domain-capture BY DEFINITION. Its
 			// planning controller lives out-of-process (the domain owner's manager), so no in-process
 			// activator/ordering gate applies — mark it domain-capture directly so the generic binder
-			// runs the eager capture-leg init + request lifecycle for it just like the demo domains.
+			// runs the eager capture-leg init + request lifecycle for it (the PoC demo domain and real
+			// domains such as virtualization flow through this same branch).
 			// The kind is intentionally NOT added to DedicatedSnapshotControllerKinds (that list is
 			// SS-internal in-process activation ordering).
 			s.snap.MarkDomainCaptureKind(snapGVK)

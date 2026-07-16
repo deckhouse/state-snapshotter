@@ -400,11 +400,13 @@ func main() {
 	}
 	log.Info("VolumeSnapshot import binder added to manager")
 
-	// No dedicated controller activators in core: the demo dedicated planning controllers run in the
-	// domain-controller pod. The Syncer still drives generic Snapshot/SnapshotContent watches AND the
-	// generic binder's ownership of domain-capture SnapshotContent (demo kinds): with no local
-	// activator wired, the binder owns that content directly (its unstructured informer needs no field
-	// index, so there is no informer-ordering hazard). See unifiedruntime.Syncer.Sync.
+	// No dedicated controller activators in core: the only in-process dedicated kind is the namespace-root
+	// "Snapshot", whose controller is registered statically at startup (AddSnapshotControllerToManager
+	// above), so nothing needs runtime activation. Out-of-process domain kinds (CSD-driven modules, e.g.
+	// the PoC demo domain) have no in-process planning controller at all; the Syncer drives the generic
+	// Snapshot/SnapshotContent watches AND the generic binder's ownership of their domain-capture
+	// SnapshotContent (the binder's unstructured informer needs no field index, so there is no
+	// informer-ordering hazard). See unifiedruntime.Syncer.Sync.
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
