@@ -27,14 +27,15 @@ package transition
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -57,12 +58,19 @@ const (
 	//     extended (storage-foundation) CRDs — no legacy/handoff split, no phase-C retag.
 	//   - svdm: two slots — the legacy old-group image (phase B) and the v0.2.0/D1 new-group image the
 	//     phase-C migration retags to.
-	envSnapshotControllerTag = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
-	envSvdmLegacyTag         = "E2E_TRANSITION_SVDM_LEGACY_TAG"
-	envSvdmTag               = "E2E_TRANSITION_SVDM_TAG"
+	//   - sds-local-volume: two slots as well. Its current build depends on storage-foundation (absent
+	//     in phase B), so phase B enables a LEGACY image that depends on snapshot-controller
+	//     (E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG) and phase C retags it to the storage-foundation-
+	//     integrated build (the standard SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE) after the flip.
+	envSnapshotControllerTag   = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
+	envSvdmLegacyTag           = "E2E_TRANSITION_SVDM_LEGACY_TAG"
+	envSvdmTag                 = "E2E_TRANSITION_SVDM_TAG"
+	envSdsLocalVolumeLegacyTag = "E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG"
 
 	// Standard storage-e2e <MODULE>_MODULE_PULL_OVERRIDE vars for modules the test enables at
 	// runtime (they are preseeded disabled in cluster_config.yml, so bootstrap does not read them).
+	// For sds-local-volume this is the phase-C (storage-foundation-integrated) target the flip retags
+	// to; its phase-B legacy image comes from envSdsLocalVolumeLegacyTag above.
 	envStateSnapshotterOverride  = "STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE"
 	envStorageFoundationOverride = "STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE"
 	envSdsLocalVolumeOverride    = "SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE"
@@ -101,9 +109,22 @@ const (
 	workloadNS   = "transition-workload"
 	srcPVCName   = "src-data"
 	probePodName = "probe"
+
+	// two-owner migration-race fixtures (phase-C race leg; see the race section in helpers_test.go).
+	// raceImportName is the ACTIVE legacy DataImport re-seeded before the flip; raceImportPVCName is
+	// the target PVC its pvcTemplate names; racePVCName is the PVC seeded with the legacy finalizer.
+	raceImportName    = "race-import"
+	raceImportPVCName = "race-imported-data"
+	racePVCName       = "race-pvc"
 )
 
 var markerPath = "/mnt/" + srcPVCName + "/marker"
+
+// sdsLocalVolumePhaseCTag holds the phase-C (storage-foundation-integrated) sds-local-volume tag,
+// captured in BeforeSuite before SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE is repointed at the legacy
+// tag for phase B (so the storage-e2e testkit's lazy sds-local-volume enable uses the legacy image).
+// The phase-C retag restores the var to this value and retags to it.
+var sdsLocalVolumePhaseCTag string
 
 var (
 	suiteRes         *cluster.TestClusterResources
@@ -184,11 +205,33 @@ func TestSnapshotterTransition(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// Validate the module image-tag env vars first (before any provisioning): every one that is set
+	// must be a plain-ASCII tag matching mr<N>/pr<N>/main. This catches a prod v* tag (absent from
+	// the dev registry the nested cluster pulls) and — the real footgun — a tag typed in a non-Latin
+	// keyboard layout (e.g. a Cyrillic tag U+0430 U+0435 U+0442 instead of the Latin "main"), which otherwise only surfaces
+	// minutes later as a wedged converge in a mid-run phase.
+	validateModuleTagEnvVars()
+
 	if strings.TrimSpace(os.Getenv("TEST_CLUSTER_CREATE_MODE")) == "" {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
 	// Fail fast before provisioning if any required image-tag var is missing.
 	requireEnv(envSnapshotControllerTag, envSvdmLegacyTag, envSvdmTag)
+	// sds-local-volume is only enabled for the data-plane steps, and its phase-B legacy image has no
+	// safe default ("main" now depends on storage-foundation, which is disabled in phase B), so it is
+	// required only when the data plane is exercised.
+	if dataPlaneEnabled() {
+		requireEnv(envSdsLocalVolumeLegacyTag)
+		// The storage-e2e testkit (EnsureDefaultStorageClass, phase B) ALSO enables sds-local-volume
+		// and reads its tag from SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE — so if that var held the
+		// phase-C (storage-foundation-dependent) tag, the testkit would retag sds-local-volume to it
+		// mid-phase-B and Deckhouse would deny it ("dependency 'storage-foundation' is disabled").
+		// Repoint the var at the legacy tag for the whole legacy phase; capture the phase-C target
+		// first and restore+retag to it after the flip (phase C).
+		sdsLocalVolumePhaseCTag = tagFrom(envSdsLocalVolumeOverride)
+		Expect(os.Setenv(envSdsLocalVolumeOverride, tagFrom(envSdsLocalVolumeLegacyTag))).To(Succeed(),
+			"repoint %s at the legacy tag for phase B", envSdsLocalVolumeOverride)
+	}
 
 	suiteRes = cluster.CreateOrConnectToTestCluster()
 	if suiteRes == nil || suiteRes.Kubeconfig == nil {
@@ -225,6 +268,57 @@ func envTrue(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// moduleTagPattern is the set of image tags this suite accepts for its module ModulePullOverrides:
+// GitLab MR builds (mr<IID>), GitHub PR builds (pr<N>), or the main build. The nested cluster pulls
+// module images from the DEV registry, where builds land under exactly these tags — a prod v* tag
+// is not there, so it is rejected on purpose (fail fast, not on a later image pull).
+var moduleTagPattern = regexp.MustCompile(`^(mr[0-9]+|pr[0-9]+|main)$`)
+
+// moduleTagEnvVars are the image-tag / ModulePullOverride env vars the transition suite consumes.
+var moduleTagEnvVars = []string{
+	envSnapshotControllerTag,
+	envSvdmLegacyTag,
+	envSvdmTag,
+	envSdsLocalVolumeLegacyTag,
+	envSdsLocalVolumeOverride,
+	envStateSnapshotterOverride,
+	envStorageFoundationOverride,
+	"SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE",
+}
+
+// isASCII reports whether s contains only ASCII bytes. A value typed in a non-Latin keyboard layout
+// (e.g. a Cyrillic tag U+0430 U+0435 U+0442) carries multi-byte UTF-8 runes and fails this check.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// validateModuleTagEnvVars fails the suite up front if any SET module image-tag env var is not a
+// plain-ASCII tag matching mr<N>/pr<N>/main. Presence of required vars is enforced separately by
+// requireEnv; unset optional vars default to "main" via tagFrom and are skipped here.
+func validateModuleTagEnvVars() {
+	var problems []string
+	for _, name := range moduleTagEnvVars {
+		v := strings.TrimSpace(os.Getenv(name))
+		if v == "" {
+			continue
+		}
+		switch {
+		case !isASCII(v):
+			problems = append(problems, fmt.Sprintf("%s=%q contains non-ASCII characters — check the keyboard layout (a Latin tag typed in another layout?)", name, v))
+		case !moduleTagPattern.MatchString(v):
+			problems = append(problems, fmt.Sprintf("%s=%q must match one of: mr<N>, pr<N>, main (dev-registry image tags)", name, v))
+		}
+	}
+	if len(problems) > 0 {
+		Fail("invalid module image-tag env var(s):\n  - " + strings.Join(problems, "\n  - "))
 	}
 }
 
@@ -321,18 +415,26 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 	Context("Phase B: legacy stack (old group)", func() {
 		It("enables snapshot-controller, svdm(legacy) and sds-local-volume", func() {
 			// One batch: the framework brings snapshot-controller and svdm up concurrently (no
-			// interdependency) and sds-local-volume after snapshot-controller (its v0.4.x dependency,
+			// interdependency) and sds-local-volume after snapshot-controller (its legacy dependency,
 			// declared in-batch so the graph resolves — a separate call would fail graph-build).
 			// snapshot-controller runs its single deprecated v0.2.0 build (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG):
 			// no storage-foundation requirement, so it installs standalone here and ships the extended
 			// (storage-foundation) CRDs — the "vanilla controller + extended CRDs" combination the next
 			// spec verifies. svdm runs its legacy old-group image (E2E_TRANSITION_SVDM_LEGACY_TAG); the
 			// phase-C migration retags it to the D1 image.
-			enableModules(
+			specs := []storagekube.ModuleSpec{
 				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerTag)),
 				moduleSpec(modSvdm, tagFrom(envSvdmLegacyTag)),
-				moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeOverride), modSnapshotController),
-			)
+			}
+			// sds-local-volume is the CSI backend for the data-plane steps only, so enable it just for
+			// those runs. Use its LEGACY image (E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG), which
+			// depends on snapshot-controller: the current build depends on storage-foundation, disabled
+			// in phase B, and would be webhook-denied ("dependency 'storage-foundation' is disabled").
+			// Phase C retags it to the storage-foundation-integrated build after the flip.
+			if dataPlaneEnabled() {
+				specs = append(specs, moduleSpec(modSdsLocalVolume, tagFrom(envSdsLocalVolumeLegacyTag), modSnapshotController))
+			}
+			enableModules(specs...)
 		})
 
 		It("creates a PVC + pod, writes deterministic data and a CSI VolumeSnapshot", func(ctx SpecContext) {
@@ -350,7 +452,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			ensureNamespace(ctx, workloadNS)
 
 			createPVC(ctx, workloadNS, srcPVCName, os.Getenv(envStorageClass), "1Gi")
-			createProbePod(ctx, workloadNS, probePodName, probeImage(), srcPVCName)
+			createProbePod(ctx, probePodName, probeImage(), srcPVCName)
 
 			var err error
 			sourceChecksum, err = writeMarkerChecksum(ctx, workloadNS, probePodName, "probe", markerPath)
@@ -399,14 +501,14 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 			// DataExport the source PVC on the LEGACY group/schema; wait for status.url + status.ca.
 			Expect(createLegacyDataExport(ctx, workloadNS, "export-pvc", "PersistentVolumeClaim", srcPVCName)).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), workloadNS, "export-pvc", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), "export-pvc")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(url).NotTo(BeEmpty())
 			Expect(caB64).NotTo(BeEmpty())
 
 			// Download the marker file (PVC root) and confirm its checksum matches the source.
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "downloaded marker checksum must match the source")
 		})
@@ -419,7 +521,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			By("creating the legacy DataImport and waiting for the importer to publish status.url")
 			// DataImport (legacy schema, CreatePVC via targetRef.pvcTemplate) → importer publishes url.
 			Expect(createLegacyDataImport(ctx, workloadNS, "import-di", "imported-data", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), "import-di")
 			Expect(err).NotTo(HaveOccurred())
 
 			By("uploading the marker over the svdm HTTP API and signalling finished")
@@ -434,8 +536,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			waitImportComplete(ctx, legacyGroup, workloadNS, "import-di", "imported-data", podRunningTimeout())
 
 			By("mounting imported-data and verifying the checksum")
-			createProbePod(ctx, workloadNS, "probe-imported", probeImage(), "imported-data")
-			got, err := checksumFile(ctx, workloadNS, "probe-imported", "probe", "/mnt/imported-data/marker")
+			createProbePod(ctx, "probe-imported", probeImage(), "imported-data")
+			got, err := checksumFile(ctx, "probe-imported", "probe", "/mnt/imported-data/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "imported marker checksum must match the source")
 		})
@@ -445,8 +547,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				Skip("data-plane steps skipped (see previous spec)")
 			}
 			createPVCFromSnapshot(ctx, workloadNS, "restored-pvc", os.Getenv(envStorageClass), vsName, "1Gi")
-			createProbePod(ctx, workloadNS, "probe-restored", probeImage(), "restored-pvc")
-			got, err := checksumFile(ctx, workloadNS, "probe-restored", "probe", "/mnt/restored-pvc/marker")
+			createProbePod(ctx, "probe-restored", probeImage(), "restored-pvc")
+			got, err := checksumFile(ctx, "probe-restored", "probe", "/mnt/restored-pvc/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "CSI-restored marker checksum must match the source")
 		})
@@ -504,20 +606,55 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
 			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
 			Expect(createUnifiedDataExport(ctx, workloadNS, "export-d1", "PersistentVolumeClaim", "restored-pvc")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), "export-d1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-d1")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-d1")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-d1")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "svdm-D1 standalone must serve the new-group export")
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-d1", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-d1")
 
 			// (b) Tear down the MIGRATED in-flight export under the D1 controller (still standalone), so
 			// no live export is carried across the flip. Deleting it must remove the CR (finalizer
 			// released) AND recover the source PVC: svdm restores the reassigned PV, so src-data must
 			// return from Lost to Bound. This is the clean-teardown proof, not a lingering artifact.
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-pvc", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-pvc")
 			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
+		})
+
+		It("re-seeds a legacy epoch (CRDs + active DataImport + PVC finalizer) to stage the two-owner migration race", func(ctx SpecContext) {
+			// The svdm-D1 025-migrate-legacy-crds hook is mirrored by an identical hook in
+			// storage-foundation (same OnBeforeHelm order, idempotent, gated on legacy-CRD presence):
+			// whichever module converges first migrates, the other must cleanly no-op. The first
+			// phase-C spec exercised the svdm hook alone; this leg re-creates the legacy epoch RIGHT
+			// BEFORE the flip, because enabling storage-foundation triggers a global converge that
+			// re-runs svdm's beforeHelm hooks too — so BOTH owners see the legacy CRDs in the same
+			// converge window. Which one wins varies per run; the next spec asserts the outcome
+			// winner-agnostically. Both hooks are transitional/expiring — drop this leg with them.
+			Expect(crdExists(ctx, "dataexports."+legacyGroup)).To(BeFalse(),
+				"the real legacy epoch must already be migrated before re-seeding the race one")
+			Expect(crdExists(ctx, "dataimports."+legacyGroup)).To(BeFalse(),
+				"the real legacy epoch must already be migrated before re-seeding the race one")
+
+			By("installing minimal legacy dataexports/dataimports CRDs (stand-ins for the pre-D1 svdm CRDs)")
+			createLegacyCRD(ctx, "DataExport", "dataexports")
+			createLegacyCRD(ctx, "DataImport", "dataimports")
+
+			// An ACTIVE legacy DataImport (no status yet => active): the winner must RE-CREATE it under
+			// the unified group with the spec mapped, not just delete it with the CRD. The legacy
+			// finalizer is seeded by hand — the pre-D1 controller that used to set it is gone.
+			By("creating an active legacy DataImport carrying the legacy finalizer")
+			ensureNamespace(ctx, workloadNS)
+			Expect(createLegacyDataImport(ctx, workloadNS, raceImportName, raceImportPVCName,
+				os.Getenv(envStorageClass), "1Gi")).To(Succeed())
+			addFinalizer(ctx, dataImportGVR(legacyGroup), workloadNS, raceImportName, legacyFinalizer)
+
+			// A PVC stuck with the legacy finalizer (storageClassName "" => stays Pending, so this leg
+			// runs with or without the data-plane env). The sweep must strip exactly the legacy
+			// finalizer; kubernetes.io/pvc-protection stays.
+			By("creating a PVC carrying the legacy finalizer")
+			createPVC(ctx, workloadNS, racePVCName, "", "1Gi")
+			addFinalizer(ctx, pvcGVR, workloadNS, racePVCName, legacyFinalizer)
 		})
 
 		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
@@ -551,6 +688,78 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			}
 		})
 
+		It("migrates the re-seeded legacy epoch through the two-owner race and stays converged", func(ctx SpecContext) {
+			// The flip in the previous spec ran the race: enabling storage-foundation triggered a
+			// global converge in which BOTH 025 hooks (svdm-D1 and storage-foundation) executed
+			// against the legacy epoch seeded two specs ago. Which hook won varies per run — every
+			// assertion below is winner-agnostic: it checks the shared migration contract's OUTCOME
+			// plus the loser's clean no-op (module health + outcome stability).
+			By("waiting for both legacy CRDs to be removed by whichever hook won the race")
+			pollUntil(ctx, "legacy CRDs removed by the migration race", 5*time.Minute,
+				func() bool {
+					return !crdExists(ctx, "dataexports."+legacyGroup) && !crdExists(ctx, "dataimports."+legacyGroup)
+				},
+				func() string {
+					return fmt.Sprintf("dataexports present=%v dataimports present=%v",
+						crdExists(ctx, "dataexports."+legacyGroup), crdExists(ctx, "dataimports."+legacyGroup))
+				})
+
+			By("asserting the active DataImport was re-created under the unified group with the mapped spec")
+			impGVR := dataImportGVR(unifiedGroup)
+			pollUntil(ctx, "race DataImport re-created under the unified group", 3*time.Minute,
+				func() bool { _, e := getUnstr(ctx, impGVR, workloadNS, raceImportName); return e == nil },
+				func() string { return "not on the unified group yet" })
+			migrated, err := getUnstr(ctx, impGVR, workloadNS, raceImportName)
+			Expect(err).NotTo(HaveOccurred())
+			mode, _, _ := unstructured.NestedString(migrated.Object, "spec", "mode")
+			Expect(mode).To(Equal("CreatePVC"), "migrated DataImport must get spec.mode=CreatePVC")
+			tmpl, found, _ := unstructured.NestedMap(migrated.Object, "spec", "pvcTemplate")
+			Expect(found).To(BeTrue(), "migrated DataImport must carry spec.pvcTemplate (hoisted out of targetRef)")
+			tmplName, _, _ := unstructured.NestedString(tmpl, "metadata", "name")
+			Expect(tmplName).To(Equal(raceImportPVCName), "pvcTemplate must be carried over verbatim")
+			_, found, _ = unstructured.NestedMap(migrated.Object, "spec", "targetRef")
+			Expect(found).To(BeFalse(), "migrated DataImport must not carry the legacy spec.targetRef")
+			Expect(migrated.GetFinalizers()).NotTo(ContainElement(legacyFinalizer),
+				"the unified counterpart must not inherit the legacy finalizer")
+			migratedUID := string(migrated.GetUID())
+
+			By("asserting the legacy finalizer was swept off every PVC")
+			leftover, err := pvcsWithFinalizer(ctx, legacyFinalizer)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
+
+			By("asserting both owners stayed Ready after the race (the loser's no-op must not error-loop)")
+			for _, m := range []string{modSvdm, modStorageFoundation} {
+				Expect(storagekube.WaitForModuleReady(suiteCtx(), suiteRes.Kubeconfig, m, 3*time.Minute)).To(Succeed(),
+					"module %s must stay Ready after the migration race", m)
+			}
+
+			// Follow-up converges are no-ops. The flip itself already re-converged both modules
+			// several times after the migration (module Ready transitions, the Helm-guard re-render of
+			// the legacy modules) — each re-run saw no legacy CRDs and had to no-op. Hold the outcome
+			// stable for another window: the CRDs must stay gone and the migrated CR must keep its UID
+			// (a re-run that wrongly re-migrated would delete/recreate or duplicate it).
+			By("holding the migrated state stable (no-op on repeated converges)")
+			Consistently(func() bool {
+				if crdExists(ctx, "dataexports."+legacyGroup) || crdExists(ctx, "dataimports."+legacyGroup) {
+					return false
+				}
+				cur, gerr := getUnstr(ctx, impGVR, workloadNS, raceImportName)
+				return gerr == nil && string(cur.GetUID()) == migratedUID
+			}).WithTimeout(45*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+				"legacy CRDs must stay gone and the migrated DataImport must keep its identity")
+
+			By("deleting the swept PVC — it must go away cleanly, not hang in Terminating")
+			deletePVCAndWaitGone(ctx, workloadNS, racePVCName, 2*time.Minute)
+
+			// Teardown so no in-flight import crosses into phase D: the CR first (the controller
+			// releases its finalizers), then the import target PVC the controller may have created
+			// from pvcTemplate (it survives the CR by design — it is the import's product).
+			By("tearing down the migrated DataImport and its target PVC")
+			deleteCRAndWaitGone(ctx, impGVR, raceImportName)
+			deletePVCAndWaitGone(ctx, workloadNS, raceImportPVCName, 2*time.Minute)
+		})
+
 		It("fires the deprecation alerts for both legacy modules", func(ctx SpecContext) {
 			// Both legacy modules are now Deprecated: snapshot-controller since phase B (its single
 			// v0.2.0 build is Deprecated and needs no retag — it never required storage-foundation), and
@@ -560,12 +769,29 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			//     effect;
 			//   - custom D8<Name>ModuleDeprecated (vector(1), severity 9) — proves the deprecation-alert
 			//     template renders (svdm's under the reverse "sf enabled" guard, snapc's always-on).
-			// Alert eval lags a scrape, so wait.
-			const alertTimeout = 6 * time.Minute
-			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController, alertTimeout)
-			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "", alertTimeout)
-			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm, alertTimeout)
-			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "", alertTimeout)
+			// Alert eval lags a scrape, so expectAlertFiring waits at the package-level alertTimeout.
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController)
+			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "")
+			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm)
+			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "")
+		})
+
+		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(ctx SpecContext) {
+			if !dataPlaneEnabled() {
+				Skip("sds-local-volume is only enabled for the data-plane steps (see phase B)")
+			}
+			// In phase B sds-local-volume ran its legacy image (depends on snapshot-controller). Its
+			// current image depends on storage-foundation, now enabled by the flip, so retag the live
+			// MPO to the phase-C target (SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE, default "main") and wait
+			// Ready — the sds-local-volume analog of the svdm legacy->D1 retag. Do this LAST in phase C,
+			// after the migration race and alert assertions have observed the flip's converge, and
+			// before the phase-D data steps that exercise the storage-foundation-integrated CSI path
+			// (unified DataImport populator, VRR-based restore).
+			//
+			// Restore SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE (repointed at the legacy tag in BeforeSuite
+			// so the phase-B testkit used it) back to the captured phase-C target before retagging.
+			Expect(os.Setenv(envSdsLocalVolumeOverride, sdsLocalVolumePhaseCTag)).To(Succeed())
+			enableModule(modSdsLocalVolume, sdsLocalVolumePhaseCTag)
 		})
 	})
 
@@ -627,8 +853,8 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			}
 			// The legacy plain-CSI snapshot must remain restorable under the new stack.
 			createPVCFromSnapshot(ctx, workloadNS, "restored-postflip", os.Getenv(envStorageClass), vsName, "1Gi")
-			createProbePod(ctx, workloadNS, "probe-postflip", probeImage(), "restored-postflip")
-			got, err := checksumFile(ctx, workloadNS, "probe-postflip", "probe", "/mnt/restored-postflip/marker")
+			createProbePod(ctx, "probe-postflip", probeImage(), "restored-postflip")
+			got, err := checksumFile(ctx, "probe-postflip", "probe", "/mnt/restored-postflip/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "post-flip CSI restore from the legacy VS must match the source")
 		})
@@ -640,7 +866,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// A brand-new PVC + CSI VolumeSnapshot created after the flip must reach ready+bound —
 			// i.e. the storage-foundation snapshot-controller now services CSI snapshots.
 			createPVC(ctx, workloadNS, "new-pvc", os.Getenv(envStorageClass), "1Gi")
-			createProbePod(ctx, workloadNS, "probe-new", probeImage(), "new-pvc")
+			createProbePod(ctx, "probe-new", probeImage(), "new-pvc")
 			_, err := writeMarkerChecksum(ctx, workloadNS, "probe-new", "probe", "/mnt/new-pvc/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(createCSIVolumeSnapshot(ctx, workloadNS, "new-snap", os.Getenv(envVSClass), "new-pvc")).To(Succeed())
@@ -667,22 +893,22 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 			By("exporting new-pvc over the unified group (served by storage-foundation)")
 			Expect(createUnifiedDataExport(ctx, workloadNS, "export-sf", "PersistentVolumeClaim", "new-pvc")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 5*time.Minute)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), "export-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-sf")).To(Succeed())
-			got, err := checksumFile(ctx, workloadNS, httpClientPod, "curl", "/tmp/marker-sf")
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "storage-foundation must serve the unified export after the flip")
 
 			By("importing over the unified group into a fresh PVC (served by storage-foundation)")
 			Expect(createUnifiedDataImport(ctx, workloadNS, "import-sf", "imported-sf", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			iurl, icaB64, err := crStatusURLCA(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 5*time.Minute)
+			iurl, icaB64, err := crStatusURLCA(ctx, dataImportGVR(unifiedGroup), "import-sf")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(svdmUpload(ctx, workloadNS, iurl, icaB64, "/tmp/marker-sf", "marker")).To(Succeed())
 			waitImportComplete(ctx, unifiedGroup, workloadNS, "import-sf", "imported-sf", podRunningTimeout())
 
-			createProbePod(ctx, workloadNS, "probe-sf", probeImage(), "imported-sf")
-			got, err = checksumFile(ctx, workloadNS, "probe-sf", "probe", "/mnt/imported-sf/marker")
+			createProbePod(ctx, "probe-sf", probeImage(), "imported-sf")
+			got, err = checksumFile(ctx, "probe-sf", "probe", "/mnt/imported-sf/marker")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(sourceChecksum), "unified import under storage-foundation must match the source")
 
@@ -691,9 +917,9 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// export must remove the CR AND recover new-pvc to Bound. Also drop the finished DataImport
 			// CR (its target PVC imported-sf stays Bound — that is the delivered result). Mirrors the
 			// phase-C teardown, so a kept cluster is left clean instead of with a stale in-flight export.
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), workloadNS, "export-sf", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-sf")
 			waitPVCPhase(ctx, workloadNS, "new-pvc", corev1.ClaimBound, 3*time.Minute)
-			deleteCRAndWaitGone(ctx, dataImportGVR(unifiedGroup), workloadNS, "import-sf", 3*time.Minute)
+			deleteCRAndWaitGone(ctx, dataImportGVR(unifiedGroup), "import-sf")
 		})
 	})
 

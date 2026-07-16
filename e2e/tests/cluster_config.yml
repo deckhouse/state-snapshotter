@@ -18,14 +18,18 @@
 #                           Listed first (always on): the CRDs + controllers are cheap
 #                           for phases 1-2; the data leg itself is only exercised in
 #                           phase 3.
-#   - state-snapshotter   : the module under test. enableDemoDomain ships the
-#                           demo domain controller (separate pod + aggregated
-#                           apiserver) and the demo CustomSnapshotDefinition.
+#   - state-snapshotter   : the module under test (core snapshot engine + SDK).
 #                           modulePullOverride defaults to the literal "main";
 #                           override it for CI by exporting
 #                           STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr<N>/mr<N>
 #                           (storage-e2e's generic <MODULE>_MODULE_PULL_OVERRIDE
 #                           convention; in-YAML ${VAR} is rejected).
+#   - sds-unified-snapshots-poc: reference demo domain module. Ships the demo domain
+#                           controller (separate pod + aggregated apiserver), the demo
+#                           CRDs and the demo CustomSnapshotDefinitions the suite
+#                           captures/restores against. Depends on state-snapshotter.
+#                           Override its tag via
+#                           SDS_UNIFIED_SNAPSHOTS_POC_MODULE_PULL_OVERRIDE.
 #   - sds-node-configurator: block-device/LVM manager on the nodes; the
 #                           sds-local-volume backend requires it. Enabled here so
 #                           its image is pinnable via SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE.
@@ -93,13 +97,29 @@ clusterDefinition:
         # STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE, e.g. "pr<N>" on GitHub, "mr<N>"
         # on GitLab (the override and the static tag are logged at config load).
         modulePullOverride: "main"
-        settings:
-          enableDemoDomain: true
         # No module dependency: state-snapshotter comes up first and tolerates
         # storage-foundation's CRDs (VolumeCaptureRequest, extended VolumeSnapshot)
         # being absent at startup — the VCR watch is added dynamically once the CRD
         # becomes RESTMappable. storage-foundation then depends on this module.
+        # The demo domain is no longer shipped here — it comes from the
+        # sds-unified-snapshots-poc module enabled below.
         dependencies: []
+      - name: "sds-unified-snapshots-poc"
+        version: 1
+        enabled: true
+        # Reference demo domain module: provides the demo domain controller, demo CRDs
+        # (demo.state-snapshotter.deckhouse.io) and the two demo CSDs the suite captures
+        # and restores against. Its GitLab CI publishes to the same dev registry as the
+        # other modules; CI overrides the tag WITHOUT editing this file by exporting
+        # SDS_UNIFIED_SNAPSHOTS_POC_MODULE_PULL_OVERRIDE (e.g. "mr<N>").
+        modulePullOverride: "main"
+        # Depends on state-snapshotter: the demo CSDs are CustomSnapshotDefinition
+        # (group state-snapshotter.deckhouse.io) and the demo aggregated API sits under
+        # subresources.demo.state-snapshotter.deckhouse.io, so the core CSD CRD + core
+        # aggregation layer must be live first. (module.yaml declares no requirements.modules,
+        # so this dependency graph is what enforces the ordering in e2e.)
+        dependencies:
+          - "state-snapshotter"
       - name: "sds-node-configurator"
         version: 1
         enabled: true

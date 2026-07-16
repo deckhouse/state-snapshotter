@@ -1,18 +1,19 @@
 ---
-description: Demo/domain controllers are executable architecture documentation — reference-grade naming, package layout, intent-comments, and zero hidden magic. Demo code must be cleaner than production. Apply when editing demo/domain controllers or the snapshot SDK semantic layer, and when naming or placing any function/type/field/file a new engineer would read as a contract.
-globs: images/domain-controller/**/*.go,pkg/snapshotsdk/**/*.go
+description: The snapshot SDK is executable architecture documentation — reference-grade naming, package layout, intent-comments, and zero hidden magic. SDK code must be cleaner than production. Apply when editing the snapshot SDK semantic layer, and when naming or placing any function/type/field/file a new engineer would read as a contract.
+globs: pkg/snapshotsdk/**/*.go
 alwaysApply: false
 ---
 
-# Demo / SDK code quality contract
+# SDK code quality contract
 
-Demo (`images/domain-controller`) and the snapshot SDK (`pkg/snapshotsdk`) are **executable architecture
-documentation / reference implementation**. New engineers read them instead of ADRs, and copy-paste them
-into new domain controllers. A reader must, from this code alone and in ~30 minutes (no ADR / design doc),
-be able to explain the **happy path, the failure paths, the ownership boundaries, and the lifecycle** (the
-measurable bar — see §8). "It works" is not enough — it must be **impossible to misread**. These standards
-are therefore *stricter than production*: demo code must be cleaner than prod, because prod may carry
-legacy / compat hacks and demo never may.
+The snapshot SDK (`pkg/snapshotsdk`) is **executable architecture documentation / reference
+implementation**. New engineers read it instead of ADRs, and copy-paste it into new domain controllers
+(the reference demo domain controller itself now lives in the `sds-unified-snapshots-poc` repo). A reader
+must, from this code alone and in ~30 minutes (no ADR / design doc), be able to explain the **happy path,
+the failure paths, the ownership boundaries, and the lifecycle** (the measurable bar — see §8). "It works"
+is not enough — it must be **impossible to misread**. These standards are therefore *stricter than
+production*: SDK code must be cleaner than prod, because prod may carry legacy / compat hacks and the SDK
+never may.
 
 ## 1. Naming is architecture-grade (MUST)
 
@@ -87,18 +88,28 @@ successfully.
 
 - **Data capture:** at most one PVC per node (`VolumeCaptureSpec.DataRef` is a single optional pointer — never
   a slice). Multiple volumes are modeled as child snapshot nodes, never as several data refs on one node.
-- **Manifest capture — forbidden state:** `ManifestCaptureRequest.spec.targets == []`. The final manifest set
-  (domain targets + owned-PVC augmentation) MUST contain at least one target. If any code path lets planning
-  succeed (or a barrier be raised) with an empty MCR, that is a **bug** — the SDK fails closed with
-  `ErrEmptyManifest` before any cluster mutation. The SDK does NOT inject the source object; supplying ≥1
-  manifest target is the domain's responsibility.
+- **Manifest capture — never empty:** the SDK does NOT inject the source object; supplying ≥1 manifest
+  target is the domain's responsibility. Every snapshot MUST capture at least its own source object's
+  manifest — a domain leaf/single-object snapshot passes its own source identity, and the namespace-root
+  aggregator always includes its own Namespace object — so the target set is never empty. `EnsureManifestCapture`
+  fails closed with `ErrEmptyManifest` before any cluster mutation, and the MCR CRD rejects an empty
+  `spec.targets` via CEL.
+- **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT
+  declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that
+  wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once
+  the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches
+  `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a
+  decision (a domain reacts with `Fail(GraphPlanningFailed)`; the namespace-root ignores it, first plan
+  wins). `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips
+  re-planning the leg via `ManifestCaptureNeeded`.
 
 ## 8. Litmus
 
 A new engineer opens the demo controller, reads no ADR, and within 30 minutes can explain **all four** of:
 - the **happy path** — how a snapshot node is normally planned (manifest capture, data capture, and child
   snapshot planning, then the planning barrier);
-- the **failure paths** — not-ready (`MarkNotReady`), planning-failed, and drift (topology/manifest);
+- the **failure paths** — recoverable waiting (`ReportProgress` + requeue), terminal domain failure
+  (`Fail`/`Reject`), and core-owned leg failure (terminal Ready reason → stop);
 - the **ownership boundaries** — domain vs SDK vs core (who writes what);
 - the **lifecycle** — create/adopt, barrier commit, and suppression after the core handoff.
 

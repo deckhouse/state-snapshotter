@@ -89,7 +89,7 @@ test-transition: ## Run the transition e2e suite (manual: needs E2E_RUN_TRANSITI
 	go test -v -count=1 -timeout 200m ./tests/transition/ -ginkgo.timeout 180m -ginkgo.v
 
 .PHONY: transition-clean
-transition-clean: ## Reset the cluster to the transition phase-A start state: FIRST delete the workload (DataExports/DataImports, VolumeSnapshots, pods, PVCs, namespace) while the controllers are still up so finalizers clear and child resources (prime PVC / importer Deployment) are reaped, THEN disable the 4 snapshot modules, drain their namespaces, and sweep leftover domain RBAC
+transition-clean: ## Reset the cluster to the transition phase-A start state: FIRST delete the workload (DataExports/DataImports, VolumeSnapshots, pods, PVCs, namespace) while the controllers are still up so finalizers clear and child resources (prime PVC / importer Deployment) are reaped, THEN disable the 4 snapshot modules, drain their namespaces, and sweep leftover domain RBAC + legacy CRDs
 	@echo "==> [1/4] Deleting the workload in '$(TRANSITION_WORKLOAD_NS)' while the controllers are still up (so finalizers clear)..."
 	@if $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; then \
 		echo "  DataExports/DataImports (controllers reap the export/import PVCs + Deployments)..."; \
@@ -139,6 +139,8 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 	done
 	@echo "==> [4/4] Sweeping leftover hook-created domain RBAC (state-snapshotter ClusterRoles/Bindings survive module disable — see docs/backlog.md #2)..."
 	@$(KUBECTL) delete clusterrole,clusterrolebinding -l heritage=deckhouse,module=state-snapshotter --ignore-not-found >/dev/null 2>&1 || true
+	@echo "     Sweeping leftover LEGACY CRDs (re-seeded by the phase-C two-owner race leg; on a successful run the migration hooks already removed them, and phase B reinstalls the real ones)..."
+	@$(KUBECTL) delete crd dataexports.storage.deckhouse.io dataimports.storage.deckhouse.io --ignore-not-found >/dev/null 2>&1 || true
 	@echo "==> Done. Re-check: none of [$(TRANSITION_NS)] and no '$(TRANSITION_WORKLOAD_NS)' should exist before re-running 'make test-transition'."
 
 .PHONY: transition-reset-snapc
@@ -178,7 +180,7 @@ check-env: ## Print the relevant env vars for the nested flow
 	@echo "E2E_SNAPSHOTTER_NS_PREFIX:              $${E2E_SNAPSHOTTER_NS_PREFIX}  # namespace prefix for source/restore namespaces (default snap-e2e)"
 	@echo "E2E_SNAPSHOT_READY_TIMEOUT:             $${E2E_SNAPSHOT_READY_TIMEOUT}  # Go duration, default 10m"
 	@echo "E2E_MODULE_READY_TIMEOUT:               $${E2E_MODULE_READY_TIMEOUT}  # Go duration, default 15m"
-	@echo "E2E_GC_TTL:                             $${E2E_GC_TTL}  # snapshotRootOkTtl for the GC spec (default 60s)"
+	@echo "E2E_GC_TTL:                             $${E2E_GC_TTL}  # snapshotTtlAfterDelete for the GC spec (default 60s)"
 	@echo "E2E_VOLUME_DATA:                        $${E2E_VOLUME_DATA}  # true|1|yes -> run phase 3 (full volume-data flow)"
 	@echo "E2E_GET_LOAD:                           $${E2E_GET_LOAD}  # true|1|yes -> run the opt-in GET-load measurement (provisions own SC; ~minutes)"
 	@echo "E2E_GET_LOAD_ITERATIONS:                $${E2E_GET_LOAD_ITERATIONS}  # GET-load capture waves to run (default 5)"

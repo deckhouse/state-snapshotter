@@ -2,7 +2,7 @@
 
 > Migrated from `.cursor/rules/*.mdc`. Repo-wide (always-apply) rules live here;
 > path-scoped rules live in nested `CLAUDE.md` files (`api/`, `images/state-snapshotter-controller/`,
-> `images/domain-controller/`, `pkg/snapshotsdk/`).
+> `pkg/snapshotsdk/`).
 
 ## Go formatting (MUST)
 
@@ -69,6 +69,8 @@ golangci-lint run --build-tags ce ./...
 - Runtime containers (controllers/helpers/jobs) MUST be distroless-compatible.
 - Do NOT use shell entrypoints/wrappers (`/bin/sh`, `bash`, `sh -c`) in Pod/Job specs — invoke binaries directly (e.g. the controller binary from `images/state-snapshotter-controller/cmd`).
 - Multi-step behavior → Go/helper binaries, not inline shell. For ad-hoc debug probes needing a shell, use a shell-friendly image (e.g. BusyBox), never the distroless controller image.
+- For **state-snapshotter** module images (werf-built controller/webhook), NEVER assume a shell exists: do not use `/bin/sh -lc ...` in manifests.
+- Generated demo manifests: do NOT use shell entrypoints for runtime containers; keep them distroless-compatible.
 
 ## RBAC source of truth (MUST)
 

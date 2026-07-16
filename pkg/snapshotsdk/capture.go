@@ -63,14 +63,31 @@ type Planning interface {
 	// hands both halves here. Pass nil when nothing is excluded; the wire value is normalized to [].
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error
 
-	// EnsureVolumeCapture ensures the data-leg capture request for the given PVC targets and publishes its
-	// name. An empty target set is a manifest-only snapshot (no request, no published name). The operation
-	// is suppressed once the core controller has stamped the data leg captured.
+	// EnsureVolumeCapture ensures the data-leg capture request for the snapshot's single PVC (VolumeCaptureSpec.DataRef)
+	// and publishes its name. A nil DataRef is a manifest-only snapshot (no request, no published name). The
+	// operation is suppressed once the core controller has stamped the data leg captured. It depends ONLY on
+	// VolumeCaptureSpec and never reads the manifest leg.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
-	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest (the base target SET plus any
-	// owned-PVC targets discovered from the data leg) and publishes its name. The operation is suppressed
-	// once the core controller has stamped the manifest leg captured.
+	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest from the domain's declared
+	// target SET (ManifestCaptureSpec.Targets) and publishes its name. It depends ONLY on ManifestCaptureSpec:
+	// the SDK never reads the data-leg VCR to derive or inject targets, so EnsureManifestCapture and
+	// EnsureVolumeCapture are two independent declarations whose call order does not affect the result. A
+	// domain that wants a PVC's YAML captured lists that PVC in Targets explicitly. The operation is
+	// suppressed once the core controller has stamped the manifest leg captured.
+	//
+	// The target set MUST be non-empty: every snapshot captures at least its own source object's manifest
+	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
+	// cluster mutation; the MCR CRD enforces the same invariant via CEL. The captured-latch suppression wins
+	// over this guard: once the leg is captured the call is a no-op (nil) regardless of input.
+	//
+	// The request is created ONCE with the frozen point-in-time target set. When the MCR already exists the
+	// SDK ADOPTS it — it (idempotently) publishes the name into status and never patches spec.targets — and
+	// then SIGNALS ErrManifestTargetsDrift if the caller's freshly-declared set differs from the frozen one
+	// (compared as a set). Drift is a signal, not a decision: the name is already published, so the leg is
+	// established; the caller decides (a domain typically Fails; the namespace root ignores it and freezes to
+	// the first plan). Immutability of spec.targets is separately enforced at the apiserver via a CEL rule.
+	// Callers that want to skip building targets once the leg is planned gate on ManifestCaptureNeeded.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -211,6 +228,38 @@ type sdk struct {
 // node in ChildrenLinkPending forever (the immutable content-ref CEL would reject the new edge). Callers
 // match it with errors.Is(err, ErrChildrenSetFrozen).
 var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phase>=Planned): EnsureChildren cannot grow the declared child set")
+
+// ErrEmptyManifest is returned by EnsureManifestCapture when the ManifestCaptureSpec carries no targets.
+// Every snapshot must capture at least its own source object's manifest — a single-object domain snapshot
+// passes its own source identity, the namespace-root aggregator always includes its own Namespace object —
+// and the SDK never injects the source on the domain's behalf. So an empty target set is a domain contract
+// violation (recommended reaction sdk.Fail(GraphPlanningFailed)), not a valid empty capture. Fail-closed
+// and side-effect-free: it rejects BEFORE the ManifestCaptureRequest is created. The captured-latch
+// suppression wins over this guard: once the core has stamped the manifest leg captured the call is a
+// no-op (nil) regardless of input — nothing can be created anymore, so a late empty recomputation must
+// not fail an already-captured snapshot. The MCR CRD enforces the same invariant via a CEL rule as a
+// second line of defense. Callers match it with errors.Is(err, ErrEmptyManifest).
+var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at least one target (the snapshotted object's own manifest)")
+
+// ErrManifestTargetsDrift is a SIGNAL (not a decision) returned by EnsureManifestCapture when the
+// ManifestCaptureRequest already exists (its target set is the frozen point-in-time capture plan) and the
+// caller now declares a DIFFERENT set. The MCR name is ALWAYS published first (adopt), so the leg is
+// established regardless; this only reports that the freshly-declared set diverges from the frozen plan.
+// The caller decides: a domain typically reacts with sdk.Fail(GraphPlanningFailed); the namespace root
+// ignores it (it recomputes a shifting set over a live namespace and the first plan wins). Immutability of
+// the MCR targets is separately enforced at the apiserver by the CRD's CEL rule. Targets are compared as a
+// SET keyed by (apiVersion, kind, name), so reordering/duplicates never count as drift. Callers match it
+// with errors.Is(err, ErrManifestTargetsDrift).
+var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets differ from the frozen ManifestCaptureRequest (point-in-time plan already set)")
+
+// ManifestCaptureNeeded reports whether the manifest leg still needs planning: true iff the
+// ManifestCaptureRequest name has not been published yet AND the core has not latched the manifest leg
+// captured. A caller uses it to skip the (potentially expensive) target computation once the leg is
+// established — e.g. the namespace-root gates its live-namespace re-list on it. Pure read of the adapter
+// status; no cluster access.
+func ManifestCaptureNeeded(t SnapshotAdapter) bool {
+	return t.GetDomainCaptureState().ManifestCaptureRequestName == "" && !t.CoreCaptureState().manifestCaptured()
+}
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
@@ -353,8 +402,17 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
 	obj := t.Object()
+	// Suppression first: once the core has stamped the manifest leg captured the call is a no-op — even for
+	// invalid input. Nothing can be created anymore, so a late (post-capture) empty recomputation by a
+	// domain that skipped the ManifestCaptureNeeded gate must not fail a captured snapshot.
 	if t.CoreCaptureState().manifestCaptured() {
 		return nil
+	}
+	// A manifest capture must always carry at least the snapshotted object's own manifest; the SDK never
+	// injects the source (the manifest leg is built solely from in.Targets — see EnsureManifestCapture doc),
+	// so an empty target set is a domain bug. Fail closed before any cluster mutation.
+	if len(in.Targets) == 0 {
+		return ErrEmptyManifest
 	}
 	namespace := obj.GetNamespace()
 	mcrName := manifest.RequestName(obj.GetUID())
@@ -370,6 +428,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	if getErr != nil && !apierrors.IsNotFound(getErr) {
 		return getErr
 	}
+	mcrExisted := getErr == nil
 	if apierrors.IsNotFound(getErr) {
 		if err := s.refresh(ctx, obj); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -379,10 +438,6 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		}
 		if t.CoreCaptureState().manifestCaptured() {
 			return nil
-		}
-		ownedPVC, err := s.provider.OwnedPVCTarget(ctx, namespace, t.GetDomainCaptureState().VolumeCaptureRequestName)
-		if err != nil {
-			return err
 		}
 		owner, err := s.ownerRef(t)
 		if err != nil {
@@ -395,14 +450,20 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Spec: ssv1alpha1.ManifestCaptureRequestSpec{
-				Targets: manifest.Targets(in.Targets, ownedPVC, namespace),
+				// The manifest leg is built solely from the domain's declared targets — the SDK never reads
+				// the data-leg VCR to derive or inject targets. EnsureManifestCapture and EnsureVolumeCapture
+				// are therefore order-independent (see ManifestCaptureSpec / VolumeCaptureSpec).
+				Targets: manifest.Targets(in.Targets),
 			},
 		}
 		if err := s.client.Create(ctx, mcr); err != nil && !apierrors.IsAlreadyExists(err) {
 			return err
 		}
 	}
-	return patch.Status(ctx, s.client, obj, func() bool {
+	// ADOPT: publish the MCR name into the snapshot status (idempotent — no write if already set). Done for
+	// BOTH the just-created and the pre-existing MCR, so the leg always establishes even when the caller's
+	// freshly-declared set differs from the frozen plan (no wedge on a create-then-publish-failed retry).
+	if err := patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
 		if st.ManifestCaptureRequestName == mcrName {
 			return false
@@ -410,7 +471,18 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		st.ManifestCaptureRequestName = mcrName
 		t.SetDomainCaptureState(st)
 		return true
-	})
+	}); err != nil {
+		return err
+	}
+	// DRIFT signal (AFTER adopt): the MCR pre-existed (its target set is the frozen point-in-time plan) and
+	// the caller now declares a DIFFERENT set — set-compared from the cached object, no apiserver call. The
+	// name is already published, so the leg is established; the caller decides (a domain typically Fails; the
+	// namespace root ignores it — it recomputes a shifting set over a live namespace and the first plan
+	// wins). MCR-target immutability is separately enforced at the apiserver by the CRD's CEL rule.
+	if mcrExisted && !manifest.SameSet(existing.Spec.Targets, in.Targets) {
+		return ErrManifestTargetsDrift
+	}
+	return nil
 }
 
 func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error {

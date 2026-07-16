@@ -25,7 +25,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -215,14 +214,17 @@ func writeMarkerChecksum(ctx context.Context, ns, pod, container, path string) (
 	return execSh(ctx, ns, pod, container, script)
 }
 
-// checksumFile returns the sha256 of a file inside the pod.
-func checksumFile(ctx context.Context, ns, pod, container, path string) (string, error) {
-	return execSh(ctx, ns, pod, container, fmt.Sprintf("sha256sum %s | awk '{print $1}'", path))
+// checksumFile returns the sha256 of a file inside a pod in the transition workload namespace
+// (the whole suite operates in the single workloadNS).
+func checksumFile(ctx context.Context, pod, container, path string) (string, error) {
+	return execSh(ctx, workloadNS, pod, container, fmt.Sprintf("sha256sum %s | awk '{print $1}'", path))
 }
 
-// createProbePod creates a sleeping pod mounting the given PVCs at /mnt/<pvc> and waits for Running.
-// image must provide `sh`, `sha256sum` and (for the svdm HTTP steps) `curl`.
-func createProbePod(ctx context.Context, ns, name, image string, pvcs ...string) {
+// createProbePod creates a sleeping pod in the transition workload namespace mounting the given PVCs
+// at /mnt/<pvc> and waits for Running. image must provide `sh`, `sha256sum` and (for the svdm HTTP
+// steps) `curl`.
+func createProbePod(ctx context.Context, name, image string, pvcs ...string) {
+	ns := workloadNS
 	GinkgoHelper()
 	var mounts []corev1.VolumeMount
 	var volumes []corev1.Volume
@@ -739,8 +741,15 @@ func createHTTPClientPod(ctx context.Context, ns, name, sa string) {
 	}, 5*time.Minute, pollInterval).Should(Equal(corev1.PodRunning), "http client pod Running")
 }
 
-// crStatusURLCA reads status.url and status.ca (base64) from a DataExport/DataImport CR.
-func crStatusURLCA(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) (url, caB64 string, err error) {
+// crStatusTimeout bounds the wait for a DataExport/DataImport to publish status.url/status.ca (the
+// controller has to provision the exporter/importer endpoint behind it).
+const crStatusTimeout = 5 * time.Minute
+
+// crStatusURLCA reads status.url and status.ca (base64) from a DataExport/DataImport CR in the
+// transition workload namespace.
+func crStatusURLCA(ctx context.Context, gvr schema.GroupVersionResource, name string) (url, caB64 string, err error) {
+	ns := workloadNS
+	timeout := crStatusTimeout
 	url, err = waitStatusString(ctx, gvr, ns, name, timeout, "url")
 	if err != nil {
 		return "", "", err
@@ -928,10 +937,14 @@ func firingAlertNames(ctx context.Context) string {
 	return strings.Join(names, ",")
 }
 
+// alertTimeout bounds every ClusterAlert-firing wait: alert evaluation lags a Prometheus scrape, so
+// the budget is deliberately generous.
+const alertTimeout = 6 * time.Minute
+
 // expectAlertFiring blocks until a ClusterAlert (alertName, optional moduleLabel) is firing, logging
-// the currently-firing set each tick. Alert evaluation lags a Prometheus scrape, so callers give it
-// a generous timeout.
-func expectAlertFiring(ctx context.Context, alertName, moduleLabel string, timeout time.Duration) {
+// the currently-firing set each tick.
+func expectAlertFiring(ctx context.Context, alertName, moduleLabel string) {
+	timeout := alertTimeout
 	GinkgoHelper()
 	what := "ClusterAlert " + alertName
 	if moduleLabel != "" {
@@ -985,9 +998,14 @@ func createUnifiedDataImport(ctx context.Context, ns, name, pvcName, storageClas
 	})
 }
 
-// deleteCRAndWaitGone deletes a namespaced CR and blocks until it is fully gone (finalizers
-// released). Used to tear down DataExports so the reassigned source PV is recovered.
-func deleteCRAndWaitGone(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) {
+// crDeleteTimeout bounds the wait for a deleted CR to fully disappear (finalizer release).
+const crDeleteTimeout = 3 * time.Minute
+
+// deleteCRAndWaitGone deletes a CR in the transition workload namespace and blocks until it is fully
+// gone (finalizers released). Used to tear down DataExports so the reassigned source PV is recovered.
+func deleteCRAndWaitGone(ctx context.Context, gvr schema.GroupVersionResource, name string) {
+	ns := workloadNS
+	timeout := crDeleteTimeout
 	GinkgoHelper()
 	err := suiteDyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -1014,4 +1032,105 @@ func waitPVCPhase(ctx context.Context, ns, name string, want corev1.PersistentVo
 	pollUntil(ctx, fmt.Sprintf("PVC %s/%s == %s", ns, name, want), timeout,
 		func() bool { return pvcPhase(ctx, ns, name) == string(want) },
 		func() string { return "phase=" + pvcPhase(ctx, ns, name) })
+}
+
+// --- two-owner migration race (phase C race leg) -----------------------------
+//
+// The svdm 025-migrate-legacy-crds hook is mirrored by an identical storage-foundation hook: both
+// run OnBeforeHelm, are idempotent, and gate on the presence of the legacy CRDs, so whichever
+// module converges first migrates and the other must cleanly no-op. The race leg re-seeds a legacy
+// epoch AFTER the first phase-C spec migrated the real one, so that enabling storage-foundation —
+// which triggers a global converge re-running svdm's beforeHelm hooks too — makes BOTH owners see
+// the legacy CRDs in the same converge window. Both hooks are transitional/expiring; drop this leg
+// together with them.
+
+// createLegacyCRD installs a minimal stand-in for a pre-D1 svdm CRD (namespaced, v1alpha1,
+// x-kubernetes-preserve-unknown-fields) and waits until it is Established. Minimal is enough: the
+// migration hooks are schema-agnostic — they list the CRs unstructured, read/patch metadata and
+// spec, and delete the CRD; nothing else watches the legacy group at this point (svdm is already
+// the D1 build).
+func createLegacyCRD(ctx context.Context, kind, plural string) {
+	GinkgoHelper()
+	name := plural + "." + legacyGroup
+	crd := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apiextensions.k8s.io/v1",
+		"kind":       "CustomResourceDefinition",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec": map[string]interface{}{
+			"group": legacyGroup,
+			"scope": "Namespaced",
+			"names": map[string]interface{}{
+				"plural":   plural,
+				"singular": strings.ToLower(kind),
+				"kind":     kind,
+				"listKind": kind + "List",
+			},
+			"versions": []interface{}{map[string]interface{}{
+				"name":    "v1alpha1",
+				"served":  true,
+				"storage": true,
+				"schema": map[string]interface{}{
+					"openAPIV3Schema": map[string]interface{}{
+						"type":                                 "object",
+						"x-kubernetes-preserve-unknown-fields": true,
+					},
+				},
+			}},
+		},
+	}}
+	_, err := suiteDyn.Resource(crdGVR).Create(ctx, crd, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred(), "create legacy CRD %s", name)
+	}
+	pollUntil(ctx, fmt.Sprintf("legacy CRD %s Established", name), 2*time.Minute,
+		func() bool { return crdEstablished(ctx, name) },
+		func() string { return "not Established yet" })
+}
+
+// addFinalizer appends a finalizer to a namespaced object (PVC or CR) via the dynamic client,
+// retrying on write conflicts. Used to seed the legacy storage-manager finalizer the migration
+// hooks must sweep — there is no legacy controller left to put it there for real.
+func addFinalizer(ctx context.Context, gvr schema.GroupVersionResource, ns, name, finalizer string) {
+	GinkgoHelper()
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		obj, err := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred(), "get %s %s/%s to add finalizer", gvr.Resource, ns, name)
+		for _, f := range obj.GetFinalizers() {
+			if f == finalizer {
+				return
+			}
+		}
+		obj.SetFinalizers(append(obj.GetFinalizers(), finalizer))
+		_, lastErr = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+		if lastErr == nil {
+			return
+		}
+		if !apierrors.IsConflict(lastErr) {
+			break
+		}
+	}
+	Expect(lastErr).NotTo(HaveOccurred(), "add finalizer %s to %s %s/%s", finalizer, gvr.Resource, ns, name)
+}
+
+// deletePVCAndWaitGone deletes a PVC and blocks until it is fully gone — the "deletes cleanly"
+// proof: with the legacy finalizer swept, nothing may hold the PVC in Terminating.
+func deletePVCAndWaitGone(ctx context.Context, ns, name string, timeout time.Duration) {
+	GinkgoHelper()
+	err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		Expect(err).NotTo(HaveOccurred(), "delete PVC %s/%s", ns, name)
+	}
+	pollUntil(ctx, fmt.Sprintf("PVC %s/%s deleted", ns, name), timeout,
+		func() bool {
+			_, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+			return apierrors.IsNotFound(gerr)
+		},
+		func() string {
+			pvc, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
+			if gerr != nil {
+				return fmt.Sprintf("get err=%v", gerr)
+			}
+			return "still present, finalizers=" + fmt.Sprint(pvc.Finalizers)
+		})
 }

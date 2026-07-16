@@ -26,7 +26,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -37,7 +36,6 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 
-	demov1alpha1 "github.com/deckhouse/state-snapshotter/api/demo/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/storage-e2e/pkg/cluster"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
@@ -81,8 +79,13 @@ const (
 	defaultBackupClientImage = "curlimages/curl:8.11.1"
 
 	moduleName = "state-snapshotter"
-	// The demo domain ships two flat CSDs (one snapshot kind per object): the structural VM snapshot
-	// and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
+	// pocModuleName is the reference demo domain module (sds-unified-snapshots-poc). It is enabled
+	// alongside state-snapshotter in the e2e cluster and provides the demo domain controller + demo
+	// CRDs + demo CSDs that this suite captures/restores against (the demo domain no longer ships in
+	// state-snapshotter itself).
+	pocModuleName = "sds-unified-snapshots-poc"
+	// The demo domain (from the PoC module) ships two flat CSDs (one snapshot kind per object): the
+	// structural VM snapshot and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
@@ -130,7 +133,10 @@ const (
 )
 
 // Demo domain API group (the CRs and their snapshot kinds).
-var demoGroupVersion = demov1alpha1.SchemeGroupVersion.String()
+// demoGroupVersion is the demo domain apiVersion. The demo types live in the PoC module; the suite
+// accesses demo objects purely via unstructured + literal GVRs, so this is a plain constant (the group
+// is identical whether the types are compiled from state-snapshotter or the PoC).
+const demoGroupVersion = "demo.state-snapshotter.deckhouse.io/v1alpha1"
 
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
@@ -358,11 +364,66 @@ func cleanupNestedTestCluster() {
 
 // --- module / CSD readiness ------------------------------------------------
 
+// ensureModulesEnabled enables the modules this suite needs (idempotently: create-or-update each
+// module's ModuleConfig + ModulePullOverride at its env-pinned tag, in dependency order) so the suite
+// converges regardless of the cluster's starting state — a fresh alwaysCreateNew cluster, an
+// alwaysUseExisting one, or a cluster where a module happened to be disabled. Image tags come from
+// the standard <MODULE>_MODULE_PULL_OVERRIDE convention (default "main"), matching what the
+// cluster_config path would apply. It only enables; the WaitForModuleReady calls below do the waiting.
+func ensureModulesEnabled(ctx context.Context) error {
+	specs := []storagekube.ModuleSpec{
+		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
+		// The PoC module (demo controller + demo CRDs + demo CSDs) depends on state-snapshotter: its
+		// CSDs are CustomSnapshotDefinition (state-snapshotter.deckhouse.io group), so the core CSD CRD
+		// must exist first. The dependency is declared in-batch so the graph resolves. The demo domain
+		// deploys unconditionally (the module's only config setting is logLevel), so no Settings needed.
+		{Name: pocModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(pocModuleName), Dependencies: []string{moduleName}},
+	}
+	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
+		return fmt.Errorf("ensure required modules enabled: %w", err)
+	}
+	return nil
+}
+
+// moduleTagFromEnv returns a module's image tag from its <MODULE>_MODULE_PULL_OVERRIDE env var (the
+// module name upper-cased, every non-alphanumeric rune replaced with '_'), defaulting to "main".
+// Mirrors storage-e2e's per-module override convention so a runtime enable pins the same tag the
+// alwaysCreateNew cluster_config path would.
+func moduleTagFromEnv(moduleName string) string {
+	key := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r - ('a' - 'A')
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			return r
+		default:
+			return '_'
+		}
+	}, moduleName) + "_MODULE_PULL_OVERRIDE"
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return "main"
+}
+
 // waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
 // AccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
 func waitModuleAndCSDReady(ctx context.Context) error {
+	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
+	// The suite does not otherwise enable modules — it relies on storage-e2e applying
+	// tests/cluster_config.yml, which only happens on alwaysCreateNew. Enabling here (idempotently)
+	// lets an alwaysUseExisting run — or a cluster where a module was left disabled for any reason —
+	// converge instead of sitting in WaitForModuleReady until the timeout on a NotInstalled module.
+	if err := ensureModulesEnabled(ctx); err != nil {
+		return err
+	}
 	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
 		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
+	}
+	// The demo domain controller + demo CSDs are delivered by the PoC module now, so it must also be
+	// Ready before the CSDs can reach AccessGranted.
+	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, pocModuleName, suiteCfg.moduleReadyTO); err != nil {
+		return fmt.Errorf("module %s not Ready: %w", pocModuleName, err)
 	}
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
 		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
@@ -410,17 +471,60 @@ func deleteNamespace(ctx context.Context, name string) {
 
 // --- aggregated --raw helpers ----------------------------------------------
 
-// aggGet performs an aggregated-apiserver GET against an absolute API path, returning the raw body.
-func aggGet(ctx context.Context, path string, params map[string]string) ([]byte, error) {
-	req := suiteClientset.Discovery().RESTClient().Get().AbsPath(path)
-	for k, v := range params {
-		req = req.Param(k, v)
+// aggGetTransientRetryTO/Interval bound how long aggGet retries a transiently-unavailable
+// aggregated API. The state-snapshotter aggregated API (subresources.state-snapshotter.deckhouse.io)
+// is served by the SINGLE-replica controller Deployment, so any controller restart — VPA
+// InPlaceOrRecreate eviction, node reschedule, or a TTL-driven rollout — opens a brief window in
+// which the backing APIService has no ready endpoint and the aggregation layer answers 503
+// ServiceUnavailable. Real backup clients retry through that window; the suite must too, otherwise
+// a one-shot read that happens to land during a controller restart fails spuriously.
+const (
+	aggGetTransientRetryTO = 30 * time.Second
+	aggGetRetryInterval    = 1 * time.Second
+)
+
+// isTransientAggErr reports whether an aggregated-apiserver error is transient backend
+// unavailability worth retrying (the single-replica controller is restarting), as opposed to a
+// real 4xx / decode failure that a retry would never fix.
+func isTransientAggErr(err error) bool {
+	if err == nil {
+		return false
 	}
-	return req.DoRaw(ctx)
+	if apierrors.IsServiceUnavailable(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) || apierrors.IsInternalError(err) || apierrors.IsTooManyRequests(err) {
+		return true
+	}
+	// Connection-level errors while the sole endpoint is being torn down/replaced.
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "the server is currently unable to handle the request")
 }
 
-// aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path.
-func aggPost(ctx context.Context, path string, body []byte) ([]byte, error) {
+// aggGet performs an aggregated-apiserver GET against an absolute API path, returning the raw body.
+// It retries transient aggregation-layer unavailability (see isTransientAggErr) up to
+// aggGetTransientRetryTO, bounded by ctx, so a controller restart does not fail an otherwise-valid read.
+func aggGet(ctx context.Context, path string, params map[string]string) ([]byte, error) {
+	deadline := time.Now().Add(aggGetTransientRetryTO)
+	for attempt := 1; ; attempt++ {
+		req := suiteClientset.Discovery().RESTClient().Get().AbsPath(path)
+		for k, v := range params {
+			req = req.Param(k, v)
+		}
+		body, err := req.DoRaw(ctx)
+		if err == nil || !isTransientAggErr(err) || time.Now().After(deadline) {
+			return body, err
+		}
+		GinkgoWriter.Printf("aggGet %s: transient aggregated-API error on attempt %d (%v) — retrying in %s\n", path, attempt, err, aggGetRetryInterval)
+		if !sleepCtx(ctx, aggGetRetryInterval) {
+			return body, err
+		}
+	}
+}
+
+// aggPost performs an aggregated-apiserver POST (JSON body) against an absolute API path. No caller
+// consumes the response body, so only the (annotated) error is returned.
+func aggPost(ctx context.Context, path string, body []byte) error {
 	resp, err := suiteClientset.Discovery().RESTClient().Post().
 		AbsPath(path).
 		SetHeader("Content-Type", "application/json").
@@ -430,9 +534,9 @@ func aggPost(ctx context.Context, path string, body []byte) ([]byte, error) {
 		// DoRaw collapses any non-2xx into a generic error (e.g. POST+409 -> "the server reported a
 		// conflict" with reason AlreadyExists) and does not decode the body, which hides the aggregated
 		// apiserver's real Status message. Append the raw response body so failures are actionable.
-		return resp, fmt.Errorf("%w (response body: %s)", err, truncate(resp, 1024))
+		return fmt.Errorf("%w (response body: %s)", err, truncate(resp, 1024))
 	}
-	return resp, nil
+	return nil
 }
 
 func coreSnapshotSubPath(ns, name, sub string) string {
@@ -547,11 +651,11 @@ func waitObjectCondition(ctx context.Context, gvr schema.GroupVersionResource, n
 	for {
 		obj, err := getResource(ctx, gvr, ns, name)
 		if err == nil {
-			if st, reason, found := conditionStatus(obj, condType); found && st == wantStatus {
+			st, reason, found := conditionStatus(obj, condType)
+			if found && st == wantStatus {
 				return nil
-			} else {
-				last = fmt.Sprintf("found=%v status=%q reason=%q", found, st, reason)
 			}
+			last = fmt.Sprintf("found=%v status=%q reason=%q", found, st, reason)
 		} else {
 			last = fmt.Sprintf("get err=%v", err)
 		}

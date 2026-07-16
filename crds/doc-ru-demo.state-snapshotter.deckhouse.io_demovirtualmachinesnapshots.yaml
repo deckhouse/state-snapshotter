@@ -1,8 +1,0 @@
-spec:
-  versions:
-    - name: v1alpha1
-      schema:
-        openAPIV3Schema:
-          description: |
-            DemoVirtualMachineSnapshot — промежуточный узел demo-снимка (PR5b) под корневым Snapshot;
-            к нему могут присоединяться снимки дисков.

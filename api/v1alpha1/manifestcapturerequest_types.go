@@ -41,20 +41,22 @@ type ManifestCaptureRequestList struct {
 }
 
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="has(self.targets) && size(self.targets) > 0",message="spec.targets must list at least one object to capture (at minimum the snapshotted object's own manifest)"
+// +kubebuilder:validation:XValidation:rule="self.targets == oldSelf.targets",message="spec.targets is immutable: the capture plan is frozen once the ManifestCaptureRequest is created"
 type ManifestCaptureRequestSpec struct {
-	// Targets specifies the objects to capture.
+	// Targets specifies the objects to capture. It MUST contain at least one target — at minimum the
+	// snapshotted object's own manifest. A single-object domain snapshot passes its own source identity,
+	// and the namespace-root aggregator always includes its own Namespace object, so a well-formed capture
+	// is never empty. An empty (or omitted) target set is a contract violation: the SDK fails closed with
+	// ErrEmptyManifest before creating the request, and the CRD rejects it via the spec-level CEL rule
+	// above ("has(self.targets) && size(self.targets) > 0").
+	// The set is the FROZEN point-in-time capture plan: it is IMMUTABLE once the request is created (the
+	// spec-level CEL transition rule "self.targets == oldSelf.targets" rejects any change). The SDK creates
+	// the request once and never patches it; a caller that recomputes a shifting set (e.g. the namespace
+	// root over a live namespace) is silently frozen to the first plan.
 	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest, with a
 	// single exception: the capture's own Namespace object (core v1 Namespace whose name equals the
 	// ManifestCaptureRequest namespace) is the only allowed cluster-scoped target.
-	//
-	// Optional (may be empty): an MCR with no targets is a valid EMPTY capture. It is produced by the
-	// namespace-root aggregator when a namespace has no allowlisted objects to capture (a single-object
-	// domain snapshot always passes its own source identity, so it never hits this case). The executor
-	// (ManifestCheckpointController) already handles an empty target set end-to-end — it writes a single
-	// empty content chunk and marks the ManifestCheckpoint Ready=Completed — so an empty MCR converges to
-	// an empty, Ready MCP and the owning SnapshotContent becomes ManifestsReady=True. This field is
-	// therefore NOT required: the SDK sends a null/omitted targets for the empty aggregator MCR, and a
-	// required constraint would reject that create with "spec.targets: Required value".
 	// +optional
 	Targets []ManifestTarget `json:"targets,omitempty"`
 }

@@ -19,7 +19,15 @@
 
 ## Kubebuilder markers (MUST)
 
-- Do NOT use `+kubebuilder:validation:XValidation` in this repo. Use standard markers (`Enum`, `MinLength`, `Minimum`, …).
+- Prefer standard markers (`Enum`, `MinLength`, `Minimum`, `MinItems`, `Required`) when they suffice.
+- `+kubebuilder:validation:XValidation` (CEL → `x-kubernetes-validations`) IS allowed and used for
+  invariants standard markers can't express — cross-field / transition rules (e.g. immutability on
+  `api/storage`, the `ManifestCaptureRequest` non-empty-`targets` rule on `api/v1alpha1`). Reach for CEL
+  only when a standard marker cannot express the constraint.
+- **CEL needs an integration test (MUST):** a CEL rule is enforced by the kube-apiserver, and a
+  fake-client unit test bypasses it — so it proves nothing. Any added/changed CEL rule requires an
+  envtest under `images/state-snapshotter-controller/test/integration/` asserting apiserver
+  reject-on-violation + accept-on-valid. See `.cursor/rules/cel-requires-integration-test.mdc`.
 
 ## File structure (MUST/SHOULD)
 

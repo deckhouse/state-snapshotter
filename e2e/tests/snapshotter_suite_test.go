@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 )
@@ -83,7 +82,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	// module TTL, so it cannot reuse the shared root.)
 	Context("Phase 1 & 2: manifest-only flow (no volume data)", func() {
 		captureSpecs()                  // capture_test.go: apply demo source + root Snapshot, assert Ready tree
-		aggregatedApiSpecs()            // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
+		aggregatedAPISpecs()            // aggregated_api_test.go: --raw manifests-download / -with-data-restoration
 		namespaceCaptureReworkSpecs()   // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
 		namespaceManifestCaptureSpecs() // namespace_manifest_capture_test.go: Namespace object capture + MCR admission
 		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
@@ -123,7 +122,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  capture ready timeout:      %s\n", suiteCfg.captureReadyTO)
 	GinkgoWriter.Printf("  data transfer timeout:      %s\n", suiteCfg.dataTransferTO)
 	GinkgoWriter.Printf("  module ready timeout:       %s\n", suiteCfg.moduleReadyTO)
-	GinkgoWriter.Printf("  GC TTL (snapshotRootOkTtl): %s\n", suiteCfg.gcTTL)
+	GinkgoWriter.Printf("  GC TTL (snapshotTtlAfterDelete): %s\n", suiteCfg.gcTTL)
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
 	GinkgoWriter.Printf("  GET-load measurement (opt): %v\n", suiteCfg.getLoad)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)

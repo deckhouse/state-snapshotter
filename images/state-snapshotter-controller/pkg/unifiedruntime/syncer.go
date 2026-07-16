@@ -65,13 +65,13 @@ type Syncer struct {
 	activeSnapshotGVKKeys map[string]struct{}
 }
 
-// NewSyncer builds a syncer. bootstrap is the static built-in list from
-// config.EffectiveUnifiedBootstrapPairs (by default just the core Snapshot pair,
-// unifiedbootstrap.DefaultGraphRegistryBuiltInPairs); eligible CSD pairs are merged on each Sync.
+// NewSyncer builds a syncer. bootstrap is the static built-in list
+// unifiedbootstrap.DefaultGraphRegistryBuiltInPairs (the core Snapshot + built-in VolumeSnapshot
+// pairs); eligible CSD pairs are merged on each Sync.
 //
-// dedicatedActivators maps a snapshot Kind (e.g. "DemoVirtualDiskSnapshot") to a function that
-// registers its dedicated controller at runtime. It may be nil/empty: then dedicated kinds are only
-// marked active (legacy behavior) and the caller is responsible for registering their controllers.
+// dedicatedActivators maps a snapshot Kind (e.g. the namespace-root "Snapshot") to a function that
+// registers its dedicated in-process controller at runtime. It may be nil/empty: then dedicated kinds are
+// only marked active (legacy behavior) and the caller is responsible for registering their controllers.
 func NewSyncer(
 	mgr ctrl.Manager,
 	log logr.Logger,
@@ -180,18 +180,15 @@ func (s *Syncer) Sync(ctx context.Context) error {
 				}
 				continue
 			}
-			// Domain-capture kind (demo): the dedicated planning controller owns MCR/VCR/children +
-			// PlanningReady, while the generic binder owns its SnapshotContent. The binder uses
-			// its own unstructured informer and registers no field index, so it can be wired
-			// independently of the planning controller — EXCEPT in a single manager that runs both: there
-			// the planning controller's typed informer + field index must be registered first to avoid an
-			// indexer conflict on the shared informer. So the gate only applies when this manager owns the
-			// planning controller (an activator is wired for the kind).
-			//
-			// Two-pod split (core): the planning controller runs in the domain-controller pod, so no
-			// activator is wired here. Core then owns the SnapshotContent directly with no ordering
-			// hazard. This keeps the cutover invariant (exactly one SnapshotContent owner — the generic
-			// binder) while the demo CR is reconciled solely by the out-of-process domain controller.
+			// Dedicated domain-capture kind (today only the namespace-root "Snapshot", wave5 dogfooding):
+			// the dedicated planning controller owns MCR/VCR/children + PlanningReady, while the generic
+			// binder owns its SnapshotContent. The binder uses its own unstructured informer and registers
+			// no field index, so it can be wired independently of the planning controller — EXCEPT in a
+			// single manager that runs both via a wired activator: there the planning controller's typed
+			// informer + field index must be registered first to avoid an indexer conflict on the shared
+			// informer, so the gate below waits for activation. With no activator wired (core registers the
+			// root's controller statically at startup, cmd/main.go), the binder is wired directly with no
+			// ordering hazard — the invariant stays "exactly one SnapshotContent owner: the generic binder".
 			if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; hasActivator {
 				if _, planningActive := s.activeSnapshotGVKKeys[snapGVK.String()]; !planningActive {
 					continue
@@ -206,7 +203,8 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			// VolumeSnapshot, content-single-writer design §11.5): domain-capture BY DEFINITION. Its
 			// planning controller lives out-of-process (the domain owner's manager), so no in-process
 			// activator/ordering gate applies — mark it domain-capture directly so the generic binder
-			// runs the eager capture-leg init + request lifecycle for it just like the demo domains.
+			// runs the eager capture-leg init + request lifecycle for it (the PoC demo domain and real
+			// domains such as virtualization flow through this same branch).
 			// The kind is intentionally NOT added to DedicatedSnapshotControllerKinds (that list is
 			// SS-internal in-process activation ordering).
 			s.snap.MarkDomainCaptureKind(snapGVK)
@@ -256,12 +254,11 @@ func (s *Syncer) Sync(ctx context.Context) error {
 // present in the eligible resolved set and have a wired activator, iterating in
 // unifiedbootstrap.DedicatedSnapshotControllerKinds order.
 //
-// That order is dependency order (children before parents): a parent controller (e.g. the demo VM
-// snapshot controller) Watches a child kind (DemoVirtualDiskSnapshot), and starting that Watch starts
-// the child's typed informer. The child's controller registers a typed field index, which
-// controller-runtime rejects once the informer has already started ("indexer conflict"). Activating
-// the child first guarantees its field index is registered before any parent Watch can start the
-// child informer.
+// That order is dependency order (children before parents): a parent in-process controller Watches a
+// child snapshot kind, and starting that Watch starts the child's typed informer. The child's controller
+// registers a typed field index, which controller-runtime rejects once the informer has already started
+// ("indexer conflict"). Activating the child first guarantees its field index is registered before any
+// parent Watch can start the child informer.
 //
 // Each kind is activated at most once (guarded by activeSnapshotGVKKeys). On activation failure the key
 // is left unset so the next Sync retries. The caller must hold s.mu.

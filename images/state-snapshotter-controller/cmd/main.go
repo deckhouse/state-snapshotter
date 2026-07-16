@@ -42,12 +42,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumesnapshotimport"
+	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/kubutils"
@@ -250,11 +250,11 @@ func main() {
 	}
 	log.Info("NamespaceGenericSnapshotBinderController added to manager")
 
-	// Demo dedicated controllers (DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot) run in the
-	// separate domain-controller pod/binary, not in core (commit "core-remove-demo"). Core no longer
-	// reconciles demo CRs nor serves an in-process restore transform: it owns SnapshotContent for the
-	// demo kinds (see the unified runtime Syncer wiring below) and delegates demo restore subtrees to
-	// the domain aggregated apiserver (see the domain restore client passed to api.NewServer).
+	// Out-of-process domain controllers (the PoC demo domain, and real domains such as virtualization) run
+	// in a separate pod/binary, not in core. Core carries no domain-specific kind names: it discovers such
+	// kinds purely from their CustomSnapshotDefinition, owns their SnapshotContent (see the unified runtime
+	// Syncer wiring below), and delegates their restore subtrees to the domain aggregated apiserver by
+	// CSD-origin (see the isOutOfProcessDomainKind predicate passed to api.NewServer).
 
 	contentController, err := controllers.NewSnapshotContentController(
 		mgr.GetClient(),
@@ -276,7 +276,8 @@ func main() {
 	}
 	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
 
-	// Unified runtime is always on in v0; bootstrap list comes from env defaults or STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
+	// Unified runtime is always on in v0; the static bootstrap list is the hardcoded built-in default
+	// (unifiedbootstrap.DefaultGraphRegistryBuiltInPairs) — domain kinds come only from eligible CSD.
 	csdBootstrapClient, err := client.New(kConfig, client.Options{
 		Scheme: scheme,
 		Mapper: mgr.GetRESTMapper(),
@@ -293,8 +294,8 @@ func main() {
 	} else {
 		log.Info("[main] CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
 	}
-	bootstrapPairs := cfgParams.EffectiveUnifiedBootstrapPairs()
-	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs), "bootstrapMode", cfgParams.UnifiedBootstrapMode)
+	bootstrapPairs := unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
+	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs))
 	mergedPairs := unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrapPairs, csdPairs)
 	log.Info("[main] unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
 	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
@@ -400,15 +401,17 @@ func main() {
 	}
 	log.Info("VolumeSnapshot import binder added to manager")
 
-	// No dedicated controller activators in core: the demo dedicated planning controllers run in the
-	// domain-controller pod. The Syncer still drives generic Snapshot/SnapshotContent watches AND the
-	// generic binder's ownership of domain-capture SnapshotContent (demo kinds): with no local
-	// activator wired, the binder owns that content directly (its unstructured informer needs no field
-	// index, so there is no informer-ordering hazard). See unifiedruntime.Syncer.Sync.
+	// No dedicated controller activators in core: the only in-process dedicated kind is the namespace-root
+	// "Snapshot", whose controller is registered statically at startup (AddSnapshotControllerToManager
+	// above), so nothing needs runtime activation. Out-of-process domain kinds (CSD-driven modules, e.g.
+	// the PoC demo domain) have no in-process planning controller at all; the Syncer drives the generic
+	// Snapshot/SnapshotContent watches AND the generic binder's ownership of their domain-capture
+	// SnapshotContent (the binder's unstructured informer needs no field index, so there is no
+	// informer-ordering hazard). See unifiedruntime.Syncer.Sync.
 	unifiedSync := unifiedruntime.NewSyncer(
 		mgr,
 		ctrl.Log,
-		cfgParams.EffectiveUnifiedBootstrapPairs(),
+		unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(),
 		mgr.GetAPIReader(),
 		snapshotController,
 		contentController,
@@ -483,12 +486,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The restore delegate predicate must be the OUT-OF-PROCESS domain set, NOT the domain-CAPTURE set:
-	// since wave5 the root "Snapshot" is a domain-capture kind, but its restore is served in-process by
-	// this very apiserver. Passing the capture set would make the compiler delegate the root back to core's
-	// own manifests-with-data-restoration endpoint (self-recursion, HTTP 500). Only demo/external kinds
-	// are truly out-of-process for restore.
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, unifiedbootstrap.IsOutOfProcessDomainSnapshotKind, apiTLSCertFile, apiTLSKeyFile, mapper)
+	// The restore delegate predicate is CSD-origin driven: a snapshot kind that is registered in the live
+	// graph registry but is NOT a built-in in-process pair (root "Snapshot" / CSI "VolumeSnapshot") can only
+	// have come from an eligible CustomSnapshotDefinition — i.e. an out-of-process domain that serves its own
+	// restore apiserver, so the compiler delegates it. Built-in kinds restore in-process (delegating the root
+	// back to core's own endpoint would be self-recursion → HTTP 500). graphRegProvider.Current() is live
+	// (refreshed on CSD changes), so this needs no hardcoded domain kind names.
+	isOutOfProcessDomainKind := func(kind string) bool {
+		return unifiedbootstrap.IsOutOfProcessDomainSnapshotKind(graphRegProvider.Current(), kind)
+	}
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, isOutOfProcessDomainKind, apiTLSCertFile, apiTLSKeyFile, mapper)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

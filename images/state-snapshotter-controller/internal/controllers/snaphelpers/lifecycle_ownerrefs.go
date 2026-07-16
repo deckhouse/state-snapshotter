@@ -29,9 +29,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 )
 
@@ -44,10 +44,10 @@ func RootObjectKeeperName(snapshotUID types.UID) string {
 }
 
 func RootObjectKeeperTTL(cfg *config.Options) time.Duration {
-	if cfg != nil && cfg.SnapshotRootOKTTL > 0 {
-		return cfg.SnapshotRootOKTTL
+	if cfg != nil && cfg.SnapshotTTLAfterDelete > 0 {
+		return cfg.SnapshotTTLAfterDelete
 	}
-	return config.DefaultSnapshotRootOKTTL
+	return config.DefaultSnapshotTTLAfterDelete
 }
 
 func EnsureRootObjectKeeperWithTTL(

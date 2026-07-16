@@ -105,9 +105,9 @@ type subtreeAdapter struct {
 	refreshTestAdapter
 }
 
-func newSubtreeAdapter(namespace string, children ...SnapshotChildRef) *subtreeAdapter {
+func newSubtreeAdapter(children ...SnapshotChildRef) *subtreeAdapter {
 	a := &subtreeAdapter{}
-	a.obj = &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "root"}}
+	a.obj = &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "root"}}
 	a.domain = DomainCaptureState{ChildrenSnapshotRefs: children}
 	return a
 }
@@ -145,7 +145,7 @@ func TestSubtreeManifestIdentities_UnionsAndDedups(t *testing.T) {
 	defer closeSrv()
 
 	s := New(cl, nil, nil, WithSubresourceREST(rc))
-	adapter := newSubtreeAdapter("ns1", childRef("child-a"), childRef("child-b"))
+	adapter := newSubtreeAdapter(childRef("child-a"), childRef("child-b"))
 
 	got, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestSubtreeManifestIdentities_NoChildrenEmptySet(t *testing.T) {
 	scheme := newRefreshTestScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	s := New(cl, nil, nil) // no WithSubresourceREST on purpose
-	adapter := newSubtreeAdapter("ns1")
+	adapter := newSubtreeAdapter()
 
 	got, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if err != nil {
@@ -196,7 +196,7 @@ func TestSubtreeManifestIdentities_FailClosedOn409(t *testing.T) {
 	defer closeSrv()
 
 	s := New(cl, nil, nil, WithSubresourceREST(rc))
-	adapter := newSubtreeAdapter("ns1", childRef("child-a"))
+	adapter := newSubtreeAdapter(childRef("child-a"))
 
 	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if !errors.Is(err, ErrSubtreeIdentitiesPending) {
@@ -216,7 +216,7 @@ func TestSubtreeManifestIdentities_UnboundChildPending(t *testing.T) {
 	defer closeSrv()
 
 	s := New(cl, nil, nil, WithSubresourceREST(rc))
-	adapter := newSubtreeAdapter("ns1", childRef("child-a"))
+	adapter := newSubtreeAdapter(childRef("child-a"))
 
 	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if !errors.Is(err, ErrSubtreeIdentitiesPending) {
@@ -234,7 +234,7 @@ func TestSubtreeManifestIdentities_MissingChildPending(t *testing.T) {
 	defer closeSrv()
 
 	s := New(cl, nil, nil, WithSubresourceREST(rc))
-	adapter := newSubtreeAdapter("ns1", childRef("child-a"))
+	adapter := newSubtreeAdapter(childRef("child-a"))
 
 	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if !errors.Is(err, ErrSubtreeIdentitiesPending) {
@@ -251,7 +251,7 @@ func TestSubtreeManifestIdentities_RequiresRESTClient(t *testing.T) {
 		Build()
 
 	s := New(cl, nil, nil) // no WithSubresourceREST
-	adapter := newSubtreeAdapter("ns1", childRef("child-a"))
+	adapter := newSubtreeAdapter(childRef("child-a"))
 
 	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if err == nil || errors.Is(err, ErrSubtreeIdentitiesPending) {

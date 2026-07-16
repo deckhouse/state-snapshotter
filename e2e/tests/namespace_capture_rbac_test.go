@@ -25,7 +25,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -81,11 +80,11 @@ func waitRootArchived(ctx context.Context, ns, snap string, timeout time.Duratio
 	for {
 		obj, err := getResource(ctx, snapshotGVR, ns, snap)
 		if err == nil {
-			if captured, found := rootManifestCaptured(obj); found && captured {
+			captured, found := rootManifestCaptured(obj)
+			if found && captured {
 				return nil
-			} else {
-				last = fmt.Sprintf("found=%v captured=%v", found, captured)
 			}
+			last = fmt.Sprintf("found=%v captured=%v", found, captured)
 		} else {
 			last = fmt.Sprintf("get err=%v", err)
 		}

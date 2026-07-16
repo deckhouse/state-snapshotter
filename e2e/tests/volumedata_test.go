@@ -24,7 +24,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -480,7 +479,7 @@ func startPendingVCRWindowObserver(ns, coveredPVC string) (stop func(), observed
 		cancel()
 		<-done
 	}
-	observed = func() bool { return seen.Load() }
+	observed = seen.Load
 	return stop, observed
 }
 
@@ -678,7 +677,6 @@ func volumeDataSpecs() {
 
 			By("Asserting main latched dataCaptured=true on each data leaf's xxxSnapshot and never on its content")
 			for _, node := range diskNodes {
-				node := node
 				Eventually(func(g Gomega) {
 					snap, err := getResource(ctx, demoDiskSnapshotGVR, srcNS, node.name)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -737,7 +735,7 @@ func volumeDataSpecs() {
 				}
 				gvr, ok := gvrForSnapshotKind(node.kind)
 				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				node := node
+
 				Eventually(func(g Gomega) {
 					snap, err := getResource(ctx, gvr, srcNS, node.name)
 					g.Expect(err).NotTo(HaveOccurred())
@@ -772,7 +770,7 @@ func volumeDataSpecs() {
 			// INV-CONTENT-WRITER-1: the content exists + is bound because the BINDER created it, not the ns domain.
 			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
 
-			// The orphan-VS ADOPTION pipeline (domain-controller managed latch -> binder shell -> aggregator
+			// The orphan-VS ADOPTION pipeline (VS-domain controller's managed latch -> binder shell -> aggregator
 			// manifest+data legs -> Ready mirror) is a multi-controller convergence, NOT pure snapshot
 			// creation, so every wait is budgeted at the generous snapshotReadyTO — identical to the parallel
 			// user-VS pipeline in volumesnapshot_domain_test.go. captureReadyTO (a few tens of seconds, sized

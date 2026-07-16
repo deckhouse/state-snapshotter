@@ -87,25 +87,22 @@ func TestResolveAvailableUnifiedGVKPairs_skipsWhenOnlySnapshotMaps(t *testing.T)
 }
 
 func TestFilterGenericSnapshotGVKPairs_skipsDedicatedKinds(t *testing.T) {
-	// Snapshot (root) and the demo kinds have dedicated reconcilers, so the
-	// generic binder must not watch them. Only a non-dedicated kind survives.
+	// Only the namespace-root "Snapshot" has an in-process dedicated reconciler, so the generic binder must
+	// not watch it. Out-of-process domain kinds (e.g. an external virtualization domain) are NOT dedicated —
+	// the generic binder owns their SnapshotContent, so they survive the filter alongside plain generic kinds.
+	rootSnap := schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"}
+	domainSnap := schema.GroupVersionKind{Group: "domain.example.com", Version: "v1alpha1", Kind: "WidgetSnapshot"}
 	genericSnap := schema.GroupVersionKind{Group: "example.deckhouse.io", Version: "v1alpha1", Kind: "ExampleDomainSnapshot"}
-	snapGVKs := []schema.GroupVersionKind{
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"},
-		{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"},
-		{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "Snapshot"},
-		genericSnap,
-	}
+	snapGVKs := []schema.GroupVersionKind{rootSnap, domainSnap, genericSnap}
 	commonContent := CommonSnapshotContentGVK()
-	contentGVKs := []schema.GroupVersionKind{
-		commonContent,
-		commonContent,
-		commonContent,
-		commonContent,
-	}
+	contentGVKs := []schema.GroupVersionKind{commonContent, commonContent, commonContent}
+
 	sOut, cOut := FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs)
-	if len(sOut) != 1 || sOut[0] != genericSnap || len(cOut) != 1 || cOut[0].Kind != "SnapshotContent" {
-		t.Fatalf("got snaps=%v contents=%v", sOut, cOut)
+	if len(sOut) != 2 || sOut[0] != domainSnap || sOut[1] != genericSnap {
+		t.Fatalf("expected the two non-dedicated kinds to survive, got snaps=%v", sOut)
+	}
+	if len(cOut) != 2 || cOut[0].Kind != "SnapshotContent" || cOut[1].Kind != "SnapshotContent" {
+		t.Fatalf("expected two SnapshotContent GVKs, got contents=%v", cOut)
 	}
 }
 
@@ -171,14 +168,10 @@ func TestDefaultGraphRegistryBuiltInPairs_hasNoCSDGatedDomainPairs(t *testing.T)
 	// carry a CSD-gated domain kind (e.g. virtualization/demo), which has no static RBAC contract and would
 	// widen the watch surface into forbidden list/watch loops.
 	for _, p := range DefaultGraphRegistryBuiltInPairs() {
-		switch p.Snapshot.Kind {
-		case "DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot":
-			t.Fatalf("demo pair must be CSD-gated, found graph built-in: %v", p)
-		}
 		isRootSnapshot := p.Snapshot.Group == "state-snapshotter.deckhouse.io" && p.Snapshot.Kind == "Snapshot"
 		isVolumeSnapshot := p.Snapshot.Group == "snapshot.storage.k8s.io" && p.Snapshot.Kind == "VolumeSnapshot"
 		if !isRootSnapshot && !isVolumeSnapshot {
-			t.Fatalf("built-in pairs must contain only the core Snapshot + CSI VolumeSnapshot, found: %v", p)
+			t.Fatalf("built-in pairs must contain only the core Snapshot + CSI VolumeSnapshot (never a CSD-gated domain kind), found: %v", p)
 		}
 	}
 }

@@ -50,8 +50,8 @@ func TestRootObjectKeeperNameIsDNS1123Safe(t *testing.T) {
 }
 
 func TestRootObjectKeeperTTLUsesDefaultForNilConfig(t *testing.T) {
-	if got := RootObjectKeeperTTL(nil); got != config.DefaultSnapshotRootOKTTL {
-		t.Fatalf("RootObjectKeeperTTL(nil) = %s, want %s", got, config.DefaultSnapshotRootOKTTL)
+	if got := RootObjectKeeperTTL(nil); got != config.DefaultSnapshotTTLAfterDelete {
+		t.Fatalf("RootObjectKeeperTTL(nil) = %s, want %s", got, config.DefaultSnapshotTTLAfterDelete)
 	}
 }
 

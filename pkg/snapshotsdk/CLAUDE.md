@@ -1,8 +1,9 @@
 # snapshot SDK code-quality contract
 
-> Migrated from `.cursor/rules/demo-code-quality.mdc`. The SDK and the demo domain-controller share
-> one contract — the **full text lives in [`images/domain-controller/CLAUDE.md`](../../images/domain-controller/CLAUDE.md)**.
-> Read it before editing here. SDK-specific highlights below.
+> Migrated from `.cursor/rules/demo-code-quality.mdc`, where the **full text lives**
+> ([`../../.cursor/rules/demo-code-quality.mdc`](../../.cursor/rules/demo-code-quality.mdc)).
+> Read it before editing here. SDK-specific highlights below. (The reference demo domain controller
+> that follows the same contract now lives in the `sds-unified-snapshots-poc` repo.)
 
 `pkg/snapshotsdk` is **reference-implementation / executable architecture documentation** — cleaner than production, impossible to misread. Names must reveal owner/lifecycle/persistence/domain-vs-infra without explanation; no dumping-ground files (`helpers.go`, `utils.go`, `common.go`); comments explain WHY not WHAT.
 
@@ -19,6 +20,7 @@ No reflection / `unstructured.Unstructured` / raw GVK assembly / `map[string]any
 ## Capture invariants (MUST)
 
 - **Data capture:** `VolumeCaptureSpec.DataRef` is a single optional pointer (≤1 PVC per node), never a slice; extra volumes are child snapshot nodes.
-- **Manifest capture:** the SDK fails closed with `ErrEmptyManifest` before any cluster mutation if the final manifest set is empty. The SDK does NOT inject the source object — supplying ≥1 manifest target is the domain's responsibility.
+- **Manifest capture — never empty:** the SDK does NOT inject the source object — supplying ≥1 manifest target is the domain's responsibility. Every snapshot MUST capture at least its own source object's manifest (a single-object domain snapshot passes its own source identity; the namespace-root aggregator always includes its own Namespace object), so the target set is never empty. `EnsureManifestCapture` fails closed with `ErrEmptyManifest` before any cluster mutation, and the MCR CRD rejects an empty `spec.targets` via CEL.
+- **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a decision (a domain reacts with `Fail(GraphPlanningFailed)`; the namespace-root ignores it, first plan wins). `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips re-planning the leg via `ManifestCaptureNeeded`.
 
-See the full 8-point contract (naming bans, file layout, no accidental abstractions, the 30-minute litmus) in `images/domain-controller/CLAUDE.md`.
+See the full 8-point contract (naming bans, file layout, no accidental abstractions, the 30-minute litmus) in `.cursor/rules/demo-code-quality.mdc`.

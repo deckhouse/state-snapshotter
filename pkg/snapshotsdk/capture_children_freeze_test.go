@@ -52,10 +52,11 @@ func freezeChildSpec(name string) ChildSpec {
 	return ChildSpec{Object: c}
 }
 
-// freezeChildRef is the SnapshotChildRef freezeChildSpec(name) publishes — the same (apiVersion, kind,
-// name) derivation the guard and children.Reconcile perform.
-func freezeChildRef(name string) SnapshotChildRef {
-	return SnapshotChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: name}
+// freezeChildRef is the SnapshotChildRef freezeChildSpec("child-a") publishes — the same (apiVersion,
+// kind, name) derivation the guard and children.Reconcile perform. Every freeze scenario publishes the
+// same single adopted child, so the fixture is fixed to "child-a".
+func freezeChildRef() SnapshotChildRef {
+	return SnapshotChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child-a"}
 }
 
 // newFreezeFixture wires a fake client (informer cache) holding the root Snapshot plus any already-adopted
@@ -90,7 +91,7 @@ func newFreezeFixture(t *testing.T, phase Phase, published []SnapshotChildRef, a
 	return context.Background(), cl, adapter, New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr"})
 }
 
-func freezeChildExists(t *testing.T, ctx context.Context, cl client.Client, name string) bool {
+func freezeChildExists(ctx context.Context, t *testing.T, cl client.Client, name string) bool {
 	t.Helper()
 	err := cl.Get(ctx, client.ObjectKey{Namespace: freezeNS, Name: name}, &storagev1alpha1.Snapshot{})
 	switch {
@@ -111,17 +112,17 @@ func TestEnsureChildren_GrowthAllowedBeforePlanned(t *testing.T) {
 	if err := sdk.EnsureChildren(ctx, adapter, []ChildSpec{freezeChildSpec("child-a")}, nil); err != nil {
 		t.Fatalf("growth before Planned must be allowed: %v", err)
 	}
-	if !freezeChildExists(t, ctx, cl, "child-a") {
+	if !freezeChildExists(ctx, t, cl, "child-a") {
 		t.Fatal("child-a was not created")
 	}
-	if got := adapter.domain.ChildrenSnapshotRefs; !children.RefsEqualIgnoreOrder(got, []SnapshotChildRef{freezeChildRef("child-a")}) {
+	if got := adapter.domain.ChildrenSnapshotRefs; !children.RefsEqualIgnoreOrder(got, []SnapshotChildRef{freezeChildRef()}) {
 		t.Fatalf("published refs = %v, want [child-a]", got)
 	}
 }
 
 // Post-Planned, same declared set: no error, no status write, no new create — idempotent across reconciles.
 func TestEnsureChildren_SameSetAfterPlannedIsNoop(t *testing.T) {
-	published := []SnapshotChildRef{freezeChildRef("child-a")}
+	published := []SnapshotChildRef{freezeChildRef()}
 	ctx, cl, adapter, sdk := newFreezeFixture(t, PhasePlanned, published, "child-a")
 
 	for i := 0; i < 5; i++ {
@@ -132,7 +133,7 @@ func TestEnsureChildren_SameSetAfterPlannedIsNoop(t *testing.T) {
 	if !children.RefsEqualIgnoreOrder(adapter.domain.ChildrenSnapshotRefs, published) {
 		t.Fatalf("published refs drifted to %v, want unchanged %v", adapter.domain.ChildrenSnapshotRefs, published)
 	}
-	if freezeChildExists(t, ctx, cl, "child-b") {
+	if freezeChildExists(ctx, t, cl, "child-b") {
 		t.Fatal("no-op re-reconcile must not create any new child")
 	}
 }
@@ -140,14 +141,14 @@ func TestEnsureChildren_SameSetAfterPlannedIsNoop(t *testing.T) {
 // Post-Planned growth is rejected fail-closed: typed error, published set untouched, and — crucially — the
 // new child CR is NOT created (the reject happens before children.Reconcile).
 func TestEnsureChildren_GrowthAfterPlannedRejectedNoSideEffects(t *testing.T) {
-	published := []SnapshotChildRef{freezeChildRef("child-a")}
+	published := []SnapshotChildRef{freezeChildRef()}
 	ctx, cl, adapter, sdk := newFreezeFixture(t, PhasePlanned, published, "child-a")
 
 	err := sdk.EnsureChildren(ctx, adapter, []ChildSpec{freezeChildSpec("child-a"), freezeChildSpec("child-b")}, nil)
 	if !errors.Is(err, ErrChildrenSetFrozen) {
 		t.Fatalf("growth after Planned must return ErrChildrenSetFrozen, got: %v", err)
 	}
-	if freezeChildExists(t, ctx, cl, "child-b") {
+	if freezeChildExists(ctx, t, cl, "child-b") {
 		t.Fatal("a rejected growth must NOT create the new child CR (fail-closed before Reconcile)")
 	}
 	if !children.RefsEqualIgnoreOrder(adapter.domain.ChildrenSnapshotRefs, published) {
@@ -159,14 +160,14 @@ func TestEnsureChildren_GrowthAfterPlannedRejectedNoSideEffects(t *testing.T) {
 func TestEnsureChildren_GrowthAtFinishedAndFailedRejected(t *testing.T) {
 	for _, phase := range []Phase{PhaseFinished, PhaseFailed} {
 		t.Run(string(phase), func(t *testing.T) {
-			published := []SnapshotChildRef{freezeChildRef("child-a")}
+			published := []SnapshotChildRef{freezeChildRef()}
 			ctx, cl, adapter, sdk := newFreezeFixture(t, phase, published, "child-a")
 
 			err := sdk.EnsureChildren(ctx, adapter, []ChildSpec{freezeChildSpec("child-a"), freezeChildSpec("child-b")}, nil)
 			if !errors.Is(err, ErrChildrenSetFrozen) {
 				t.Fatalf("growth at %s must return ErrChildrenSetFrozen, got: %v", phase, err)
 			}
-			if freezeChildExists(t, ctx, cl, "child-b") {
+			if freezeChildExists(ctx, t, cl, "child-b") {
 				t.Fatalf("growth at %s must not create the new child CR", phase)
 			}
 		})
@@ -175,7 +176,7 @@ func TestEnsureChildren_GrowthAtFinishedAndFailedRejected(t *testing.T) {
 
 // A CHANGED excluded set is frozen too; an equal set is a no-op.
 func TestEnsureChildren_ExcludedChangeAfterPlanned(t *testing.T) {
-	published := []SnapshotChildRef{freezeChildRef("child-a")}
+	published := []SnapshotChildRef{freezeChildRef()}
 	excluded := []ExcludedObjectRef{{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-x"}}
 	ctx, _, adapter, sdk := newFreezeFixture(t, PhasePlanned, published, "child-a")
 	adapter.domain.ExcludedRefs = excluded
@@ -237,7 +238,7 @@ func (a *freezeRaceAdapter) GetDomainCaptureState() DomainCaptureState {
 // node advances to Planned before the status patch. The closure cannot return an error, so it fail-closed
 // DROPS the frozen growth — the published set stays frozen even though the racing child CR now exists.
 func TestEnsureChildren_FrozenBeltDropsRacyGrowth(t *testing.T) {
-	published := []SnapshotChildRef{freezeChildRef("child-a")}
+	published := []SnapshotChildRef{freezeChildRef()}
 	ctx, cl, base, sdk := newFreezeFixture(t, PhasePlanning, published, "child-a")
 	adapter := &freezeRaceAdapter{refreshTestAdapter: base, phases: []Phase{PhasePlanning, PhasePlanned}}
 
@@ -247,7 +248,7 @@ func TestEnsureChildren_FrozenBeltDropsRacyGrowth(t *testing.T) {
 	if !children.RefsEqualIgnoreOrder(base.domain.ChildrenSnapshotRefs, published) {
 		t.Fatalf("belt must not publish the racy growth, got %v want frozen %v", base.domain.ChildrenSnapshotRefs, published)
 	}
-	if !freezeChildExists(t, ctx, cl, "child-b") {
+	if !freezeChildExists(ctx, t, cl, "child-b") {
 		t.Fatal("Reconcile ran before the freeze took effect, so the racy child is expected to exist (belt guards the publish, not the create)")
 	}
 }

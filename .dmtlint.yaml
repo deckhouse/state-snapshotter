@@ -8,7 +8,6 @@ linters-settings:
           # Checked-in prebuilt Go binary (release-notes tool); not a source file.
           - hack/generate_release_notes
           # Local dev-only Dockerfiles (gitignored); no license header expected.
-          - images/domain-controller/dev/Dockerfile-dev
           - images/state-snapshotter-controller/dev/Dockerfile-dev
   rbac:
     exclude-rules:

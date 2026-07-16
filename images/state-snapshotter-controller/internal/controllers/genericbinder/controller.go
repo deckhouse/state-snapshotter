@@ -34,9 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
+	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -624,9 +624,9 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 
 func (r *GenericSnapshotBinderController) desiredUnifiedRootObjectKeeperSpec(obj *unstructured.Unstructured) deckhousev1alpha1.ObjectKeeperSpec {
 	gvk := obj.GetObjectKind().GroupVersionKind()
-	ttl := config.DefaultSnapshotRootOKTTL
-	if r.Config != nil && r.Config.SnapshotRootOKTTL > 0 {
-		ttl = r.Config.SnapshotRootOKTTL
+	ttl := config.DefaultSnapshotTTLAfterDelete
+	if r.Config != nil && r.Config.SnapshotTTLAfterDelete > 0 {
+		ttl = r.Config.SnapshotTTLAfterDelete
 	}
 	return deckhousev1alpha1.ObjectKeeperSpec{
 		Mode: controllercommon.ObjectKeeperModeFollowObjectWithTTL,

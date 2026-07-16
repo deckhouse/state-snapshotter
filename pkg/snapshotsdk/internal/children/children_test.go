@@ -45,15 +45,16 @@ func owner() metav1.OwnerReference {
 	return metav1.OwnerReference{APIVersion: "demo/v1", Kind: "Parent", Name: "p", UID: "p-uid", Controller: &controller}
 }
 
-func childCM(name string) client.Object {
-	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: childNS}}
+// childCM returns the single child ConfigMap fixture ("a" in childNS) every spec reconciles.
+func childCM() client.Object {
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}
 }
 
 func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	refs, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")})
+	refs, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestReconcileDoesNotMutateCallerTemplate(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	template := childCM("a")
+	template := childCM()
 	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{template}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS, OwnerReferences: []metav1.OwnerReference{conflicting}}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err == nil {
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err == nil {
 		t.Fatal("expected conflict error when adopting a child owned by another parent")
 	}
 	got := &corev1.ConfigMap{}
@@ -162,7 +163,7 @@ func TestReconcileAdoptsUnownedChild(t *testing.T) {
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}).
 		Build()
 
-	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM("a")}); err != nil {
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := &corev1.ConfigMap{}

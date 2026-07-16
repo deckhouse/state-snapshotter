@@ -22,7 +22,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/internal/storagefoundation"
 )
 
 func TestRequestNameDeterministic(t *testing.T) {
@@ -36,18 +35,22 @@ func TestRequestNameDeterministic(t *testing.T) {
 	}
 }
 
-func TestTargetsManifestOnly(t *testing.T) {
-	base := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
-	got := Targets(base, nil, "ns")
-	if len(got) != 1 || got[0] != base[0] {
-		t.Fatalf("manifest-only must return base unchanged, got %#v", got)
+func TestTargetsSingle(t *testing.T) {
+	declared := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
+	got := Targets(declared)
+	if len(got) != 1 || got[0] != declared[0] {
+		t.Fatalf("single declared target must pass through unchanged, got %#v", got)
 	}
 }
 
-func TestTargetsMergesOwnedPVCAndSorts(t *testing.T) {
-	base := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
-	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
-	got := Targets(base, owned, "ns")
+// The domain declares BOTH the object and its PVC explicitly (the manifest leg does not derive the PVC
+// from the data leg); Targets returns exactly the declared set, deduplicated and sorted deterministically.
+func TestTargetsDeclaredSetSorted(t *testing.T) {
+	declared := []ssv1alpha1.ManifestTarget{
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+		{APIVersion: "demo/v1", Kind: "Disk", Name: "d"},
+	}
+	got := Targets(declared)
 	want := []ssv1alpha1.ManifestTarget{
 		{APIVersion: "demo/v1", Kind: "Disk", Name: "d"},
 		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
@@ -62,20 +65,44 @@ func TestTargetsMergesOwnedPVCAndSorts(t *testing.T) {
 	}
 }
 
-func TestTargetsSkipsNonPVCOwnedTarget(t *testing.T) {
-	base := []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}}
-	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "Secret", Name: "ignored"}
-	got := Targets(base, owned, "ns")
-	if len(got) != 1 || got[0] != base[0] {
-		t.Fatalf("non-PVC owned target must be skipped, got %#v", got)
+func TestTargetsDedupesDeclaredDuplicates(t *testing.T) {
+	declared := []ssv1alpha1.ManifestTarget{
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+	}
+	got := Targets(declared)
+	if len(got) != 1 {
+		t.Fatalf("expected dedup to a single target, got %#v", got)
 	}
 }
 
-func TestTargetsDedupesOverlapWithBase(t *testing.T) {
-	base := []ssv1alpha1.ManifestTarget{{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}}
-	owned := &storagefoundation.Target{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
-	got := Targets(base, owned, "ns")
-	if len(got) != 1 {
-		t.Fatalf("expected dedup to a single target, got %#v", got)
+func TestTargetsEmpty(t *testing.T) {
+	if got := Targets(nil); len(got) != 0 {
+		t.Fatalf("nil declared set must yield empty, got %#v", got)
+	}
+}
+
+// SameSet is the single identity rule shared by Targets dedup and the SDK drift signal: set semantics
+// keyed by (apiVersion, kind, name) — order and duplicates never matter.
+func TestSameSet(t *testing.T) {
+	disk := ssv1alpha1.ManifestTarget{APIVersion: "demo/v1", Kind: "Disk", Name: "d"}
+	pvc := ssv1alpha1.ManifestTarget{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"}
+
+	cases := []struct {
+		name string
+		a, b []ssv1alpha1.ManifestTarget
+		want bool
+	}{
+		{"both empty", nil, []ssv1alpha1.ManifestTarget{}, true},
+		{"reordered", []ssv1alpha1.ManifestTarget{disk, pvc}, []ssv1alpha1.ManifestTarget{pvc, disk}, true},
+		{"duplicates collapse", []ssv1alpha1.ManifestTarget{disk, disk}, []ssv1alpha1.ManifestTarget{disk}, true},
+		{"extra element", []ssv1alpha1.ManifestTarget{disk}, []ssv1alpha1.ManifestTarget{disk, pvc}, false},
+		{"different name", []ssv1alpha1.ManifestTarget{disk}, []ssv1alpha1.ManifestTarget{{APIVersion: "demo/v1", Kind: "Disk", Name: "other"}}, false},
+		{"empty vs non-empty", nil, []ssv1alpha1.ManifestTarget{disk}, false},
+	}
+	for _, tc := range cases {
+		if got := SameSet(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: SameSet = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

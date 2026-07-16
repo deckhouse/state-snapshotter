@@ -18,6 +18,7 @@ package snapshotsdk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -114,7 +115,7 @@ func newRefreshTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
-func countMCRs(t *testing.T, ctx context.Context, cl client.Client) int {
+func countMCRs(ctx context.Context, t *testing.T, cl client.Client) int {
 	t.Helper()
 	list := &ssv1alpha1.ManifestCaptureRequestList{}
 	if err := cl.List(ctx, list); err != nil {
@@ -156,7 +157,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if adapter.domain.ManifestCaptureRequestName == "" {
 		t.Fatal("phase1: manifest capture request name was not published")
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("phase1: MCR count = %d, want 1", n)
 	}
 
@@ -169,7 +170,7 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if reader.gets != 1 {
 		t.Fatalf("phase2: in-flight polls performed %d uncached reads, want to stay at 1 (cache hit must skip refresh)", reader.gets)
 	}
-	if n := countMCRs(t, ctx, cl); n != 1 {
+	if n := countMCRs(ctx, t, cl); n != 1 {
 		t.Fatalf("phase2: MCR count = %d, want 1 (no duplicate creation)", n)
 	}
 
@@ -189,8 +190,134 @@ func TestEnsureManifestCapture_InFlightSkipsUncachedRead(t *testing.T) {
 	if reader.gets != 2 {
 		t.Fatalf("phase3: uncached reads = %d, want 2 (absent MCR must consult the latch once)", reader.gets)
 	}
-	if n := countMCRs(t, ctx, cl); n != 0 {
+	if n := countMCRs(ctx, t, cl); n != 0 {
 		t.Fatalf("phase3: MCR count = %d, want 0 (must not re-create a captured request)", n)
+	}
+}
+
+// TestEnsureManifestCapture_EmptyTargetsFailsClosed pins the manifest-mandatory invariant: a snapshot
+// must capture at least its own source object's manifest, so an empty ManifestCaptureSpec.Targets is a
+// domain contract violation. The SDK fails closed with ErrEmptyManifest and creates no MCR (the MCR CRD
+// enforces the same invariant via CEL as a second line of defense).
+func TestEnsureManifestCapture_EmptyTargetsFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "snap-empty", UID: types.UID("snap-empty-uid")},
+	}
+	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		Build()
+
+	sdk := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-a"})
+	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+
+	err := sdk.EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: nil})
+	if !errors.Is(err, ErrEmptyManifest) {
+		t.Fatalf("empty targets must return ErrEmptyManifest, got %v", err)
+	}
+	if n := countMCRs(ctx, t, cl); n != 0 {
+		t.Fatalf("no MCR must be created for an empty target set, got %d", n)
+	}
+
+	// Suppression wins over the guard: once the core has latched the leg captured, the call is a no-op
+	// even for the invalid (empty) input — a late post-capture recomputation that came up empty must not
+	// fail an already-captured snapshot.
+	adapter.core = CoreCaptureState{ManifestCaptured: refreshBoolPtr(true)}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: nil}); err != nil {
+		t.Fatalf("captured latch must suppress the empty-targets guard (nil), got %v", err)
+	}
+}
+
+// TestManifestCaptureNeeded pins the gate predicate: needed only while the leg is unplanned (name not
+// published AND not captured); false once the name is published or the leg is captured.
+func TestManifestCaptureNeeded(t *testing.T) {
+	base := &refreshTestAdapter{core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+	if !ManifestCaptureNeeded(base) {
+		t.Fatal("unplanned leg (no name, not captured) must be Needed=true")
+	}
+	named := &refreshTestAdapter{
+		core:   CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)},
+		domain: DomainCaptureState{ManifestCaptureRequestName: "mcr-x"},
+	}
+	if ManifestCaptureNeeded(named) {
+		t.Fatal("published name must make Needed=false")
+	}
+	captured := &refreshTestAdapter{core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(true)}}
+	if ManifestCaptureNeeded(captured) {
+		t.Fatal("captured latch must make Needed=false")
+	}
+}
+
+// TestEnsureManifestCapture_AdoptThenDrift pins the adopt-then-drift contract on an existing MCR: the name
+// is ALWAYS published (adopt), then an identical set is a no-op while a DIFFERENT set additionally SIGNALS
+// ErrManifestTargetsDrift — and never recreates/patches the MCR.
+func TestEnsureManifestCapture_AdoptThenDrift(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	snap := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "snap-frozen", UID: types.UID("snap-frozen-uid")},
+	}
+	snap.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(snap).
+		Build()
+
+	sdk := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-a"})
+	adapter := &refreshTestAdapter{obj: snap, core: CoreCaptureState{ManifestCaptured: refreshBoolPtr(false)}}
+
+	setA := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+	}}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setA); err != nil {
+		t.Fatalf("create with set A: %v", err)
+	}
+	if n := countMCRs(ctx, t, cl); n != 1 {
+		t.Fatalf("MCR count = %d, want 1", n)
+	}
+	wantName := adapter.domain.ManifestCaptureRequestName
+	if wantName == "" {
+		t.Fatal("name not published on create")
+	}
+
+	// Identical set (reordered/duplicated) on the existing MCR → no error, no drift, no recreate.
+	if err := sdk.EnsureManifestCapture(ctx, adapter, ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+	}}); err != nil {
+		t.Fatalf("identical set on existing MCR must be a no-op, got %v", err)
+	}
+
+	// Different set → adopt (name stays published) AND ErrManifestTargetsDrift; MCR not recreated.
+	adapter.domain = DomainCaptureState{} // simulate name-not-yet-published (race) to prove adopt republishes
+	setB := ManifestCaptureSpec{Targets: []ManifestTarget{
+		{APIVersion: "demo/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk"},
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-a"},
+	}}
+	err := sdk.EnsureManifestCapture(ctx, adapter, setB)
+	if !errors.Is(err, ErrManifestTargetsDrift) {
+		t.Fatalf("different set on existing MCR must signal ErrManifestTargetsDrift, got %v", err)
+	}
+	if adapter.domain.ManifestCaptureRequestName != wantName {
+		t.Fatalf("adopt must republish the name even on drift, got %q", adapter.domain.ManifestCaptureRequestName)
+	}
+	if n := countMCRs(ctx, t, cl); n != 1 {
+		t.Fatalf("drift must not recreate the MCR: count = %d, want 1", n)
+	}
+
+	// After the core latches manifestCaptured, the call short-circuits (suppressed), no drift.
+	adapter.core = CoreCaptureState{ManifestCaptured: refreshBoolPtr(true)}
+	if err := sdk.EnsureManifestCapture(ctx, adapter, setB); err != nil {
+		t.Fatalf("post-latch call must be suppressed (nil), got %v", err)
 	}
 }
 

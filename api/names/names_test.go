@@ -118,8 +118,10 @@ func TestImportManifestCheckpointObjectKeeperNoRootOKCollision(t *testing.T) {
 		t.Fatalf("import-MCP ObjectKeeper name must not collide with the root ObjectKeeper name for the same UID")
 	}
 	// Determinism + per-UID uniqueness.
-	if ImportManifestCheckpointObjectKeeperName(uid) != ImportManifestCheckpointObjectKeeperName(uid) {
-		t.Fatalf("ImportManifestCheckpointObjectKeeperName not deterministic")
+	first := ImportManifestCheckpointObjectKeeperName(uid)
+	second := ImportManifestCheckpointObjectKeeperName(uid)
+	if first != second {
+		t.Fatalf("ImportManifestCheckpointObjectKeeperName not deterministic: %q vs %q", first, second)
 	}
 	if ImportManifestCheckpointObjectKeeperName(uid) == ImportManifestCheckpointObjectKeeperName(types.UID("other-uid")) {
 		t.Fatalf("distinct snapshot UIDs must yield distinct import-MCP ObjectKeeper names")

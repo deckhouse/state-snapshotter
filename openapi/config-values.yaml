@@ -10,28 +10,10 @@ properties:
       - TRACE
     description: Module log level.
     default: DEBUG
-  enableDemoDomain:
-    type: boolean
-    default: false
-    description: |
-      Deploy the reference demo domain controller (separate pod + aggregated apiserver) and its demo
-      CustomSnapshotDefinition. Enables the demo.state-snapshotter.deckhouse.io snapshot kinds end to end.
-      Disabled by default; intended for demo/e2e and as a template for real domain controllers.
-  unifiedBootstrapPairs:
+  snapshotTtlAfterDelete:
     type: string
     default: ""
     description: |
-      Static bootstrap GVK list before merge with eligible DSC. Empty/unset = the single built-in pair
-      (core Snapshot -> SnapshotContent); domain kinds are added only via eligible DSC.
-      Literal "empty" (or "none", "dsc-only") = no static pairs at all (pure DSC-only merge).
-      Custom = semicolon-separated pairs "group/version/Kind|group/version/Kind" (snapshot|content);
-      dev/test escape hatch only, requires full RBAC on every listed GVR.
-      Maps to env STATE_SNAPSHOTTER_UNIFIED_BOOTSTRAP_PAIRS.
-  snapshotRootOkTtl:
-    type: string
-    default: ""
-    description: |
-      Recycle-bin retention window: Go duration for the root snapshot ObjectKeeper FollowObjectWithTTL (Snapshot + unified XxxxSnapshot), e.g. "24h", "168h".
-      This is how long the durable SnapshotContent tree survives after its namespaced Snapshot is deleted, during which the captured data remains recoverable.
-      Empty = omit env; controller uses the built-in default of 30 days (720h). Maps to STATE_SNAPSHOTTER_SNAPSHOT_ROOT_OK_TTL.
-      If unset, the controller binary also accepts STATE_SNAPSHOTTER_NS_ROOT_OK_TTL for the same setting.
+      Recycle-bin retention window: how long a snapshot's durable data is kept after the Snapshot is deleted,
+      during which it remains recoverable. Go duration, e.g. "24h", "168h".
+      Empty = omit env; controller uses the built-in default of 30 days (720h).

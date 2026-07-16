@@ -25,7 +25,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -509,7 +508,7 @@ func postUploadWithRetry(ctx context.Context, path string, body []byte) error {
 	deadline := time.Now().Add(2 * time.Minute)
 	var lastErr error
 	for {
-		_, err := aggPost(ctx, path, body)
+		err := aggPost(ctx, path, body)
 		if err == nil {
 			return nil
 		}
@@ -1031,7 +1030,6 @@ func importVariantsSpecs() {
 			errCh := make(chan error, len(specs))
 			var wg sync.WaitGroup
 			for i, spec := range specs {
-				i, spec := i, spec
 				wg.Add(1)
 				go func() {
 					defer GinkgoRecover()

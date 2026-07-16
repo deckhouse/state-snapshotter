@@ -27,7 +27,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -181,7 +180,6 @@ func writeBlockDataParallel(ctx context.Context, ns string, pvcs []string, check
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for i, pvc := range pvcs {
-		i, pvc := i, pvc
 		podName := fmt.Sprintf("block-writer-%d", i)
 		wg.Add(1)
 		go func() {

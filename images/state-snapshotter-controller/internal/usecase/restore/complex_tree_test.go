@@ -37,13 +37,14 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// Orchestration harness: after the demo controllers moved to a separate binary, core compiles only
-// GENERIC nodes in-process and DELEGATES every domain snapshot subtree to the domain controller's
-// aggregated apiserver (DomainSubtreeRestorer). These tests validate that boundary against a fake
-// client + a stub delegate: the resolver stops at domain nodes (it never reads their SnapshotContent),
-// compileNode delegates them, and the spliced output stays apply-ready (post-order, deduped,
-// fail-closed). Domain-internal restore logic (disk dataSource, covered PVCs) is tested in the domain
-// apiserver package (internal/domainapi), not here.
+// Orchestration harness: out-of-process domains run outside core (the reference demo domain lives in the
+// sds-unified-snapshots-poc module), so core compiles only GENERIC nodes in-process and DELEGATES every
+// domain snapshot subtree to the domain's aggregated apiserver (DomainSubtreeRestorer). These tests
+// validate that boundary against a fake client + a stub delegate: the resolver stops at domain nodes (it
+// never reads their SnapshotContent), compileNode delegates them, and the spliced output stays apply-ready
+// (post-order, deduped, fail-closed). Domain-internal restore logic (disk dataSource, covered PVCs) lives
+// with the domain controller in its own repo, not here; the demo kind names below are synthetic stand-ins
+// for the delegation predicate — core compiles no domain types.
 
 const demoGroupV = "demo.state-snapshotter.deckhouse.io/v1alpha1"
 

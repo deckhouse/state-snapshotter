@@ -44,21 +44,3 @@ var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLS
 	}),
 	FullValuesPathPrefix: fmt.Sprintf("%s.internal.apiServerCert", consts.ModuleName),
 })
-
-// Separate self-signed serving certificate for the DOMAIN controller's aggregated API server. It has its
-// own CA so the two pods stay independent (each mounts only its own serving key) and the domain APIService
-// registers its own caBundle. The kube-apiserver -> domain mTLS client side uses the k8s-managed
-// front-proxy (requestheader) CA, loaded by the domain binary from extension-apiserver-authentication.
-var _ = tlscertificate.RegisterInternalTLSHookEM(tlscertificate.GenSelfSignedTLSHookConf{
-	CommonCACanonicalName: fmt.Sprintf("%s-%s", consts.ModulePluralName, consts.DomainAPIServerCertCN),
-	CN:                    consts.DomainAPIServerCertCN,
-	TLSSecretName:         consts.DomainAPIServerSecretName,
-	Namespace:             consts.ModuleNamespace,
-	SANs: tlscertificate.DefaultSANs([]string{
-		consts.DomainAPIServerCertCN,
-		fmt.Sprintf("%s.%s", consts.DomainAPIServerCertCN, consts.ModuleNamespace),
-		fmt.Sprintf("%s.%s.svc", consts.DomainAPIServerCertCN, consts.ModuleNamespace),
-		fmt.Sprintf("%%CLUSTER_DOMAIN%%://%s.%s.svc", consts.DomainAPIServerCertCN, consts.ModuleNamespace),
-	}),
-	FullValuesPathPrefix: fmt.Sprintf("%s.internal.domainApiServerCert", consts.ModuleName),
-})
