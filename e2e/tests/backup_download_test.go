@@ -613,6 +613,12 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 }
 
 func createDataExport(ctx context.Context, ns string, target dataExportTarget) error {
+	return createDataExportWithTTL(ctx, ns, target, "15m")
+}
+
+// createDataExportWithTTL creates a DataExport with an explicit idle-TTL; the idle-expiry spec uses a short
+// value so the exporter pod's IdleTimer fires within the test budget.
+func createDataExportWithTTL(ctx context.Context, ns string, target dataExportTarget, ttl string) error {
 	de := &unstructured.Unstructured{Object: map[string]interface{}{
 		// DataExport is served by storage-foundation, not state-snapshotter: derive the apiVersion from
 		// dataExportGVR so the object body matches the resource endpoint (a mismatch is rejected by the
@@ -624,7 +630,7 @@ func createDataExport(ctx context.Context, ns string, target dataExportTarget) e
 			"namespace": ns,
 		},
 		"spec": map[string]interface{}{
-			"ttl": "15m",
+			"ttl": ttl,
 			"targetRef": map[string]interface{}{
 				"group": target.group,
 				"kind":  target.kind,
@@ -639,6 +645,31 @@ func createDataExport(ctx context.Context, ns string, target dataExportTarget) e
 	return nil
 }
 
+// waitDataExportPhase polls a DataExport until status.phase equals wantPhase (the controller-owned
+// coarse-grained lifecycle state), reporting the last observed phase for diagnostics on timeout.
+func waitDataExportPhase(ctx context.Context, ns, name, wantPhase string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, gerr := getResource(ctx, dataExportGVR, ns, name)
+		if gerr == nil {
+			phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+			if phase == wantPhase {
+				return nil
+			}
+			last = fmt.Sprintf("phase=%q", phase)
+		} else {
+			last = fmt.Sprintf("get err=%v", gerr)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DataExport %s/%s phase=%s; last: %s", ns, name, wantPhase, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
 func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Duration) (url, ca string, err error) {
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -649,10 +680,15 @@ func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Dura
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
 				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
-				if url != "" {
+				// New status model: a serving DataExport also reports status.phase=Ready (the controller
+				// writes Ready=True and phase=Ready in the same status update). The DataExport catalog is
+				// exactly {Ready} — no standalone Expired and no legacy/foreign condition type.
+				phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+				catalogOK, extra := conditionsWithinCatalog(obj, "Ready")
+				if url != "" && phase == "Ready" && catalogOK {
 					return url, ca, nil
 				}
-				last = "Ready=True but status.url is empty"
+				last = fmt.Sprintf("Ready=True but url=%q phase=%q extraConditions=%v", url, phase, extra)
 			} else {
 				last = fmt.Sprintf("Ready=%v reason=%q", st, reason)
 			}
@@ -1026,6 +1062,86 @@ func backupDownloadSpecs() {
 				deleteDataExport(ctx, backup.srcNS, target.exportName)
 			}
 			backup.ready = true
+		})
+
+		It("expires an idle DataExport after its idle-TTL (phase=Expired)", func() {
+			Expect(backup.rootContent).NotTo(BeEmpty(), "capture spec must have populated rootContent")
+
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.dataTransferTO+10*time.Minute)
+			defer cancel()
+
+			hasLeaf, err := anyBoundSnapshotContent(ctx, backup.srcNS)
+			Expect(err).NotTo(HaveOccurred())
+			if !hasLeaf {
+				Skip("no snapshot leaf exposes status.boundSnapshotContentName: extended-VS data surface unavailable")
+			}
+
+			tgts, err := collectDataExportTargets(ctx, backup.srcNS, backup.rootContent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tgts).NotTo(BeEmpty())
+			// Distinct name so this idle export never collides with the download-spec exports (already
+			// deleted by the ordered download It above, but the rename is defensive).
+			target := tgts[0]
+			target.exportName = target.exportName + "-idle"
+
+			By(fmt.Sprintf("Creating DataExport %s with a short idle-TTL and never downloading from it", target.exportName))
+			Expect(createDataExportWithTTL(ctx, backup.srcNS, target, "30s")).To(Succeed())
+			DeferCleanup(func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer ccancel()
+				deleteDataExport(cctx, backup.srcNS, target.exportName)
+			})
+
+			By("Waiting for the DataExport server to become Ready (phase=Ready), then leaving it idle")
+			_, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
+			Expect(werr).NotTo(HaveOccurred(), "DataExport %s must serve before it can idle-expire", target.exportName)
+
+			By("Asserting the idle DataExport reaches the terminal Expired phase (idle-TTL enforced by the pod)")
+			Expect(waitDataExportPhase(ctx, backup.srcNS, target.exportName, "Expired", suiteCfg.dataTransferTO)).
+				To(Succeed(), "an untouched DataExport must reach phase=Expired after its idle-TTL")
+		})
+
+		It("expires an abandoned DataImport after its idle-TTL (phase=Expired, server torn down)", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.dataTransferTO+10*time.Minute)
+			defer cancel()
+
+			// Derive scratch/PVC params from an existing source PVC so the CreatePVC import can provision and
+			// bind its own PVC (short idle-TTL; we never upload, so it must idle-expire).
+			scName, scSize, scMode, perr := sourcePVCScratchParams(ctx, backup.srcNS, bkPVCName)
+			Expect(perr).NotTo(HaveOccurred())
+			Expect(scName).NotTo(BeEmpty(), "source PVC must have a storageClassName to clone for the abandoned import")
+
+			const diName = "e2e-abandoned-import"
+			By(fmt.Sprintf("Creating abandoned CreatePVC DataImport %s with a short idle-TTL and never uploading to it", diName))
+			Expect(createAbandonedImportPVC(ctx, backup.srcNS, diName, scName, scSize, scMode, "30s")).To(Succeed())
+			DeferCleanup(func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer ccancel()
+				deleteDataImport(cctx, backup.srcNS, diName)
+			})
+
+			By("Waiting for the importer server to become Ready, then leaving it idle")
+			_, _, werr := waitDataImportReady(ctx, backup.srcNS, diName, suiteCfg.dataTransferTO)
+			Expect(werr).NotTo(HaveOccurred(), "importer server must serve before it can idle-expire")
+
+			// Anti-vacuum guard for the teardown assertion below: the server pod is guaranteed alive right
+			// after Ready, so the later ==0 assertion is meaningful (it would be vacuously green if the
+			// namespace/annotation lookup ever silently stopped matching real server pods).
+			By("Confirming the importer server pod exists while serving")
+			Eventually(func() (int, error) {
+				return countDataManagerServerPods(ctx, diName)
+			}).WithContext(ctx).WithTimeout(2*time.Minute).WithPolling(pollInterval).Should(BeNumerically(">", 0),
+				"an importer server pod must exist while the DataImport is Ready")
+
+			By("Asserting the idle DataImport reaches the terminal Expired phase")
+			Expect(waitDataImportPhase(ctx, backup.srcNS, diName, "Expired", suiteCfg.dataTransferTO)).
+				To(Succeed(), "an untouched DataImport must reach phase=Expired after its idle-TTL")
+
+			By("Asserting the importer server infrastructure is torn down after expiry")
+			Eventually(func() (int, error) {
+				return countDataManagerServerPods(ctx, diName)
+			}).WithContext(ctx).WithTimeout(5*time.Minute).WithPolling(pollInterval).Should(Equal(0),
+				"the importer server pods must be torn down after the DataImport expires")
 		})
 	})
 }

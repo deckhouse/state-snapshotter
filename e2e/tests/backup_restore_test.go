@@ -253,6 +253,68 @@ func deleteDataImport(ctx context.Context, ns, name string) {
 	_ = suiteDyn.Resource(dataImportGVR).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
+// createAbandonedImportPVC creates a self-contained CreatePVC DataImport (it provisions its own PVC via
+// pvcTemplate, needing no snapshotRef leaf) with an explicit short idle-TTL. The idle-expiry spec never
+// uploads to it, so the importer server comes up and then idle-expires — exercising the DI-specific
+// spec.ttl→--ttl plumbing and the controller/populator teardown interplay end to end.
+//
+// waitForFirstConsumer=false is REQUIRED here: for a WaitForFirstConsumer StorageClass (the e2e suite's
+// SC), the controller creates a load ("dummy") pod to bind the PVC only when waitForFirstConsumer is
+// false (NeedConsumer = scWffc && !waitForFirstConsumer, pvc.go). An abandoned import has no real
+// consumer, so with true the PVC would never bind, the server would never come up, and the spec would
+// hang — the opposite of the intended idle-expiry.
+func createAbandonedImportPVC(ctx context.Context, ns, name, storageClassName, size, volumeMode, ttl string) error {
+	pvcSpec := map[string]interface{}{
+		"accessModes":      []interface{}{"ReadWriteOnce"},
+		"storageClassName": storageClassName,
+		"resources":        map[string]interface{}{"requests": map[string]interface{}{"storage": size}},
+	}
+	if volumeMode != "" {
+		pvcSpec["volumeMode"] = volumeMode
+	}
+	di := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind":       "DataImport",
+		"metadata": map[string]interface{}{
+			"name":      name,
+			"namespace": ns,
+		},
+		"spec": map[string]interface{}{
+			"ttl":  ttl,
+			"mode": "CreatePVC",
+			// false → the controller creates a load pod to bind a WaitForFirstConsumer PVC (there is no real
+			// consumer for an abandoned import). See the doc comment above.
+			"waitForFirstConsumer": false,
+			"pvcTemplate": map[string]interface{}{
+				"metadata": map[string]interface{}{"name": name},
+				"spec":     pvcSpec,
+			},
+		},
+	}}
+	_, err := suiteDyn.Resource(dataImportGVR).Namespace(ns).Create(ctx, di, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+// countDataManagerServerPods counts the importer/exporter server pods that belong to the named
+// DataImport/DataExport (they run in the data-manager namespace and carry the storage-manager-name
+// annotation). It is used to assert server-infrastructure teardown after idle expiry.
+func countDataManagerServerPods(ctx context.Context, storageManagerName string) (int, error) {
+	pods, err := suiteClientset.CoreV1().Pods(d8DataManagerNS).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := range pods.Items {
+		if pods.Items[i].Annotations["storage-foundation.deckhouse.io/storage-manager-name"] == storageManagerName {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Duration) (url, ca string, err error) {
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -299,15 +361,72 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 		if gerr == nil {
 			st, reason, found := conditionStatus(obj, "Completed")
 			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
-			if found && st == "True" && artFound && len(artifact) > 0 {
+			// New status model: a completed DataImport also carries status.phase=Completed and a
+			// status.completionTimestamp (stamped once by the controller at the terminal transition; the GC
+			// measures retention from it). The controller writes all three in the same status update, so
+			// gating on them together does not add a race.
+			phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+			completionTS, _, _ := unstructured.NestedString(obj.Object, "status", "completionTimestamp")
+			// The DataImport catalog is exactly {Ready, UploadFinished, Completed} — no standalone Expired
+			// and no stale/legacy condition type survives (a completed object is terminal and stable, so
+			// this is not racy). extra lists any out-of-catalog types for diagnostics.
+			catalogOK, extra := conditionsWithinCatalog(obj, "Ready", "UploadFinished", "Completed")
+			if found && st == "True" && artFound && len(artifact) > 0 && phase == "Completed" && completionTS != "" && catalogOK {
 				return nil
 			}
-			last = fmt.Sprintf("Completed=%v reason=%q artifact=%v", st, reason, artFound)
+			last = fmt.Sprintf("Completed=%v reason=%q artifact=%v phase=%q completionTimestamp=%q extraConditions=%v", st, reason, artFound, phase, completionTS, extra)
 		} else {
 			last = fmt.Sprintf("get err=%v", gerr)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for DataImport %s/%s Completed; last: %s", ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// conditionsWithinCatalog reports whether every status condition type on obj is in the allowed set,
+// returning the list of out-of-catalog types found (empty when clean). It pins the DataImport/DataExport
+// condition catalog end to end: no legacy "Expired" condition and no foreign type may survive.
+func conditionsWithinCatalog(obj *unstructured.Unstructured, allowed ...string) (bool, []string) {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		allow[a] = struct{}{}
+	}
+	conds, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	var extra []string
+	for _, c := range conds {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		typ, _, _ := unstructured.NestedString(m, "type")
+		if _, ok := allow[typ]; !ok {
+			extra = append(extra, typ)
+		}
+	}
+	return len(extra) == 0, extra
+}
+
+// waitDataImportPhase polls a DataImport until status.phase equals wantPhase (controller-owned).
+func waitDataImportPhase(ctx context.Context, ns, name, wantPhase string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		obj, gerr := getResource(ctx, dataImportGVR, ns, name)
+		if gerr == nil {
+			phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+			if phase == wantPhase {
+				return nil
+			}
+			last = fmt.Sprintf("phase=%q", phase)
+		} else {
+			last = fmt.Sprintf("get err=%v", gerr)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DataImport %s/%s phase=%s; last: %s", ns, name, wantPhase, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
 			return ctx.Err()
