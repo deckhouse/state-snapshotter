@@ -60,7 +60,7 @@ func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 //   - manifest leg: publish the reconstructed ManifestCheckpoint (manifests-and-children-refs-upload keyed
 //     to the leaf UID);
 //   - children: publish the content-graph edges from the uploaded namespaced child refs;
-//   - data leg: read DataImport.status.data.artifact -> VolumeSnapshotContent, force Retain + transfer
+//   - data leg: read DataImport.status.data.artifactRef -> VolumeSnapshotContent, force Retain + transfer
 //     ownership to the content, publish dataRef;
 //   - Ready: mirror the bound content's Ready (single-aggregator), exiting ImportPending.
 //

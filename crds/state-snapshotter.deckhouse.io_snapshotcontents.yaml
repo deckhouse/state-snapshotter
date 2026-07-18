@@ -341,8 +341,8 @@ spec:
                   Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
                   Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
                   represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
-                  It is the durable, self-contained {source, artifact, volume metadata} block the core mirrors onto
-                  the namespaced snapshot's top-level status.data.
+                  It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
+                  onto the namespaced snapshot's top-level status.data.
                 properties:
                   accessModes:
                     description: AccessModes records the source PVC access modes (e.g.
@@ -350,9 +350,9 @@ spec:
                     items:
                       type: string
                     type: array
-                  artifact:
-                    description: Artifact references the cluster-scoped durable data
-                      artifact (for example VolumeSnapshotContent).
+                  artifactRef:
+                    description: ArtifactRef references the cluster-scoped durable
+                      data artifact (for example VolumeSnapshotContent).
                     properties:
                       apiVersion:
                         minLength: 1
@@ -366,7 +366,7 @@ spec:
                       uid:
                         description: |-
                           UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
-                          artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+                          artifact reference self-contained, symmetric with sourceRef.uid. Optional: the artifact may be
                           referenced before its UID is known, so producers fill it best-effort.
                         type: string
                     required:
@@ -386,10 +386,12 @@ spec:
                       the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
                       dependency-free; controllers parse it via resource.ParseQuantity.
                     type: string
-                  source:
+                  sourceRef:
                     description: |-
-                      Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+                      SourceRef identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
                       this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
+                      This is the backing-PVC reference (status.data.sourceRef); it is distinct from the top-level
+                      status.sourceRef (SnapshotSourceObjectRef), which references the captured live domain object.
                     properties:
                       apiVersion:
                         type: string
@@ -426,8 +428,8 @@ spec:
                     - Filesystem
                     type: string
                 required:
-                - artifact
-                - source
+                - artifactRef
+                - sourceRef
                 type: object
               excludedRefs:
                 description: |-

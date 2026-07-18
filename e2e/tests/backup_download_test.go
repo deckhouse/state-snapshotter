@@ -575,7 +575,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 			if gerr != nil {
 				continue
 			}
-			targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
+			targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "sourceRef", "name")
 			if targetName == "" {
 				continue
 			}
@@ -833,7 +833,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 		if gerr != nil {
 			continue
 		}
-		targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
+		targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "sourceRef", "name")
 		if targetName == bkPVCName {
 			orphanVS = vs.GetName()
 			break

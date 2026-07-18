@@ -114,11 +114,11 @@ func captureLegsContentObj(ownerGVK schema.GroupVersionKind, subtreePersisted *b
 
 func captureLegsData() *storagev1alpha1.SnapshotDataBinding {
 	return &storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: projTestPVCName,
 			Namespace: projTestNS, UID: types.UID(projTestPVCUID),
 		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: projTestVSCName,
 		},
 		StorageClassName: "sc-a",

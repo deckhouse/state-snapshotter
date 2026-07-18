@@ -75,7 +75,7 @@ func projSourcePVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// projReadyVCR builds a Ready VolumeCaptureRequest binding the PVC target to the VSC (status.data.artifact).
+// projReadyVCR builds a Ready VolumeCaptureRequest binding the PVC target to the VSC (status.data.artifactRef).
 func projReadyVCR() *unstructured.Unstructured {
 	target := vcpkg.Target{
 		UID:        projTestPVCUID,
@@ -93,7 +93,7 @@ func projReadyVCR() *unstructured.Unstructured {
 		},
 	}, "status", "conditions")
 	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": projTestVSCName,
 		},
 	}, "status", "data")
@@ -135,7 +135,7 @@ func projAssertPublishedAndHandedOff(t *testing.T, cl client.Client) {
 		t.Fatalf("expected status.data to be published by the aggregator, got none")
 	}
 	d := *got.Status.Data
-	if string(d.Source.UID) != projTestPVCUID || d.Artifact.Name != projTestVSCName {
+	if string(d.SourceRef.UID) != projTestPVCUID || d.ArtifactRef.Name != projTestVSCName {
 		t.Fatalf("unexpected published data binding: %#v", d)
 	}
 	if d.StorageClassName != "sc-a" || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(d.AccessModes) != 1 {

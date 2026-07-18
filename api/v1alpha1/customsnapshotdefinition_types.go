@@ -65,7 +65,7 @@ type CustomSnapshotDefinitionSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
 	// RequiresDataArtifact marks that this snapshot kind carries a volume data leg: the generic
-	// controller must wait for the data artifact (capture, SnapshotContent.status.data.artifact) or the
+	// controller must wait for the data artifact (capture, SnapshotContent.status.data.artifactRef) or the
 	// matching DataImport (import) before it reports Ready. Manifest-only snapshot kinds (no volume
 	// data) set false.
 	RequiresDataArtifact bool `json:"requiresDataArtifact,omitempty"`

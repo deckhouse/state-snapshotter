@@ -113,11 +113,11 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName,
 			Namespace: domainTestNS, UID: types.UID(domainTestPVCUID),
 		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent",
 			Name: domainTestVSCName, UID: types.UID("vsc-uid-1"),
 		},
@@ -147,11 +147,11 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	if !found {
 		t.Fatalf("expected status.data to be mirrored")
 	}
-	if srcUID, _, _ := unstructured.NestedString(data, "source", "uid"); srcUID != domainTestPVCUID {
-		t.Fatalf("status.data.source.uid = %q, want %q", srcUID, domainTestPVCUID)
+	if srcUID, _, _ := unstructured.NestedString(data, "sourceRef", "uid"); srcUID != domainTestPVCUID {
+		t.Fatalf("status.data.sourceRef.uid = %q, want %q", srcUID, domainTestPVCUID)
 	}
-	if artName, _, _ := unstructured.NestedString(data, "artifact", "name"); artName != domainTestVSCName {
-		t.Fatalf("status.data.artifact.name = %q, want %q", artName, domainTestVSCName)
+	if artName, _, _ := unstructured.NestedString(data, "artifactRef", "name"); artName != domainTestVSCName {
+		t.Fatalf("status.data.artifactRef.name = %q, want %q", artName, domainTestVSCName)
 	}
 	if sc, _, _ := unstructured.NestedString(data, "storageClassName"); sc != "sc-a" {
 		t.Fatalf("status.data.storageClassName = %q, want sc-a", sc)
@@ -179,9 +179,9 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
-		Size:     "5Gi",
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
+		Size:        "5Gi",
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -202,19 +202,19 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 	}
 }
 
-// SnapshotDataBindingToUnstructuredMap renders source/artifact always, omits empty optionals, and
+// SnapshotDataBindingToUnstructuredMap renders sourceRef/artifactRef always, omits empty optionals, and
 // converts AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
 func TestSnapshotDataBindingToMap(t *testing.T) {
 	m := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
-		Source:      storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
-		Artifact:    storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
 		AccessModes: []string{"ReadWriteOnce"},
 	})
-	if _, ok := m["source"].(map[string]interface{}); !ok {
-		t.Fatalf("source must be a map, got %#v", m["source"])
+	if _, ok := m["sourceRef"].(map[string]interface{}); !ok {
+		t.Fatalf("sourceRef must be a map, got %#v", m["sourceRef"])
 	}
-	if _, ok := m["artifact"].(map[string]interface{}); !ok {
-		t.Fatalf("artifact must be a map, got %#v", m["artifact"])
+	if _, ok := m["artifactRef"].(map[string]interface{}); !ok {
+		t.Fatalf("artifactRef must be a map, got %#v", m["artifactRef"])
 	}
 	am, ok := m["accessModes"].([]interface{})
 	if !ok || len(am) != 1 || am[0] != "ReadWriteOnce" {
@@ -227,8 +227,8 @@ func TestSnapshotDataBindingToMap(t *testing.T) {
 	if _, ok := m["size"]; ok {
 		t.Fatalf("empty size must be omitted")
 	}
-	// The Namespace on source was empty -> omitted.
-	if src := m["source"].(map[string]interface{}); func() bool { _, ok := src["namespace"]; return ok }() {
-		t.Fatalf("empty source.namespace must be omitted")
+	// The Namespace on sourceRef was empty -> omitted.
+	if src := m["sourceRef"].(map[string]interface{}); func() bool { _, ok := src["namespace"]; return ok }() {
+		t.Fatalf("empty sourceRef.namespace must be omitted")
 	}
 }

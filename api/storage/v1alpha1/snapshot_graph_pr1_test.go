@@ -84,14 +84,14 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 				{Name: "child-content-1"},
 			},
 			Data: &SnapshotDataBinding{
-				Source: SnapshotSubjectRef{
+				SourceRef: SnapshotSubjectRef{
 					APIVersion: "v1",
 					Kind:       "PersistentVolumeClaim",
 					Name:       "data",
 					Namespace:  "demo",
 					UID:        types.UID(pvcUID),
 				},
-				Artifact: SnapshotDataArtifactRef{
+				ArtifactRef: SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
 					Name:       "vsc-1",
@@ -120,11 +120,11 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("Data: got nil want a binding")
 	}
 	ref := *out.Status.Data
-	if string(ref.Source.UID) != pvcUID || ref.Source.Name != "data" || ref.Artifact.Name != "vsc-1" {
+	if string(ref.SourceRef.UID) != pvcUID || ref.SourceRef.Name != "data" || ref.ArtifactRef.Name != "vsc-1" {
 		t.Fatalf("Data: got %#v", ref)
 	}
-	if ref.Artifact.Kind == "VolumeCaptureRequest" {
-		t.Fatalf("artifact must reference a durable artifact, not an execution request: %#v", ref.Artifact)
+	if ref.ArtifactRef.Kind == "VolumeCaptureRequest" {
+		t.Fatalf("artifact must reference a durable artifact, not an execution request: %#v", ref.ArtifactRef)
 	}
 
 	var raw map[string]interface{}
@@ -144,11 +144,11 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("did not expect namespace key in child content ref JSON: %#v", item)
 	}
 	entry := status["data"].(map[string]interface{})
-	source := entry["source"].(map[string]interface{})
+	source := entry["sourceRef"].(map[string]interface{})
 	if source["uid"] != pvcUID {
-		t.Fatalf("expected source.uid on singular data binding, got %#v", entry)
+		t.Fatalf("expected sourceRef.uid on singular data binding, got %#v", entry)
 	}
-	artifact := entry["artifact"].(map[string]interface{})
+	artifact := entry["artifactRef"].(map[string]interface{})
 	if artifact["apiVersion"] != "snapshot.storage.k8s.io/v1" ||
 		artifact["kind"] != "VolumeSnapshotContent" ||
 		artifact["name"] != "vsc-1" {

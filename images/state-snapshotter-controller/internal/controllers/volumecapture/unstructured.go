@@ -95,9 +95,9 @@ func ParseVolumeCaptureTargets(obj *unstructured.Unstructured) ([]vcpkg.Target, 
 }
 
 // ParseVolumeCaptureDataRefs reads the VCR's produced data binding and returns it as a 0-or-1 element
-// slice. The durable artifact comes from status.data.artifact; the captured PVC identity comes from the
+// slice. The durable artifact comes from status.data.artifactRef; the captured PVC identity comes from the
 // immutable spec.target (status.data no longer duplicates the target). Returns an empty slice until the
-// foundation writes status.data.artifact.
+// foundation writes status.data.artifactRef.
 func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBinding, error) {
 	dataMap, found, err := unstructured.NestedMap(obj.Object, "status", "data")
 	if err != nil {
@@ -106,7 +106,7 @@ func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBin
 	if !found || len(dataMap) == 0 {
 		return nil, nil
 	}
-	artifactMap, _ := dataMap["artifact"].(map[string]interface{})
+	artifactMap, _ := dataMap["artifactRef"].(map[string]interface{})
 	if len(artifactMap) == 0 {
 		return nil, nil
 	}
@@ -164,14 +164,14 @@ func SnapshotDataBindingsFromVCRStatus(refs []vcpkg.DataBinding) []storagev1alph
 	out := make([]storagev1alpha1.SnapshotDataBinding, 0, len(refs))
 	for _, ref := range refs {
 		out = append(out, storagev1alpha1.SnapshotDataBinding{
-			Source: storagev1alpha1.SnapshotSubjectRef{
+			SourceRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: ref.Target.APIVersion,
 				Kind:       ref.Target.Kind,
 				Name:       ref.Target.Name,
 				Namespace:  ref.Target.Namespace,
 				UID:        types.UID(ref.Target.UID),
 			},
-			Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+			ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 				APIVersion: ref.Artifact.APIVersion,
 				Kind:       ref.Artifact.Kind,
 				Name:       ref.Artifact.Name,

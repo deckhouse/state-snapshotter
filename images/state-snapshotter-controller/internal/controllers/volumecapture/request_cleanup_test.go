@@ -70,8 +70,8 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "content-1", UID: contentUID},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			Data: &storagev1alpha1.SnapshotDataBinding{
-				Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"},
-				Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+				SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"},
+				ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
 					Name:       "vsc-a",
@@ -90,7 +90,7 @@ func TestVolumeCaptureRequestSafeToDelete_emptyOwnerUIDNotSafe(t *testing.T) {
 		"name":       "pvc-a",
 	}, "spec", "target")
 	_ = unstructured.SetNestedMap(vcr.Object, map[string]interface{}{
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1",
 			"kind":       "VolumeSnapshotContent",
 			"name":       "vsc-a",

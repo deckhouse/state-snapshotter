@@ -53,7 +53,7 @@ func scPtr(s string) *string                  { return &s }
 
 func pvcTargetBinding(name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
 	}
 }
 
@@ -175,7 +175,7 @@ func TestEnrich_NonPVCTargetSkipped(t *testing.T) {
 	scheme := enrichScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	binding := storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-x", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-x", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
 	}
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{binding})
 	if err != nil {
@@ -223,10 +223,10 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 		Build()
 
 	pvcBinding := pvcTargetBinding("data")
-	pvcBinding.Artifact = vscArtifact("vsc-pvc")
+	pvcBinding.ArtifactRef = vscArtifact("vsc-pvc")
 	domainBinding := storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
-		Artifact: vscArtifact("vsc-disk"),
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		ArtifactRef: vscArtifact("vsc-disk"),
 	}
 
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcBinding, domainBinding})
@@ -255,23 +255,23 @@ func TestEnrich_BackfillsArtifactUIDFromVSC(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vscNamed, vscPreset).Build()
 
 	nameOnly := storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
-		Artifact: vscArtifact("vsc-named"),
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk"},
+		ArtifactRef: vscArtifact("vsc-named"),
 	}
 	preset := storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk2", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk2"},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-preset", UID: "producer-supplied-uid"},
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{UID: "uid-disk2", Kind: "DemoVirtualDisk", Namespace: "ns1", Name: "disk2"},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-preset", UID: "producer-supplied-uid"},
 	}
 
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{nameOnly, preset})
 	if err != nil {
 		t.Fatalf("enrich: %v", err)
 	}
-	if out[0].Artifact.UID != "vsc-uid-from-object" {
-		t.Errorf("name-only artifact uid: want backfill from VSC object, got %q", out[0].Artifact.UID)
+	if out[0].ArtifactRef.UID != "vsc-uid-from-object" {
+		t.Errorf("name-only artifact uid: want backfill from VSC object, got %q", out[0].ArtifactRef.UID)
 	}
-	if out[1].Artifact.UID != "producer-supplied-uid" {
-		t.Errorf("producer-supplied artifact uid must not be overridden, got %q", out[1].Artifact.UID)
+	if out[1].ArtifactRef.UID != "producer-supplied-uid" {
+		t.Errorf("producer-supplied artifact uid must not be overridden, got %q", out[1].ArtifactRef.UID)
 	}
 }
 
@@ -332,8 +332,8 @@ func TestReadArtifactRestoreSize_TransientErrorPropagates(t *testing.T) {
 
 func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 	base := storagev1alpha1.SnapshotDataBinding{
-		Source:           storagev1alpha1.SnapshotSubjectRef{UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
-		Artifact:         storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1"},
+		SourceRef:        storagev1alpha1.SnapshotSubjectRef{UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
+		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1"},
 		VolumeMode:       "Filesystem",
 		FsType:           "ext4",
 		StorageClassName: "sc",
@@ -357,7 +357,7 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		"storageClassName": func(b *storagev1alpha1.SnapshotDataBinding) { b.StorageClassName = "other" },
 		"size":             func(b *storagev1alpha1.SnapshotDataBinding) { b.Size = "20Gi" },
 		"accessModes":      func(b *storagev1alpha1.SnapshotDataBinding) { b.AccessModes = []string{"ReadWriteMany"} },
-		"artifactUID":      func(b *storagev1alpha1.SnapshotDataBinding) { b.Artifact.UID = "different-uid" },
+		"artifactUID":      func(b *storagev1alpha1.SnapshotDataBinding) { b.ArtifactRef.UID = "different-uid" },
 	} {
 		if dataBindingEqual(base, mut(f)) {
 			t.Errorf("bindings differing by %s must compare unequal", name)

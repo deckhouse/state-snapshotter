@@ -161,8 +161,8 @@ func assertContentManifestLegReady(ctx context.Context, g Gomega, contentName st
 func assertContentDataRetainOwned(ctx context.Context, g Gomega, contentName string) {
 	content, err := getResource(ctx, snapshotContentGVR, "", contentName)
 	g.Expect(err).NotTo(HaveOccurred(), "get SnapshotContent %s", contentName)
-	artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "kind")
-	vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "name")
+	artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "kind")
+	vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "name")
 	g.Expect(artifactKind).To(Equal("VolumeSnapshotContent"), "content %s must project a VolumeSnapshotContent data artifact", contentName)
 	g.Expect(vscName).NotTo(BeEmpty(), "content %s data artifact name must be set", contentName)
 	vsc, err := getResource(ctx, volumeSnapshotContentGVR, "", vscName)

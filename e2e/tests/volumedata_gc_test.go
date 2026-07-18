@@ -140,8 +140,8 @@ func recordGcTree(ctx context.Context, root, okName string) (gcTree, error) {
 			}
 		}
 
-		artifactKind, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifact", "kind")
-		vscName, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifact", "name")
+		artifactKind, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifactRef", "kind")
+		vscName, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifactRef", "name")
 		if artifactKind == "VolumeSnapshotContent" && vscName != "" {
 			vsc, err := getResource(ctx, volumeSnapshotContentGVR, "", vscName)
 			if err != nil {

@@ -105,7 +105,7 @@ type SnapshotDataArtifactRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
-	// artifact reference self-contained, symmetric with source.uid. Optional: the artifact may be
+	// artifact reference self-contained, symmetric with sourceRef.uid. Optional: the artifact may be
 	// referenced before its UID is known, so producers fill it best-effort.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
@@ -114,16 +114,18 @@ type SnapshotDataArtifactRef struct {
 // SnapshotDataBinding associates the single PVC source of a logical snapshot node with its captured data
 // artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE data binding; multiple
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
-// It is self-contained ({source, artifact, volume metadata}) so the core can mirror it verbatim onto the
-// namespaced snapshot's top-level status.data (see the status-source descriptor).
+// It is self-contained ({sourceRef, artifactRef, volume metadata}) so the core can mirror it verbatim onto
+// the namespaced snapshot's top-level status.data (see the status-source descriptor).
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
-	// Source identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
+	// SourceRef identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
 	// this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
-	Source SnapshotSubjectRef `json:"source"`
+	// This is the backing-PVC reference (status.data.sourceRef); it is distinct from the top-level
+	// status.sourceRef (SnapshotSourceObjectRef), which references the captured live domain object.
+	SourceRef SnapshotSubjectRef `json:"sourceRef"`
 
-	// Artifact references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
-	Artifact SnapshotDataArtifactRef `json:"artifact"`
+	// ArtifactRef references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
+	ArtifactRef SnapshotDataArtifactRef `json:"artifactRef"`
 
 	// VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
 	// mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
@@ -190,8 +192,8 @@ type SnapshotContentStatus struct {
 	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
 	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
-	// It is the durable, self-contained {source, artifact, volume metadata} block the core mirrors onto
-	// the namespaced snapshot's top-level status.data.
+	// It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
+	// onto the namespaced snapshot's top-level status.data.
 	// +optional
 	Data *SnapshotDataBinding `json:"data,omitempty"`
 

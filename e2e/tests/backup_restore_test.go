@@ -360,7 +360,7 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 		obj, gerr := getResource(ctx, dataImportGVR, ns, name)
 		if gerr == nil {
 			st, reason, found := conditionStatus(obj, "Completed")
-			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
+			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifactRef")
 			// New status model: a completed DataImport also carries status.phase=Completed and a
 			// status.completionTimestamp (stamped once by the controller at the terminal transition; the GC
 			// measures retention from it). The controller writes all three in the same status update, so

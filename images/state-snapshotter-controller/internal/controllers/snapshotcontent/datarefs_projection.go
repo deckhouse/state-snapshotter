@@ -181,14 +181,14 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	}
 
 	binding := storagev1alpha1.SnapshotDataBinding{
-		Source: volumeSnapshotOwnerSource(owner),
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		SourceRef: volumeSnapshotOwnerSource(owner),
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: volumeSnapshotContentAPIVersion,
 			Kind:       kindVolumeSnapshotContent,
 			Name:       vscName,
 		},
 	}
-	if binding.Source.Name == "" {
+	if binding.SourceRef.Name == "" {
 		// The domain reconciler has not published status.sourceRef yet: wait.
 		return true, "", "", nil
 	}
@@ -197,7 +197,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	if content.Status.Data != nil && content.Status.Data.Artifact.Name == vscName {
+	if content.Status.Data != nil && content.Status.Data.ArtifactRef.Name == vscName {
 		// Already published and bound to the same VSC: latched.
 		return false, "", "", nil
 	}
