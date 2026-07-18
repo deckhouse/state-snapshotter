@@ -162,18 +162,19 @@ func (h *RestoreHandler) routeCoreSnapshotSubresource(w http.ResponseWriter, r *
 }
 
 // routeGenericSnapshotSubresource dispatches subresources of any registered (non-core) snapshot kind.
+//
+// The core group serves manifests-download / manifests-with-data-restoration ONLY for the core Snapshot
+// kind (routeCoreSnapshotSubresource). A domain (non-core) snapshot kind is addressed through its own
+// aggregated group (subresources.<domain-group>): download is a proxy to the cluster-scoped content
+// download and restore compiles the domain subtree there; a VolumeSnapshot is addressed through the
+// subresources.snapshot.storage.k8s.io connector. Serving those here would be a redundant delegation hop
+// (domain kind) or plain broken (VolumeSnapshot has no boundSnapshotContentName / Ready-gated restore),
+// so both are refused with 404 pointing the client at the node's own group. Only upload remains generic.
 func (h *RestoreHandler) routeGenericSnapshotSubresource(w http.ResponseWriter, r *http.Request, namespace, resource, name, subresource string) {
 	switch subresource {
-	case "manifests-with-data-restoration":
-		if !h.requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		h.HandleGenericSnapshotManifestsWithDataRestoration(w, r, namespace, resource, name)
-	case "manifests-download":
-		if !h.requireMethod(w, r, http.MethodGet) {
-			return
-		}
-		h.HandleGenericSnapshotManifestsDownload(w, r, namespace, resource, name)
+	case "manifests-download", "manifests-with-data-restoration":
+		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound",
+			fmt.Sprintf("subresource %q is not served for %q under the core group; address the snapshot kind through its own aggregated group (the domain group for domain kinds, or the subresources.snapshot.storage.k8s.io connector for VolumeSnapshots)", subresource, resource))
 	case "manifests-and-children-refs-upload":
 		if !h.requireMethod(w, r, http.MethodPost) {
 			return
@@ -228,27 +229,6 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
 }
 
-func (h *RestoreHandler) HandleGenericSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
-	start := time.Now()
-	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	opts := restore.Options{
-		SnapshotName:      snapshotName,
-		SnapshotNamespace: namespace,
-		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
-	}
-	data, err := h.service.BuildManifestsWithDataRestorationForNode(r.Context(), snapshotGVK, opts)
-	if err != nil {
-		h.writeRestoreError(w, err)
-		return
-	}
-	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned per-node manifests-with-data-restoration", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
-}
-
 // HandleCoreSnapshotManifestsDownload returns the own-node (single-node) manifests of a core Snapshot
 // root — raw verbatim from MCP (status, managedFields, namespace preserved), WITHOUT walking the subtree.
 func (h *RestoreHandler) HandleCoreSnapshotManifestsDownload(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
@@ -264,28 +244,6 @@ func (h *RestoreHandler) HandleCoreSnapshotManifestsDownload(w http.ResponseWrit
 	}
 	h.writeJSONResponse(w, r, data)
 	h.logger.Info("Returned per-CR manifests-download", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
-}
-
-// HandleGenericSnapshotManifestsDownload returns the own-node manifests of any registered (non-core)
-// namespaced snapshot kind (single-node, raw verbatim from MCP), resolving the resource to its GVK.
-func (h *RestoreHandler) HandleGenericSnapshotManifestsDownload(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
-	start := time.Now()
-	if h.nsAggregated == nil {
-		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "manifests handler not configured")
-		return
-	}
-	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	data, err := h.nsAggregated.BuildSingleNodeJSONFromSnapshot(r.Context(), snapshotGVK, namespace, snapshotName)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned per-CR generic manifests-download", "resource", resource, "snapshot", snapshotName, "namespace", namespace, "gvk", snapshotGVK.String(), "duration", time.Since(start))
 }
 
 // HandleContentManifestsDownload returns the own-node manifests addressed by cluster-scoped
@@ -424,6 +382,11 @@ func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err):
 		status = http.StatusNotFound
 		reason = "NotFound"
+	case apierrors.IsForbidden(err):
+		// The restore resolver returns apierrors.NewForbidden when a bound SnapshotContent's
+		// spec.snapshotRef does not point back at the addressed snapshot subject (anti-spoofing).
+		status = http.StatusForbidden
+		reason = "Forbidden"
 	case errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation):
 		status = http.StatusConflict
 		reason = "Conflict"

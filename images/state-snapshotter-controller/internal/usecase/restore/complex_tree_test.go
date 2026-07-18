@@ -139,7 +139,7 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 
 	objs := materializeMCP(mcp, manifests)
 
-	contentObj := readySnapshotContent(content, mcp, nil)
+	contentObj := rootBoundContent(content, mcp, rootName)
 	if rootNotReady {
 		meta.SetStatusCondition(&contentObj.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending"})
 	}
@@ -320,38 +320,6 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 	}
 	mustBefore("DemoVirtualMachine", "vm-a", "ConfigMap", "config")
 	mustBefore("DemoVirtualDisk", "disk-standalone", "ConfigMap", "config")
-}
-
-// TestBuildManifestsWithDataRestorationForNode_DomainKindFullyDelegated proves the per-node endpoint
-// for a domain kind delegates the whole subtree to the domain apiserver (core compiles nothing for it).
-func TestBuildManifestsWithDataRestorationForNode_DomainKindFullyDelegated(t *testing.T) {
-	objs := materializeRoot(t,
-		[]map[string]interface{}{cmManifest("config")},
-		nil,
-		[]domainChild{{kind: "DemoVirtualMachineSnapshot", name: "vm-a-snap"}}, false)
-
-	delegate := &recordingDelegate{byName: map[string][]map[string]interface{}{
-		"vm-a-snap": {{"apiVersion": demoGroupV, "kind": "DemoVirtualMachine", "metadata": map[string]interface{}{"name": "vm-a"}}},
-	}}
-	svc := newServiceWithDelegate(t, objs, delegate)
-
-	gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
-	out, err := svc.BuildManifestsWithDataRestorationForNode(context.Background(), gvk, Options{
-		SnapshotName: "vm-a-snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
-	})
-	if err != nil {
-		t.Fatalf("BuildManifestsWithDataRestorationForNode: %v", err)
-	}
-	objects := decodeObjects(t, out)
-	if !hasObj(objects, "DemoVirtualMachine", "vm-a") {
-		t.Fatal("delegated VM subtree must contain vm-a")
-	}
-	if hasObj(objects, "ConfigMap", "config") {
-		t.Fatal("root namespace objects must not be compiled for a per-node domain restore")
-	}
-	if len(delegate.calls) != 1 || delegate.calls[0].name != "vm-a-snap" {
-		t.Fatalf("expected exactly one delegate call for vm-a-snap, got %#v", delegate.calls)
-	}
 }
 
 // TestBuildManifestsWithDataRestoration_DuplicateAcrossDelegatedFailsClosed proves the final dedup

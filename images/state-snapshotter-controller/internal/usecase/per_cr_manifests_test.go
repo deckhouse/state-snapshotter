@@ -23,9 +23,13 @@ import (
 	"net/http"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -54,7 +58,16 @@ func perCRNodeFixture(t *testing.T) *AggregatedNamespaceManifests {
 		_ = cl.Create(ctx, mcp)
 	}
 	_ = cl.Create(ctx, aggManifestContent("child-content", "mcp-child"))
-	_ = cl.Create(ctx, aggManifestContent("root-content", "mcp-root", "child-content"))
+	rootContent := aggManifestContent("root-content", "mcp-root", "child-content")
+	// The root download path resolves the live Snapshot's status.boundSnapshotContentName and enforces the
+	// anti-spoofing back-reference, so the root content must point back at the bound Snapshot (ns1/snap).
+	rootContent.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "Snapshot",
+		Namespace:  aggManifestTestSnapNamespace,
+		Name:       aggManifestTestSnapName,
+	}
+	_ = cl.Create(ctx, rootContent)
 	_ = cl.Create(ctx, aggManifestNS("root-content"))
 
 	return NewAggregatedNamespaceManifests(cl, arch, nil)
@@ -260,6 +273,139 @@ func TestBuildSingleNodeJSON_Errors(t *testing.T) {
 		agg := NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil)
 		_, err := agg.BuildSingleNodeJSON(ctx, "")
 		assertAggStatus(t, err, http.StatusBadRequest)
+	})
+}
+
+// TestBuildSingleNodeJSONForRootSnapshot_BackRef pins the anti-spoofing handshake on the CORE Snapshot
+// root download (live-CR branch): the content resolved from the live Snapshot's
+// status.boundSnapshotContentName must carry a spec.snapshotRef pointing back at that core Snapshot. A
+// matching back-ref serves the root's own manifests; a mismatched or missing one is fail-closed 403.
+func TestBuildSingleNodeJSONForRootSnapshot_BackRef(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+
+	newAgg := func(t *testing.T, ref *storagev1alpha1.SnapshotSubjectRef) *AggregatedNamespaceManifests {
+		t.Helper()
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		arch := NewArchiveService(cl, cl, log)
+		ctx := context.Background()
+		d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "root-own", "namespace": "ns1"}},
+		})
+		ch := aggManifestCreateChunk("ch-root", "mcp-root", d, cs)
+		if err := cl.Create(ctx, ch); err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.Create(ctx, aggManifestReadyMCP("mcp-root", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)); err != nil {
+			t.Fatal(err)
+		}
+		content := aggManifestContent("root-content", "mcp-root")
+		content.Spec.SnapshotRef = ref
+		if err := cl.Create(ctx, content); err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.Create(ctx, aggManifestNS("root-content")); err != nil {
+			t.Fatal(err)
+		}
+		return NewAggregatedNamespaceManifests(cl, arch, nil)
+	}
+
+	t.Run("matching back-ref succeeds", func(t *testing.T) {
+		agg := newAgg(t, &storagev1alpha1.SnapshotSubjectRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Namespace: aggManifestTestSnapNamespace, Name: aggManifestTestSnapName})
+		raw, err := agg.BuildSingleNodeJSONForRootSnapshot(context.Background(), aggManifestTestSnapNamespace, aggManifestTestSnapName)
+		if err != nil {
+			t.Fatalf("BuildSingleNodeJSONForRootSnapshot: %v", err)
+		}
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			t.Fatal(err)
+		}
+		if len(arr) != 1 || arr[0]["metadata"].(map[string]interface{})["name"] != "root-own" {
+			t.Fatalf("want the root node's own object, got %v", arr)
+		}
+	})
+
+	t.Run("mismatched back-ref 403", func(t *testing.T) {
+		agg := newAgg(t, &storagev1alpha1.SnapshotSubjectRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Namespace: aggManifestTestSnapNamespace, Name: "other"})
+		_, err := agg.BuildSingleNodeJSONForRootSnapshot(context.Background(), aggManifestTestSnapNamespace, aggManifestTestSnapName)
+		assertAggStatus(t, err, http.StatusForbidden)
+	})
+
+	t.Run("missing back-ref 403", func(t *testing.T) {
+		agg := newAgg(t, nil)
+		_, err := agg.BuildSingleNodeJSONForRootSnapshot(context.Background(), aggManifestTestSnapNamespace, aggManifestTestSnapName)
+		assertAggStatus(t, err, http.StatusForbidden)
+	})
+}
+
+// TestBuildSingleNodeJSONFromSnapshot_BackRef pins the anti-spoofing handshake on the per-CR download
+// facade: after resolving the CR's status.boundSnapshotContentName, the bound SnapshotContent must carry
+// a spec.snapshotRef pointing back at that very CR. A matching back-ref serves the node's own manifests;
+// a mismatched or missing back-ref is refused fail-closed with 403 (Forbidden).
+func TestBuildSingleNodeJSONFromSnapshot_BackRef(t *testing.T) {
+	scheme := aggManifestTestScheme(t)
+	log, _ := logger.NewLogger("error")
+	gvk := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+
+	newAgg := func(t *testing.T, ref *storagev1alpha1.SnapshotSubjectRef) *AggregatedNamespaceManifests {
+		t.Helper()
+		cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+		arch := NewArchiveService(cl, cl, log)
+		ctx := context.Background()
+		d, cs := aggManifestEncodeChunk([]map[string]interface{}{
+			{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "own", "namespace": "ns1"}},
+		})
+		ch := aggManifestCreateChunk("ch-bound", "bound-mcp", d, cs)
+		if err := cl.Create(ctx, ch); err != nil {
+			t.Fatal(err)
+		}
+		if err := cl.Create(ctx, aggManifestReadyMCP("bound-mcp", []ssv1alpha1.ChunkInfo{{Name: ch.Name, Index: 0, Checksum: cs}}, 1)); err != nil {
+			t.Fatal(err)
+		}
+		content := &storagev1alpha1.SnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: "bound-content"},
+			Spec:       storagev1alpha1.SnapshotContentSpec{SnapshotRef: ref},
+			Status:     storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "bound-mcp"},
+		}
+		meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
+		if err := cl.Create(ctx, content); err != nil {
+			t.Fatal(err)
+		}
+		snap := &storagev1alpha1.Snapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns1"},
+			Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "bound-content"},
+		}
+		if err := cl.Create(ctx, snap); err != nil {
+			t.Fatal(err)
+		}
+		return NewAggregatedNamespaceManifests(cl, arch, nil)
+	}
+
+	t.Run("matching back-ref succeeds", func(t *testing.T) {
+		agg := newAgg(t, &storagev1alpha1.SnapshotSubjectRef{APIVersion: gvk.GroupVersion().String(), Kind: "Snapshot", Namespace: "ns1", Name: "snap"})
+		raw, err := agg.BuildSingleNodeJSONFromSnapshot(context.Background(), gvk, "ns1", "snap")
+		if err != nil {
+			t.Fatalf("BuildSingleNodeJSONFromSnapshot: %v", err)
+		}
+		var arr []map[string]interface{}
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			t.Fatal(err)
+		}
+		if len(arr) != 1 || arr[0]["metadata"].(map[string]interface{})["name"] != "own" {
+			t.Fatalf("want the node's own object, got %v", arr)
+		}
+	})
+
+	t.Run("mismatched back-ref 403", func(t *testing.T) {
+		agg := newAgg(t, &storagev1alpha1.SnapshotSubjectRef{APIVersion: gvk.GroupVersion().String(), Kind: "Snapshot", Namespace: "ns1", Name: "other"})
+		_, err := agg.BuildSingleNodeJSONFromSnapshot(context.Background(), gvk, "ns1", "snap")
+		assertAggStatus(t, err, http.StatusForbidden)
+	})
+
+	t.Run("missing back-ref 403", func(t *testing.T) {
+		agg := newAgg(t, nil)
+		_, err := agg.BuildSingleNodeJSONFromSnapshot(context.Background(), gvk, "ns1", "snap")
+		assertAggStatus(t, err, http.StatusForbidden)
 	})
 }
 

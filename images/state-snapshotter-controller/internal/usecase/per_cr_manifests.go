@@ -50,10 +50,17 @@ func (s *AggregatedNamespaceManifests) BuildSingleNodeJSON(ctx context.Context, 
 		}
 		return nil, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
 	}
+	return s.buildSingleNodeJSONFromContentObject(ctx, content)
+}
+
+// buildSingleNodeJSONFromContentObject decodes a single node's own manifests from an already-fetched
+// SnapshotContent (its own ManifestCheckpoint), so callers that must first fetch the content for an
+// anti-spoofing back-reference check do not read it twice.
+func (s *AggregatedNamespaceManifests) buildSingleNodeJSONFromContentObject(ctx context.Context, content *storagev1alpha1.SnapshotContent) ([]byte, error) {
 	mcpName := content.Status.ManifestCheckpointName
 	if mcpName == "" {
 		return nil, NewAggregatedStatusError(http.StatusConflict, "Conflict",
-			fmt.Sprintf("SnapshotContent %q has empty manifestCheckpointName", contentName))
+			fmt.Sprintf("SnapshotContent %q has empty manifestCheckpointName", content.Name))
 	}
 
 	seenKeys := make(map[string]struct{})
@@ -70,23 +77,51 @@ func (s *AggregatedNamespaceManifests) BuildSingleNodeJSON(ctx context.Context, 
 
 // BuildSingleNodeJSONForRootSnapshot returns the own-node manifests of a core Snapshot root (no subtree),
 // resolving its SnapshotContent from live status, then from retained content via the root ObjectKeeper.
+// When the content was resolved from the live Snapshot's (user-writable) status.boundSnapshotContentName,
+// it enforces the anti-spoofing handshake: the content's spec.snapshotRef must point back at this core
+// Snapshot (fail-closed 403). The retained/ObjectKeeper branch is trusted via ownerRefs, so it is not
+// back-ref checked (no live CR to reference).
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONForRootSnapshot(ctx context.Context, namespace, snapshotName string) ([]byte, error) {
-	rootContent, err := s.resolveRootContentName(ctx, namespace, snapshotName)
+	rootContent, snapshotUID, fromLiveCR, err := s.resolveRootContentName(ctx, namespace, snapshotName)
 	if err != nil {
 		return nil, err
 	}
-	return s.BuildSingleNodeJSON(ctx, rootContent)
+	if !fromLiveCR {
+		return s.BuildSingleNodeJSON(ctx, rootContent)
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := s.client.Get(ctx, client.ObjectKey{Name: rootContent}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("SnapshotContent %q not found", rootContent))
+		}
+		return nil, fmt.Errorf("get SnapshotContent %q: %w", rootContent, err)
+	}
+	if err := verifyContentSnapshotRef(content, storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", namespace, snapshotName, snapshotUID); err != nil {
+		return nil, err
+	}
+	return s.buildSingleNodeJSONFromContentObject(ctx, content)
 }
 
 // BuildSingleNodeJSONFromSnapshot returns the own-node manifests of any namespaced snapshot-like CR
-// (by GVK; e.g. a domain leaf or a generic-PVC node), resolving its bound SnapshotContent via
-// status.boundSnapshotContentName. No subtree recursion.
+// (by GVK; e.g. a generic-PVC extended VolumeSnapshot), resolving its bound SnapshotContent via
+// status.boundSnapshotContentName. No subtree recursion. It enforces the anti-spoofing handshake: the
+// resolved content must carry a spec.snapshotRef pointing back at the addressed CR (fail-closed 403).
 func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) ([]byte, error) {
-	contentName, err := s.resolveContentNameFromSnapshot(ctx, snapshotGVK, namespace, snapshotName)
+	contentName, snapshotUID, err := s.resolveContentNameFromSnapshot(ctx, snapshotGVK, namespace, snapshotName)
 	if err != nil {
 		return nil, err
 	}
-	return s.BuildSingleNodeJSON(ctx, contentName)
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := s.client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("SnapshotContent %q not found", contentName))
+		}
+		return nil, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
+	}
+	if err := verifyContentSnapshotRef(content, snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, namespace, snapshotName, snapshotUID); err != nil {
+		return nil, err
+	}
+	return s.buildSingleNodeJSONFromContentObject(ctx, content)
 }
 
 // BuildSingleNodeJSONFromContent returns the own-node manifests for a cluster-scoped SnapshotContent

@@ -24,6 +24,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -129,11 +130,26 @@ func aggregatedAPISpecs() {
 			Expect(found).To(BeTrue(), "manifests-download should contain the source ConfigMap %s", srcConfigMapName)
 		})
 
-		It("serves a demo node's own manifests via the core generic manifests-download path", func() {
+		It("does NOT serve a demo node's own manifests via the core generic group (404 for both read subresources)", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 
-			path := coreGenericSubPath(captured.namespace, resDemoVMSnapshots, vmSnapshot.name, subManifestsDownload)
+			// The core group serves manifests-download / manifests-with-data-restoration ONLY for the core
+			// Snapshot kind. A domain kind must be addressed through its own aggregated group, so both generic
+			// reads under the core group are 404 (the domain group and the VS connector are the valid entrypoints).
+			for _, sub := range []string{subManifestsDownload, subManifestsRestore} {
+				path := coreGenericSubPath(captured.namespace, resDemoVMSnapshots, vmSnapshot.name, sub)
+				_, err := aggGet(ctx, path, nil)
+				Expect(err).To(HaveOccurred(), "core group must not serve %s for domain kinds: %s", sub, path)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected 404 NotFound for %s, got %v", path, err)
+			}
+		})
+
+		It("serves a demo node's own manifests via the demo group manifests-download path", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := demoSubPath(captured.namespace, resDemoVMSnapshots, vmSnapshot.name, subManifestsDownload)
 			body, err := aggGet(ctx, path, nil)
 			Expect(err).NotTo(HaveOccurred(), "GET %s", path)
 

@@ -270,7 +270,7 @@ func assertBackupTopology(ctx context.Context, ns, rootSnap string) error {
 			continue
 		}
 		// manifests-download on the nested disk snapshot should contain disk-a.
-		path := coreGenericSubPath(ns, resDemoDiskSnapshots, c.name, subManifestsDownload)
+		path := demoSubPath(ns, resDemoDiskSnapshots, c.name, subManifestsDownload)
 		body, aerr := aggGet(ctx, path, nil)
 		if aerr != nil {
 			return fmt.Errorf("GET %s: %w", path, aerr)
@@ -289,7 +289,7 @@ func assertBackupTopology(ctx context.Context, ns, rootSnap string) error {
 	}
 
 	// Standalone disk-b: root child manifests-download should reference disk-b.
-	path := coreGenericSubPath(ns, resDemoDiskSnapshots, diskBSnap.name, subManifestsDownload)
+	path := demoSubPath(ns, resDemoDiskSnapshots, diskBSnap.name, subManifestsDownload)
 	body, err := aggGet(ctx, path, nil)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
@@ -309,9 +309,9 @@ func manifestDownloadPath(ns string, ref childRef) string {
 	case "Snapshot":
 		return coreSnapshotSubPath(ns, ref.name, subManifestsDownload)
 	case "DemoVirtualMachineSnapshot":
-		return coreGenericSubPath(ns, resDemoVMSnapshots, ref.name, subManifestsDownload)
+		return demoSubPath(ns, resDemoVMSnapshots, ref.name, subManifestsDownload)
 	case "DemoVirtualDiskSnapshot":
-		return coreGenericSubPath(ns, resDemoDiskSnapshots, ref.name, subManifestsDownload)
+		return demoSubPath(ns, resDemoDiskSnapshots, ref.name, subManifestsDownload)
 	case "VolumeSnapshot":
 		// Orphan-PVC visibility leaf: its captured PVC manifest is served by the generic-PVC extended
 		// VolumeSnapshot connector (subresources.snapshot.storage.k8s.io), not the core/demo subresource.

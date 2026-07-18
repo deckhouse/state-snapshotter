@@ -73,7 +73,7 @@ func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVe
 		}
 		return nil, fmt.Errorf("failed to get snapshot %s/%s: %w", snapshotNamespace, snapshotName, err)
 	}
-	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{})
+	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{}, true)
 }
 
 // domainRestoreNode builds the marker node for a domain snapshot boundary. It carries only the
@@ -91,7 +91,10 @@ func domainRestoreNode(apiVersion, kind, name, namespace string) *RestoreNode {
 	}
 }
 
-func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}) (*RestoreNode, error) {
+// buildRestoreNode resolves one snapshot node and its subtree. isRoot marks the user-addressed entry node
+// (vs a node reached via the trusted childrenSnapshotRefs tree-walk), which controls the back-reference
+// mismatch status: 403 for the root, 409 for tree-walk children (see the anti-spoofing check below).
+func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}, isRoot bool) (*RestoreNode, error) {
 	key := snapshotObj.GetAPIVersion() + "/" + snapshotObj.GetKind() + "/" + snapshotObj.GetName()
 	if _, ok := visited[key]; ok {
 		return nil, fmt.Errorf("%w: snapshot run-tree cycle at %s", ErrContractViolation, key)
@@ -121,6 +124,22 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 	}
 	if err := ensureReady(content); err != nil {
 		return nil, err
+	}
+	// Anti-spoofing handshake (unified facade contract): status.boundSnapshotContentName is written on the
+	// snapshot side and is not trustworthy alone — a status writer could aim it at a foreign content. The
+	// bound content must carry a spec.snapshotRef pointing back at this very snapshot subject
+	// (apiVersion/kind/namespace/name; uid only when both sides carry one). For the user-addressed ROOT node
+	// a mismatch is a 403 (Forbidden), mirroring the domain-side facade; for a CHILD node reached via the
+	// trusted childrenSnapshotRefs tree-walk a mismatch is a data-integrity contract violation (409),
+	// consistent with the sibling orphan-VS child leg (verifyOrphanContentSnapshotRef). Either way, fail-closed.
+	if reason := snapshotRefMismatch(content, snapshotObj.GetAPIVersion(), snapshotObj.GetKind(), namespace, snapshotObj.GetName(), string(snapshotObj.GetUID())); reason != "" {
+		if isRoot {
+			return nil, errors.NewForbidden(
+				schema.GroupResource{Group: contentGVK.Group, Resource: "snapshotcontents"}, boundName,
+				fmt.Errorf("bound SnapshotContent %s does not belong to snapshot %s/%s: %s", boundName, namespace, snapshotObj.GetName(), reason),
+			)
+		}
+		return nil, fmt.Errorf("%w: bound SnapshotContent %s does not belong to child snapshot %s/%s: %s", ErrContractViolation, boundName, namespace, snapshotObj.GetName(), reason)
 	}
 	contentLike, err := snapshot.ExtractSnapshotContentLike(content)
 	if err != nil {
@@ -184,7 +203,7 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 			}
 			return nil, fmt.Errorf("failed to get child snapshot %s/%s: %w", namespace, ref.Name, err)
 		}
-		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited)
+		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited, false)
 		if err != nil {
 			return nil, err
 		}
@@ -311,6 +330,31 @@ func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsN
 	return boundVSC, boundContentName, string(vs.GetUID()), nil
 }
 
+// snapshotRefMismatch is the shared anti-spoofing primitive: it compares a SnapshotContent's
+// spec.snapshotRef back-reference against the expected snapshot subject identity
+// (apiVersion/kind/namespace/name; uid only when both the ref and the live subject carry one). It returns
+// a human-readable reason describing the first mismatch, or "" when the back-reference is present and
+// points at the expected subject. Callers wrap the reason in their own status (409 contract violation for
+// the orphan-VS tree-walk leg, 403 Forbidden for user-addressed snapshot-node resolution).
+func snapshotRefMismatch(content *unstructured.Unstructured, wantAPIVersion, wantKind, wantNamespace, wantName, wantUID string) string {
+	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
+	if err != nil || !found || len(ref) == 0 {
+		return "missing spec.snapshotRef back-reference"
+	}
+	apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
+	ns, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+	name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+	uid, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
+	if apiVersion != wantAPIVersion || kind != wantKind || ns != wantNamespace || name != wantName {
+		return fmt.Sprintf("spec.snapshotRef (apiVersion=%q kind=%q %s/%s) does not point back at %s/%s (apiVersion=%q kind=%q)", apiVersion, kind, ns, name, wantNamespace, wantName, wantAPIVersion, wantKind)
+	}
+	if uid != "" && wantUID != "" && uid != wantUID {
+		return fmt.Sprintf("spec.snapshotRef.uid %q does not match subject %s/%s uid %q", uid, wantNamespace, wantName, wantUID)
+	}
+	return ""
+}
+
 // verifyOrphanContentSnapshotRef enforces the anti-spoofing handshake for the orphan child volume node:
 // the bound child SnapshotContent must carry a spec.snapshotRef that points back at the VolumeSnapshot
 // handle (apiVersion/kind/namespace/name). The UID is matched only when the ref carries one — both the
@@ -319,20 +363,8 @@ func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsN
 // against the live VS whenever present. Any missing/mismatched field is a contract violation (409), never
 // a transient not-ready.
 func verifyOrphanContentSnapshotRef(content *unstructured.Unstructured, namespace, vsName, vsUID, childContentName string) error {
-	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
-	if err != nil || !found || len(ref) == 0 {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s has no spec.snapshotRef back-reference to VolumeSnapshot %s/%s", ErrContractViolation, childContentName, namespace, vsName)
-	}
-	apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
-	ns, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
-	name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
-	uid, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
-	if apiVersion != snapshot.CSISnapshotAPIVersion || kind != snapshot.KindVolumeSnapshot || ns != namespace || name != vsName {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef (apiVersion=%q kind=%q %s/%s) does not point back at VolumeSnapshot %s/%s", ErrContractViolation, childContentName, apiVersion, kind, ns, name, namespace, vsName)
-	}
-	if uid != "" && vsUID != "" && uid != vsUID {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef.uid %q does not match VolumeSnapshot %s/%s uid %q", ErrContractViolation, childContentName, uid, namespace, vsName, vsUID)
+	if reason := snapshotRefMismatch(content, snapshot.CSISnapshotAPIVersion, snapshot.KindVolumeSnapshot, namespace, vsName, vsUID); reason != "" {
+		return fmt.Errorf("%w: orphan child SnapshotContent %s %s (expected VolumeSnapshot %s/%s)", ErrContractViolation, childContentName, reason, namespace, vsName)
 	}
 	return nil
 }

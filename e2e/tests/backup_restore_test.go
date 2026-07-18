@@ -532,11 +532,11 @@ func restoreProbePodName(pvc string) string { return bkRestoreProbePod + "-" + p
 func emptyJSONArray() []byte { return []byte("[]") }
 
 func fetchVMSnapManifests(ctx context.Context, name string) ([]byte, error) {
-	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoVMSnapshots, name, subManifestsDownload), nil)
+	return aggGet(ctx, demoSubPath(backup.srcNS, resDemoVMSnapshots, name, subManifestsDownload), nil)
 }
 
 func fetchDiskSnapManifests(ctx context.Context, name string) ([]byte, error) {
-	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoDiskSnapshots, name, subManifestsDownload), nil)
+	return aggGet(ctx, demoSubPath(backup.srcNS, resDemoDiskSnapshots, name, subManifestsDownload), nil)
 }
 
 func fetchVSManifests(ctx context.Context, name string) ([]byte, error) {

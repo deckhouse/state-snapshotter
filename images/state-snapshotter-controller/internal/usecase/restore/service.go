@@ -63,15 +63,6 @@ func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Op
 	})
 }
 
-// BuildManifestsWithDataRestorationForNode compiles the restore subtree rooted at a specific snapshot
-// node (the namespaced root Snapshot or a domain snapshot CR identified by gvk), so the endpoint can
-// return apply-ready manifests for that node only, e.g. a single VM or disk snapshot.
-func (s *Service) BuildManifestsWithDataRestorationForNode(ctx context.Context, gvk schema.GroupVersionKind, opts Options) ([]byte, error) {
-	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
-		return s.resolver.ResolveRestoreSubtree(ctx, gvk, opts.SnapshotNamespace, opts.SnapshotName)
-	})
-}
-
 // BuildManifestsWithDataRestorationForVolumeSnapshot compiles the restore output for a single
 // generic-PVC extended VolumeSnapshot leaf addressed by namespace/name — the
 // subresources.snapshot.storage.k8s.io connector (C8). The VolumeSnapshot is a namespaced handle to a

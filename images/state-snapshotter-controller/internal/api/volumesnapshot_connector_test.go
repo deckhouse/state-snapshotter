@@ -185,6 +185,42 @@ func TestVolumeSnapshotConnector_ManifestsDownload(t *testing.T) {
 	}
 }
 
+// TestVolumeSnapshotConnector_ManifestsDownloadBackRefMismatch pins the anti-spoofing handshake on the
+// download facade: a VolumeSnapshot whose status.boundSnapshotContentName points at a content that does
+// NOT reference it back (spec.snapshotRef aims at a different VS) is refused with 403 (Forbidden), never
+// served. Without this a status writer could aim boundSnapshotContentName at a foreign content.
+func TestVolumeSnapshotConnector_ManifestsDownloadBackRefMismatch(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(vsConnectorScheme()).Build()
+	pvc := map[string]interface{}{
+		"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{"name": "orphan-pvc", "namespace": "ns1"},
+	}
+	createReadyMCPForAPI(t, cl, "mcp-vol", []map[string]interface{}{pvc})
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vol-content"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Namespace:  "ns1",
+				Name:       "vs-other", // back-reference points at a DIFFERENT VolumeSnapshot
+			},
+		},
+		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-vol"},
+	}
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
+	if err := cl.Create(context.Background(), content); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-1", "ns1", "vsc-1", "vol-content", false, true)); err != nil {
+		t.Fatal(err)
+	}
+	srv := newVSConnectorServer(t, cl)
+	defer srv.Close()
+
+	getRawResponse(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download", http.StatusForbidden)
+}
+
 func TestVolumeSnapshotConnector_ManifestsWithDataRestoration(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(vsConnectorScheme()).Build()
 	seedVolumeSnapshotLeaf(t, cl, "vs-1", true)

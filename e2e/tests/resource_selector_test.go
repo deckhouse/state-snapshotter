@@ -148,7 +148,7 @@ func vmSnapshotManifestNames(ctx context.Context, ns string, nodes []childRef) (
 		if n.kind != rsVMSnapshotKnd {
 			continue
 		}
-		path := coreGenericSubPath(ns, resDemoVMSnapshots, n.name, subManifestsDownload)
+		path := demoSubPath(ns, resDemoVMSnapshots, n.name, subManifestsDownload)
 		body, err := aggGet(ctx, path, nil)
 		if err != nil {
 			return nil, fmt.Errorf("GET %s: %w", path, err)
