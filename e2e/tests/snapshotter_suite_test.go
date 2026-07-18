@@ -125,6 +125,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  GC TTL (snapshotTtlAfterDelete): %s\n", suiteCfg.gcTTL)
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
 	GinkgoWriter.Printf("  GET-load measurement (opt): %v\n", suiteCfg.getLoad)
+	GinkgoWriter.Printf("  publish sanity-check (opt): %v\n", suiteCfg.publish)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
@@ -152,6 +153,14 @@ func prepareSuite() {
 
 	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC) and the demo CSD to become Ready")
 	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD readiness")
+
+	// Publish (ingress + tokens) specs need the publish infrastructure the storage-e2e bootstrap
+	// provisions out of the box (user-authn publishAPI + global publicDomainTemplate + ingress-nginx).
+	// Under the E2E_PUBLISH gate, fail fast here — before any spec runs — if that profile is incomplete,
+	// and record the discovered ingress facts for the publish specs. It INSTALLS NOTHING.
+	if suiteCfg.publish {
+		checkPublishInfra()
+	}
 }
 
 // prepareSharedState runs once before the Ordered specs. Clients and module readiness are already set up

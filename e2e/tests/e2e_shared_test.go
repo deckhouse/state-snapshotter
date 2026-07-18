@@ -51,6 +51,7 @@ const (
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envGetLoad              = "E2E_GET_LOAD"
+	envPublish              = "E2E_PUBLISH"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -256,14 +257,18 @@ var backup backupFixture
 const pollInterval = 5 * time.Second
 
 type e2eConfig struct {
-	nsPrefix          string
-	snapshotReadyTO   time.Duration
-	captureReadyTO    time.Duration
-	dataTransferTO    time.Duration
-	moduleReadyTO     time.Duration
-	gcTTL             string
-	volumeData        bool
-	getLoad           bool
+	nsPrefix        string
+	snapshotReadyTO time.Duration
+	captureReadyTO  time.Duration
+	dataTransferTO  time.Duration
+	moduleReadyTO   time.Duration
+	gcTTL           string
+	volumeData      bool
+	getLoad         bool
+	// publish opts into the publish (ingress + tokens) specs. It is a BeforeSuite sanity-check gate
+	// (mirrors volumeData): the infra is provisioned by the storage-e2e bootstrap, so this flag only
+	// asserts it is present and records the discovered ingress facts in suitePublishInfra.
+	publish           bool
 	storageClass      string
 	probeImage        string
 	backupClientImage string
@@ -292,6 +297,7 @@ func loadConfig() e2eConfig {
 		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
 		volumeData:        envBool(os.Getenv(envVolumeData)),
 		getLoad:           envBool(os.Getenv(envGetLoad)),
+		publish:           envBool(os.Getenv(envPublish)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),

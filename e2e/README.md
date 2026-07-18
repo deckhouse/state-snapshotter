@@ -139,6 +139,30 @@ pseudo-version. `state-snapshotter/api` is always consumed via
     cold-cache bias (default `1`).
   - `E2E_GET_LOAD_MAX_PER_SEC`: when set, hard-bound the MEAN GET/sec (leave unset
     for the baseline run; set it to the baseline figure for the new run).
+- `E2E_PUBLISH`: when truthy (`true`/`1`/`yes`), opts into the publish (ingress +
+  tokens) specs — DataExport/DataImport with `publish: true`, downloaded/uploaded
+  both from inside the cluster (`status.url`) and from outside through the ingress
+  (`status.publicURL`). Off by default. The publish infrastructure is **already
+  provisioned by the storage-e2e bootstrap** — this flag does **not** install
+  anything. It only turns on a **BeforeSuite sanity-check** that fails fast (before
+  any spec runs) if the installed profile is incomplete, then records the ingress
+  facts for the publish specs. The bootstrap provides:
+  - user-authn `publishAPI.enabled=true` (publishes the kube-API through the origin
+    `kubernetes-api` Ingress, whose TLS secret the DataExport/DataImport ingresses
+    reuse);
+  - global `publicDomainTemplate = %s.<masterIP>.sslip.io` — `sslip.io` is a public
+    wildcard DNS, so `api.<masterIP>.sslip.io` resolves to the nested master from
+    anywhere (no extra DNS setup; the external path can also fall back to
+    `curl --resolve api.<domain>:443:<masterIP>`);
+  - ingress-nginx (class `nginx`) from the Default bundle.
+
+  The sanity-check verifies: (a) the origin `kubernetes-api` Ingress exists
+  (searched in `kube-system` **and** `d8-user-authn` — its namespace is
+  version-dependent) and records its host as the expected `status.publicURL` prefix;
+  (b) ingress-nginx is Ready and the `nginx` IngressClass exists; (c)
+  `publicDomainTemplate` is non-empty on the global ModuleConfig. TLS on the
+  sslip.io host of a private master IP is typically self-signed (Let's Encrypt cannot
+  reach it), so external requests use `-k` or the ingress CA (`status.ca`).
 - `E2E_STORAGE_CLASS`: the thin, snapshot-capable StorageClass the suite
   provisions/uses for phase 3. Defaults to `e2e-thin`.
 - `E2E_PROBE_IMAGE`: container image (must ship `sh` + `cat`) for the PVC
