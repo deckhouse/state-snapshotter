@@ -18,7 +18,6 @@ package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +27,6 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,21 +53,15 @@ type RestoreHandler struct {
 	logger       logger.LoggerInterface
 	nsAggregated *usecase.AggregatedNamespaceManifests
 	importUpload *usecase.ImportUploadService
-	restMapper   meta.RESTMapper
 }
 
-func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, importUpload *usecase.ImportUploadService, restMappers ...meta.RESTMapper) *RestoreHandler {
-	var restMapper meta.RESTMapper
-	if len(restMappers) > 0 {
-		restMapper = restMappers[0]
-	}
+func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, importUpload *usecase.ImportUploadService) *RestoreHandler {
 	return &RestoreHandler{
 		client:       client,
 		service:      service,
 		logger:       logger,
 		nsAggregated: nsAggregated,
 		importUpload: importUpload,
-		restMapper:   restMapper,
 	}
 }
 
@@ -103,7 +95,7 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "resource not found")
 				return
 			}
-			h.routeGenericSnapshotSubresource(w, r, namespace, parts[1], parts[2], parts[3])
+			h.routeGenericSnapshotSubresource(w, parts[1], parts[3])
 		}
 	})
 
@@ -112,6 +104,10 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 	//     manifest directly off its SnapshotContent before any namespaced snapshot CR binds.
 	//   - subtree-manifest-identities (GET, recursive): the exclude-computation endpoint an aggregator's
 	//     SDK calls on each child content to obtain the subtree identity set (fail-closed, §6.3).
+	//   - manifests-upload (POST, manifests-only, internal): the content-addressed import write. It has NO
+	//     bind-gate — the content exists by definition (cluster-scoped addressing), a missing content is a
+	//     plain 404, never ImportContentNotBound. It is the target the domain upload facade forwards
+	//     manifests to (childRefs stay on the namespaced layer).
 	mux.HandleFunc("/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/")
 		path = strings.TrimSuffix(path, "/")
@@ -132,6 +128,11 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 				return
 			}
 			h.HandleContentSubtreeManifestIdentities(w, r, contentName)
+		case "manifests-upload":
+			if !h.requireMethod(w, r, http.MethodPost) {
+				return
+			}
+			h.HandleContentManifestsUpload(w, r, contentName)
 		default:
 			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 		}
@@ -163,23 +164,19 @@ func (h *RestoreHandler) routeCoreSnapshotSubresource(w http.ResponseWriter, r *
 
 // routeGenericSnapshotSubresource dispatches subresources of any registered (non-core) snapshot kind.
 //
-// The core group serves manifests-download / manifests-with-data-restoration ONLY for the core Snapshot
-// kind (routeCoreSnapshotSubresource). A domain (non-core) snapshot kind is addressed through its own
-// aggregated group (subresources.<domain-group>): download is a proxy to the cluster-scoped content
-// download and restore compiles the domain subtree there; a VolumeSnapshot is addressed through the
-// subresources.snapshot.storage.k8s.io connector. Serving those here would be a redundant delegation hop
-// (domain kind) or plain broken (VolumeSnapshot has no boundSnapshotContentName / Ready-gated restore),
-// so both are refused with 404 pointing the client at the node's own group. Only upload remains generic.
-func (h *RestoreHandler) routeGenericSnapshotSubresource(w http.ResponseWriter, r *http.Request, namespace, resource, name, subresource string) {
+// The core group serves ALL THREE user-facing namespaced subresources (manifests-download,
+// manifests-with-data-restoration, manifests-and-children-refs-upload) ONLY for the core Snapshot kind
+// (routeCoreSnapshotSubresource). A domain (non-core) snapshot kind is addressed through its own
+// aggregated group (subresources.<domain-group>): the domain facade writes childRefs on its own CR and
+// proxies/forwards to the cluster-scoped content layer; a VolumeSnapshot is addressed through the
+// subresources.snapshot.storage.k8s.io connector. Serving a domain GVR here would be a redundant delegation
+// hop (or plain broken for VolumeSnapshot), so every subresource is refused with 404 pointing the client at
+// the node's own group.
+func (h *RestoreHandler) routeGenericSnapshotSubresource(w http.ResponseWriter, resource, subresource string) {
 	switch subresource {
-	case "manifests-download", "manifests-with-data-restoration":
+	case "manifests-download", "manifests-with-data-restoration", "manifests-and-children-refs-upload":
 		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound",
 			fmt.Sprintf("subresource %q is not served for %q under the core group; address the snapshot kind through its own aggregated group (the domain group for domain kinds, or the subresources.snapshot.storage.k8s.io connector for VolumeSnapshots)", subresource, resource))
-	case "manifests-and-children-refs-upload":
-		if !h.requireMethod(w, r, http.MethodPost) {
-			return
-		}
-		h.HandleGenericSnapshotManifestsAndChildrenUpload(w, r, namespace, resource, name)
 	default:
 		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 	}
@@ -283,28 +280,73 @@ func (h *RestoreHandler) HandleContentSubtreeManifestIdentities(w http.ResponseW
 }
 
 // HandleSnapshotManifestsAndChildrenUpload persists one core Snapshot node's import payload
-// ({manifests, childRefs}): it reconstructs the node's ManifestCheckpoint and records its direct children.
+// ({manifests, childRefs}): it records the node's direct children, enforces bind-first, and forwards the
+// manifests to the content-addressed layer.
 func (h *RestoreHandler) HandleSnapshotManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) {
-	h.handleManifestsAndChildrenUpload(w, r, snapshotGVK, namespace, snapshotName)
+	h.handleManifestsAndChildrenUpload(w, r, snapshotGVK, namespace, snapshotName, false)
 }
 
-// HandleGenericSnapshotManifestsAndChildrenUpload persists a generic (non-core) snapshot node's import
-// payload, resolving the resource to its GVK first.
-func (h *RestoreHandler) HandleGenericSnapshotManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, namespace, resource, snapshotName string) {
-	snapshotGVK, err := h.resolveNamespacedSnapshotGVK(r.Context(), resource)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
-	h.handleManifestsAndChildrenUpload(w, r, snapshotGVK, namespace, snapshotName)
-}
-
-func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) {
+// handleManifestsAndChildrenUpload is the shared NAMESPACED upload path for the core Snapshot kind and the
+// CSI VolumeSnapshot connector. leaf marks the connector (a leaf may declare no children).
+func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string, leaf bool) {
 	start := time.Now()
 	if h.importUpload == nil {
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "import upload handler not configured")
 		return
 	}
+	body, ok := h.readUploadBody(w, r)
+	if !ok {
+		return
+	}
+	checkpointName, err := h.importUpload.Upload(r.Context(), snapshotGVK, namespace, snapshotName, body, leaf)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	h.writeUploadSuccess(w, checkpointName)
+	h.logger.Info("Accepted manifests-and-children-refs-upload", "resource", snapshotGVK.String(), "snapshot", snapshotName, "namespace", namespace, "checkpoint", checkpointName, "duration", time.Since(start))
+}
+
+// HandleContentManifestsUpload persists one node's import manifests addressed by cluster-scoped
+// SnapshotContent name (manifests-only, content-addressed layer). It has NO bind-gate: the content exists
+// by definition, so a missing content is a plain 404 (never ImportContentNotBound). childRefs are a
+// namespaced-layer attribute and are not accepted here.
+func (h *RestoreHandler) HandleContentManifestsUpload(w http.ResponseWriter, r *http.Request, contentName string) {
+	start := time.Now()
+	if h.importUpload == nil {
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "import upload handler not configured")
+		return
+	}
+	body, ok := h.readUploadBody(w, r)
+	if !ok {
+		return
+	}
+	var payload usecase.ManifestsUpload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		h.writeKubernetesErrorResponse(w, http.StatusBadRequest, "BadRequest", fmt.Sprintf("invalid upload payload: %v", err))
+		return
+	}
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := h.client.Get(r.Context(), client.ObjectKey{Name: contentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", fmt.Sprintf("SnapshotContent %q not found", contentName))
+			return
+		}
+		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("get SnapshotContent %q: %v", contentName, err))
+		return
+	}
+	checkpointName, err := h.importUpload.UploadToContent(r.Context(), content, payload.Manifests)
+	if err != nil {
+		h.writeAggregatedError(w, err)
+		return
+	}
+	h.writeUploadSuccess(w, checkpointName)
+	h.logger.Info("Accepted per-content manifests-upload", "content", contentName, "checkpoint", checkpointName, "duration", time.Since(start))
+}
+
+// readUploadBody reads (and size-bounds) an upload request body, writing the appropriate error response
+// and returning ok=false on failure.
+func (h *RestoreHandler) readUploadBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxManifestsUploadBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -312,16 +354,16 @@ func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter,
 		if errors.As(err, &tooLarge) {
 			h.writeKubernetesErrorResponse(w, http.StatusRequestEntityTooLarge, "RequestEntityTooLarge",
 				fmt.Sprintf("upload body exceeds %d bytes", maxManifestsUploadBytes))
-			return
+			return nil, false
 		}
 		h.writeKubernetesErrorResponse(w, http.StatusBadRequest, "BadRequest", fmt.Sprintf("read upload body: %v", err))
-		return
+		return nil, false
 	}
-	checkpointName, err := h.importUpload.Upload(r.Context(), snapshotGVK, namespace, snapshotName, body)
-	if err != nil {
-		h.writeAggregatedError(w, err)
-		return
-	}
+	return body, true
+}
+
+// writeUploadSuccess writes the Success Status carrying the reconstructed ManifestCheckpoint name.
+func (h *RestoreHandler) writeUploadSuccess(w http.ResponseWriter, checkpointName string) {
 	resp := map[string]interface{}{
 		"kind":                   "Status",
 		"apiVersion":             "v1",
@@ -330,35 +372,6 @@ func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
-	h.logger.Info("Accepted manifests-and-children-refs-upload", "resource", snapshotGVK.String(), "snapshot", snapshotName, "namespace", namespace, "checkpoint", checkpointName, "duration", time.Since(start))
-}
-
-func (h *RestoreHandler) resolveNamespacedSnapshotGVK(ctx context.Context, resource string) (schema.GroupVersionKind, error) {
-	if h.restMapper == nil {
-		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
-	}
-	gvks, err := h.restMapper.KindsFor(schema.GroupVersionResource{Resource: resource})
-	if err != nil || len(gvks) == 0 {
-		return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
-	}
-	for _, gvk := range gvks {
-		registered, rerr := h.nsAggregated.IsRegisteredSnapshotGVK(ctx, gvk)
-		if rerr != nil {
-			return schema.GroupVersionKind{}, rerr
-		}
-		if !registered {
-			continue
-		}
-		mapping, merr := h.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-		if merr != nil {
-			continue
-		}
-		if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
-			return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "cluster-scoped snapshot resources are not supported")
-		}
-		return gvk, nil
-	}
-	return schema.GroupVersionKind{}, usecase.NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "unsupported resource")
 }
 
 func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) {

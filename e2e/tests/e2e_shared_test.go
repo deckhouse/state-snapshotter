@@ -573,6 +573,58 @@ func aggPost(ctx context.Context, path string, body []byte) error {
 	return nil
 }
 
+// aggPostStatusReason performs an aggregated-apiserver POST and returns the HTTP status code and the
+// metav1.Status.reason from the response body (empty reason on a 2xx Success). Used by the bind-first
+// negative assertions that must distinguish the canonical 409 ImportContentNotBound from other errors.
+func aggPostStatusReason(ctx context.Context, path string, body []byte) (int, string) {
+	var code int
+	res := suiteClientset.Discovery().RESTClient().Post().
+		AbsPath(path).
+		SetHeader("Content-Type", "application/json").
+		Body(body).
+		Do(ctx)
+	res.StatusCode(&code)
+	raw, _ := res.Raw()
+	var st metav1.Status
+	_ = json.Unmarshal(raw, &st)
+	return code, string(st.Reason)
+}
+
+// boundSnapshotContentName reads status.boundSnapshotContentName off a snapshot-like CR ("" until bound).
+func boundSnapshotContentName(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (string, error) {
+	obj, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return "", err
+	}
+	bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
+	return bound, nil
+}
+
+// waitSnapshotBound blocks until a snapshot-like CR has a non-empty status.boundSnapshotContentName (the
+// binder has created + bound its SnapshotContent), returning that content name. Bind-first: the namespaced
+// upload is refused (409 ImportContentNotBound) until this holds.
+func waitSnapshotBound(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		bound, err := boundSnapshotContentName(ctx, gvr, ns, name)
+		if err == nil && bound != "" {
+			return bound, nil
+		}
+		if err != nil {
+			last = fmt.Sprintf("get err=%v", err)
+		} else {
+			last = "boundSnapshotContentName empty"
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for %s %s/%s to bind; last: %s", gvr.Resource, ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return "", ctx.Err()
+		}
+	}
+}
+
 func coreSnapshotSubPath(ns, name, sub string) string {
 	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/snapshots/%s/%s", coreSubresGroup, coreSubresVersion, ns, name, sub)
 }

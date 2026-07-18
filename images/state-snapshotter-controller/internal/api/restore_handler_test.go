@@ -55,12 +55,13 @@ func TestRestoreHandler_RoutingInvalidPaths(t *testing.T) {
 	}
 }
 
-// TestRestoreHandler_GenericDomainManifestReadsRemoved pins that the core group no longer serves
-// manifests-download / manifests-with-data-restoration for non-core (domain) snapshot kinds: both are
-// 404 (address the node's own group), while the generic upload route and the core Snapshot /
-// cluster-scoped SnapshotContent read routes stay alive (they reach their handlers, not the 404-unknown
-// fall-through — with nil deps a live read handler returns 500, and the POST-only upload returns 405 on a GET).
-func TestRestoreHandler_GenericDomainManifestReadsRemoved(t *testing.T) {
+// TestRestoreHandler_GenericDomainSubresourcesRemoved pins that the core group serves NONE of the three
+// user-facing namespaced subresources for non-core (domain) snapshot kinds — download,
+// data-restoration, AND upload are all 404 (address the node's own group) regardless of method — while
+// the core Snapshot / cluster-scoped SnapshotContent routes stay alive (they reach their handlers, not the
+// 404-unknown fall-through — with nil deps a live handler returns 500, and the POST-only upload returns 405
+// on a GET).
+func TestRestoreHandler_GenericDomainSubresourcesRemoved(t *testing.T) {
 	log, _ := logger.NewLogger("error")
 	handler := NewRestoreHandler(nil, nil, log, nil, nil)
 	mux := http.NewServeMux()
@@ -76,18 +77,29 @@ func TestRestoreHandler_GenericDomainManifestReadsRemoved(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
+	post := func(path string) int {
+		resp, err := http.Post(server.URL+path, "application/json", nil)
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
 	base := "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1"
 
-	// Generic (domain) GVR: manifests-download and manifests-with-data-restoration are refused with 404.
+	// Generic (domain) GVR: all three user-facing subresources are refused with 404.
 	if got := get(base + "/namespaces/ns/demovirtualmachinesnapshots/vm-x/manifests-download"); got != http.StatusNotFound {
 		t.Fatalf("generic manifests-download = %d, want 404", got)
 	}
 	if got := get(base + "/namespaces/ns/demovirtualdisksnapshots/disk-x/manifests-with-data-restoration"); got != http.StatusNotFound {
 		t.Fatalf("generic manifests-with-data-restoration = %d, want 404", got)
 	}
-	// Generic upload route stays alive: GET on the POST-only subresource is 405, not the 404 fall-through.
-	if got := get(base + "/namespaces/ns/demovirtualmachinesnapshots/vm-x/manifests-and-children-refs-upload"); got != http.StatusMethodNotAllowed {
-		t.Fatalf("generic upload GET = %d, want 405 (route alive)", got)
+	// Domain upload under the core group is refused with 404 (address the domain group) — GET and POST alike.
+	if got := get(base + "/namespaces/ns/demovirtualmachinesnapshots/vm-x/manifests-and-children-refs-upload"); got != http.StatusNotFound {
+		t.Fatalf("generic upload GET = %d, want 404", got)
+	}
+	if got := post(base + "/namespaces/ns/demovirtualmachinesnapshots/vm-x/manifests-and-children-refs-upload"); got != http.StatusNotFound {
+		t.Fatalf("generic upload POST = %d, want 404", got)
 	}
 	// Core Snapshot manifests-download stays alive: it reaches the handler (nil nsAggregated -> 500), not 404.
 	if got := get(base + "/namespaces/ns/snapshots/snap/manifests-download"); got != http.StatusInternalServerError {
@@ -96,6 +108,11 @@ func TestRestoreHandler_GenericDomainManifestReadsRemoved(t *testing.T) {
 	// Cluster-scoped SnapshotContent manifests-download stays alive (nil nsAggregated -> 500), not 404.
 	if got := get(base + "/snapshotcontents/c/manifests-download"); got != http.StatusInternalServerError {
 		t.Fatalf("cluster-scoped snapshotcontents manifests-download = %d, want 500 (route alive)", got)
+	}
+	// Cluster-scoped manifests-upload route is wired: GET on the POST-only subresource returns 405 (route
+	// alive), not the 404 fall-through.
+	if got := get(base + "/snapshotcontents/c/manifests-upload"); got != http.StatusMethodNotAllowed {
+		t.Fatalf("cluster-scoped manifests-upload GET = %d, want 405 (route alive)", got)
 	}
 }
 

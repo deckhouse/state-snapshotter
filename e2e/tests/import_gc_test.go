@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -109,10 +110,30 @@ func importSpecs() {
 			By("Creating an import-mode root Snapshot in a fresh namespace")
 			Expect(createImportRootSnapshot(ctx, importNS, importRootSnapshotName)).To(Succeed())
 
-			By("Uploading the node's manifests (empty childRefs) via manifests-and-children-refs-upload")
 			uploadBody, err := buildUploadBody(ownManifests, nil)
 			Expect(err).NotTo(HaveOccurred())
 			ulPath := coreSnapshotSubPath(importNS, importRootSnapshotName, subManifestsUpload)
+
+			By("Asserting the namespaced upload is refused with 409 ImportContentNotBound until the binder binds")
+			// Bind-first: the binder creates + binds the SnapshotContent independently of upload. While the
+			// import root is still unbound, the namespaced upload MUST be rejected with the canonical
+			// ImportContentNotBound reason (the transport "wait for the binder" signal d8 retries on). This
+			// poll asserts that reason on every unbound attempt and exits once the content is bound.
+			Eventually(func(g Gomega) {
+				bound, berr := boundSnapshotContentName(ctx, snapshotGVR, importNS, importRootSnapshotName)
+				g.Expect(berr).NotTo(HaveOccurred())
+				if bound != "" {
+					return // bound: bind-first window closed
+				}
+				code, reason := aggPostStatusReason(ctx, ulPath, uploadBody)
+				g.Expect(code).To(Equal(http.StatusConflict), "unbound upload must be 409")
+				g.Expect(reason).To(Equal("ImportContentNotBound"))
+				g.Expect(bound).NotTo(BeEmpty()) // keep polling until the binder binds
+			}).WithTimeout(2 * time.Minute).WithPolling(pollInterval).Should(Succeed())
+
+			By("Waiting for the import root to be bound, then uploading the node's manifests (empty childRefs)")
+			_, err = waitSnapshotBound(ctx, snapshotGVR, importNS, importRootSnapshotName, 2*time.Minute)
+			Expect(err).NotTo(HaveOccurred())
 			Eventually(func() error {
 				postErr := aggPost(ctx, ulPath, uploadBody)
 				return postErr
@@ -127,7 +148,7 @@ func importSpecs() {
 			By("Asserting the reconstructed SnapshotContent reaches all leg conditions")
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 
-			By("Asserting the aggregator projected the import manifest leg and the reconstructed checkpoint was handed off (MCP durability)")
+			By("Asserting the aggregator projected the import manifest leg and the reconstructed checkpoint is owned by the content (MCP durability)")
 			// content-single-writer design §10 (w8-block6b-1): the SnapshotContentController aggregator, not
 			// the import orchestrator, is the single writer of status.manifestCheckpointName for imports.
 			co, err := getResource(ctx, snapshotContentGVR, "", content)
@@ -135,11 +156,10 @@ func importSpecs() {
 			mcpName, _, _ := unstructured.NestedString(co.Object, "status", "manifestCheckpointName")
 			Expect(mcpName).NotTo(BeEmpty(), "aggregator must project status.manifestCheckpointName for the import root")
 
-			// MCP durability (w8-block6a): the per-CR upload creates the reconstructed ManifestCheckpoint
-			// GC-safe under a dedicated import ObjectKeeper (FollowObjects the import Snapshot), and once the
-			// content is bound the aggregator hands the checkpoint off to the SnapshotContent as its controller
-			// owner and sweeps the now-redundant import ObjectKeeper. After Ready the checkpoint must be owned
-			// by the content (the durable end-state), so deleting the content GCs the checkpoint.
+			// MCP durability (bind-first): the content-addressed upload reconstructs the ManifestCheckpoint
+			// owned by the SnapshotContent FROM BIRTH (bind-first guarantees the content exists at upload time,
+			// so there is no ownerless window and no import ObjectKeeper backstop). Deleting the content GCs the
+			// checkpoint via the ownerRef.
 			mcp, err := getResource(ctx, manifestCheckpointGVR, "", mcpName)
 			Expect(err).NotTo(HaveOccurred(), "reconstructed ManifestCheckpoint %s must exist", mcpName)
 			ownedByContent := false

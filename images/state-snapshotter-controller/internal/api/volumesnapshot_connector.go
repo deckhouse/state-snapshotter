@@ -135,8 +135,9 @@ func (h *RestoreHandler) handleVolumeSnapshotNamespaced(w http.ResponseWriter, r
 		if !h.requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		// Reuse the generic per-CR upload path, keyed by the VolumeSnapshot CR identity.
-		h.handleManifestsAndChildrenUpload(w, r, volumeSnapshotGVK(), namespace, name)
+		// Reuse the shared namespaced upload path, keyed by the VolumeSnapshot CR identity. A
+		// VolumeSnapshot is always a leaf (leaf=true), so a non-empty childRefs payload is rejected.
+		h.handleManifestsAndChildrenUpload(w, r, volumeSnapshotGVK(), namespace, name, true)
 	default:
 		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 	}

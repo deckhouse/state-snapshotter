@@ -73,9 +73,11 @@ rules:
   verbs:
   - get
 # Demo domain aggregated group: a domain snapshot node is exported (manifests-download, a proxy to the
-# cluster-scoped content download) and restored (manifests-with-data-restoration) through its OWN group,
-# not the core group. These demo subresources belong here (admin-kubeconfig/demo role), NOT in the
-# controller SA production RBAC.
+# cluster-scoped content download), imported (manifests-and-children-refs-upload, the bind-first domain
+# facade that writes childRefs on its own CR and forwards manifests to the cluster-scoped content layer),
+# and restored (manifests-with-data-restoration) through its OWN group, not the core group. The core group
+# serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). These demo
+# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
 - apiGroups:
   - subresources.demo.state-snapshotter.deckhouse.io
   resources:
@@ -83,6 +85,13 @@ rules:
   - demovirtualdisksnapshots/manifests-download
   verbs:
   - get
+- apiGroups:
+  - subresources.demo.state-snapshotter.deckhouse.io
+  resources:
+  - demovirtualmachinesnapshots/manifests-and-children-refs-upload
+  - demovirtualdisksnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
 # C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
 # user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
 # import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.

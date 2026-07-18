@@ -613,9 +613,10 @@ func importNodeChildRefs(children []*importNode) []childRef {
 func importNodeUploadPath(ns string, node *importNode) string {
 	switch node.kind {
 	case "DemoVirtualMachineSnapshot":
-		return coreGenericSubPath(ns, resDemoVMSnapshots, node.name, subManifestsUpload)
+		// Domain upload is served by the DOMAIN group (bind-first facade), not the core group.
+		return demoSubPath(ns, resDemoVMSnapshots, node.name, subManifestsUpload)
 	case "DemoVirtualDiskSnapshot":
-		return coreGenericSubPath(ns, resDemoDiskSnapshots, node.name, subManifestsUpload)
+		return demoSubPath(ns, resDemoDiskSnapshots, node.name, subManifestsUpload)
 	case "VolumeSnapshot":
 		return vsConnectorSubPath(ns, node.name, subManifestsUpload)
 	default:
@@ -1169,6 +1170,15 @@ func importVariantsSpecs() {
 			for err := range errCh {
 				Expect(err).NotTo(HaveOccurred())
 			}
+
+			By("Asserting a domain upload addressed to the CORE group is refused with 404 (must use the domain group)")
+			// Symmetric with the download plan: the core group serves the upload subresource ONLY for the core
+			// Snapshot kind; a domain GVR under the core group is 404 (address the domain group). This is a
+			// routing refusal, independent of whether the addressed CR exists.
+			coreDomainUpload := coreGenericSubPath(runs[0].ns, resDemoVMSnapshots, "any-name", subManifestsUpload)
+			derr := aggPost(ctx, coreDomainUpload, []byte(`{"manifests":[],"childRefs":[]}`))
+			Expect(derr).To(HaveOccurred(), "domain upload under the core group must be refused")
+			Expect(apierrors.IsNotFound(derr)).To(BeTrue(), "domain upload under the core group must be 404 (POST %s): %v", coreDomainUpload, derr)
 		})
 	})
 }

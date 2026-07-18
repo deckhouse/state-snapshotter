@@ -47,10 +47,9 @@ const reconstructMaxChunkBytes = 800 * 1000
 
 const (
 	// ReconstructedManifestCheckpointLabelKey marks a ManifestCheckpoint as reconstructed on the import
-	// path (vs captured). The aggregator keys the import-MCP ObjectKeeper backstop off it: a reconstructed
-	// MCP is anchored by a dedicated import ObjectKeeper that must be removed after the SnapshotContent
-	// ownerRef handoff (content-single-writer design §10.1), whereas a capture MCP is anchored by the MCR
-	// execution ObjectKeeper, which is GC'd with its MCR.
+	// path (vs captured) — provenance only: it records HOW the MCP came to be, not WHERE from. Since
+	// bind-first (the MCP is born owned by its SnapshotContent) there is no ObjectKeeper backstop keyed off
+	// this label anymore; it is retained for diagnostics/traceability.
 	ReconstructedManifestCheckpointLabelKey   = "state-snapshotter.deckhouse.io/reconstructed"
 	reconstructedManifestCheckpointLabelValue = "true"
 )
@@ -65,13 +64,11 @@ func ReconstructedManifestCheckpointName(importUID types.UID, nodeID string) str
 }
 
 // DeleteReconstructedManifestCheckpoint best-effort deletes the deterministically-named per-node
-// ManifestCheckpoint that manifests-and-children-refs-upload reconstructed for the import snapshot
-// identified by importUID (its chunks cascade via ownerRef). Since content-single-writer design §10.1 the
-// reconstructed checkpoint is anchored by a dedicated import ObjectKeeper that FollowObjects the snapshot,
-// so a deleted-while-pending import is already swept by that keeper's cascade; this explicit delete remains
-// as a belt-and-suspenders for the pre-adoption window (and for upgrade from the earlier ownerless scheme).
-// The aggregator adopts the MCP onto the SnapshotContent it materializes, after which SnapshotContent
-// lifecycle GCs it. NotFound is treated as success.
+// ManifestCheckpoint that the import upload reconstructed for the import snapshot identified by importUID
+// (its chunks cascade via ownerRef). Since bind-first the reconstructed MCP is born owned by its
+// SnapshotContent, so deleting the content GCs it via the ownerRef chain; this explicit delete is a
+// belt-and-suspenders for upgrade from the earlier ownerless/ObjectKeeper scheme (a stray pre-bind-first
+// MCP keyed by the same UID). NotFound is treated as success.
 func DeleteReconstructedManifestCheckpoint(ctx context.Context, c client.Client, importUID types.UID) error {
 	if importUID == "" {
 		return nil
@@ -90,7 +87,8 @@ func DeleteReconstructedManifestCheckpoint(ctx context.Context, c client.Client,
 // pre-provisioned SnapshotContent that references it restores exactly like a captured one.
 //
 // It is idempotent: an already-Ready checkpoint is left untouched; chunk creation tolerates
-// AlreadyExists. ownerRefs anchor the checkpoint for GC (the owning import snapshot CR).
+// AlreadyExists. ownerRefs anchor the checkpoint for GC (the owning SnapshotContent, set from birth since
+// bind-first guarantees the content exists at upload time).
 func ReconstructManifestCheckpoint(
 	ctx context.Context,
 	c client.Client,
@@ -101,11 +99,9 @@ func ReconstructManifestCheckpoint(
 	existing := &storagev1alpha1.ManifestCheckpoint{}
 	if err := c.Get(ctx, types.NamespacedName{Name: checkpointName}, existing); err == nil {
 		if meta.IsStatusConditionTrue(existing.Status.Conditions, storagev1alpha1.ManifestCheckpointConditionTypeReady) {
-			// Idempotent — an already-Ready checkpoint's content is left untouched — with one upgrade-safety
-			// exception: anchor a Ready-but-UNANCHORED checkpoint onto the passed import ObjectKeeper so it is
-			// GC-safe (content-single-writer design §10.1). This covers a checkpoint that became Ready under
-			// the pre-§10.1 ownerless scheme, or a repeat upload that lands before the aggregator handoff.
-			return ensureReconstructedManifestCheckpointAnchored(ctx, c, existing, ownerRefs)
+			// Idempotent: an already-Ready checkpoint's content and ownerRefs are left untouched (a repeat
+			// upload must not re-write it).
+			return nil
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get ManifestCheckpoint %s: %w", checkpointName, err)
@@ -117,10 +113,8 @@ func ReconstructManifestCheckpoint(
 	}
 
 	// Provenance note: unlike capture-path MCPs (which carry the source-request label pointing at the
-	// originating MCR), a reconstructed MCP is traceable only through its ownerRefs (import ObjectKeeper
-	// -> SnapshotContent) — the reconstructed label marks HOW it came to be, not WHERE from, and the
-	// name is a sha256 derivation. If the keeper is swept and ownerRefs stripped, nothing identifies the
-	// source; accepted with the spec.sourceNamespace removal (wave-2 Block E, cluster-wide sources).
+	// originating MCR), a reconstructed MCP is traceable only through its ownerRef (the SnapshotContent) —
+	// the reconstructed label marks HOW it came to be, not WHERE from, and the name is a sha256 derivation.
 	cp := &storagev1alpha1.ManifestCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            checkpointName,
@@ -137,12 +131,6 @@ func ReconstructManifestCheckpoint(
 	// Re-get to obtain the UID (needed for chunk owner references) and the live object.
 	if err := c.Get(ctx, types.NamespacedName{Name: checkpointName}, cp); err != nil {
 		return fmt.Errorf("get reconstructed ManifestCheckpoint %s: %w", checkpointName, err)
-	}
-	// Anchor if the LIVE object is unowned: on the fresh-create branch the Create above already set the
-	// ownerRefs+label (no-op here), but on an AlreadyExists resume the pre-existing not-yet-Ready object may
-	// be a pre-§10.1 ownerless checkpoint that would otherwise finish Ready without a GC anchor (§10.1).
-	if err := ensureReconstructedManifestCheckpointAnchored(ctx, c, cp, ownerRefs); err != nil {
-		return err
 	}
 
 	infos, totalObjects, totalSize, err := writeReconstructedChunks(ctx, c, checkpointName, cp.UID, objects)
@@ -161,35 +149,6 @@ func ReconstructManifestCheckpoint(
 	})
 	if err := c.Status().Update(ctx, cp); err != nil {
 		return fmt.Errorf("update reconstructed ManifestCheckpoint %s status: %w", checkpointName, err)
-	}
-	return nil
-}
-
-// ensureReconstructedManifestCheckpointAnchored anchors an unowned reconstructed ManifestCheckpoint onto
-// the passed import ObjectKeeper ownerRefs (content-single-writer design §10.1), and backfills the
-// reconstructed label so the aggregator's handoff recognizes+reclaims the keeper. It is a no-op when the
-// checkpoint already has a controller owner — the import ObjectKeeper from a prior upload, or the
-// SnapshotContent after the aggregator handoff — so it never adds a second controller ref or re-anchors a
-// handed-off checkpoint. Called both on the already-Ready early return and after the create/resume re-get,
-// so a pre-§10.1 ownerless checkpoint (Ready or still building) is anchored before it can finish Ready
-// without a GC backstop.
-func ensureReconstructedManifestCheckpointAnchored(
-	ctx context.Context,
-	c client.Client,
-	mcp *storagev1alpha1.ManifestCheckpoint,
-	ownerRefs []metav1.OwnerReference,
-) error {
-	if len(ownerRefs) == 0 || metav1.GetControllerOf(mcp) != nil {
-		return nil
-	}
-	base := mcp.DeepCopy()
-	mcp.OwnerReferences = append(mcp.OwnerReferences, ownerRefs...)
-	if mcp.Labels == nil {
-		mcp.Labels = map[string]string{}
-	}
-	mcp.Labels[ReconstructedManifestCheckpointLabelKey] = reconstructedManifestCheckpointLabelValue
-	if err := c.Patch(ctx, mcp, client.MergeFrom(base)); err != nil {
-		return fmt.Errorf("anchor already-Ready reconstructed ManifestCheckpoint %s: %w", mcp.Name, err)
 	}
 	return nil
 }

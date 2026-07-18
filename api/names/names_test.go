@@ -56,26 +56,24 @@ func TestGeneratorsAreDeterministicAndDNS1123(t *testing.T) {
 	uid2 := types.UID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
 	cases := map[string]string{
-		"child":     ChildSnapshotName(uid, uid2),
-		"content":   ContentName(uid),
-		"mcr":       ManifestCaptureRequestName(uid),
-		"mcp":       ManifestCheckpointName(uid),
-		"chunk":     ChunkName(uid, 7),
-		"vs":        OrphanVolumeSnapshotName(uid, uid2),
-		"vcr":       VolumeCaptureRequestName(uid),
-		"ok":        ObjectKeeperName(uid),
-		"import-ok": ImportManifestCheckpointObjectKeeperName(uid),
+		"child":   ChildSnapshotName(uid, uid2),
+		"content": ContentName(uid),
+		"mcr":     ManifestCaptureRequestName(uid),
+		"mcp":     ManifestCheckpointName(uid),
+		"chunk":   ChunkName(uid, 7),
+		"vs":      OrphanVolumeSnapshotName(uid, uid2),
+		"vcr":     VolumeCaptureRequestName(uid),
+		"ok":      ObjectKeeperName(uid),
 	}
 	prefixes := map[string]string{
-		"child":     "nss-snap-",
-		"content":   "nss-content-",
-		"mcr":       "nss-mcr-",
-		"mcp":       "nss-mcp-",
-		"chunk":     "nss-mcp-",
-		"vs":        "nss-vs-",
-		"vcr":       "nss-vcr-",
-		"ok":        "nss-ok-",
-		"import-ok": "nss-import-ok-",
+		"child":   "nss-snap-",
+		"content": "nss-content-",
+		"mcr":     "nss-mcr-",
+		"mcp":     "nss-mcp-",
+		"chunk":   "nss-mcp-",
+		"vs":      "nss-vs-",
+		"vcr":     "nss-vcr-",
+		"ok":      "nss-ok-",
 	}
 	for kind, name := range cases {
 		assertDNS1123(t, name)
@@ -106,25 +104,6 @@ func TestChildSnapshotNameUniqueness(t *testing.T) {
 	// (b) same source under two parents (DAG) -> different names (h8(parentUID) differs).
 	if ChildSnapshotName(parentA, srcX) == ChildSnapshotName(parentB, srcX) {
 		t.Fatalf("same source under different parents must yield different child names")
-	}
-}
-
-func TestImportManifestCheckpointObjectKeeperNoRootOKCollision(t *testing.T) {
-	// The import-MCP ObjectKeeper and the snapshot's root ObjectKeeper are both keyed by the SAME snapshot
-	// UID; they MUST NOT collide (an import root Snapshot owns both). The distinct nss-import-ok- prefix
-	// guarantees it (design §10.1).
-	uid := types.UID("import-root-uid")
-	if ImportManifestCheckpointObjectKeeperName(uid) == ObjectKeeperName(uid) {
-		t.Fatalf("import-MCP ObjectKeeper name must not collide with the root ObjectKeeper name for the same UID")
-	}
-	// Determinism + per-UID uniqueness.
-	first := ImportManifestCheckpointObjectKeeperName(uid)
-	second := ImportManifestCheckpointObjectKeeperName(uid)
-	if first != second {
-		t.Fatalf("ImportManifestCheckpointObjectKeeperName not deterministic: %q vs %q", first, second)
-	}
-	if ImportManifestCheckpointObjectKeeperName(uid) == ImportManifestCheckpointObjectKeeperName(types.UID("other-uid")) {
-		t.Fatalf("distinct snapshot UIDs must yield distinct import-MCP ObjectKeeper names")
 	}
 }
 

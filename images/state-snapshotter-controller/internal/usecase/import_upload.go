@@ -29,16 +29,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// ManifestsAndChildrenUpload is the per-CR import payload (POST manifests-and-children-refs-upload):
-// one node's own manifests plus the list of its DIRECT children (refs, not the child objects). There is
-// NO volume descriptor — volume parameters are read from the manifests in MCP on import. The upload is a
-// single atomic request per node: not resumable, no ?node=/?finalize and no completeness marker.
+// ReasonImportContentNotBound is the canonical status.reason of the 409 the NAMESPACED upload
+// (manifests-and-children-refs-upload) returns while the addressed import CR has no
+// status.boundSnapshotContentName yet (bind-first, ADR "HTTP / subresource API"). It is a transport
+// "wait for the binder" signal, NOT a Ready-condition reason (d8 waits/retries on it). Code, ADR, and
+// clients (d8, domain facade) MUST match this string verbatim. The cluster-scoped
+// snapshotcontents/<name>/manifests-upload layer has NO bind-gate: a missing content is a 404 addressing
+// error, never ImportContentNotBound.
+const ReasonImportContentNotBound = "ImportContentNotBound"
+
+// ManifestsAndChildrenUpload is the NAMESPACED per-CR import payload (POST
+// manifests-and-children-refs-upload): one node's own manifests plus the list of its DIRECT children
+// (refs, not the child objects). There is NO volume descriptor — volume parameters are read from the
+// manifests in MCP on import. The upload is a single atomic request per node: not resumable, no
+// ?node=/?finalize and no completeness marker.
 type ManifestsAndChildrenUpload struct {
 	// Manifests is a JSON array of raw objects (this node's own manifests, the same shape returned by
 	// manifests-download). Stored verbatim in the reconstructed ManifestCheckpoint.
@@ -49,6 +60,15 @@ type ManifestsAndChildrenUpload struct {
 	ChildRefs []UploadChildRef `json:"childRefs"`
 }
 
+// ManifestsUpload is the CLUSTER-SCOPED content-addressed import payload (POST
+// snapshotcontents/<name>/manifests-upload): only the node's own manifests. childRefs are a
+// namespaced-layer attribute (written on the owning CR's status) and are deliberately absent here — the
+// domain upload facade writes them on its own CR and forwards ONLY manifests to this layer.
+type ManifestsUpload struct {
+	// Manifests is a JSON array of raw objects (same shape as the namespaced layer's manifests).
+	Manifests json.RawMessage `json:"manifests"`
+}
+
 // UploadChildRef is one direct-child reference in an import payload (Kubernetes-style ref, name-only
 // namespace-implicit), mirroring storagev1alpha1.SnapshotChildRef.
 type UploadChildRef struct {
@@ -57,12 +77,22 @@ type UploadChildRef struct {
 	Name       string `json:"name"`
 }
 
-// ImportUploadService persists per-CR import uploads. It is the transport/persistence half of the import
-// flow (C3): it validates the payload and the target CR (must be in import mode), reconstructs the node's
-// raw ManifestCheckpoint from the uploaded manifests, and records the direct children on
-// status.childrenSnapshotRefs. The import orchestrator (C5) consumes these — it materializes the
-// SnapshotContent (manifestCheckpointName + childrenSnapshotContentRefs), resolves the data artifact
-// (DataImport), attaches ownerRefs/GC, and writes the binding.
+// ImportUploadService persists import uploads across two layers (content-single-writer design;
+// ADR "HTTP / subresource API"):
+//
+//   - NAMESPACED, user-facing (Upload): validates the target CR (import mode), records the DIRECT children
+//     on status.childrenSnapshotRefs, then enforces bind-first — an unbound CR (empty
+//     status.boundSnapshotContentName) is refused with 409 ImportContentNotBound. Once bound it resolves
+//     the SnapshotContent, checks the anti-spoofing back-reference, and forwards ONLY the manifests to the
+//     content-addressed layer.
+//   - CLUSTER-SCOPED, internal (UploadToContent): given a SnapshotContent (which exists by definition —
+//     cluster-scoped addressing) it reconstructs the node's raw ManifestCheckpoint + chunks owned by that
+//     content FROM BIRTH (bind-first removed the ownerless-MCP window, so there is no more ObjectKeeper
+//     backstop). It is manifests-only; childRefs never reach this layer.
+//
+// The reconstructed MCP name stays deterministic from the owning snapshot UID
+// (ReconstructedManifestCheckpointName), so the aggregator's status.manifestCheckpointName projection is
+// unchanged. Errors are AggregatedStatusError so the HTTP layer maps them to Kubernetes Status responses.
 type ImportUploadService struct {
 	client client.Client
 }
@@ -72,10 +102,18 @@ func NewImportUploadService(c client.Client) *ImportUploadService {
 	return &ImportUploadService{client: c}
 }
 
-// Upload persists one node's manifests + direct-children refs for the snapshot CR identified by
-// (snapshotGVK, namespace, name). It returns the reconstructed ManifestCheckpoint name. Errors are
-// AggregatedStatusError so the HTTP layer maps them to Kubernetes Status responses.
-func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, name string, body []byte) (string, error) {
+// Upload is the NAMESPACED layer: it persists one node's direct-children refs for the snapshot CR
+// identified by (snapshotGVK, namespace, name) and, once the CR is bound, forwards the manifests to the
+// content-addressed layer. It returns the reconstructed ManifestCheckpoint name.
+//
+// leaf marks a leaf-only connector (the CSI VolumeSnapshot connector): a leaf declares no children, so a
+// non-empty childRefs payload is rejected (400). Core Snapshots pass leaf=false.
+//
+// Ordering (mirrors the domain upload facade): validate -> write childRefs (idempotent, a snapshot-layer
+// attribute the CR owner writes regardless of bind) -> bind-first gate (empty boundSnapshotContentName ->
+// 409 ImportContentNotBound) -> resolve content + anti-spoofing back-ref (403 on mismatch/missing) ->
+// forward manifests to UploadToContent.
+func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, name string, body []byte, leaf bool) (string, error) {
 	if snapshotGVK.Empty() || namespace == "" || name == "" {
 		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
 	}
@@ -90,6 +128,10 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if err := validateUploadChildRefs(payload.ChildRefs); err != nil {
 		return "", err
+	}
+	if leaf && len(payload.ChildRefs) > 0 {
+		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest",
+			fmt.Sprintf("%s %s/%s is a leaf: childRefs must be empty", snapshotGVK.String(), namespace, name))
 	}
 
 	cr := &unstructured.Unstructured{}
@@ -109,26 +151,76 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict", "target snapshot has no UID yet")
 	}
 
-	// Import-MCP durability backstop (content-single-writer design §10.1): a cluster-scoped MCP cannot be
-	// owned by the namespaced snapshot CR, and the eager SnapshotContent shell may not exist yet at upload
-	// time, so the reconstructed MCP is anchored by a dedicated ObjectKeeper that FollowObjects the import
-	// snapshot. This makes the MCP + chunks GC-safe from birth: if the snapshot is deleted while the import
-	// is still pending, the keeper (and with it the MCP) cascades away. The aggregator re-parents the MCP
-	// onto its SnapshotContent and removes this keeper once the content materializes.
-	okRef, err := EnsureReconstructedManifestCheckpointObjectKeeper(ctx, s.client, cr, snapshotGVK)
-	if err != nil {
-		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", err.Error())
-	}
-
-	// Reconstruct the node's raw ManifestCheckpoint (idempotent, deterministic name keyed to the CR UID),
-	// owned by the dedicated import ObjectKeeper (durable GC anchor until the SnapshotContent handoff).
-	checkpointName := ReconstructedManifestCheckpointName(uid, "")
-	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, []metav1.OwnerReference{okRef}, manifests); err != nil {
-		return "", classifyReconstructError(err)
-	}
-
+	// childRefs is a snapshot-layer attribute: the CR owner records it on its own status regardless of bind
+	// (idempotent, skip-if-equal). A leaf has no children, so this is a no-op there.
 	if err := s.writeChildrenSnapshotRefs(ctx, snapshotGVK, namespace, name, payload.ChildRefs); err != nil {
 		return "", err
+	}
+
+	// Bind-first (ADR): the binder creates + binds the SnapshotContent independently of upload. Until it
+	// has, refuse the manifests write with the canonical 409 so the client waits/retries. Content-slug
+	// resolution and the MCP write are content-addressed (below); nothing is written pre-bind.
+	boundContentName, _, berr := unstructured.NestedString(cr.Object, "status", "boundSnapshotContentName")
+	if berr != nil {
+		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError",
+			fmt.Sprintf("%s %s/%s has invalid status.boundSnapshotContentName: %v", snapshotGVK.String(), namespace, name, berr))
+	}
+	if boundContentName == "" {
+		return "", NewAggregatedStatusError(http.StatusConflict, ReasonImportContentNotBound,
+			fmt.Sprintf("%s %s/%s is not bound to a SnapshotContent yet (status.boundSnapshotContentName is empty): waiting for the binder", snapshotGVK.String(), namespace, name))
+	}
+
+	// Anti-spoofing: status.boundSnapshotContentName is user-writable, so verify the resolved content points
+	// back at THIS CR (spec.snapshotRef) before forwarding manifests into it (fail-closed 403). The
+	// content-addressed layer has no addressed CR, so the back-ref lives here, not there.
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := s.client.Get(ctx, client.ObjectKey{Name: boundContentName}, content); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("SnapshotContent %q not found", boundContentName))
+		}
+		return "", fmt.Errorf("get SnapshotContent %q: %w", boundContentName, err)
+	}
+	if err := verifyContentSnapshotRef(content, snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, namespace, name, string(uid)); err != nil {
+		return "", err
+	}
+
+	return s.UploadToContent(ctx, content, manifests)
+}
+
+// UploadToContent is the CLUSTER-SCOPED, content-addressed layer: given a SnapshotContent (which exists by
+// definition) it reconstructs the node's raw ManifestCheckpoint + chunks owned by that content from birth
+// and returns the checkpoint name. manifests is a JSON array (this node's own manifests, no childRefs).
+//
+// The checkpoint name is derived from the content's spec.snapshotRef.uid so it matches the aggregator's
+// ReconstructedManifestCheckpointName(owner.UID) projection. It is idempotent: an already-Ready checkpoint
+// is left untouched.
+func (s *ImportUploadService) UploadToContent(ctx context.Context, content *storagev1alpha1.SnapshotContent, manifests []byte) (string, error) {
+	if content == nil {
+		return "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", "nil SnapshotContent")
+	}
+	validated, err := validateUploadManifests(manifests)
+	if err != nil {
+		return "", err
+	}
+	if content.Spec.SnapshotRef == nil || content.Spec.SnapshotRef.UID == "" {
+		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
+			fmt.Sprintf("SnapshotContent %q has no spec.snapshotRef.uid to key the reconstructed ManifestCheckpoint", content.Name))
+	}
+	snapshotUID := types.UID(content.Spec.SnapshotRef.UID)
+
+	// The MCP is born owned by the SnapshotContent (bind-first guarantees the content exists), so it is
+	// GC-safe immediately — no ObjectKeeper backstop and no aggregator re-parent needed.
+	controllerTrue := true
+	contentOwnerRef := metav1.OwnerReference{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "SnapshotContent",
+		Name:       content.Name,
+		UID:        content.UID,
+		Controller: &controllerTrue,
+	}
+	checkpointName := ReconstructedManifestCheckpointName(snapshotUID, "")
+	if err := ReconstructManifestCheckpoint(ctx, s.client, checkpointName, []metav1.OwnerReference{contentOwnerRef}, validated); err != nil {
+		return "", classifyReconstructError(err)
 	}
 	return checkpointName, nil
 }
