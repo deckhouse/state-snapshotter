@@ -112,6 +112,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (opt-in: E2E_PUBLISH)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (opt-in: E2E_PUBLISH)
+	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; opt-in: E2E_PUBLISH)
 })
 
 func prepareSuite() {

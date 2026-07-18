@@ -98,6 +98,26 @@ functions in dependency order:
    the publish infra down only on idle-TTL expiry or `DataImport` deletion, not on the
    terminal `Completed` phase. Needs `storage-foundation` and the publish infrastructure
    (see `E2E_PUBLISH`).
+7. **Publish - aggregated manifests via the published kube-API**
+   (`publishManifestsSpecs`, env-gated by `E2E_PUBLISH`, independent of
+   `E2E_VOLUME_DATA`): proves the open question **"do the manifests need a separate
+   APIService ingress?"** — they do **not**. The aggregated apiserver
+   (`subresources.state-snapshotter.deckhouse.io`) is registered as an `APIService` in
+   the kube-apiserver, and the kube-apiserver is exactly what the origin
+   `kubernetes-api` ingress (user-authn `publishAPI`) exposes, so the aggregated API is
+   reachable from outside through the **same** host the `DataExport`/`DataImport`
+   ingresses reuse — no separate ingress is required. The spec captures a self-contained
+   manifest-only tree (ConfigMap + `DemoVirtualMachine`), then: (a) reads the root
+   `Snapshot` `manifests-download` **in-cluster** and asserts it matches the live
+   objects (the phase-4 raw comparator); (b) NEGATIVE — the **external** request from a
+   base-cluster `curlimages/curl` pod through `https://api.<domain>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/<ns>/snapshots/<name>/manifests-download`
+   with a valid SA Bearer token but **no** `snapshots/manifests-download` RoleBinding is
+   Forbidden (`403`, the aggregated apiserver's delegated `SubjectAccessReview`); (c) once
+   the RoleBinding is granted, the external response is `200`, carries the **same object
+   set** as the internal aggregated response, and matches the live objects. RBAC:
+   `snapshots/manifests-download` `get` in group
+   `subresources.state-snapshotter.deckhouse.io`. Needs `state-snapshotter` and the
+   publish infrastructure (see `E2E_PUBLISH`).
 
 ## Module dependency note
 
@@ -187,7 +207,9 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_PUBLISH`: when truthy (`true`/`1`/`yes`), opts into the publish (ingress +
   tokens) specs — DataExport/DataImport with `publish: true`, downloaded/uploaded
   both from inside the cluster (`status.url`) and from outside through the ingress
-  (`status.publicURL`). Off by default. The publish infrastructure is **already
+  (`status.publicURL`), plus the aggregated **manifests** reachable externally through
+  the same published `kubernetes-api` ingress (no separate APIService ingress). Off by
+  default. The publish infrastructure is **already
   provisioned by the storage-e2e bootstrap** — this flag does **not** install
   anything. It only turns on a **BeforeSuite sanity-check** that fails fast (before
   any spec runs) if the installed profile is incomplete, then records the ingress
