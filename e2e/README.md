@@ -75,6 +75,29 @@ functions in dependency order:
    and that deleting the `DataExport` reaps its Ingress + Service in
    `d8-storage-foundation`. Needs `storage-foundation` and the publish
    infrastructure (see `E2E_PUBLISH`).
+6. **Publish - DataImport `publish: true`** (`publishDataImportSpecs`, env-gated by
+   `E2E_PUBLISH`, independent of `E2E_VOLUME_DATA`): the upload counterpart of the
+   `DataExport` publish spec. Self-contained (no dependency on the phase-4/5 backup
+   fixture): it captures a source orphan **Block** PVC as a `VolumeSnapshot` leaf so
+   its captured PVC manifest can be re-uploaded on import and field-compared to the
+   live source on restore, materializes an import-mode root `Snapshot` + `VolumeSnapshot`
+   leaf, and creates a `DataImport` (`mode: PopulateData`, `publish: true`, `publicURL`
+   path `/<ns>/pvc/<name>/`). Manifests are uploaded in-cluster via the aggregated API,
+   but the **volume bytes are pushed from OUTSIDE** the nested cluster — a random block
+   payload generated in the base-cluster `curlimages/curl` pod is streamed through the
+   origin `kubernetes-api` ingress (`status.publicURL`) with `PUT /api/v1/block` + `POST
+   /api/v1/finished`, Bearer-authenticated with a ServiceAccount token minted via
+   TokenRequest (RBAC: `dataimports/download` create). Negative: the same request
+   WITHOUT a token is rejected (`401/403`). Terminal state is asserted per the current
+   status catalog (`phase: Completed`, `completionTimestamp`, `status.data.artifactRef`
+   pointing at a real `VolumeSnapshotContent`). Two-layer validation follows phase 5:
+   the restore output is field-compared to the live source objects, and the imported
+   snapshot is restored into a PVC + probe pod whose `sha256` must equal the external
+   payload. Teardown deletes the `DataImport` and asserts the importer server
+   infrastructure (Ingress + Service in `d8-storage-foundation`) is reaped — `sf` tears
+   the publish infra down only on idle-TTL expiry or `DataImport` deletion, not on the
+   terminal `Completed` phase. Needs `storage-foundation` and the publish infrastructure
+   (see `E2E_PUBLISH`).
 
 ## Module dependency note
 
