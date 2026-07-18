@@ -171,7 +171,7 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 	content := projContentTyped()
 
 	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
+	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
 	owner.SetNamespace(projTestNS)
 	owner.SetName("disk-snap")
 	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
@@ -205,7 +205,7 @@ func TestReconcileDataLegProjection_VCRFailedIsContentTerminal(t *testing.T) {
 	content := projContentTyped()
 
 	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
+	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
 	owner.SetNamespace(projTestNS)
 	owner.SetName("disk-snap")
 	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")

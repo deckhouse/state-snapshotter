@@ -559,7 +559,7 @@ func newDiskImportNode(ctx context.Context, snapName string) (*importNode, error
 	return &importNode{
 		name:       snapName,
 		kind:       "DemoVirtualDiskSnapshot",
-		group:      "demo.state-snapshotter.deckhouse.io",
+		group:      "sds-unified-snapshots-poc.deckhouse.io",
 		apiVersion: demoGroupVersion,
 		manifests:  manifests,
 		dataLeaf:   true,
@@ -595,7 +595,7 @@ func newVMImportNode(ctx context.Context, snapName string, children ...*importNo
 	return &importNode{
 		name:       snapName,
 		kind:       "DemoVirtualMachineSnapshot",
-		group:      "demo.state-snapshotter.deckhouse.io",
+		group:      "sds-unified-snapshots-poc.deckhouse.io",
 		apiVersion: demoGroupVersion,
 		manifests:  manifests,
 		children:   children,

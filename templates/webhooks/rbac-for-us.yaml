@@ -30,7 +30,7 @@ rules:
   # Demo inventory (Track D0/D1): MCR validation resolves targets via dynamic client Get().
   # get/list/watch — admission paths beyond a single named Get.
   - apiGroups:
-      - demo.state-snapshotter.deckhouse.io
+      - sds-unified-snapshots-poc.deckhouse.io
     resources:
       - demovirtualmachines
       - demovirtualdisks

@@ -55,12 +55,12 @@ func csd(name, srcAPI, srcKind, snapAPI, snapKind string) v1alpha1.CustomSnapsho
 
 func TestResolveEligibleGVRs(t *testing.T) {
 	const (
-		demoAPI = "demo.state-snapshotter.deckhouse.io/v1alpha1"
+		demoAPI = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
 	)
-	diskGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks"}
-	diskSnapGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
-	vmGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines"}
-	vmSnapGVR := schema.GroupVersionResource{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
+	diskGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks"}
+	diskSnapGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots"}
+	vmGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines"}
+	vmSnapGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots"}
 
 	table := map[string]schema.GroupVersionResource{
 		demoAPI + "/DemoVirtualDisk":            diskGVR,

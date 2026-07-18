@@ -41,7 +41,7 @@ import (
 func TestMirrorReadyToOwnerSnapshot_DomainImportCRAfterBind(t *testing.T) {
 	ctx := context.Background()
 
-	domainGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
+	domainGVK := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
 
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {

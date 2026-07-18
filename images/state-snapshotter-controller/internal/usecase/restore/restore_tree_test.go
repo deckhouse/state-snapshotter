@@ -36,7 +36,7 @@ import (
 func restoreTreeScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
-	demoDiskSnapshotGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
+	demoDiskSnapshotGVK := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
 	scheme.AddKnownTypeWithName(demoDiskSnapshotGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: demoDiskSnapshotGVK.Group, Version: demoDiskSnapshotGVK.Version, Kind: "DemoVirtualDiskSnapshotList"}, &unstructured.UnstructuredList{})
 	vsGVK := schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}
@@ -100,7 +100,7 @@ func diskSnapBoundContent(name, mcp, snapName string) *storagev1alpha1.SnapshotC
 
 func demoDiskSnapshotObj(name, contentName string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
 		"status": map[string]interface{}{
@@ -149,7 +149,7 @@ func domainSnapshotObj(kind, name, contentName string, childRefs []storagev1alph
 		readyStatus = "False"
 	}
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       kind,
 		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
 		"status": map[string]interface{}{
@@ -168,7 +168,7 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	// the root, so the resolver must materialize it as a child RestoreNode (not a root VSCToVS entry).
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
-		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+		{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-orphan", &storagev1alpha1.SnapshotDataBinding{
@@ -524,7 +524,7 @@ func TestResolveRestoreTree_CycleFailsClosed(t *testing.T) {
 func TestResolveRestoreTree_ChildNotReadyFailsClosed(t *testing.T) {
 	scheme := restoreTreeScheme()
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
-		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+		{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")

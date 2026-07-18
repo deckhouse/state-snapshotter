@@ -46,7 +46,7 @@ import (
 // with the domain controller in its own repo, not here; the demo kind names below are synthetic stand-ins
 // for the delegation predicate — core compiles no domain types.
 
-const demoGroupV = "demo.state-snapshotter.deckhouse.io/v1alpha1"
+const demoGroupV = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
 
 func isDemoSnapshotKind(kind string) bool {
 	return kind == "DemoVirtualMachineSnapshot" || kind == "DemoVirtualDiskSnapshot"
@@ -71,7 +71,7 @@ func complexTreeScheme() *runtime.Scheme {
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
 	for _, k := range []string{"DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot"} {
-		gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: k}
+		gvk := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: k}
 		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: k + "List"}, &unstructured.UnstructuredList{})
 	}
@@ -306,7 +306,7 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 		if c.namespace != "source-ns" || c.targetNamespace != "restore-ns" {
 			t.Fatalf("delegate call %s/%s: namespace=%q targetNamespace=%q", c.gvk.Kind, c.name, c.namespace, c.targetNamespace)
 		}
-		if c.gvk.Group != "demo.state-snapshotter.deckhouse.io" {
+		if c.gvk.Group != "sds-unified-snapshots-poc.deckhouse.io" {
 			t.Fatalf("delegate call gvk group = %q, want demo group", c.gvk.Group)
 		}
 	}

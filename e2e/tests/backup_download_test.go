@@ -601,7 +601,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 		}
 		switch sk.kind {
 		case "DemoVirtualDiskSnapshot":
-			t.group = "demo.state-snapshotter.deckhouse.io"
+			t.group = "sds-unified-snapshots-poc.deckhouse.io"
 		case "VolumeSnapshot":
 			t.group = "snapshot.storage.k8s.io"
 		default:

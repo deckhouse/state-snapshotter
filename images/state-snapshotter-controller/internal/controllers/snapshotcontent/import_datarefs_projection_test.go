@@ -33,7 +33,7 @@ import (
 
 const (
 	importLeafKind     = "DemoVirtualDiskSnapshot"
-	importLeafGroup    = "demo.state-snapshotter.deckhouse.io"
+	importLeafGroup    = "sds-unified-snapshots-poc.deckhouse.io"
 	importLeafAPIVer   = importLeafGroup + "/v1alpha1"
 	importLeafObjName  = "disk-snap"
 	importDataImportNS = projTestNS
@@ -70,7 +70,7 @@ func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 
 func importLeafObject() *unstructured.Unstructured {
 	o := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata": map[string]interface{}{
 			"name":      "disk-snap",

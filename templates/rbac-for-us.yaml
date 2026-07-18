@@ -79,14 +79,14 @@ rules:
 # serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). These demo
 # subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
 - apiGroups:
-  - subresources.demo.state-snapshotter.deckhouse.io
+  - subresources.sds-unified-snapshots-poc.deckhouse.io
   resources:
   - demovirtualmachinesnapshots/manifests-download
   - demovirtualdisksnapshots/manifests-download
   verbs:
   - get
 - apiGroups:
-  - subresources.demo.state-snapshotter.deckhouse.io
+  - subresources.sds-unified-snapshots-poc.deckhouse.io
   resources:
   - demovirtualmachinesnapshots/manifests-and-children-refs-upload
   - demovirtualdisksnapshots/manifests-and-children-refs-upload
@@ -118,7 +118,7 @@ rules:
   - watch
 # Demo domain inventory + generated child snapshots (live demo / pre-e2e manual kubectl).
 - apiGroups:
-  - demo.state-snapshotter.deckhouse.io
+  - sds-unified-snapshots-poc.deckhouse.io
   resources:
   - demovirtualmachines
   - demovirtualdisks

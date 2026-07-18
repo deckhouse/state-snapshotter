@@ -114,7 +114,7 @@ var phase5ImportNS string
 const (
 	coreSubresGroup   = "subresources.state-snapshotter.deckhouse.io"
 	coreSubresVersion = "v1alpha1"
-	demoSubresGroup   = "subresources.demo.state-snapshotter.deckhouse.io"
+	demoSubresGroup   = "subresources.sds-unified-snapshots-poc.deckhouse.io"
 	demoSubresVersion = "v1alpha1"
 	vsConnectorGroup  = "subresources.snapshot.storage.k8s.io"
 	vsConnectorVer    = "v1"
@@ -147,7 +147,7 @@ const (
 // demoGroupVersion is the demo domain apiVersion. The demo types live in the PoC module; the suite
 // accesses demo objects purely via unstructured + literal GVRs, so this is a plain constant (the group
 // is identical whether the types are compiled from state-snapshotter or the PoC).
-const demoGroupVersion = "demo.state-snapshotter.deckhouse.io/v1alpha1"
+const demoGroupVersion = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
 
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
@@ -158,16 +158,16 @@ var (
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
 	}
 	demoVMGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
 	}
 	demoDiskGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks",
 	}
 	demoVMSnapshotGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots",
 	}
 	demoDiskSnapshotGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots",
 	}
 	csdGVR = schema.GroupVersionResource{
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "customsnapshotdefinitions",

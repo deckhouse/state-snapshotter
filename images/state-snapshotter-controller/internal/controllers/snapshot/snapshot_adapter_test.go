@@ -51,7 +51,7 @@ func TestNamespaceSnapshotAdapter_DomainCaptureStateRoundTrip(t *testing.T) {
 	a := NewNamespaceSnapshotAdapter(snap)
 
 	children := []snapshotsdk.SnapshotChildRef{{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		Kind:       "DemoVirtualMachineSnapshot",
 		Name:       "nss-snap-child",
 	}}
