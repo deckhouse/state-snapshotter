@@ -53,6 +53,28 @@ functions in dependency order:
    from the phase-4 backup pod), wait for the imported tree Ready, restore-apply
    into a fresh namespace, and verify manifests + block checksums. Needs
    `storage-foundation`.
+5. **Publish - DataExport `publish: true`** (`publishDataExportSpecs`, env-gated by
+   `E2E_PUBLISH`, independent of `E2E_VOLUME_DATA`): export a live **Filesystem**
+   PVC directly (`targetRef` -> `PersistentVolumeClaim`, `publicURL` path
+   `/<ns>/pvc/<name>/`) with `publish: true`, and reach the exporter's Filesystem
+   data-plane (`/api/v1/files/`: JSON listing + per-file download) **both** from
+   inside the nested cluster (`status.url`, direct to the exporter pod, validated
+   against the exporter's own CA `status.ca` — issuer `data-exporter-CA`) **and**
+   from outside through the origin `kubernetes-api` ingress host (`status.publicURL`,
+   TLS terminated at nginx). The source PVC holds files in the root, a subdir, a deep
+   `subdir2/subdir/subsubdir`, and a 200Mi random file; the big file is streamed to
+   `sha256sum` in the runner pod (never to the runner disk) and asserted equal
+   inside == outside == source. Authentication is a ServiceAccount Bearer token
+   minted via the TokenRequest API. Negatives: (internal) the token is denied
+   (`403`) BEFORE its `RoleBinding` exists; (external) client certificates through
+   the ingress do NOT authenticate (`401/403`, nginx terminated TLS). The external
+   path runs from a `curlimages/curl` pod on the **base** cluster (in
+   `TEST_CLUSTER_NAMESPACE`, sharing the DVP network with the nested VMs), since the
+   test runner reaches the nested cluster only via the API SSH tunnel. Teardown
+   asserts the `DataExport` schema is immutable (`publish` cannot be toggled off)
+   and that deleting the `DataExport` reaps its Ingress + Service in
+   `d8-storage-foundation`. Needs `storage-foundation` and the publish
+   infrastructure (see `E2E_PUBLISH`).
 
 ## Module dependency note
 
