@@ -19,3 +19,16 @@ testing
 tools
 werf*.yaml
 e2e
+pkg
+snapshot-rework
+.git
+.github
+.claude
+.gitignore
+.cursor
+.werf
+.golangci.yaml
+.dmtlint.yaml
+go-lint.sh
+test-smoke.sh
+test-cleanup.sh

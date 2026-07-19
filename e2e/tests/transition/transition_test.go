@@ -208,7 +208,7 @@ var _ = BeforeSuite(func() {
 	// Validate the module image-tag env vars first (before any provisioning): every one that is set
 	// must be a plain-ASCII tag matching mr<N>/pr<N>/main. This catches a prod v* tag (absent from
 	// the dev registry the nested cluster pulls) and — the real footgun — a tag typed in a non-Latin
-	// keyboard layout (e.g. the Cyrillic "ает" instead of "main"), which otherwise only surfaces
+	// keyboard layout (e.g. a Cyrillic tag U+0430 U+0435 U+0442 instead of the Latin "main"), which otherwise only surfaces
 	// minutes later as a wedged converge in a mid-run phase.
 	validateModuleTagEnvVars()
 
@@ -290,7 +290,7 @@ var moduleTagEnvVars = []string{
 }
 
 // isASCII reports whether s contains only ASCII bytes. A value typed in a non-Latin keyboard layout
-// (e.g. the Cyrillic "ает") carries multi-byte UTF-8 runes and fails this check.
+// (e.g. a Cyrillic tag U+0430 U+0435 U+0442) carries multi-byte UTF-8 runes and fails this check.
 func isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] > 127 {

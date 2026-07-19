@@ -142,12 +142,15 @@ func prepareSuite() {
 	suiteDyn, err = dynamic.NewForConfig(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build dynamic client")
 
-	// waitModuleAndCSDReady runs two sequential waits (module Ready, then CSD AccessGranted), each bounded
-	// by moduleReadyTO, so the parent context budgets for both plus a buffer.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.moduleReadyTO+5*time.Minute)
+	// waitModuleAndCSDReady enables + waits for the whole module stack (five modules across three
+	// dependency levels: state-snapshotter/sds-node-configurator -> storage-foundation/poc ->
+	// sds-local-volume), then the demo CSD. Each wait is bounded by moduleReadyTO; convergence is largely
+	// serial along the dependency chain, so the parent context budgets for a few of them plus a buffer for
+	// the (retrying) enable step.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 
-	By("Waiting for the state-snapshotter module and the demo CSD to become Ready")
+	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC) and the demo CSD to become Ready")
 	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD readiness")
 }
 

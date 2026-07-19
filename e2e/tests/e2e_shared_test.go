@@ -84,6 +84,17 @@ const (
 	// CRDs + demo CSDs that this suite captures/restores against (the demo domain no longer ships in
 	// state-snapshotter itself).
 	pocModuleName = "sds-unified-snapshots-poc"
+	// The suite needs the full backing stack, not just state-snapshotter + the PoC domain. Names and the
+	// dependency graph mirror tests/cluster_config.yml (the alwaysCreateNew path), so an alwaysUseExisting
+	// run converges to the same module set instead of hanging on a disabled dependency:
+	//   - storage-foundation: the extended-VS fork + DataExport/DataImport/VCR/VRR data plane (requires
+	//     state-snapshotter per its module.yaml).
+	//   - sds-node-configurator: LVM node backend (no requirements); sds-local-volume needs it.
+	//   - sds-local-volume: the thin, snapshot-capable local StorageClass (requires BOTH
+	//     sds-node-configurator and storage-foundation).
+	storageFoundationModuleName   = "storage-foundation"
+	sdsNodeConfiguratorModuleName = "sds-node-configurator"
+	sdsLocalVolumeModuleName      = "sds-local-volume"
 	// The demo domain (from the PoC module) ships two flat CSDs (one snapshot kind per object): the
 	// structural VM snapshot and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
@@ -371,18 +382,41 @@ func cleanupNestedTestCluster() {
 // the standard <MODULE>_MODULE_PULL_OVERRIDE convention (default "main"), matching what the
 // cluster_config path would apply. It only enables; the WaitForModuleReady calls below do the waiting.
 func ensureModulesEnabled(ctx context.Context) error {
+	// The full module set the suite needs, with the dependency graph copied verbatim from
+	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
+	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
+	// dependency '...' is disabled"). None of these modules carry ModuleConfig settings (config is via
+	// CRDs / defaults), so no Settings are passed. Each ModulePullOverride comes from
+	// <MODULE>_MODULE_PULL_OVERRIDE (defaulting to "main"), matching the alwaysCreateNew path.
 	specs := []storagekube.ModuleSpec{
 		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
+		// storage-foundation requires state-snapshotter (module.yaml).
+		{Name: storageFoundationModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(storageFoundationModuleName), Dependencies: []string{moduleName}},
 		// The PoC module (demo controller + demo CRDs + demo CSDs) depends on state-snapshotter: its
 		// CSDs are CustomSnapshotDefinition (state-snapshotter.deckhouse.io group), so the core CSD CRD
-		// must exist first. The dependency is declared in-batch so the graph resolves. The demo domain
-		// deploys unconditionally (the module's only config setting is logLevel), so no Settings needed.
+		// must exist first. The demo domain deploys unconditionally, so no Settings needed.
 		{Name: pocModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(pocModuleName), Dependencies: []string{moduleName}},
+		// sds-node-configurator (LVM node backend) has no module requirements; sds-local-volume needs it.
+		{Name: sdsNodeConfiguratorModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(sdsNodeConfiguratorModuleName)},
+		// sds-local-volume (thin snapshot-capable local StorageClass) requires BOTH sds-node-configurator
+		// and storage-foundation (module.yaml) — both must be listed or SLV stays "turned off".
+		{Name: sdsLocalVolumeModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(sdsLocalVolumeModuleName), Dependencies: []string{sdsNodeConfiguratorModuleName, storageFoundationModuleName}},
 	}
 	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
 		return fmt.Errorf("ensure required modules enabled: %w", err)
 	}
 	return nil
+}
+
+// requiredModulesInReadyOrder lists every module the suite depends on, ordered so a module never appears
+// before a module it depends on — WaitForModuleReady is then called in an order that observes each
+// dependency level as it converges (a dependent cannot become Ready before its dependencies anyway).
+var requiredModulesInReadyOrder = []string{
+	moduleName,                    // state-snapshotter (base)
+	sdsNodeConfiguratorModuleName, // base (LVM node backend)
+	storageFoundationModuleName,   // needs state-snapshotter
+	pocModuleName,                 // needs state-snapshotter
+	sdsLocalVolumeModuleName,      // needs sds-node-configurator + storage-foundation
 }
 
 // moduleTagFromEnv returns a module's image tag from its <MODULE>_MODULE_PULL_OVERRIDE env var (the
@@ -417,13 +451,13 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	if err := ensureModulesEnabled(ctx); err != nil {
 		return err
 	}
-	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO); err != nil {
-		return fmt.Errorf("module %s not Ready: %w", moduleName, err)
-	}
-	// The demo domain controller + demo CSDs are delivered by the PoC module now, so it must also be
-	// Ready before the CSDs can reach AccessGranted.
-	if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, pocModuleName, suiteCfg.moduleReadyTO); err != nil {
-		return fmt.Errorf("module %s not Ready: %w", pocModuleName, err)
+	// Wait for EVERY required module to be Ready (not just state-snapshotter + the PoC), in dependency
+	// order. Without this the suite races the still-converging storage-foundation data plane and the
+	// sds-local-volume StorageClass the specs provision against.
+	for _, m := range requiredModulesInReadyOrder {
+		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("module %s not Ready: %w", m, err)
+		}
 	}
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
 		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
