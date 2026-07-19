@@ -32,11 +32,11 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// envManifestCheckpointLoss opts this spec in. It is OFF by default (even under E2E_VOLUME_DATA) because it
-// DELETES cluster-scoped ManifestCheckpoint/chunk artifacts and depends on the exact terminal
-// ManifestCheckpointFailed classification + its ChildrenFailed propagation, so — like the child-bridge and
-// freeze-deadline negative specs — it must be validated on a real cluster before being promoted to the
-// standard volume-data CI. Set E2E_MANIFEST_CHECKPOINT_LOSS=true (with the phase-3 volume-data knobs) to run.
+// envManifestCheckpointLoss opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow)
+// because it DELETES cluster-scoped ManifestCheckpoint/chunk artifacts and depends on the exact terminal
+// ManifestCheckpointFailed classification + its ChildrenFailed propagation; like the child-bridge and
+// freeze-deadline negative specs, an environment that cannot support it disables the spec with
+// E2E_MANIFEST_CHECKPOINT_LOSS=false (and the whole flow with E2E_VOLUME_DATA=false).
 const envManifestCheckpointLoss = "E2E_MANIFEST_CHECKPOINT_LOSS"
 
 // Manifest-checkpoint-loss fixture object names (isolated from the phase-3 vol-tree names so this spec can
@@ -198,15 +198,16 @@ func waitNodeReadyFalseReason(ctx context.Context, gvr schema.GroupVersionResour
 // closed, so a genuinely-absent published MCP is ManifestCheckpointFailed (not the non-terminal
 // ManifestCapturePending). See the SnapshotContentController post-capture integrity check.
 //
-// Opt-in only (E2E_MANIFEST_CHECKPOINT_LOSS): it deletes cluster-scoped artifacts and depends on the exact
-// terminal classification + propagation, so it must be validated on a real cluster before promotion.
+// Opt-out (E2E_MANIFEST_CHECKPOINT_LOSS=false): it deletes cluster-scoped artifacts and depends on the exact
+// terminal classification + propagation; it runs by default as part of the volume-data flow and is disabled
+// on environments that cannot support it.
 func manifestCheckpointLossSpecs() {
 	Context("Manifest checkpoint loss fails the tree closed (INV-FAIL-PROP, manifest leg)", func() {
 		var sc string
 
 		BeforeAll(func() {
-			if !suiteCfg.volumeData || !envBool(os.Getenv(envManifestCheckpointLoss)) {
-				Skip("manifest-checkpoint-loss spec is opt-in: set E2E_VOLUME_DATA=true and " + envManifestCheckpointLoss + "=true (real cluster required)")
+			if !suiteCfg.volumeData || !envEnabledByDefault(os.Getenv(envManifestCheckpointLoss)) {
+				Skip("manifest-checkpoint-loss spec disabled: it runs by default; set " + envManifestCheckpointLoss + "=false (or E2E_VOLUME_DATA=false) to disable")
 			}
 			sc = suiteCfg.storageClass
 

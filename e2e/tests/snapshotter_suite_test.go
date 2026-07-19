@@ -116,19 +116,19 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	})
 	resourceSelectorSpecs()          // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
 	resourceSelectorAdmissionSpecs() // resource_selector_admission_test.go: CEL forbids spec.resourceSelector on mode: Import (admission rejection; skip-not-fail on an older CRD)
-	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3, env-gated)
-	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
-	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
-	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (opt-in: E2E_MANIFEST_CHECKPOINT_LOSS)
-	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (opt-in: E2E_FREEZE_DEADLINE)
-	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
-	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
-	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
-	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (opt-in: E2E_PUBLISH)
-	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (opt-in: E2E_PUBLISH)
-	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; opt-in: E2E_PUBLISH)
+	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
+	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
+	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (default on; opt-out: E2E_VOLUME_DATA=false)
+	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (default on; opt-out: E2E_CHILD_BRIDGE_FAILURE=false)
+	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (default on; opt-out: E2E_MANIFEST_CHECKPOINT_LOSS=false)
+	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (default on; opt-out: E2E_FREEZE_DEADLINE=false)
+	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (default on; opt-out: E2E_VOLUME_DATA=false)
+	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (default on; opt-out: E2E_GET_LOAD=false)
+	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4; default on; opt-out: E2E_VOLUME_DATA=false)
+	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5; default on; opt-out: E2E_VOLUME_DATA=false)
+	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
+	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
+	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
 })
 
 func prepareSuite() {
@@ -142,9 +142,9 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  data transfer timeout:      %s\n", suiteCfg.dataTransferTO)
 	GinkgoWriter.Printf("  module ready timeout:       %s\n", suiteCfg.moduleReadyTO)
 	GinkgoWriter.Printf("  GC TTL (snapshotTtlAfterDelete): %s\n", suiteCfg.gcTTL)
-	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
-	GinkgoWriter.Printf("  GET-load measurement (opt): %v\n", suiteCfg.getLoad)
-	GinkgoWriter.Printf("  publish sanity-check (opt): %v\n", suiteCfg.publish)
+	GinkgoWriter.Printf("  volume-data phase enabled:  %v  (default on; E2E_VOLUME_DATA=false to disable)\n", suiteCfg.volumeData)
+	GinkgoWriter.Printf("  GET-load measurement:       %v  (default on; E2E_GET_LOAD=false to disable)\n", suiteCfg.getLoad)
+	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
@@ -175,8 +175,9 @@ func prepareSuite() {
 
 	// Publish (ingress + tokens) specs need the publish infrastructure the storage-e2e bootstrap
 	// provisions out of the box (user-authn publishAPI + global publicDomainTemplate + ingress-nginx).
-	// Under the E2E_PUBLISH gate, fail fast here — before any spec runs — if that profile is incomplete,
-	// and record the discovered ingress facts for the publish specs. It INSTALLS NOTHING.
+	// The publish gate is ON by default (opt-out via E2E_PUBLISH=false): fail fast here — before any spec
+	// runs — if that profile is incomplete, and record the discovered ingress facts for the publish specs.
+	// It INSTALLS NOTHING. Environments without publish infra set E2E_PUBLISH=false to skip this check.
 	if suiteCfg.publish {
 		checkPublishInfra()
 	}

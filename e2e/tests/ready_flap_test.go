@@ -323,7 +323,7 @@ func readyFlapSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the Ready-flap detector (needs real volume data)")
+				Skip("E2E_VOLUME_DATA=false: skipping the Ready-flap detector (it runs by default; needs real volume data)")
 			}
 			sc = suiteCfg.storageClass
 			srcNS = uniqueNS("flap")

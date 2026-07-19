@@ -33,11 +33,10 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// envChildBridgeFailure opts this spec in. It is OFF by default (even under E2E_VOLUME_DATA): the spec
-// mutates cluster-scoped StorageClass wiring and depends on the exact terminal behaviour of the demo
-// domain's volume-capture leg, so it must be validated on a real cluster before it is promoted to run in
-// the standard volume-data CI. Set E2E_CHILD_BRIDGE_FAILURE=true (with the phase-3 volume-data knobs) to
-// run it.
+// envChildBridgeFailure opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow):
+// the spec mutates cluster-scoped StorageClass wiring and depends on the exact terminal behaviour of the
+// demo domain's volume-capture leg, so an environment that cannot support it disables the spec with
+// E2E_CHILD_BRIDGE_FAILURE=false (and the whole flow with E2E_VOLUME_DATA=false).
 const envChildBridgeFailure = "E2E_CHILD_BRIDGE_FAILURE"
 
 // Child-bridge fixture object names (isolated from the phase-3 vol-tree names so this spec can run in the
@@ -208,9 +207,9 @@ func waitSnapshotReadyFalseReason(ctx context.Context, ns, name, wantReason stri
 // images/state-snapshotter-controller/test/integration/snapshot_graph_integration_test.go and the unit
 // tests in internal/usecase/child_snapshot_terminal_failures_test.go).
 //
-// Opt-in only (E2E_CHILD_BRIDGE_FAILURE): it mutates cluster StorageClass wiring and depends on the demo
-// domain's exact terminal volume-capture behaviour, so it must be validated on a real cluster before being
-// promoted to the standard volume-data CI.
+// Opt-out (E2E_CHILD_BRIDGE_FAILURE=false): it mutates cluster StorageClass wiring and depends on the demo
+// domain's exact terminal volume-capture behaviour; it runs by default as part of the volume-data flow and
+// is disabled on environments that cannot support it.
 func childBridgeFailureSpecs() {
 	Context("Child-Snapshot terminal-failure bridge (domain-disk terminal volume capture)", func() {
 		var (
@@ -220,8 +219,8 @@ func childBridgeFailureSpecs() {
 		)
 
 		BeforeAll(func() {
-			if !suiteCfg.volumeData || !envBool(os.Getenv(envChildBridgeFailure)) {
-				Skip("child-bridge failure spec is opt-in: set E2E_VOLUME_DATA=true and " + envChildBridgeFailure + "=true (real cluster required)")
+			if !suiteCfg.volumeData || !envEnabledByDefault(os.Getenv(envChildBridgeFailure)) {
+				Skip("child-bridge failure spec disabled: it runs by default; set " + envChildBridgeFailure + "=false (or E2E_VOLUME_DATA=false) to disable")
 			}
 			sc = suiteCfg.storageClass
 			badSC = sc + "-nobind-vsc"

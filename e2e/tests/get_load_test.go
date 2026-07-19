@@ -296,8 +296,8 @@ func measureGetLoadWave(ctx context.Context, srcNS, snapName string, iter int) (
 	}, nil
 }
 
-// getLoadSpecs registers the GET-load measurement spec. It is OPT-IN via E2E_GET_LOAD (off by default even
-// when E2E_VOLUME_DATA is set, because the repeat-and-average run adds several minutes); it provisions its
+// getLoadSpecs registers the GET-load measurement spec. It is OPT-OUT via E2E_GET_LOAD (on by default; set
+// E2E_GET_LOAD=false to disable, since the repeat-and-average run adds several minutes); it provisions its
 // own thin StorageClass, so it does not piggyback on the phase-3 volume-data flow. It repeats the vol-tree
 // capture wave (root Snapshot create -> first Ready=True) E2E_GET_LOAD_ITERATIONS times over a SHARED source
 // and reports the per-second rest_client_requests_total{method="GET"} delta, averaged across the measured
@@ -321,7 +321,7 @@ func getLoadSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.getLoad {
-				Skip("E2E_GET_LOAD not set: skipping the GET-load measurement (opt-in; run with E2E_GET_LOAD=true). It provisions its own thin StorageClass, so it does NOT need E2E_VOLUME_DATA, but it does need the base-cluster knobs TEST_CLUSTER_NAMESPACE / TEST_CLUSTER_STORAGE_CLASS that the volume-data flow also uses.")
+				Skip("GET-load measurement disabled: it runs by default; set E2E_GET_LOAD=false to disable (the repeat-and-average run adds several minutes). It provisions its own thin StorageClass, so it does NOT need E2E_VOLUME_DATA, but it does need the base-cluster knobs TEST_CLUSTER_NAMESPACE / TEST_CLUSTER_STORAGE_CLASS that the volume-data flow also uses.")
 			}
 			sc = suiteCfg.storageClass
 			srcNS = uniqueNS("getload")

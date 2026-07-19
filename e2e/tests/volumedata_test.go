@@ -503,7 +503,7 @@ func volumeDataSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-3 volume-data flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 volume-data flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
 			srcNS = uniqueNS("vol")

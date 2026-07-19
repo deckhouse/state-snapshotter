@@ -120,7 +120,7 @@ func publishDataExportSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.publish {
-				Skip("E2E_PUBLISH not set: skipping the DataExport publish (ingress + tokens) flow")
+				Skip("E2E_PUBLISH=false: skipping the DataExport publish (ingress + tokens) flow (it runs by default)")
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)

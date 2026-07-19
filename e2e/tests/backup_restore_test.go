@@ -1029,7 +1029,7 @@ func importVariantsSpecs() {
 	Context("Phase 5: import any tree node (4 parallel variants)", func() {
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-5 import variants flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-5 import variants flow (it runs by default)")
 			}
 			if !backup.ready {
 				Skip("phase-4 backup download did not complete (extended-VS surface or download skipped)")

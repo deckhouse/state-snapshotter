@@ -194,7 +194,7 @@ func volumeSnapshotDomainSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the Block 3d VolumeSnapshot-domain specs")
+				Skip("E2E_VOLUME_DATA=false: skipping the Block 3d VolumeSnapshot-domain specs (they run by default)")
 			}
 			sc = suiteCfg.storageClass
 			ns = uniqueNS("vsdom")

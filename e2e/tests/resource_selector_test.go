@@ -401,7 +401,7 @@ func resourceSelectorVolumeDataSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the resourceSelector volume-data spec")
+				Skip("E2E_VOLUME_DATA=false: skipping the resourceSelector volume-data spec (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
 			ns = uniqueNS("selector-vol")

@@ -127,7 +127,7 @@ func publishDataImportSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.publish {
-				Skip("E2E_PUBLISH not set: skipping the DataImport publish (external ingress upload) flow")
+				Skip("E2E_PUBLISH=false: skipping the DataImport publish (external ingress upload) flow (it runs by default)")
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)

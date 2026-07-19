@@ -274,7 +274,7 @@ func volumeDataGcSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-3 durable volume-data teardown flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 durable volume-data teardown flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
 			srcNS = uniqueNS("vol-gc")

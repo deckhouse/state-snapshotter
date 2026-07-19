@@ -890,7 +890,7 @@ func backupDownloadSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-4 backup download flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-4 backup download flow (it runs by default)")
 			}
 			backup.sc = suiteCfg.storageClass
 			backup.srcNS = uniqueNS("bk")

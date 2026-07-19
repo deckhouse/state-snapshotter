@@ -305,9 +305,9 @@ func loadConfig() e2eConfig {
 		storageClass:      strings.TrimSpace(os.Getenv(envStorageClass)),
 		probeImage:        strings.TrimSpace(os.Getenv(envProbeImage)),
 		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
-		volumeData:        envBool(os.Getenv(envVolumeData)),
-		getLoad:           envBool(os.Getenv(envGetLoad)),
-		publish:           envBool(os.Getenv(envPublish)),
+		volumeData:        envEnabledByDefault(os.Getenv(envVolumeData)),
+		getLoad:           envEnabledByDefault(os.Getenv(envGetLoad)),
+		publish:           envEnabledByDefault(os.Getenv(envPublish)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
@@ -341,6 +341,20 @@ func envBool(raw string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// envEnabledByDefault reports whether an OPT-OUT feature flag is enabled. Opt-out flags default to ON
+// (empty/unset => enabled); the feature is disabled ONLY when its env var is explicitly set to a falsey
+// value (false/0/no/n/off). It is the inverse of envBool: every gated spec now runs by default and is
+// switched OFF with `E2E_<FEATURE>=false`, so a default run exercises the whole suite on a full cluster and
+// operators disable only what their environment cannot support.
+func envEnabledByDefault(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "no", "n", "off":
+		return false
+	default:
+		return true
 	}
 }
 

@@ -33,11 +33,11 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// envFreezeDeadline opts this spec in. It is OFF by default (even under E2E_VOLUME_DATA): the spec mutates
-// the SHARED poc domain-controller Deployment (a cluster-wide FREEZE_DEADLINE env patch) and provisions
-// cluster-scoped StorageClass wiring, so it must be validated on a real cluster before it is promoted to
-// run in the standard volume-data CI. Set E2E_FREEZE_DEADLINE=true (with the phase-3 volume-data knobs) to
-// run it. Mirrors the E2E_CHILD_BRIDGE_FAILURE gate.
+// envFreezeDeadline opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow): the
+// spec mutates the SHARED poc domain-controller Deployment (a cluster-wide FREEZE_DEADLINE env patch,
+// restored on cleanup) and provisions cluster-scoped StorageClass wiring, so an environment that cannot
+// support it disables the spec with E2E_FREEZE_DEADLINE=false (and the whole flow with E2E_VOLUME_DATA=false).
+// Mirrors the E2E_CHILD_BRIDGE_FAILURE gate.
 const envFreezeDeadline = "E2E_FREEZE_DEADLINE"
 
 // envFreezeDeadlineValue overrides the short FREEZE_DEADLINE injected into the domain controller for this
@@ -307,9 +307,9 @@ func demoDomainPhaseReason(obj *unstructured.Unstructured) (phase, reason string
 // images/domain-controller/internal/controllers/demo/virtualmachinesnapshot_barrier_test.go, which cannot
 // synthesize a genuinely hung child through the real CSI + VCR path.
 //
-// Opt-in only (E2E_FREEZE_DEADLINE): it patches the SHARED poc domain-controller Deployment (a cluster-wide
-// FREEZE_DEADLINE change, restored on cleanup) and provisions cluster StorageClass wiring, so it must be
-// validated on a real cluster before being promoted to the standard volume-data CI.
+// Opt-out (E2E_FREEZE_DEADLINE=false): it patches the SHARED poc domain-controller Deployment (a cluster-wide
+// FREEZE_DEADLINE change, restored on cleanup) and provisions cluster StorageClass wiring; it runs by
+// default as part of the volume-data flow and is disabled on environments that cannot support it.
 func freezeDeadlineSpecs() {
 	Context("Freeze deadline (hung child disk snapshot -> VM self-Fail ConsistencyDeadlineExceeded)", func() {
 		var (
@@ -323,8 +323,8 @@ func freezeDeadlineSpecs() {
 		)
 
 		BeforeAll(func() {
-			if !suiteCfg.volumeData || !envBool(os.Getenv(envFreezeDeadline)) {
-				Skip("freeze-deadline spec is opt-in: set E2E_VOLUME_DATA=true and " + envFreezeDeadline + "=true (real cluster required)")
+			if !suiteCfg.volumeData || !envEnabledByDefault(os.Getenv(envFreezeDeadline)) {
+				Skip("freeze-deadline spec disabled: it runs by default; set " + envFreezeDeadline + "=false (or E2E_VOLUME_DATA=false) to disable")
 			}
 			baseSC = suiteCfg.storageClass
 			thickSC = baseSC + "-thick-nosnap"

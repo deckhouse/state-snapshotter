@@ -91,7 +91,7 @@ func publishManifestsSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.publish {
-				Skip("E2E_PUBLISH not set: skipping the published-manifests (aggregated API via ingress) flow")
+				Skip("E2E_PUBLISH=false: skipping the published-manifests (aggregated API via ingress) flow (it runs by default)")
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+15*time.Minute)

@@ -179,24 +179,41 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
 - `E2E_GC_TTL`: `snapshotTtlAfterDelete` applied for the GC spec. Defaults to `60s`.
-- `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-5 (full
-  volume-data flow, backup download, and backup restore). Off by default (phases 1-2 only).
-- `E2E_CHILD_BRIDGE_FAILURE`: opt-in regression for the child-Snapshot terminal-failure
-  bridge (INV-FAIL-PROP). Requires `E2E_VOLUME_DATA` too. It provisions a StorageClass
-  wired to a non-existent `VolumeSnapshotClass`, captures a data-backed `DemoVirtualDisk`
-  whose volume capture then fails terminally, and asserts the root `Snapshot` flips to
-  `Ready=False/ChildrenFailed`. Off by default even under `E2E_VOLUME_DATA` because it
-  mutates cluster StorageClass wiring and must be validated on a real cluster before being
-  promoted to the standard volume-data CI. The same invariant is covered deterministically
-  by unit tests (`internal/usecase/child_snapshot_terminal_failures_test.go`); the two
-  envtest specs in `snapshot_graph_integration_test.go` are skipped because a genuine
+All feature flags below are **opt-out**: they are **ON by default** so a plain run on a
+full cluster exercises the entire suite. Disable what your environment cannot support by
+setting the flag to a falsey value (`false`/`0`/`no`/`off`).
+
+- `E2E_VOLUME_DATA`: **on by default** — runs phases 3-5 (full volume-data flow, backup
+  download, and backup restore). Set `E2E_VOLUME_DATA=false` to run phases 1-2 only (no
+  volume provisioning); this also disables every spec that piggybacks on the volume-data
+  flow (`E2E_CHILD_BRIDGE_FAILURE`, `E2E_FREEZE_DEADLINE`, `E2E_MANIFEST_CHECKPOINT_LOSS`).
+- `E2E_CHILD_BRIDGE_FAILURE`: **on by default** (as part of the volume-data flow) —
+  regression for the child-Snapshot terminal-failure bridge (INV-FAIL-PROP). It provisions
+  a StorageClass wired to a non-existent `VolumeSnapshotClass`, captures a data-backed
+  `DemoVirtualDisk` whose volume capture then fails terminally, and asserts the root
+  `Snapshot` flips to `Ready=False/ChildrenFailed`. Set `E2E_CHILD_BRIDGE_FAILURE=false`
+  (or `E2E_VOLUME_DATA=false`) to disable — it mutates cluster StorageClass wiring, so
+  disable it on environments that cannot support that. The same invariant is covered
+  deterministically by unit tests (`internal/usecase/child_snapshot_terminal_failures_test.go`);
+  the two envtest specs in `snapshot_graph_integration_test.go` are skipped because a genuine
   terminal child volume capture cannot be synthesized under envtest.
-- `E2E_GET_LOAD`: when truthy, runs the opt-in GET-load measurement spec (REST
-  GET-load delta across the capture wave, scraped from the leader controller's
-  `/metrics`). Off by default even when `E2E_VOLUME_DATA` is set, because the
-  repeat-and-average run adds several minutes. It provisions its own thin
-  StorageClass, so it does not need `E2E_VOLUME_DATA`, but it does need the same
-  base-cluster knobs (`TEST_CLUSTER_NAMESPACE` / `TEST_CLUSTER_STORAGE_CLASS`).
+- `E2E_FREEZE_DEADLINE`: **on by default** (as part of the volume-data flow) — drives a hung
+  child disk snapshot so the VM aggregator self-fails with `ConsistencyDeadlineExceeded` and
+  clears its freeze marker. It patches the SHARED poc domain-controller Deployment
+  (a cluster-wide `FREEZE_DEADLINE` env change, restored on cleanup). Set
+  `E2E_FREEZE_DEADLINE=false` (or `E2E_VOLUME_DATA=false`) to disable. Tune the injected
+  deadline with `E2E_FREEZE_DEADLINE_VALUE` (a Go duration).
+- `E2E_MANIFEST_CHECKPOINT_LOSS`: **on by default** (as part of the volume-data flow) —
+  deletes a `ManifestCheckpoint` (or one of its chunks) at the root / child / grandchild
+  level AFTER capture and asserts the affected node flips to
+  `Ready=False/ManifestCheckpointFailed` and the root `Snapshot` to
+  `Ready=False/ChildrenFailed`. Set `E2E_MANIFEST_CHECKPOINT_LOSS=false`
+  (or `E2E_VOLUME_DATA=false`) to disable — it deletes cluster-scoped artifacts.
+- `E2E_GET_LOAD`: **on by default** — the GET-load measurement spec (REST GET-load delta
+  across the capture wave, scraped from the leader controller's `/metrics`). Set
+  `E2E_GET_LOAD=false` to disable (the repeat-and-average run adds several minutes). It
+  provisions its own thin StorageClass, so it does not need `E2E_VOLUME_DATA`, but it does
+  need the same base-cluster knobs (`TEST_CLUSTER_NAMESPACE` / `TEST_CLUSTER_STORAGE_CLASS`).
   Tuning knobs:
   - `E2E_GET_LOAD_ITERATIONS`: capture waves to run back-to-back over a shared
     source (default `5`).
@@ -204,15 +221,15 @@ pseudo-version. `state-snapshotter/api` is always consumed via
     cold-cache bias (default `1`).
   - `E2E_GET_LOAD_MAX_PER_SEC`: when set, hard-bound the MEAN GET/sec (leave unset
     for the baseline run; set it to the baseline figure for the new run).
-- `E2E_PUBLISH`: when truthy (`true`/`1`/`yes`), opts into the publish (ingress +
-  tokens) specs — DataExport/DataImport with `publish: true`, downloaded/uploaded
-  both from inside the cluster (`status.url`) and from outside through the ingress
-  (`status.publicURL`), plus the aggregated **manifests** reachable externally through
-  the same published `kubernetes-api` ingress (no separate APIService ingress). Off by
-  default. The publish infrastructure is **already
-  provisioned by the storage-e2e bootstrap** — this flag does **not** install
-  anything. It only turns on a **BeforeSuite sanity-check** that fails fast (before
-  any spec runs) if the installed profile is incomplete, then records the ingress
+- `E2E_PUBLISH`: **on by default** — the publish (ingress + tokens) specs:
+  DataExport/DataImport with `publish: true`, downloaded/uploaded both from inside the
+  cluster (`status.url`) and from outside through the ingress (`status.publicURL`), plus
+  the aggregated **manifests** reachable externally through the same published
+  `kubernetes-api` ingress (no separate APIService ingress). Set `E2E_PUBLISH=false` to
+  disable (do this on clusters without the publish infrastructure). The publish
+  infrastructure is **already provisioned by the storage-e2e bootstrap** — this flag does
+  **not** install anything. It only turns on a **BeforeSuite sanity-check** that fails fast
+  (before any spec runs) if the installed profile is incomplete, then records the ingress
   facts for the publish specs. The bootstrap provides:
   - user-authn `publishAPI.enabled=true` (publishes the kube-API through the origin
     `kubernetes-api` Ingress, whose TLS secret the DataExport/DataImport ingresses
@@ -266,18 +283,22 @@ export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=main   # module under test; or prN
 # export STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=prN
 # export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE=prN
 
-# Phases 1-2 only:
+# Everything, on a full cluster (all feature flags default ON):
 cd e2e
 make deps
 make test
 
-# Phases 3-5 (volume-data + backup download + backup restore) as well:
-E2E_VOLUME_DATA=true make test
+# Phases 1-2 only (no volume provisioning); this also disables the volume-data-backed
+# negative specs (child-bridge, freeze-deadline, manifest-checkpoint-loss):
+E2E_VOLUME_DATA=false make test
 
-# Opt-in GET-load measurement only (provisions its own SC; baseline = log only):
-E2E_GET_LOAD=true make test-focus FOCUS="GET-load measurement"
+# Trim what a partial cluster cannot run (e.g. no publish ingress, skip the slow GET-load):
+E2E_PUBLISH=false E2E_GET_LOAD=false make test
+
+# GET-load measurement only (provisions its own SC; baseline = log only):
+make test-focus FOCUS="GET-load measurement"
 # New image, hard-bound the mean against the baseline figure:
-E2E_GET_LOAD=true E2E_GET_LOAD_MAX_PER_SEC=<baseline> make test-focus FOCUS="GET-load measurement"
+E2E_GET_LOAD_MAX_PER_SEC=<baseline> make test-focus FOCUS="GET-load measurement"
 ```
 
 Run a subset:
