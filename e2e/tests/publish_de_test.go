@@ -363,24 +363,24 @@ func publishDataExportSpecs() {
 			Expect(ccCode).To(BeElementOf(401, 403), "client certs through the ingress must NOT authenticate (got %d)", ccCode)
 		})
 
-		It("(e) teardown: the spec is immutable, and deleting the DataExport reaps the Ingress + Service", func() {
+		It("(e) teardown: spec.targetRef is immutable, and deleting the DataExport reaps the Ingress + Service", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 			defer cancel()
 
-			By("Asserting the DataExport spec is immutable (publish cannot be toggled off)")
-			// The whole schema is immutable (crds/dataexports.yaml: openAPIV3Schema x-kubernetes-immutable:
-			// true), so publish:true->false is unavailable; any spec change is rejected by admission.
-			// TODO(e2e-publish): verify on cluster — confirm x-kubernetes-immutable is enforced by the
-			// Deckhouse admission webhook for this CRD and that a spec patch is rejected (the exact node is
-			// the top-level openAPIV3Schema in crds/dataexports.yaml).
-			patch := []byte(`{"spec":{"publish":false}}`)
+			By("Asserting the DataExport export identity is immutable (spec.targetRef cannot change)")
+			// Only the export identity spec.targetRef is locked after creation, via a CEL transition rule
+			// (crds/dataexports.yaml: spec x-kubernetes-validations self.targetRef == oldSelf.targetRef);
+			// ttl/publish/publicIngress remain mutable (DataExport mirrors DataImport, which locks only
+			// spec.mode + spec.snapshotRef). Patching targetRef.name must be rejected by admission; probe by
+			// attempting the mutation rather than reading the CRD (Deckhouse strips vendor schema extensions).
+			patch := []byte(`{"spec":{"targetRef":{"name":"immutability-probe"}}}`)
 			_, perr := suiteDyn.Resource(dataExportGVR).Namespace(srcNS).Patch(ctx, publishDEExport, types.MergePatchType, patch, metav1.PatchOptions{})
-			Expect(perr).To(HaveOccurred(), "toggling spec.publish on an immutable DataExport must be rejected")
+			Expect(perr).To(HaveOccurred(), "changing spec.targetRef on a DataExport must be rejected")
 			// Prove the rejection is immutability admission, not an incidental NotFound/Conflict: the object
 			// must still exist here (finding-1 fix keeps the DE alive through (e)), and the patch must be
 			// rejected as Invalid/BadRequest.
 			Expect(apierrors.IsNotFound(perr)).To(BeFalse(), "the DataExport must still exist when the immutability patch is attempted; got: %v", perr)
-			Expect(apierrors.IsInvalid(perr) || apierrors.IsBadRequest(perr)).To(BeTrue(), "the publish:false patch must be rejected as Invalid/BadRequest by immutability admission; got: %v", perr)
+			Expect(apierrors.IsInvalid(perr) || apierrors.IsBadRequest(perr)).To(BeTrue(), "the targetRef patch must be rejected as Invalid/BadRequest by immutability admission; got: %v", perr)
 
 			By("Deleting the DataExport and asserting the Ingress + Service are reaped in " + d8DataManagerNS)
 			GinkgoWriter.Printf("  publish Ingress %s/%s (Service %s) expected to be reaped after DataExport delete\n", d8DataManagerNS, ingName, svcName)
@@ -517,7 +517,8 @@ func waitDataExportPublished(ctx context.Context, ns, name string, timeout time.
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
 				publicURL, _, _ = unstructured.NestedString(obj.Object, "status", "publicURL")
-				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
+				rawCA, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
+				ca = normalizePublishCA(rawCA) // status.ca is base64-encoded PEM per the CRD; decode for pem.Decode / --cacert
 				phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
 				catalogOK, extra := conditionsWithinCatalog(obj, "Ready")
 				if url != "" && publicURL != "" && phase == "Ready" && catalogOK {

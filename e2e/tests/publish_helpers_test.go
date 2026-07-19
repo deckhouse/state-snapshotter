@@ -19,6 +19,7 @@ package tests
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"net/url"
@@ -547,6 +548,23 @@ func runCurlChecksumOnce(ctx context.Context, t curlPodTarget, rawURL string, r 
 }
 
 // --- (4) CA (status.ca) helpers --------------------------------------------
+
+// normalizePublishCA returns the PEM form of a DataExport/DataImport status.ca. Per the CRD schema
+// (crds/dataexports.yaml / dataimports.yaml: "Base64 encoded CA certificate ...") the field carries
+// base64-encoded PEM, so callers that feed it to pem.Decode / `curl --cacert` must decode it first.
+// It is tolerant: a value that already starts with a PEM block (a future/other build serving raw PEM)
+// is returned unchanged, and a value that is not valid base64 is returned as-is so the downstream
+// PEM parse surfaces the real problem instead of a decode error here.
+func normalizePublishCA(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.HasPrefix(raw, "-----BEGIN") {
+		return raw
+	}
+	if dec, err := base64.StdEncoding.DecodeString(raw); err == nil {
+		return string(dec)
+	}
+	return raw
+}
 
 // caIssuerCommonName parses a PEM CA/cert bundle (status.ca) and returns the Issuer CommonName of the first
 // certificate. The published TLS chain is served under the data-exporter's own CA, so the DE/DI specs

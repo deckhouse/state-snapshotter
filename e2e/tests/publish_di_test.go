@@ -547,7 +547,8 @@ func waitDataImportPublished(ctx context.Context, ns, name string, timeout time.
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
 				publicURL, _, _ = unstructured.NestedString(obj.Object, "status", "publicURL")
-				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
+				rawCA, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
+				ca = normalizePublishCA(rawCA) // status.ca is base64-encoded PEM per the CRD; decode for pem.Decode / --cacert
 				phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
 				catalogOK, extra := conditionsWithinCatalog(obj, "Ready", "UploadFinished", "Completed")
 				if url != "" && publicURL != "" && volMode == "Block" && ca != "" && phase == "Ready" && catalogOK {
