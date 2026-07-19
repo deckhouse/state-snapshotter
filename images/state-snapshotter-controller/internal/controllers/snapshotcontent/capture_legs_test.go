@@ -589,10 +589,12 @@ func TestReconcileOwnerCaptureLegs_SubtreePlannedLatchesWhenChildrenPlanned(t *t
 		captureLegsChildRef(clSnapGVK, "child-a"),
 	)
 
+	// The child is also terminal (Ready=True) so the sibling childrenSettled leg converges too and the
+	// owner does not requeue; the subtreePlanned latch is what this test asserts.
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(owner).
-		WithObjects(owner, captureLegsContentTyped("", nil), captureLegsChildSnapshot(clSnapGVK, "child-a", true)).
+		WithObjects(owner, captureLegsContentTyped("", nil), captureLegsChildWithState(clSnapGVK, "child-a", "", metav1.ConditionTrue, snapshot.ReasonCompleted)).
 		Build()
 	r := captureLegsController(cl, clSnapGVK, false)
 
@@ -697,5 +699,197 @@ func TestReconcileOwnerCaptureLegs_Guards(t *testing.T) {
 				t.Fatalf("guard %q must not eager-init any capture leg", tc.name)
 			}
 		})
+	}
+}
+
+// captureLegsChildWithState builds a child snapshot carrying an optional domain phase and an optional Ready
+// condition. It always marks the child subtreePlanned=true so the sibling subtreePlanned leg latches without
+// confounding the childrenSettled requeue assertions.
+func captureLegsChildWithState(gvk schema.GroupVersionKind, name, phase string, readyStatus metav1.ConditionStatus, readyReason string) *unstructured.Unstructured {
+	c := captureLegsChildSnapshot(gvk, name, true)
+	if phase != "" {
+		_ = unstructured.SetNestedField(c.Object, phase, "status", "captureState", "domainSpecificController", "phase")
+	}
+	if readyStatus != "" {
+		cond := map[string]interface{}{
+			"type":   snapshot.ConditionReady,
+			"status": string(readyStatus),
+			"reason": readyReason,
+		}
+		_ = unstructured.SetNestedSlice(c.Object, []interface{}{cond}, "status", "conditions")
+	}
+	return c
+}
+
+// childrenSettled: a leaf owner (no declared children) never declares the latch — nil = nothing to settle.
+// (Contrast subtreePlanned, which latches vacuously true for a leaf.)
+func TestReconcileOwnerCaptureLegs_ChildrenSettledLeafStaysNil(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil)).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if _, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childrenSettled"); found {
+		t.Fatalf("a leaf owner must not declare childrenSettled (nil)")
+	}
+}
+
+// childrenSettled: fail-closed while a direct child is still non-terminal, or not created yet — the owner
+// does not latch and requeues (the child set is not fully settled).
+func TestReconcileOwnerCaptureLegs_ChildrenSettledFailClosedWhilePending(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		childObjs []client.Object
+	}{
+		{"child not created yet", nil},
+		{"child in-flight (Planned, ChildrenPending)", []client.Object{
+			captureLegsChildWithState(clSnapGVK, "child-a", string(storagev1alpha1.SnapshotCapturePhasePlanned), metav1.ConditionFalse, "ChildrenPending"),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := captureLegsScheme(t)
+			owner := captureLegsWithChildrenRefs(
+				captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+				captureLegsChildRef(clSnapGVK, "child-a"),
+			)
+			objs := []client.Object{owner, captureLegsContentTyped("", nil)}
+			objs = append(objs, tc.childObjs...)
+
+			cl := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(owner).
+				WithObjects(objs...).
+				Build()
+			r := captureLegsController(cl, clSnapGVK, false)
+
+			requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+			if err != nil {
+				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+			}
+			if !requeue {
+				t.Fatalf("owner with a non-terminal child must requeue")
+			}
+			if _, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childrenSettled"); found {
+				t.Fatalf("owner must not latch childrenSettled while a child is non-terminal")
+			}
+		})
+	}
+}
+
+// childrenSettled: latches true once EVERY direct child is terminal, covering a mix of channels — captured
+// (Ready=True), a data-leg failure via a terminal Ready reason (VolumeCaptureFailed), a domain failure via
+// phase=Failed with a FREE-FORM (non-terminal) Ready reason, and a domain-Finished child. The free-form
+// phase=Failed child is the crux: it is terminal ONLY through the phase channel, since its reason is not in
+// TerminalReadyReasons.
+func TestReconcileOwnerCaptureLegs_ChildrenSettledLatchesWhenAllTerminalMixed(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-ok"),
+		captureLegsChildRef(clSnapGVK, "child-vcrfail"),
+		captureLegsChildRef(clSnapGVK, "child-domainfail"),
+		captureLegsChildRef(clSnapGVK, "child-finished"),
+	)
+	children := []client.Object{
+		captureLegsChildWithState(clSnapGVK, "child-ok", "", metav1.ConditionTrue, snapshot.ReasonCompleted),
+		captureLegsChildWithState(clSnapGVK, "child-vcrfail", "", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed),
+		// Domain failure: phase=Failed with a free-form reason NOT in TerminalReadyReasons -> only the phase
+		// channel makes it terminal.
+		captureLegsChildWithState(clSnapGVK, "child-domainfail", string(storagev1alpha1.SnapshotCapturePhaseFailed), metav1.ConditionFalse, "ConsistencyDeadlineExceeded"),
+		captureLegsChildWithState(clSnapGVK, "child-finished", string(storagev1alpha1.SnapshotCapturePhaseFinished), "", ""),
+	}
+	objs := append([]client.Object{owner, captureLegsContentTyped("", nil)}, children...)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(objs...).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	if err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if requeue {
+		t.Fatalf("owner with every child terminal must not requeue")
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childrenSettled"); !found || !got {
+		t.Fatalf("owner must latch childrenSettled=true when all children are terminal, got found=%v value=%v", found, got)
+	}
+}
+
+// childrenSettled: a single non-terminal child among otherwise-terminal children holds the latch closed.
+func TestReconcileOwnerCaptureLegs_ChildrenSettledNotFlippedByOneInflight(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-ok"),
+		captureLegsChildRef(clSnapGVK, "child-inflight"),
+	)
+	children := []client.Object{
+		captureLegsChildWithState(clSnapGVK, "child-ok", "", metav1.ConditionTrue, snapshot.ReasonCompleted),
+		captureLegsChildWithState(clSnapGVK, "child-inflight", string(storagev1alpha1.SnapshotCapturePhasePlanned), metav1.ConditionFalse, "ChildrenPending"),
+	}
+	objs := append([]client.Object{owner, captureLegsContentTyped("", nil)}, children...)
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(objs...).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	requeue, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil))
+	if err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if !requeue {
+		t.Fatalf("owner with one in-flight child must requeue")
+	}
+	if _, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childrenSettled"); found {
+		t.Fatalf("owner must not latch childrenSettled with one non-terminal child")
+	}
+}
+
+// childrenSettled: monotonic — once latched true it is never dragged back to false, even if a child is
+// observed non-terminal on a later pass (spec is immutable; the latch is one-way).
+func TestReconcileOwnerCaptureLegs_ChildrenSettledMonotonic(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-a"),
+	)
+	// Pre-latch childrenSettled (and subtreePlanned so it does not requeue), then reconcile with a
+	// non-terminal child.
+	_ = unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "childrenSettled")
+	_ = unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "subtreePlanned")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil),
+			captureLegsChildWithState(clSnapGVK, "child-a", string(storagev1alpha1.SnapshotCapturePhasePlanned), metav1.ConditionFalse, "ChildrenPending")).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childrenSettled"); !found || !got {
+		t.Fatalf("childrenSettled must stay true (monotonic), got found=%v value=%v", found, got)
 	}
 }

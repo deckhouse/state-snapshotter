@@ -101,6 +101,33 @@ type CommonControllerCaptureState struct {
 	// planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
 	// +optional
 	SubtreePlanned *bool `json:"subtreePlanned,omitempty"`
+
+	// ChildrenSettled is a core-computed monotonic latch: true once EVERY DIRECT child of THIS node has gone
+	// terminal — terminal meaning captured-OK OR failed. Formally childrenSettled(n) = for every direct child
+	// c: isTerminal(c), where isTerminal(c) = c.Ready==True OR c.phase in {Finished,Failed} OR
+	// IsReasonTerminal(c.Ready). It is, in effect, ChildrenReady with a terminal child FAILURE also counted as
+	// "settled": a completeness signal ORTHOGONAL to success, not a success aggregate. (Ready cannot serve
+	// this role — its terminal False collapses "one child failed, others still in flight" and "one failed, all
+	// done" into an indistinguishable False, and a parent's own Ready=True is derived only AFTER its domain
+	// reaches phase=Finished, a circular dependency for a consumer that must act BEFORE finishing.)
+	//
+	// It is snapshot-native and main-written, computed by resolving the owner's DIRECT children from
+	// status.childrenSnapshotRefs and reading each child's Ready condition AND domain phase, then written
+	// SIDEWAYS onto this snapshot (like SubtreePlanned; a SnapshotContent has no phase, so this cannot live on
+	// the content). The child's domain phase=Failed is read DIRECTLY (not inferred from a terminal Ready
+	// reason): the core bubbles a domain's free-form phase=Failed reason VERBATIM onto the child Ready, and a
+	// free-form reason is not in TerminalReadyReasons, so IsReasonTerminal alone would miss a domain failure.
+	//
+	// It uses the same fail-closed-until-frozen machinery as ChildrenReady: the owner's direct-child set is
+	// frozen at capture barrier 1 (phase >= Planned), and a declared-but-not-yet-created child is treated as
+	// not-terminal, so the latch never flips true over an incomplete child set. It is NOT a capture leg (not
+	// part of CoreCaptureOutcome and not counted by AllLegsCaptured). Domains only READ it — e.g. a domain
+	// gates a consistency action (fs unfreeze) on childrenSettled==true, which must fire even when a child
+	// data snapshot failed; a child that HANGS (never terminal) is covered by a domain-side deadline, not by
+	// this latch. nil = no direct children (leaf) or not computed yet. Monotonic (nil/false -> true; the spec
+	// is immutable, so no recapture flips it back).
+	// +optional
+	ChildrenSettled *bool `json:"childrenSettled,omitempty"`
 }
 
 // DomainSpecificControllerCaptureState is the domain-written half of captureState: execution-request

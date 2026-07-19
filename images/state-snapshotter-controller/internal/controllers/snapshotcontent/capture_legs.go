@@ -31,6 +31,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -280,6 +281,32 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		}
 	}
 
+	// childrenSettled (main-owned, snapshot-native, monotonic): true once EVERY DIRECT child has gone
+	// terminal — captured-OK OR failed. Unlike subtreePlanned (a success/planning latch) it counts a terminal
+	// child FAILURE as settled, so it is a completeness signal ORTHOGONAL to success: a domain reads it to
+	// time a barrier-2 action (e.g. fs unfreeze) that must fire even when a child data snapshot failed. A leaf
+	// (no declared children) never declares the latch (nil = nothing to settle). While any direct child is
+	// still non-terminal — or not created yet — the owner does not latch and requeues, so the 500 ms
+	// self-requeue re-evaluates as children go terminal (a child's Ready/phase write also wakes its bound
+	// content, which re-mirrors and re-drives this owner). The direct-child set is frozen at barrier 1
+	// (guaranteed past ownerDomainCaptureAtLeastPlanned above), and NotFound children are fail-closed, so the
+	// latch never flips true over an incomplete set.
+	if !ownerCommonLegCaptured(owner, "childrenSettled") {
+		settled, hasChildren, csErr := r.allDirectChildrenSettled(ctx, owner)
+		if csErr != nil {
+			return false, csErr
+		}
+		if hasChildren {
+			if settled {
+				if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "childrenSettled"); mErr != nil {
+					return false, mErr
+				}
+			} else {
+				requeue = true
+			}
+		}
+	}
+
 	return requeue, nil
 }
 
@@ -327,6 +354,83 @@ func (r *SnapshotContentController) allDirectChildrenSubtreePlanned(ctx context.
 		}
 	}
 	return true, nil
+}
+
+// allDirectChildrenSettled reports whether every DIRECT child declared on the owner's
+// status.childrenSnapshotRefs has gone terminal (childSnapshotSettled). It mirrors
+// allDirectChildrenSubtreePlanned: the direct-child set is frozen at capture barrier 1 (the caller only runs
+// past phase>=Planned, when childrenSnapshotRefs is set-once), and a declared-but-not-yet-created child
+// (NotFound) reads as not-settled (fail-closed), so childrenSettled never latches true over an incomplete
+// child set — the same fail-closed-until-frozen discipline ChildrenReady uses. hasChildren=false means a leaf
+// node (no declared children): the caller leaves the latch nil, since a leaf has nothing to settle. Children
+// are read from the owner's fresh status; each is resolved by its ref GVK in the owner's namespace.
+func (r *SnapshotContentController) allDirectChildrenSettled(ctx context.Context, owner *unstructured.Unstructured) (settled bool, hasChildren bool, err error) {
+	refs, found, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return false, false, err
+	}
+	if !found || len(refs) == 0 {
+		return false, false, nil
+	}
+	namespace := owner.GetNamespace()
+	for _, raw := range refs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			return false, true, fmt.Errorf("owner %s/%s has a malformed childrenSnapshotRefs entry %T", namespace, owner.GetName(), raw)
+		}
+		apiVersion, _ := m["apiVersion"].(string)
+		kind, _ := m["kind"].(string)
+		name, _ := m["name"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			return false, true, fmt.Errorf("owner %s/%s has an incomplete childrenSnapshotRefs entry %v", namespace, owner.GetName(), m)
+		}
+		gv, gvErr := schema.ParseGroupVersion(apiVersion)
+		if gvErr != nil {
+			return false, true, gvErr
+		}
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gv.WithKind(kind))
+		if gErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, child); gErr != nil {
+			if errors.IsNotFound(gErr) {
+				// Declared but not created yet: not settled (fail-closed).
+				return false, true, nil
+			}
+			return false, true, gErr
+		}
+		if !childSnapshotSettled(child) {
+			return false, true, nil
+		}
+	}
+	return true, true, nil
+}
+
+// childSnapshotSettled reports whether a child snapshot has gone terminal for childrenSettled purposes —
+// captured-OK OR failed. Terminal = child Ready==True, OR domain phase in {Finished,Failed}, OR a terminal
+// Ready=False reason (IsReasonTerminal). Both terminal channels are read explicitly:
+//
+//   - The domain phase=Failed is read DIRECTLY off status.captureState.domainSpecificController.phase. The
+//     core bubbles a domain's FREE-FORM phase=Failed reason VERBATIM onto the child Ready (ready_mirror.go),
+//     and a free-form domain reason is not in TerminalReadyReasons, so IsReasonTerminal(Ready) alone would
+//     miss a domain failure (e.g. a consistency-deadline reject). Reading phase catches it. phase=Finished
+//     (barrier 2, domain done) is the settled-OK domain channel.
+//   - The core-derived terminals a child's data-leg or subtree failure surfaces on its Ready
+//     (VolumeCaptureFailed, ChildrenFailed, ...) are caught by the IsReasonTerminal channel.
+//
+// Ready==True is the plain captured-OK channel (e.g. a manifest-only leaf child). No observedGeneration gate
+// is needed: the snapshot spec is immutable (no recapture) and the latch is monotonic.
+func childSnapshotSettled(child *unstructured.Unstructured) bool {
+	switch storagev1alpha1.SnapshotCapturePhase(ownerDomainCapturePhase(child)) {
+	case storagev1alpha1.SnapshotCapturePhaseFinished, storagev1alpha1.SnapshotCapturePhaseFailed:
+		return true
+	}
+	rc := usecase.CurrentReadyCondition(child)
+	if rc == nil {
+		return false
+	}
+	if rc.Status == metav1.ConditionTrue {
+		return true
+	}
+	return rc.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(rc.Reason)
 }
 
 // observeOwnerDataLegVCR observes the domain-created VolumeCaptureRequest to drive the main-owned VCR

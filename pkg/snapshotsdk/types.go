@@ -108,6 +108,13 @@ type CoreCaptureState struct {
 	ManifestCaptured *bool
 	// DataCaptured is the data-leg latch (declared only where a data line exists).
 	DataCaptured *bool
+	// ChildrenSettled is the core-computed "every direct child has gone terminal (captured-OK or failed)"
+	// latch (captureState.commonController.childrenSettled). It is NOT a capture leg: it does NOT participate
+	// in AllLegsCaptured or CoreCaptureOutcome (the subtree-scoped latches are orthogonal to this node's own
+	// legs). It is the completeness signal a domain reads — orthogonal to success — to time a barrier-2 action
+	// (e.g. fs unfreeze) that must fire even when a child data snapshot failed. nil = no direct children (leaf)
+	// or not computed yet; true once every direct child is terminal.
+	ChildrenSettled *bool
 }
 
 // manifestCaptured reports whether the manifest leg is captured (nil latch => not captured).
@@ -117,6 +124,13 @@ func (c CoreCaptureState) manifestCaptured() bool {
 
 // dataCaptured reports whether the data leg is captured (nil latch => not captured).
 func (c CoreCaptureState) dataCaptured() bool { return c.DataCaptured != nil && *c.DataCaptured }
+
+// childrenSettled reports whether every direct child has gone terminal (captured-OK or failed). A nil latch
+// (no direct children, or not computed yet) reads as false. It is deliberately NOT consulted by
+// AllLegsCaptured: childrenSettled is a subtree completeness signal, not a leg of THIS node's capture.
+func (c CoreCaptureState) childrenSettled() bool {
+	return c.ChildrenSettled != nil && *c.ChildrenSettled
+}
 
 // AllLegsCaptured reports whether every declared (non-nil) leg is captured. It requires at least one
 // declared leg: with no leg declared yet (both nil) capture has not started, so it returns false — this

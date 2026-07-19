@@ -378,5 +378,71 @@ func aggregatedAPISpecs() {
 			Expect(found).To(BeTrue())
 			Expect(val).To(BeTrue())
 		})
+
+		It("latches commonController.childrenSettled on every node WITH children once its direct children are terminal, snapshot-native, nil on leaves (childrenSettled contract)", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			ns := captured.namespace
+
+			nodes := []childRef{{kind: "Snapshot", name: captured.rootSnap}}
+			descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			nodes = append(nodes, descendants...)
+
+			By("Asserting childrenSettled is present+true on nodes WITH children, absent (nil) on leaves, and never on content")
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: no owning xxxSnapshot commonController of its own
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, gvr, ns, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					// childrenSettled is computed over the node's DIRECT children: an aggregator (root, VM) with
+					// children latches it true once every direct child is terminal (captured-OK or failed); a
+					// leaf (a disk with no children) never declares it. This is the "childrenSettled appears on
+					// the aggregator after its children go terminal" assertion, keyed on the actual tree shape.
+					hasChildren := len(childSnapshotRefs(snap)) > 0
+					val, found := snapshotCommonControllerLatch(snap, "childrenSettled")
+					if hasChildren {
+						g.Expect(found).To(BeTrue(), "node %s/%s has children, so it must carry commonController.childrenSettled", node.kind, node.name)
+						g.Expect(val).To(BeTrue(), "node %s/%s childrenSettled must latch true once every direct child is terminal", node.kind, node.name)
+					} else {
+						g.Expect(found).To(BeFalse(), "leaf node %s/%s (no children) must NOT declare childrenSettled (nil)", node.kind, node.name)
+					}
+
+					contentName, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+					g.Expect(contentName).NotTo(BeEmpty())
+					content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+					g.Expect(err).NotTo(HaveOccurred())
+					_, onContent := snapshotCommonControllerLatch(content, "childrenSettled")
+					g.Expect(onContent).To(BeFalse(),
+						"childrenSettled is snapshot-native (content has no phase): SnapshotContent %s must NOT carry it", contentName)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+
+			By("Asserting the ROOT (always has the VM child) carries childrenSettled=true")
+			root, err := getResource(ctx, snapshotGVR, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childSnapshotRefs(root)).NotTo(BeEmpty(), "the root must have at least the VM child so this assertion is non-vacuous")
+			rval, rfound := snapshotCommonControllerLatch(root, "childrenSettled")
+			Expect(rfound).To(BeTrue(), "the root has children, so it must carry childrenSettled")
+			Expect(rval).To(BeTrue(), "the root childrenSettled must be true once every direct child is terminal")
+
+			By("Asserting the DemoVirtualMachineSnapshot aggregator, when it has disk children, shows childrenSettled=true after the disks go terminal")
+			if vm, ok := firstNodeOfKind(descendants, "DemoVirtualMachineSnapshot"); ok {
+				vmGVR, gok := gvrForSnapshotKind(vm.kind)
+				Expect(gok).To(BeTrue())
+				vmSnap, err := getResource(ctx, vmGVR, ns, vm.name)
+				Expect(err).NotTo(HaveOccurred())
+				if len(childSnapshotRefs(vmSnap)) > 0 {
+					vval, vfound := snapshotCommonControllerLatch(vmSnap, "childrenSettled")
+					Expect(vfound).To(BeTrue(), "the VM snapshot has disk children, so it must carry childrenSettled")
+					Expect(vval).To(BeTrue(), "the VM snapshot childrenSettled must be true once its disks are terminal")
+				}
+			}
+		})
 	})
 }
