@@ -602,6 +602,33 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		deriveReadyStatus(&plan)
 	}
 
+	// Post-capture ManifestCheckpoint integrity: a published manifest artifact that DISAPPEARS after this
+	// node's manifest was captured is a terminal loss, symmetric with a missing chunk (which is already
+	// terminal via validateCommonContentManifestCheckpoint). buildCommonSnapshotContentStatusPlan reads the
+	// MCP from the CACHE and, by design, keeps a NotFound as the non-terminal ManifestCapturePending — the
+	// legitimate publish-before-create window (manifestCheckpointName is published before the MCP object
+	// exists). Once the owning snapshot's monotonic commonController.manifestCaptured latch is set that
+	// window is closed, so a manifest leg still pending here is confirmed UNCACHED (APIReader): a
+	// genuinely-absent published MCP is escalated to the terminal ManifestCheckpointFailed (which propagates
+	// up the content tree as ChildrenFailed), while a mere stale-cache miss (MCP still in the API) is left
+	// pending to converge next pass. Gated on (latch AND pending-and-not-already-failed manifest leg) so the
+	// happy path adds no extra GET, and confirmed uncached so a stale cache never terminally fails the tree.
+	if ownerManifestCaptured(owner) && plan.manifestsReady != metav1.ConditionTrue && !plan.manifestsFailed {
+		if mcpName, _, _ := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName"); mcpName != "" {
+			gone, goneErr := r.publishedManifestCheckpointGone(ctx, mcpName)
+			if goneErr != nil {
+				return false, goneErr
+			}
+			if gone {
+				plan.manifestsReady = metav1.ConditionFalse
+				plan.manifestsFailed = true
+				plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
+				plan.manifestsMessage = fmt.Sprintf("published ManifestCheckpoint %s was deleted after manifest capture", mcpName)
+				deriveReadyStatus(&plan)
+			}
+		}
+	}
+
 	// Barrier 2 on the CONTENT's OWN Ready (ADR §6.2): fold the owning Snapshot's domain capture phase into
 	// this content's derived Ready. A domain phase=Failed becomes the canonical terminal
 	// ReasonDomainCaptureFailed and a not-yet-Finished domain holds Ready=False/ChildrenPending, so the
@@ -1680,6 +1707,36 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 		return mcp.Name, false, true, cond.Message, nil
 	}
 	return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcp.Name), nil
+}
+
+// ownerManifestCaptured reports the owning snapshot's monotonic commonController.manifestCaptured latch
+// (status.captureState.commonController.manifestCaptured). Once true, this node's manifest artifact was
+// produced and its content's manifestCheckpointName published, so the publish-before-create window is
+// closed. A nil owner (ownerless/bucket content or the exported test entry) reports false — i.e. behaves as
+// pre-capture, where a missing MCP stays the non-terminal ManifestCapturePending.
+func ownerManifestCaptured(owner *unstructured.Unstructured) bool {
+	if owner == nil {
+		return false
+	}
+	v, _, _ := unstructured.NestedBool(owner.Object, "status", "captureState", "commonController", "manifestCaptured")
+	return v
+}
+
+// publishedManifestCheckpointGone confirms via an UNCACHED APIReader read that the named ManifestCheckpoint
+// is genuinely absent from the API server (not merely missing from the controller cache). It is called only
+// after a cached read already found the manifest leg not-ready AND the owner's manifest-capture latch is
+// set (see reconcileCommonSnapshotContentStatus), so it adds no GET on the happy path and never terminally
+// fails the tree on cache staleness. The uncached read mirrors firstMissingManifestCheckpointChunk's
+// APIReader chunk existence check (Phase 2a keeps get-only, no MCP list/watch beyond the existing informer).
+func (r *SnapshotContentController) publishedManifestCheckpointGone(ctx context.Context, mcpName string) (bool, error) {
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // ensureFinalizersOnChildrenForCascade ensures the parent-protect finalizer on every existing, non-deleting
