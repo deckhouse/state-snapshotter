@@ -75,6 +75,20 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		dumpFailedSpecDiagnostics(ctx)
 	})
 
+	// Global readiness invariant, enforced at the END of every spec that otherwise passed: no snapshot in
+	// the cluster may be Ready=True while any descendant in its tree is not Ready (the propagation bug the
+	// domain-phase-fold fix closes). Registered AFTER the diagnostics hook so it runs FIRST (Ginkgo runs
+	// AfterEach nodes in reverse registration order): if it trips, the diagnostics hook then dumps the
+	// offending tree. Skipped when the spec already failed (its own failure + diagnostics come first).
+	AfterEach(func() {
+		if CurrentSpecReport().Failed() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		assertReadyConsistencyAcrossTrees(ctx, 90*time.Second)
+	})
+
 	// Phases 1 & 2 merged into one manifest-only flow (no volume data): capture, aggregated subresource
 	// reads, namespace-capture rework, manifest restore, export->import round-trip, and TTL/GC cascade.
 	// These cheap specs share one `captured` tree and run sequentially, so they live under a single phase
@@ -106,6 +120,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3, env-gated)
 	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
 	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
+	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (opt-in: E2E_MANIFEST_CHECKPOINT_LOSS)
 	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (opt-in: E2E_FREEZE_DEADLINE)
 	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
 	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)

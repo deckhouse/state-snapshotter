@@ -1010,6 +1010,90 @@ func walkSnapshotTree(ctx context.Context, ns, rootSnapshot string) ([]childRef,
 	return out, nil
 }
 
+// --- global readiness-consistency invariant ---------------------------------
+
+// snapshotNodeReadyViolations recursively walks a snapshot node and its status.childrenSnapshotRefs
+// subtree, collecting violations of the readiness invariant: a node that is Ready=True MUST have every
+// direct child Ready=True (so a Ready node never hides an un-ready descendant). A NOT-ready node is
+// allowed to have not-ready children (it is still converging or terminally failed), so only Ready parents
+// are enforced. Nodes that vanish mid-walk (GC/teardown) are skipped, not reported. seen guards against
+// re-visiting a shared/looping ref. This is the recursive core of the domain-phase-fold guarantee (a
+// child that fails or is not yet finished must hold/fail its ancestors).
+func snapshotNodeReadyViolations(ctx context.Context, ns string, ref childRef, seen map[string]bool) []string {
+	key := ref.kind + "/" + ref.name
+	if seen[key] {
+		return nil
+	}
+	seen[key] = true
+
+	gvr, ok := gvrForSnapshotKind(ref.kind)
+	if !ok {
+		return nil // unknown kind: not part of the enforced snapshot tree
+	}
+	obj, err := getResource(ctx, gvr, ns, ref.name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // node GC'd/torn down mid-walk
+		}
+		return []string{fmt.Sprintf("get %s %s/%s: %v", ref.kind, ns, ref.name, err)}
+	}
+	parentReady, _ := snapshotNodeReady(obj, ref.kind)
+
+	var out []string
+	for _, ch := range childSnapshotRefs(obj) {
+		chGVR, ok := gvrForSnapshotKind(ch.kind)
+		if !ok {
+			continue
+		}
+		chObj, err := getResource(ctx, chGVR, ns, ch.name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue // child GC'd/torn down mid-walk
+			}
+			out = append(out, fmt.Sprintf("get child %s %s/%s: %v", ch.kind, ns, ch.name, err))
+			continue
+		}
+		if childReady, detail := snapshotNodeReady(chObj, ch.kind); parentReady && !childReady {
+			out = append(out, fmt.Sprintf(
+				"%s %s/%s is Ready=True but child %s/%s is NOT Ready (%s)",
+				ref.kind, ns, ref.name, ch.kind, ch.name, detail))
+		}
+		out = append(out, snapshotNodeReadyViolations(ctx, ns, ch, seen)...)
+	}
+	return out
+}
+
+// readyConsistencyViolations lists EVERY namespaced root Snapshot in the cluster and walks each tree,
+// returning all readiness-invariant violations (see snapshotNodeReadyViolations). An empty result means
+// every Ready snapshot node in every tree has an all-Ready child set.
+func readyConsistencyViolations(ctx context.Context) ([]string, error) {
+	roots, err := suiteDyn.Resource(snapshotGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list Snapshots: %w", err)
+	}
+	var violations []string
+	for i := range roots.Items {
+		root := &roots.Items[i]
+		seen := map[string]bool{}
+		violations = append(violations, snapshotNodeReadyViolations(ctx, root.GetNamespace(),
+			childRef{kind: "Snapshot", name: root.GetName()}, seen)...)
+	}
+	return violations, nil
+}
+
+// assertReadyConsistencyAcrossTrees enforces the global readiness invariant across every snapshot tree in
+// the cluster, retrying under a bounded timeout so a tree that is still legitimately converging (a Ready
+// parent whose child is a beat behind) settles instead of flaking. A genuine violation (a Ready snapshot
+// that keeps hiding an un-ready/failed descendant — the bug the domain-phase-fold fix closes) persists and
+// trips the assertion. Used as an end-of-spec guard for every spec (see the suite AfterEach).
+func assertReadyConsistencyAcrossTrees(ctx context.Context, timeout time.Duration) {
+	GinkgoHelper()
+	Eventually(func() ([]string, error) {
+		return readyConsistencyViolations(ctx)
+	}).WithContext(ctx).WithTimeout(timeout).WithPolling(2*time.Second).Should(BeEmpty(),
+		"a Ready snapshot must not hide an un-ready descendant (Ready => every child Ready, recursively)")
+}
+
 // errIsNotFound reports whether err is a Kubernetes NotFound (used by GC assertions).
 func errIsNotFound(err error) bool {
 	return apierrors.IsNotFound(err)
