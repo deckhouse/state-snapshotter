@@ -105,7 +105,7 @@ func createRootSnapshot(ctx context.Context, ns, name string) error {
 func captureSpecs() {
 	Context("Manifest-only capture", func() {
 		BeforeAll(func() {
-			captured.namespace = uniqueNS("src")
+			captured.namespace = uniqueNS("p1-src")
 			captured.rootSnap = rootSnapshotName
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

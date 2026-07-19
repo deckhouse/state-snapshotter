@@ -194,7 +194,7 @@ func resourceSelectorSpecs() {
 			var ns string
 
 			BeforeAll(func() {
-				ns = uniqueNS("selector-inc")
+				ns = uniqueNS("p1b-selector-include")
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer cancel()
 
@@ -279,7 +279,7 @@ func resourceSelectorSpecs() {
 			var ns string
 
 			BeforeAll(func() {
-				ns = uniqueNS("selector-exc")
+				ns = uniqueNS("p1b-selector-exclude")
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 				defer cancel()
 
@@ -404,7 +404,7 @@ func resourceSelectorVolumeDataSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the resourceSelector volume-data spec (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
-			ns = uniqueNS("selector-vol")
+			ns = uniqueNS("p3b-selector-pvc")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

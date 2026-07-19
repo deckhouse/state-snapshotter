@@ -224,7 +224,7 @@ func childBridgeFailureSpecs() {
 			}
 			sc = suiteCfg.storageClass
 			badSC = sc + "-nobind-vsc"
-			srcNS = uniqueNS("child-bridge")
+			srcNS = uniqueNS("p3-childbridge-neg")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

@@ -324,7 +324,7 @@ func getLoadSpecs() {
 				Skip("GET-load measurement disabled: it runs by default; set E2E_GET_LOAD=false to disable (the repeat-and-average run adds several minutes). It provisions its own thin StorageClass, so it does NOT need E2E_VOLUME_DATA, but it does need the base-cluster knobs TEST_CLUSTER_NAMESPACE / TEST_CLUSTER_STORAGE_CLASS that the volume-data flow also uses.")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("getload")
+			srcNS = uniqueNS("p3-getload")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

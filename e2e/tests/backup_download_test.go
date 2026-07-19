@@ -893,7 +893,7 @@ func backupDownloadSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the phase-4 backup download flow (it runs by default)")
 			}
 			backup.sc = suiteCfg.storageClass
-			backup.srcNS = uniqueNS("bk")
+			backup.srcNS = uniqueNS("p4-backup")
 			backup.checksums = map[string]string{}
 			backup.dataDir = bkBackupDataDir
 

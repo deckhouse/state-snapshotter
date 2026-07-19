@@ -326,7 +326,7 @@ func readyFlapSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the Ready-flap detector (it runs by default; needs real volume data)")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("flap")
+			srcNS = uniqueNS("p3-flap")
 
 			// SC provisioning + module enablement is the slow part; mirror the phase-3 setup. The default
 			// StorageClass + VolumeSnapshotClass wiring is idempotent, so it is safe even when the phase-3
@@ -353,7 +353,7 @@ func readyFlapSpecs() {
 			Expect(applyObjects(ctx, buildVolumeSource(srcNS, sc), srcNS)).To(Succeed())
 
 			By("Pre-creating the restore namespace (so detector B can read restore manifests without setup latency)")
-			restoreNS = uniqueNS("flap-restore")
+			restoreNS = uniqueNS("p3-flap-restore")
 			Expect(ensureNamespace(ctx, restoreNS)).To(Succeed())
 
 			DeferCleanup(func() {

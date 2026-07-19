@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ import (
 // --- Suite env knobs (storage-e2e cluster knobs are read by storage-e2e itself) ---
 const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
+	envRunID                = "E2E_RUN_ID"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
 	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
 	envDataTransferTO       = "E2E_DATA_TRANSFER_TIMEOUT"
@@ -267,7 +269,12 @@ var backup backupFixture
 const pollInterval = 5 * time.Second
 
 type e2eConfig struct {
-	nsPrefix        string
+	nsPrefix string
+	// runID is a per-run token shared by EVERY namespace this suite creates (snap-e2e-<runID>-<role>), so
+	// all namespaces of a single e2e pass carry the same prefix (list/clean them at once, no collision with
+	// leftovers from a previous keep-on-failure run). It is E2E_RUN_ID when set (sanitized), otherwise a
+	// generated MMDD-HHMM-<2 rand> token. See resolveRunID / uniqueNS.
+	runID           string
 	snapshotReadyTO time.Duration
 	captureReadyTO  time.Duration
 	dataTransferTO  time.Duration
@@ -316,6 +323,7 @@ func loadConfig() e2eConfig {
 	if cfg.nsPrefix == "" {
 		cfg.nsPrefix = defaultNSPrefix
 	}
+	cfg.runID = resolveRunID(os.Getenv(envRunID))
 	if cfg.gcTTL == "" {
 		cfg.gcTTL = defaultGCTTL
 	}
@@ -369,9 +377,63 @@ func parseDuration(raw string, def time.Duration) time.Duration {
 	return def
 }
 
-// uniqueNS returns a DNS-1123 namespace name with the configured prefix and a short run suffix.
+// uniqueNS returns a DNS-1123 namespace name of the form <nsPrefix>-<runID>-<role> (default
+// snap-e2e-<runID>-<role>). runID is shared across the whole e2e pass (see e2eConfig.runID), so every
+// namespace of one run carries the same prefix while <role> distinguishes them. Roles are unique per run,
+// so the name is unique without any per-call random suffix (list a whole run with
+// `kubectl get ns | grep <nsPrefix>-<runID>`). Falls back to <nsPrefix>-<role> only if runID is empty,
+// which never happens in practice (loadConfig always sets it).
 func uniqueNS(role string) string {
-	return fmt.Sprintf("%s-%s-%d", suiteCfg.nsPrefix, role, time.Now().UnixNano()%100000)
+	if suiteCfg.runID == "" {
+		return fmt.Sprintf("%s-%s", suiteCfg.nsPrefix, role)
+	}
+	return fmt.Sprintf("%s-%s-%s", suiteCfg.nsPrefix, suiteCfg.runID, role)
+}
+
+// resolveRunID returns the per-run token embedded in every namespace name. A non-empty E2E_RUN_ID (CI build
+// id, git short sha, ...) is sanitized to a DNS-1123 label and capped so the full namespace stays inside the
+// 63-char limit; when unset it generates a compact MMDD-HHMM-<2 rand> token — minute resolution plus two
+// random chars, so two runs starting in the same minute on one cluster still do not collide. Called once
+// from loadConfig (BeforeSuite), before any uniqueNS call.
+func resolveRunID(raw string) string {
+	if s := sanitizeDNSLabel(raw); s != "" {
+		if len(s) > 32 {
+			s = strings.TrimRight(s[:32], "-")
+		}
+		return s
+	}
+	return fmt.Sprintf("%s-%s", time.Now().Format("0102-1504"), randToken(2))
+}
+
+// sanitizeDNSLabel lowercases raw and collapses every run of characters outside [a-z0-9] into a single '-',
+// then trims leading/trailing '-', yielding a value safe to embed in a DNS-1123 namespace label. Returns ""
+// for input that has no usable characters.
+func sanitizeDNSLabel(raw string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// randToken returns n random chars drawn from [a-z0-9] (the generated run token's collision-avoidance tail).
+func randToken(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[rand.IntN(len(alphabet))]
+	}
+	return string(b)
 }
 
 // --- cluster lifecycle (mirror sds-elastic) --------------------------------

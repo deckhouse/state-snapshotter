@@ -328,7 +328,7 @@ func freezeDeadlineSpecs() {
 			}
 			baseSC = suiteCfg.storageClass
 			thickSC = baseSC + "-thick-nosnap"
-			srcNS = uniqueNS("freeze-deadline")
+			srcNS = uniqueNS("p3-freeze-neg")
 
 			freezeValue = os.Getenv(envFreezeDeadlineValue)
 			if freezeValue == "" {

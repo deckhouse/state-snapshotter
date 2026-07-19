@@ -44,10 +44,10 @@ const (
 	bkDataImportTTL    = "15m"
 	vsAPIVersion       = "snapshot.storage.k8s.io/v1"
 
-	bkImpNSVS   = "bk-imp-vs"
-	bkImpNSDisk = "bk-imp-disk"
-	bkImpNSVM   = "bk-imp-vm"
-	bkImpNSFull = "bk-imp-full"
+	bkImpNSVS   = "p5-import-vs"
+	bkImpNSDisk = "p5-import-disk"
+	bkImpNSVM   = "p5-import-vm"
+	bkImpNSFull = "p5-import-full"
 )
 
 // importNode describes one node in an import subtree (nested via children).

@@ -506,7 +506,7 @@ func volumeDataSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 volume-data flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("vol")
+			srcNS = uniqueNS("p3-voldata")
 			markers[vdPVCRoot] = "root-" + fmt.Sprintf("%d", time.Now().UnixNano())
 			markers[vdPVCDisk] = "disk-" + fmt.Sprintf("%d", time.Now().UnixNano())
 			markers[vdPVCStandalone] = "standalone-" + fmt.Sprintf("%d", time.Now().UnixNano())
@@ -935,7 +935,7 @@ func volumeDataSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
 
-			restoreNS := uniqueNS("vol-restore")
+			restoreNS := uniqueNS("p3-voldata-restore")
 			By("Creating the restore namespace " + restoreNS)
 			Expect(ensureNamespace(ctx, restoreNS)).To(Succeed())
 			DeferCleanup(func() {

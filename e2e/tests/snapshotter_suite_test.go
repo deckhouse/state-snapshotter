@@ -137,6 +137,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("E2E config:\n")
 	GinkgoWriter.Printf("  TEST_CLUSTER_CREATE_MODE:   %q\n", os.Getenv("TEST_CLUSTER_CREATE_MODE"))
 	GinkgoWriter.Printf("  namespace prefix:           %q\n", suiteCfg.nsPrefix)
+	GinkgoWriter.Printf("  run id (ns %s-<runID>-<role>): %q  (E2E_RUN_ID or generated MMDD-HHMM-<rand>)\n", suiteCfg.nsPrefix, suiteCfg.runID)
 	GinkgoWriter.Printf("  snapshot ready timeout:     %s\n", suiteCfg.snapshotReadyTO)
 	GinkgoWriter.Printf("  capture ready timeout:      %s\n", suiteCfg.captureReadyTO)
 	GinkgoWriter.Printf("  data transfer timeout:      %s\n", suiteCfg.dataTransferTO)

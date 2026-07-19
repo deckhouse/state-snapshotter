@@ -277,7 +277,7 @@ func volumeDataGcSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 durable volume-data teardown flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("vol-gc")
+			srcNS = uniqueNS("p3-voldata-gc")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

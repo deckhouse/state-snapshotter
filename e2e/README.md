@@ -174,6 +174,14 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 
 - `E2E_SNAPSHOTTER_NS_PREFIX`: prefix for the source/restore namespaces the suite
   creates. Defaults to `snap-e2e`.
+- `E2E_RUN_ID`: a per-run token embedded in every namespace name, which has the form
+  `<prefix>-<runID>-<role>` (e.g. `snap-e2e-0719-2259-9f-import`). One e2e pass shares one
+  `runID`, so all its namespaces carry the same prefix — list/clean a whole run with
+  `kubectl get ns | grep <prefix>-<runID>`, with no collision against leftovers from an
+  earlier keep-on-failure run. When unset, a compact `MMDD-HHMM-<2 rand>` token is
+  generated. A provided value (CI build id, git short sha, …) is lowercased, sanitized to a
+  DNS-1123 label, and capped at 32 chars so the full namespace stays within the 63-char
+  limit.
 - `E2E_SNAPSHOT_READY_TIMEOUT`: Go duration bounding Snapshot/SnapshotContent
   readiness waits. Defaults to `10m`.
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.

@@ -133,7 +133,7 @@ func eagerShellDeletionSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("eager-del")
+			ns := uniqueNS("p1-eager-del")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -157,7 +157,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-life")
+			ns := uniqueNS("p1-rbac-lifecycle")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -195,7 +195,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-notrigger")
+			ns := uniqueNS("p1-rbac-import-notrigger")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -219,7 +219,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-del")
+			ns := uniqueNS("p1-rbac-del-before-archive")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -251,7 +251,7 @@ func rawSecretsSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("secrets")
+			ns := uniqueNS("p1-raw-secrets")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -327,7 +327,7 @@ func inclusionRuleSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("inclusion")
+			ns := uniqueNS("p1-discovery-inclusion")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -487,7 +487,7 @@ func specImmutabilitySpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("immutable")
+			ns := uniqueNS("p1-spec-immutable-neg")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -554,7 +554,7 @@ func arbitraryCRSpecs() {
 			})
 			Expect(waitObjectCondition(ctx, crdGVR, "", "widgetthings.e2e.snapshotter.test", "Established", "True", 2*time.Minute)).To(Succeed())
 
-			ns := uniqueNS("arbcr")
+			ns := uniqueNS("p1-arbitrary-cr")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -590,7 +590,7 @@ func childDegradationSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("degrade")
+			ns := uniqueNS("p1-child-degrade")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 

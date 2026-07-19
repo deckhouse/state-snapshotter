@@ -197,7 +197,7 @@ func volumeSnapshotDomainSpecs() {
 				Skip("E2E_VOLUME_DATA=false: skipping the Block 3d VolumeSnapshot-domain specs (they run by default)")
 			}
 			sc = suiteCfg.storageClass
-			ns = uniqueNS("vsdom")
+			ns = uniqueNS("p3d-vsdom")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

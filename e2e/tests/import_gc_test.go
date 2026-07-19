@@ -81,7 +81,7 @@ func importSpecs() {
 
 		BeforeAll(func() {
 			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
-			importNS = uniqueNS("import")
+			importNS = uniqueNS("p2-import")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
@@ -318,7 +318,7 @@ func gcSpecs() {
 		)
 
 		BeforeAll(func() {
-			gcNS = uniqueNS("gc")
+			gcNS = uniqueNS("p2-gc")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.moduleReadyTO+5*time.Minute)
 			defer cancel()

@@ -44,7 +44,7 @@ func resourceSelectorAdmissionSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("selector-import")
+			ns := uniqueNS("p1b-selector-import-neg")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 

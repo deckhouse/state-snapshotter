@@ -231,10 +231,13 @@ func manifestCheckpointLossSpecs() {
 
 		// captureFreshDataTree provisions a fresh, fully-Ready three-level data tree in its own namespace and
 		// returns that namespace. Each delete case needs a pristine Ready tree (MCP loss is terminal and does
-		// not self-heal), so this cannot be shared across cases. The namespace is reaped by DeferCleanup.
-		captureFreshDataTree := func(ctx context.Context) string {
+		// not self-heal), so this cannot be shared across cases. caseSuffix keeps each case's namespace
+		// distinct within one run (p3-mcploss-<case>-neg) — without a per-call random suffix, reusing one role
+		// across the four cases would collide on the still-terminating namespace of the previous case. The
+		// namespace is reaped by DeferCleanup.
+		captureFreshDataTree := func(ctx context.Context, caseSuffix string) string {
 			GinkgoHelper()
-			ns := uniqueNS("mcp-loss")
+			ns := uniqueNS("p3-mcploss-" + caseSuffix + "-neg")
 
 			By("Creating the source namespace " + ns + " and applying the VM+disk source")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
@@ -278,7 +281,7 @@ func manifestCheckpointLossSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+20*time.Minute)
 			defer cancel()
 
-			ns := captureFreshDataTree(ctx)
+			ns := captureFreshDataTree(ctx, "root")
 
 			By("Resolving and deleting the root Snapshot's ManifestCheckpoint")
 			mcpName, err := nodeManifestCheckpointName(ctx, snapshotGVR, ns, mcpLossRootSnapshotName)
@@ -295,7 +298,7 @@ func manifestCheckpointLossSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+20*time.Minute)
 			defer cancel()
 
-			ns := captureFreshDataTree(ctx)
+			ns := captureFreshDataTree(ctx, "child")
 
 			By("Resolving the DemoVirtualMachineSnapshot child node")
 			vmSnap, err := waitSnapshotChildOfKind(ctx, ns, mcpLossRootSnapshotName, "DemoVirtualMachineSnapshot", suiteCfg.captureReadyTO)
@@ -320,7 +323,7 @@ func manifestCheckpointLossSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+20*time.Minute)
 			defer cancel()
 
-			ns := captureFreshDataTree(ctx)
+			ns := captureFreshDataTree(ctx, "disk")
 
 			By("Resolving the DemoVirtualDiskSnapshot grandchild node")
 			diskSnap, err := waitSnapshotChildOfKind(ctx, ns, mcpLossRootSnapshotName, "DemoVirtualDiskSnapshot", suiteCfg.captureReadyTO)
@@ -345,7 +348,7 @@ func manifestCheckpointLossSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+20*time.Minute)
 			defer cancel()
 
-			ns := captureFreshDataTree(ctx)
+			ns := captureFreshDataTree(ctx, "chunk")
 
 			By("Resolving the DemoVirtualDiskSnapshot grandchild node and its ManifestCheckpoint")
 			diskSnap, err := waitSnapshotChildOfKind(ctx, ns, mcpLossRootSnapshotName, "DemoVirtualDiskSnapshot", suiteCfg.captureReadyTO)

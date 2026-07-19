@@ -34,7 +34,7 @@ func restoreSpecs() {
 
 		BeforeAll(func() {
 			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
-			restoreNS = uniqueNS("restore")
+			restoreNS = uniqueNS("p2-restore")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()

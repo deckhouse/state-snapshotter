@@ -178,6 +178,7 @@ check-env: ## Print the relevant env vars for the nested flow
 	@echo ""
 	@echo "=== state-snapshotter suite knobs ==="
 	@echo "E2E_SNAPSHOTTER_NS_PREFIX:              $${E2E_SNAPSHOTTER_NS_PREFIX}  # namespace prefix for source/restore namespaces (default snap-e2e)"
+	@echo "E2E_RUN_ID:                             $${E2E_RUN_ID}  # per-run token shared by all namespaces (snap-e2e-<runID>-<role>); default generated MMDD-HHMM-<2 rand>"
 	@echo "E2E_SNAPSHOT_READY_TIMEOUT:             $${E2E_SNAPSHOT_READY_TIMEOUT}  # Go duration, default 10m"
 	@echo "E2E_MODULE_READY_TIMEOUT:               $${E2E_MODULE_READY_TIMEOUT}  # Go duration, default 15m"
 	@echo "E2E_GC_TTL:                             $${E2E_GC_TTL}  # snapshotTtlAfterDelete for the GC spec (default 60s)"
