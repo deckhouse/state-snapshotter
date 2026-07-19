@@ -106,6 +106,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3, env-gated)
 	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
 	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
+	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (opt-in: E2E_FREEZE_DEADLINE)
 	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
 	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
 	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
