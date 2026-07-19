@@ -234,27 +234,31 @@ setting the flag to a falsey value (`false`/`0`/`no`/`off`).
   cluster (`status.url`) and from outside through the ingress (`status.publicURL`), plus
   the aggregated **manifests** reachable externally through the same published
   `kubernetes-api` ingress (no separate APIService ingress). Set `E2E_PUBLISH=false` to
-  disable (do this on clusters without the publish infrastructure). The publish
-  infrastructure is **already provisioned by the storage-e2e bootstrap** — this flag does
-  **not** install anything. It only turns on a **BeforeSuite sanity-check** that fails fast
-  (before any spec runs) if the installed profile is incomplete, then records the ingress
-  facts for the publish specs. The bootstrap provides:
-  - user-authn `publishAPI.enabled=true` (publishes the kube-API through the origin
-    `kubernetes-api` Ingress, whose TLS secret the DataExport/DataImport ingresses
-    reuse);
-  - global `publicDomainTemplate = %s.<masterIP>.sslip.io` — `sslip.io` is a public
-    wildcard DNS, so `api.<masterIP>.sslip.io` resolves to the nested master from
-    anywhere (no extra DNS setup; the external path can also fall back to
-    `curl --resolve api.<domain>:443:<masterIP>`);
-  - ingress-nginx (class `nginx`) from the Default bundle.
+  disable (do this on clusters where you do not want the suite to touch ingress). It runs
+  a **BeforeSuite step BEFORE the module-readiness wait** (so a cluster that cannot support
+  publish fails fast), which asserts the prerequisites a test must not fabricate and
+  ensures the one it safely can:
+  - global `publicDomainTemplate = %s.<masterIP>.sslip.io` — a hard prerequisite (it is
+    cluster-global; `sslip.io` is a public wildcard DNS, so `api.<masterIP>.sslip.io`
+    resolves to the nested master from anywhere, and the external path can also fall back
+    to `curl --resolve api.<domain>:443:<masterIP>`). Empty ⇒ fail fast.
+  - the origin `kubernetes-api` Ingress (from user-authn `publishAPI.enabled=true`, whose
+    TLS secret the DataExport/DataImport ingresses reuse) — searched in `kube-system`
+    **and** `d8-user-authn` (its namespace is version-dependent); its host is recorded as
+    the expected `status.publicURL` prefix. Missing ⇒ fail fast.
+  - a working `nginx` IngressClass — **ensured**: if one already exists it is reused
+    (nothing is mutated); otherwise the step provisions it (enables the `ingress-nginx`
+    module and creates a HostPort `IngressNginxController` that also lands on the master,
+    whose IP the publish domain resolves to). The storage-e2e bootstrap wires the first
+    two only on `alwaysCreateNew`; it configures **no** ingress, so this ensure step is
+    what makes publish work on `alwaysUseExisting` (and on a fresh cluster).
 
-  The sanity-check verifies: (a) the origin `kubernetes-api` Ingress exists
-  (searched in `kube-system` **and** `d8-user-authn` — its namespace is
-  version-dependent) and records its host as the expected `status.publicURL` prefix;
-  (b) ingress-nginx is Ready and the `nginx` IngressClass exists; (c)
-  `publicDomainTemplate` is non-empty on the global ModuleConfig. TLS on the
-  sslip.io host of a private master IP is typically self-signed (Let's Encrypt cannot
-  reach it), so external requests use `-k` or the ingress CA (`status.ca`).
+  TLS on the sslip.io host of a private master IP is typically self-signed (Let's Encrypt
+  cannot reach it), so external requests use `-k` or the ingress CA (`status.ca`).
+- `E2E_PUBLISH_INGRESS_INLET`: inlet for the `IngressNginxController` the publish step
+  provisions when a cluster has no ingress class. Defaults to `HostPort` (the only inlet
+  that works on the static nested cluster, whose publish domain is the master IP). Only
+  used on the provision path; ignored when a `nginx` class already exists.
 - `E2E_STORAGE_CLASS`: the thin, snapshot-capable StorageClass the suite
   provisions/uses for phase 3. Defaults to `e2e-thin`.
 - `E2E_PROBE_IMAGE`: container image (must ship `sh` + `cat`) for the PVC

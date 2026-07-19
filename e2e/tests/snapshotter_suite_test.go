@@ -163,6 +163,19 @@ func prepareSuite() {
 	suiteDyn, err = dynamic.NewForConfig(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build dynamic client")
 
+	// Publish (ingress + tokens) prerequisites are a hard, cluster-side gate that does NOT depend on the
+	// snapshot module stack, so check them FIRST — before the multi-minute module-readiness wait below —
+	// so a cluster that cannot support publish fails immediately instead of only after the whole stack
+	// converges. The gate is ON by default (opt-out via E2E_PUBLISH=false). The storage-e2e bootstrap
+	// wires these prerequisites (global publicDomainTemplate + user-authn publishAPI + a working `nginx`
+	// IngressClass) ONLY on alwaysCreateNew; an alwaysUseExisting/commander cluster must already provide
+	// them — they are cluster-global (publicDomainTemplate) or infra-specific (the ingress controller
+	// inlet) and thus NOT something a test can safely install — otherwise set E2E_PUBLISH=false.
+	// checkPublishInfra INSTALLS NOTHING: it asserts the profile (fail-fast) and records the ingress facts.
+	if suiteCfg.publish {
+		checkPublishInfra()
+	}
+
 	// waitModuleAndCSDReady enables + waits for the whole module stack (five modules across three
 	// dependency levels: state-snapshotter/sds-node-configurator -> storage-foundation/poc ->
 	// sds-local-volume), then the demo CSD. Each wait is bounded by moduleReadyTO; convergence is largely
@@ -173,15 +186,6 @@ func prepareSuite() {
 
 	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC), demo CSDs AccessGranted, and demo CRDs Established")
 	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD/CRD readiness")
-
-	// Publish (ingress + tokens) specs need the publish infrastructure the storage-e2e bootstrap
-	// provisions out of the box (user-authn publishAPI + global publicDomainTemplate + ingress-nginx).
-	// The publish gate is ON by default (opt-out via E2E_PUBLISH=false): fail fast here — before any spec
-	// runs — if that profile is incomplete, and record the discovered ingress facts for the publish specs.
-	// It INSTALLS NOTHING. Environments without publish infra set E2E_PUBLISH=false to skip this check.
-	if suiteCfg.publish {
-		checkPublishInfra()
-	}
 }
 
 // prepareSharedState runs once before the Ordered specs. Clients and module readiness are already set up
