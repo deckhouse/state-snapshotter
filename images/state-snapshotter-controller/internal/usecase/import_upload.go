@@ -29,7 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -206,7 +205,7 @@ func (s *ImportUploadService) UploadToContent(ctx context.Context, content *stor
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
 			fmt.Sprintf("SnapshotContent %q has no spec.snapshotRef.uid to key the reconstructed ManifestCheckpoint", content.Name))
 	}
-	snapshotUID := types.UID(content.Spec.SnapshotRef.UID)
+	snapshotUID := content.Spec.SnapshotRef.UID
 
 	// The MCP is born owned by the SnapshotContent (bind-first guarantees the content exists), so it is
 	// GC-safe immediately — no ObjectKeeper backstop and no aggregator re-parent needed.

@@ -76,7 +76,7 @@ func importModeSnapshot(bound bool) *storagev1alpha1.Snapshot {
 // importContent builds the SnapshotContent the binder would create for the import Snapshot, with the
 // back-reference (spec.snapshotRef, uid included) the anti-spoofing check requires and the content-slug
 // UID the reconstructed-MCP name is keyed to.
-func importContent(snapUID string) *storagev1alpha1.SnapshotContent {
+func importContent() *storagev1alpha1.SnapshotContent {
 	return &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: testContentName, UID: types.UID(testContentUID)},
 		Spec: storagev1alpha1.SnapshotContentSpec{
@@ -85,7 +85,7 @@ func importContent(snapUID string) *storagev1alpha1.SnapshotContent {
 				Kind:       "Snapshot",
 				Namespace:  testSnapNS,
 				Name:       testSnapName,
-				UID:        types.UID(snapUID),
+				UID:        types.UID(testSnapUID),
 			},
 		},
 	}
@@ -120,7 +120,7 @@ func assertAggReason(t *testing.T, err error, wantStatus int, wantReason string)
 // ObjectKeeper backstop). The checkpoint name stays deterministic from the snapshot UID.
 func TestImportUpload_HappyPath_BoundSnapshot(t *testing.T) {
 	ctx := context.Background()
-	cl := uploadTestClient(t, importModeSnapshot(true), importContent(testSnapUID))
+	cl := uploadTestClient(t, importModeSnapshot(true), importContent())
 	svc := NewImportUploadService(cl)
 
 	child := UploadChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child"}
@@ -203,7 +203,7 @@ func TestImportUpload_409UntilBound(t *testing.T) {
 // manifests are forwarded to the content layer.
 func TestImportUpload_BackRefMismatch(t *testing.T) {
 	ctx := context.Background()
-	content := importContent(testSnapUID)
+	content := importContent()
 	content.Spec.SnapshotRef.Name = "other-snap" // back-ref aims at a different Snapshot
 	cl := uploadTestClient(t, importModeSnapshot(true), content)
 	svc := NewImportUploadService(cl)
@@ -232,7 +232,7 @@ func TestImportUpload_BoundContentMissing(t *testing.T) {
 // overwrite an already-Ready MCP (idempotency at the content layer).
 func TestImportUpload_Idempotent(t *testing.T) {
 	ctx := context.Background()
-	cl := uploadTestClient(t, importModeSnapshot(true), importContent(testSnapUID))
+	cl := uploadTestClient(t, importModeSnapshot(true), importContent())
 	svc := NewImportUploadService(cl)
 
 	body := uploadPayload(t)
@@ -279,7 +279,7 @@ func TestImportUpload_RejectsNonImportMode(t *testing.T) {
 
 func TestImportUpload_RejectsBadPayload(t *testing.T) {
 	ctx := context.Background()
-	cl := uploadTestClient(t, importModeSnapshot(true), importContent(testSnapUID))
+	cl := uploadTestClient(t, importModeSnapshot(true), importContent())
 	svc := NewImportUploadService(cl)
 	gvk := coreSnapshotGVK()
 
@@ -304,7 +304,7 @@ func TestImportUpload_RejectsBadPayload(t *testing.T) {
 // connector, leaf=true) must reject a non-empty childRefs payload (400).
 func TestImportUpload_LeafRejectsChildRefs(t *testing.T) {
 	ctx := context.Background()
-	cl := uploadTestClient(t, importModeSnapshot(true), importContent(testSnapUID))
+	cl := uploadTestClient(t, importModeSnapshot(true), importContent())
 	svc := NewImportUploadService(cl)
 
 	child := UploadChildRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "c"}
@@ -325,7 +325,7 @@ func TestImportUpload_NotFound(t *testing.T) {
 // aggregator's ReconstructedManifestCheckpointName(owner.UID) projection).
 func TestUploadToContent_HappyPath(t *testing.T) {
 	ctx := context.Background()
-	content := importContent(testSnapUID)
+	content := importContent()
 	cl := uploadTestClient(t, content)
 	svc := NewImportUploadService(cl)
 
@@ -350,7 +350,7 @@ func TestUploadToContent_HappyPath(t *testing.T) {
 // spec.snapshotRef.uid to key the reconstructed checkpoint name.
 func TestUploadToContent_MissingSnapshotRefUID(t *testing.T) {
 	ctx := context.Background()
-	content := importContent(testSnapUID)
+	content := importContent()
 	content.Spec.SnapshotRef.UID = ""
 	cl := uploadTestClient(t, content)
 	svc := NewImportUploadService(cl)
@@ -374,7 +374,7 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}, &storagev1alpha1.Snapshot{}).
-		WithObjects(importModeSnapshot(true), importContent(testSnapUID)).
+		WithObjects(importModeSnapshot(true), importContent()).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Snapshot" {
