@@ -106,6 +106,16 @@ const (
 	d8DataManagerNS = "d8-storage-foundation"
 )
 
+// demoCRDNames are the PoC-group CRDs the suite applies against. Module Ready + CSD AccessGranted can
+// latch from a previous install while an MPO roll is still installing these CRDs — wait for Established
+// so the first applyObjects(DemoVirtualMachine) does not race discovery.
+var demoCRDNames = []string{
+	"demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
+}
+
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
 var phase5ImportNS string
 
@@ -446,8 +456,8 @@ func moduleTagFromEnv(moduleName string) string {
 	return "main"
 }
 
-// waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
-// AccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
+// waitModuleAndCSDReady blocks until the required modules are Ready, the demo CSDs have reached
+// AccessGranted=True (030-domain-rbac), and the PoC demo CRDs are Established (discoverable for apply).
 func waitModuleAndCSDReady(ctx context.Context) error {
 	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
 	// The suite does not otherwise enable modules — it relies on storage-e2e applying
@@ -460,6 +470,10 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// Wait for EVERY required module to be Ready (not just state-snapshotter + the PoC), in dependency
 	// order. Without this the suite races the still-converging storage-foundation data plane and the
 	// sds-local-volume StorageClass the specs provision against.
+	//
+	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
+	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. The Established
+	// wait below closes that race for the demo API surface the specs apply first.
 	for _, m := range requiredModulesInReadyOrder {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
@@ -468,6 +482,11 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
 		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("demo CSD %s not AccessGranted: %w", csd, err)
+		}
+	}
+	for _, crd := range demoCRDNames {
+		if err := waitObjectCondition(ctx, crdGVR, "", crd, "Established", "True", suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("demo CRD %s not Established: %w", crd, err)
 		}
 	}
 	return nil

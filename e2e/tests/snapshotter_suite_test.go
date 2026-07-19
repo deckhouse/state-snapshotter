@@ -155,8 +155,8 @@ func prepareSuite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 
-	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC) and the demo CSD to become Ready")
-	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD readiness")
+	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC), demo CSDs AccessGranted, and demo CRDs Established")
+	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD/CRD readiness")
 
 	// Publish (ingress + tokens) specs need the publish infrastructure the storage-e2e bootstrap
 	// provisions out of the box (user-authn publishAPI + global publicDomainTemplate + ingress-nginx).
