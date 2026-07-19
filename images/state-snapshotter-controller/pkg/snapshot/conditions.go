@@ -88,6 +88,16 @@ const (
 	// VolumeCaptureRequest (domain path) or a terminal CSI VolumeSnapshot/VolumeSnapshotContent error
 	// (namespace-root orphan-PVC path, ADR 2026-06-09 / spec §3.9.11).
 	ReasonVolumeCaptureFailed = "VolumeCaptureFailed"
+	// ReasonDomainCaptureFailed is the canonical, tree-propagating terminal reason placed on a
+	// SnapshotContent's OWN Ready when its owning Snapshot reported a domain capture failure
+	// (status.captureState.domainSpecificController.phase=Failed). The domain's own reason is free-form
+	// (e.g. ConsistencyDeadlineExceeded) and therefore NOT in terminalChildContentFailureReasons, so a
+	// parent content would otherwise misread a failed domain child as merely pending. Folding phase=Failed
+	// into this canonical reason on the content (mirroring how a data-leg failure surfaces as
+	// VolumeCaptureFailed on the content) lets the failure propagate up the content-aggregation tree as
+	// ChildrenFailed (INV-FAIL-PROP). The domain's original reason/message is preserved in the message.
+	// The domain CR's own user-facing Ready keeps the raw domain reason (see applyDomainPhaseFold).
+	ReasonDomainCaptureFailed = "DomainCaptureFailed"
 	// ReasonManifestCheckpointFailed is the terminal requests-leg reason when the bound ManifestCheckpoint
 	// is terminally failed. Used by SnapshotContent aggregation (own requests leg) and the terminal
 	// child-content classification.

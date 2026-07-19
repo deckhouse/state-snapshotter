@@ -465,7 +465,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// core-owned terminal data-leg failure (failed VCR / Variant-A fault, decision D2): the aggregation
 	// makes the CONTENT itself terminal (DataReady=VolumeCaptureFailed) so it propagates up the
 	// content-aggregation tree as ChildrenFailed. See reconcileCommonSnapshotContentStatus.
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage, owner)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
@@ -487,7 +487,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// content-terminal VolumeCaptureFailed) is reflected on the Snapshot too. Removing the cross-controller
 	// hop is what closes the staleness window where the binder re-derived a stale Ready. On a transient API
 	// error, requeue and retry.
-	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj); err != nil {
+	if err := r.mirrorReadyToOwnerSnapshotWithOwner(ctx, obj, owner, ownerFound); err != nil {
 		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
 		return ctrl.Result{}, err
 	}
@@ -555,7 +555,7 @@ type commonContentStatusPlan struct {
 // requeuing on !ready, which is what drives the child->parent archive wave to converge via active
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string) (ready bool, err error) {
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string, owner *unstructured.Unstructured) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -601,6 +601,16 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		plan.volumeFailed = true
 		deriveReadyStatus(&plan)
 	}
+
+	// Barrier 2 on the CONTENT's OWN Ready (ADR §6.2): fold the owning Snapshot's domain capture phase into
+	// this content's derived Ready. A domain phase=Failed becomes the canonical terminal
+	// ReasonDomainCaptureFailed and a not-yet-Finished domain holds Ready=False/ChildrenPending, so the
+	// domain outcome propagates up the CONTENT-aggregation tree (a not-Ready child content holds/fails its
+	// parent) — not only onto the owning Snapshot via mirrorReadyToOwnerSnapshot. The SAME shared fold backs
+	// both post-bind writers so they always agree. owner==nil (ownerless/bucket content, or the exported
+	// test entry) and a non-domain owner (phase="") are no-ops. Applied AFTER the data-leg downgrades so a
+	// more specific own-leg terminal is already settled; the fold only ever downgrades Ready.
+	plan.readyStatus, plan.readyReason, plan.readyMessage = applyDomainPhaseFold(owner, true, plan.readyStatus, plan.readyReason, plan.readyMessage)
 
 	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
 	if err != nil {
@@ -700,11 +710,12 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 }
 
 // ReconcileCommonSnapshotContentStatus is the exported aggregation entry (tests/utility). It passes
-// dataLegPending=false and no terminal data-leg reason: callers that do not run the data-leg projection
-// this pass get the plain N/A treatment for an empty status.data (the aggregator's own Reconcile threads
-// the real pending/terminal signal).
+// dataLegPending=false, no terminal data-leg reason, and a nil owner: callers that do not run the data-leg
+// projection this pass get the plain N/A treatment for an empty status.data, and the domain-phase fold
+// (applyDomainPhaseFold) is skipped (owner==nil is a no-op). The aggregator's own Reconcile threads the
+// real pending/terminal signal and the resolved owning Snapshot.
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
-	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "")
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "", nil)
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, DataReady, ChildrenReady, the
@@ -1088,6 +1099,7 @@ var terminalChildContentFailureReasons = map[string]struct{}{
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
 	snapshot.ReasonVolumeCaptureFailed:      {},
+	snapshot.ReasonDomainCaptureFailed:      {},
 	snapshot.ReasonChildrenFailed:           {},
 }
 
