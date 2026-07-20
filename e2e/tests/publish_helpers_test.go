@@ -21,11 +21,15 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -157,6 +161,103 @@ func baseClusterDynamic() (dynamic.Interface, error) {
 	return dyn, nil
 }
 
+// --- base-cluster transient-tunnel retry -----------------------------------
+//
+// The base cluster is reached over a long-lived SSH tunnel established once in BeforeSuite Step 4 (local
+// port -> remote 6445 via the jump host). Over a multi-hour suite that tunnel can go stale/idle-dropped;
+// a stale tunnel surfaces on the tunnel's local port as a TLS-handshake timeout / connection refused /
+// connection reset / EOF with NO HTTP response — not an API-level error. A single-shot base-cluster call
+// (e.g. the ensureExternalCurlPod pod Create in a publish BeforeAll) then fails the whole spec even though
+// every functional assertion passed. The helpers below retry such calls and, between attempts, invalidate
+// the memoized base-cluster clients so the next attempt builds a fresh transport (a new TCP dial through
+// the tunnel), which recovers a half-dead SSH channel.
+
+const (
+	// baseClusterRetries / baseClusterRetryBackoff bound the transient-tunnel retry. Small and quick: the
+	// goal is to ride out a momentarily stale tunnel channel, not to wait out a dead tunnel forever.
+	baseClusterRetries      = 5
+	baseClusterRetryBackoff = 3 * time.Second
+)
+
+// invalidateBaseClusterClients drops the memoized base-cluster clients so the next baseClusterClientset /
+// baseClusterDynamic call rebuilds them (fresh transport -> fresh TCP dial through the SSH tunnel). The
+// publish specs that touch the base cluster run in a single Ordered container (serially), so there is no
+// concurrent access to these caches.
+func invalidateBaseClusterClients() {
+	baseClusterClientsetCache = nil
+	baseClusterDynamicCache = nil
+}
+
+// isTransientTunnelErr reports whether err is a transient transport failure worth retrying against the base
+// cluster over the SSH tunnel (TLS-handshake timeout, connection refused/reset, broken pipe, EOF, i/o
+// timeout, plus the API server's own timeout/unavailable/too-many-requests signals). It deliberately does
+// NOT match logical API errors (NotFound / AlreadyExists / Forbidden / Conflict) — those are returned to
+// the caller unchanged so real assertions never get masked by a retry.
+func isTransientTunnelErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	// TLS-handshake timeout is http.tlsHandshakeTimeoutError (a net.Error with Timeout()==true) wrapped in a
+	// *url.Error; both implement net.Error, so errors.As unwraps to the timeout regardless of nesting.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{
+		"tls handshake timeout",
+		"connection refused",
+		"connection reset",
+		"broken pipe",
+		"i/o timeout",
+		"no route to host",
+		"server misbehaving",
+		"unexpected eof",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryBaseCluster runs op, retrying on transient tunnel errors (isTransientTunnelErr) up to
+// baseClusterRetries times with a fixed backoff. On each transient failure it rebuilds the base-cluster
+// clients so op's next call dials the tunnel afresh. Non-transient errors (and success) return immediately;
+// a cancelled/expired ctx stops the loop. op MUST re-fetch its base-cluster client on every call (via
+// baseClusterClientset / baseClusterDynamic) so the rebuilt transport takes effect.
+func retryBaseCluster(ctx context.Context, what string, op func() error) error {
+	var err error
+	for attempt := 1; attempt <= baseClusterRetries; attempt++ {
+		if err = op(); err == nil {
+			return nil
+		}
+		if !isTransientTunnelErr(err) {
+			return err
+		}
+		GinkgoWriter.Printf("base-cluster %s: transient tunnel error (attempt %d/%d): %v; rebuilding client and retrying\n",
+			what, attempt, baseClusterRetries, err)
+		invalidateBaseClusterClients()
+		if attempt < baseClusterRetries {
+			if !sleepCtx(ctx, baseClusterRetryBackoff) {
+				return ctx.Err()
+			}
+		}
+	}
+	return fmt.Errorf("base-cluster %s: still failing after %d attempts over the SSH tunnel: %w", what, baseClusterRetries, err)
+}
+
 // --- (1) auth: SA / Role / RoleBinding / TokenRequest ----------------------
 
 // createServiceAccountIfNotExists creates a ServiceAccount in the nested cluster (idempotent).
@@ -279,18 +380,24 @@ func publishMasterIP(ctx context.Context) string {
 	// TODO(e2e-publish): verify on cluster — confirm the nested nodes are VirtualMachine CRs
 	// (virtualization.deckhouse.io/v1alpha2) in TEST_CLUSTER_NAMESPACE exposing .status.ipAddress, and that
 	// the node the publish host resolves to (the ingress-serving master) is the one selected here.
-	dyn, err := baseClusterDynamic()
-	if err != nil {
-		GinkgoWriter.Printf("publishMasterIP: base-cluster dynamic client unavailable: %v\n", err)
-		return ""
-	}
 	ns := strings.TrimSpace(suiteCfg.vmNamespace)
 	if ns == "" {
 		GinkgoWriter.Printf("publishMasterIP: TEST_CLUSTER_NAMESPACE is empty; cannot discover nested VM IPs\n")
 		return ""
 	}
-	list, err := dyn.Resource(virtualMachineGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
-	if err != nil {
+	var list *unstructured.UnstructuredList
+	if err := retryBaseCluster(ctx, "list VirtualMachines", func() error {
+		dyn, derr := baseClusterDynamic()
+		if derr != nil {
+			return derr
+		}
+		l, lerr := dyn.Resource(virtualMachineGVR).Namespace(ns).List(ctx, metav1.ListOptions{})
+		if lerr != nil {
+			return lerr
+		}
+		list = l
+		return nil
+	}); err != nil {
 		GinkgoWriter.Printf("publishMasterIP: list VirtualMachines in base ns %s: %v\n", ns, err)
 		return ""
 	}
@@ -359,16 +466,24 @@ func externalCurlPodSpec(ns string) *corev1.Pod {
 // lives in TEST_CLUSTER_NAMESPACE alongside the nested VMs so it can reach api.<domain>:443 on the DVP
 // network. Respect the keep-cluster knobs in the paired teardown (deleteExternalCurlPod).
 func ensureExternalCurlPod(ctx context.Context) error {
-	cs, err := baseClusterClientset()
-	if err != nil {
-		return err
-	}
 	ns := strings.TrimSpace(suiteCfg.vmNamespace)
 	if ns == "" {
 		return fmt.Errorf("TEST_CLUSTER_NAMESPACE is empty; cannot place the external curl pod in the nested VMs' base namespace")
 	}
-	if _, err := cs.CoreV1().Pods(ns).Create(ctx, externalCurlPodSpec(ns), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create external curl pod %s/%s on the base cluster: %w", ns, publishExtCurlPod, err)
+	// The pod Create is the base-cluster call that most often meets a stale tunnel (it is the first base
+	// call of a publish BeforeAll after a long stretch of nested-only specs). Retry it with a rebuilt client
+	// so a momentarily stale tunnel channel does not fail the spec.
+	if err := retryBaseCluster(ctx, fmt.Sprintf("create external curl pod %s/%s", ns, publishExtCurlPod), func() error {
+		cs, err := baseClusterClientset()
+		if err != nil {
+			return err
+		}
+		if _, err := cs.CoreV1().Pods(ns).Create(ctx, externalCurlPodSpec(ns), metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create external curl pod %s/%s on the base cluster: %w", ns, publishExtCurlPod, err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return waitBasePodRunning(ctx, ns, publishExtCurlPod, 5*time.Minute)
 }
@@ -379,23 +494,32 @@ func deleteExternalCurlPod(ctx context.Context) {
 		GinkgoWriter.Printf("%s: keeping base-cluster external curl pod %s/%s\n", keepReason(), suiteCfg.vmNamespace, publishExtCurlPod)
 		return
 	}
-	cs, err := baseClusterClientset()
-	if err != nil {
-		return
-	}
-	_ = cs.CoreV1().Pods(suiteCfg.vmNamespace).Delete(ctx, publishExtCurlPod, metav1.DeleteOptions{})
+	// Best-effort teardown, but still ride out a momentarily stale tunnel so the runner pod is actually
+	// reaped (a leaked pod would linger on the base cluster across runs).
+	_ = retryBaseCluster(ctx, "delete external curl pod", func() error {
+		cs, err := baseClusterClientset()
+		if err != nil {
+			return err
+		}
+		if derr := cs.CoreV1().Pods(suiteCfg.vmNamespace).Delete(ctx, publishExtCurlPod, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+			return derr
+		}
+		return nil
+	})
 }
 
 // waitBasePodRunning is waitPodRunning against the BASE cluster clientset (waitPodRunning uses the nested
 // suiteClientset).
 func waitBasePodRunning(ctx context.Context, ns, name string, timeout time.Duration) error {
-	cs, err := baseClusterClientset()
-	if err != nil {
-		return err
-	}
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {
+		// Re-fetch the client every iteration: on a transient tunnel error we invalidate the cache below, so
+		// the next Get dials the tunnel afresh instead of spinning on a half-dead transport until the deadline.
+		cs, err := baseClusterClientset()
+		if err != nil {
+			return err
+		}
 		pod, gerr := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if gerr == nil {
 			if pod.Status.Phase == corev1.PodRunning {
@@ -404,6 +528,9 @@ func waitBasePodRunning(ctx context.Context, ns, name string, timeout time.Durat
 			last = fmt.Sprintf("phase=%s", pod.Status.Phase)
 		} else {
 			last = fmt.Sprintf("get err=%v", gerr)
+			if isTransientTunnelErr(gerr) {
+				invalidateBaseClusterClients()
+			}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for base-cluster pod %s/%s Running; last: %s", ns, name, last)
