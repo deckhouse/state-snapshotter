@@ -65,3 +65,11 @@ git:
 imageSpec:
   config:
     entrypoint: ["/{{ $.ImageName }}"]
+
+{{- /*
+Attach an OpenVEX attestation to the state-snapshotter-controller image so trivy
+suppresses the unfixable golang.org/x/crypto/openpgp advisory (GO-2026-5932)
+reported against the controller binary. Predicate:
+/images/state-snapshotter-controller/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- include "vex mitigation" (list $ $.ImageName) }}
