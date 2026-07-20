@@ -331,6 +331,11 @@ func gvrForLiveKind(kind string) (schema.GroupVersionResource, bool) {
 		return demoVMGVR, true
 	case "DemoVirtualDisk":
 		return demoDiskGVR, true
+	case "Secret":
+		// The POC materializes a companion Secret for every DemoVirtualMachine, captured into the VM
+		// snapshot node's manifest leg ALONGSIDE the VM object (see veto_selector_test.go). Per-node
+		// manifests-download raw-vs-live comparison therefore encounters it and needs a live GVR mapping.
+		return secretGVR, true
 	default:
 		return schema.GroupVersionResource{}, false
 	}

@@ -115,6 +115,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		})
 	})
 	resourceSelectorSpecs()          // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
+	vetoSelectorSpecs()              // veto_selector_test.go: exclude-veto + resourceSelector across all tree levels (root object, VM child, disk grandchild, VM companion Secret, PVC/orphan, veto+selector combo) (default on; opt-out: E2E_VETO_SELECTOR=false; data fixture also needs E2E_VOLUME_DATA)
 	resourceSelectorAdmissionSpecs() // resource_selector_admission_test.go: CEL forbids spec.resourceSelector on mode: Import (admission rejection; skip-not-fail on an older CRD)
 	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
 	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
