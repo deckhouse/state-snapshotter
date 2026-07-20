@@ -606,6 +606,12 @@ func adminClientCertKey() (certPEM, keyPEM []byte) {
 // certs do not authenticate through the ingress (nginx terminates TLS, so the cert never reaches the
 // exporter). Mirrors runCurlOnce's direct-then-`--resolve` fallback for the sslip.io host.
 func runExternalClientCertProbe(ctx context.Context, t curlPodTarget, rawURL string, certPEM, keyPEM []byte, masterIP string) (int, error) {
+	if t.local {
+		// In-process client-cert probe from the test runner: present the client cert on the TLS handshake
+		// with NO Bearer token and assert the ingress does not authenticate it (see
+		// publish_external_http_test.go). The host->IP override folds in the masterIP `--resolve` role.
+		return localClientCertProbe(ctx, rawURL, certPEM, keyPEM)
+	}
 	if _, err := writePodFile(ctx, t, publishDECertPodFile, string(certPEM)); err != nil {
 		return 0, err
 	}

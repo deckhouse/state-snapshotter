@@ -610,6 +610,12 @@ func resolveSourceOrphanVS(ctx context.Context, srcNS, rootContent, srcPVC strin
 // and returns its sha256 hex digest (busybox sha256sum, matching the source-side dd|sha256sum and the
 // restore-probe read-back). The path is a test-controlled structural string (single-quoted).
 func generateRandomFileInPod(ctx context.Context, t curlPodTarget, path string, mib int) (string, error) {
+	if t.local {
+		// No pod: generate the payload in-process on the test runner and register it under `path` so the
+		// later local PUT (curlRequest.dataFile == path) sources its body from memory. Returns the same
+		// sha256 the restore-probe read-back compares against (see publish_external_http_test.go).
+		return generateLocalPayload(path, mib)
+	}
 	script := "dd if=/dev/urandom of=" + shQuote(path) + " bs=1M count=" + strconv.Itoa(mib) + " 2>/dev/null && sha256sum " + shQuote(path) + " | awk '{print $1}'"
 	stdout, stderr, err := t.exec(ctx, []string{"sh", "-c", script})
 	if err != nil {

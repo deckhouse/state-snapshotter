@@ -416,20 +416,32 @@ func publishMasterIP(ctx context.Context) string {
 // curlPodTarget identifies a pod (in either the nested or the base cluster) that runExec-style curl helpers
 // exec into. externalCurlTarget() addresses the base-cluster runner; nestedCurlTarget() addresses a pod in
 // the nested cluster (e.g. the backup-client pod) for the in-cluster (status.url) checks.
+//
+// When `local` is set the target is NOT a pod at all: the external publish path is served in-process by
+// the test runner over net/http (see publish_external_http_test.go). This is the alwaysUseExisting /
+// baremetal case, where there is no parent (base) cluster to host a curl runner and the origin ingress
+// host is instead reachable from the runner directly. The runExec-style helpers branch on `local` and
+// dispatch to the Go HTTP client; the pod fields are then unused.
 type curlPodTarget struct {
 	kubeconfig *rest.Config
 	ns         string
 	pod        string
 	container  string
+	local      bool // run the request in-process (net/http from the runner) instead of exec-ing curl in a pod
 }
 
 func (t curlPodTarget) exec(ctx context.Context, cmd []string) (stdout, stderr string, err error) {
 	return storagekube.ExecInPod(ctx, t.kubeconfig, t.ns, t.pod, t.container, cmd)
 }
 
-// externalCurlTarget addresses the base-cluster curl-runner pod. Its kubeconfig is the base cluster's, so
-// exec streams run against the parent cluster.
+// externalCurlTarget addresses the external publish runner. With a base cluster it is a curl-runner pod on
+// the parent cluster (exec streams run there); without one (alwaysUseExisting / baremetal — see
+// externalRunsLocally) it is the in-process net/http runner, which reaches the origin ingress host straight
+// from the test runner.
 func externalCurlTarget() (curlPodTarget, error) {
+	if externalRunsLocally() {
+		return curlPodTarget{local: true}, nil
+	}
 	cfg, err := baseClusterKubeconfig()
 	if err != nil {
 		return curlPodTarget{}, err
@@ -466,6 +478,13 @@ func externalCurlPodSpec(ns string) *corev1.Pod {
 // lives in TEST_CLUSTER_NAMESPACE alongside the nested VMs so it can reach api.<domain>:443 on the DVP
 // network. Respect the keep-cluster knobs in the paired teardown (deleteExternalCurlPod).
 func ensureExternalCurlPod(ctx context.Context) error {
+	if externalRunsLocally() {
+		// No parent cluster to host a runner pod (alwaysUseExisting / baremetal). The external publish
+		// checks run in-process (net/http) from the test runner against the public ingress host, so there
+		// is nothing to create here.
+		By("E2E_PUBLISH: no base cluster — external publish checks run in-process (net/http) from the test runner against the origin ingress host")
+		return nil
+	}
 	ns := strings.TrimSpace(suiteCfg.vmNamespace)
 	if ns == "" {
 		return fmt.Errorf("TEST_CLUSTER_NAMESPACE is empty; cannot place the external curl pod in the nested VMs' base namespace")
@@ -490,6 +509,10 @@ func ensureExternalCurlPod(ctx context.Context) error {
 
 // deleteExternalCurlPod tears the base-cluster runner down unless a keep-cluster knob asked to preserve it.
 func deleteExternalCurlPod(ctx context.Context) {
+	if externalRunsLocally() {
+		// The in-process net/http runner owns no cluster resources — nothing to reap.
+		return
+	}
 	if cleanupSkipped() {
 		GinkgoWriter.Printf("%s: keeping base-cluster external curl pod %s/%s\n", keepReason(), suiteCfg.vmNamespace, publishExtCurlPod)
 		return
@@ -592,6 +615,12 @@ func curlFlagsScript(r curlRequest, resolveArg string) string {
 // negative specs assert on 401/403. When the direct request produces no HTTP response (code 000) and
 // r.masterIP is set, it retries once with `--resolve` (the sslip DNS fallback).
 func runCurlRequest(ctx context.Context, t curlPodTarget, rawURL string, r curlRequest) (statusCode int, body string, err error) {
+	if t.local {
+		// No pod, no curl: perform the request in-process from the test runner (see
+		// publish_external_http_test.go). The Go client mirrors the curl semantics used for the external
+		// path (-k / InsecureSkipVerify, Bearer, headers, PUT body, host->IP override).
+		return localHTTPRequest(ctx, rawURL, r)
+	}
 	code, body, err := runCurlOnce(ctx, t, rawURL, r, "")
 	if err != nil {
 		return 0, "", err
@@ -633,6 +662,11 @@ func runCurlOnce(ctx context.Context, t curlPodTarget, rawURL string, r curlRequ
 // auth error is not hashed as data). Failure detection for the `--resolve` fallback uses the empty-stream
 // SHA-256 sentinel (see sha256Empty): a failed `curl -f | sha256sum` hashes zero bytes.
 func runCurlChecksum(ctx context.Context, t curlPodTarget, rawURL string, r curlRequest) (string, error) {
+	if t.local {
+		// In-process streaming checksum from the test runner (see publish_external_http_test.go): stream the
+		// response body straight into sha256 so a large payload is never buffered whole.
+		return localHTTPChecksum(ctx, rawURL, r)
+	}
 	sum, err := runCurlChecksumOnce(ctx, t, rawURL, r, "")
 	if err != nil {
 		return "", err
