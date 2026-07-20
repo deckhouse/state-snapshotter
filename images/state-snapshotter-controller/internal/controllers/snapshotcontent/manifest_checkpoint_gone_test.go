@@ -45,7 +45,7 @@ func ownerWithManifestCaptured(captured bool) *unstructured.Unstructured {
 	return o
 }
 
-func contentReadyCondition(t *testing.T, cl client.Client, ctx context.Context, name string) *metav1.Condition {
+func contentReadyCondition(ctx context.Context, t *testing.T, cl client.Client, name string) *metav1.Condition {
 	t.Helper()
 	fresh := &unstructured.Unstructured{}
 	fresh.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
@@ -80,7 +80,7 @@ func TestReconcileContentReady_PublishedMCPDeletedAfterCaptureTerminal(t *testin
 		t.Fatalf("content Ready must be False when the published MCP was deleted after capture")
 	}
 
-	rd := contentReadyCondition(t, cl, ctx, "vm-content")
+	rd := contentReadyCondition(ctx, t, cl, "vm-content")
 	if rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonManifestCheckpointFailed {
 		t.Fatalf("content Ready = %#v, want False/%s", rd, snapshot.ReasonManifestCheckpointFailed)
 	}
@@ -118,7 +118,7 @@ func TestReconcileContentReady_MCPAbsentBeforeCaptureStaysPending(t *testing.T) 
 			if ready {
 				t.Fatalf("content Ready must be False while the MCP is not yet published/created")
 			}
-			rd := contentReadyCondition(t, cl, ctx, "vm-content")
+			rd := contentReadyCondition(ctx, t, cl, "vm-content")
 			if rd == nil || rd.Status != metav1.ConditionFalse || rd.Reason != snapshot.ReasonManifestCapturePending {
 				t.Fatalf("content Ready = %#v, want False/%s (non-terminal)", rd, snapshot.ReasonManifestCapturePending)
 			}
@@ -148,7 +148,7 @@ func TestReconcileContentReady_MCPPresentAfterCaptureNoFalseEscalation(t *testin
 	if !ready {
 		t.Fatalf("content Ready must be True when the published MCP is present and Ready")
 	}
-	rd := contentReadyCondition(t, cl, ctx, "vm-content")
+	rd := contentReadyCondition(ctx, t, cl, "vm-content")
 	if rd == nil || rd.Status != metav1.ConditionTrue || rd.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("content Ready = %#v, want True/%s", rd, snapshot.ReasonCompleted)
 	}
