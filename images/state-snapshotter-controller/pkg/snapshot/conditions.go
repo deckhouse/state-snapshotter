@@ -49,6 +49,15 @@ const (
 // core code and the wave-barrier reference the single canonical classifier.
 var IsReasonTerminal = storagev1alpha1.IsReasonTerminal
 
+// DegradedReadyReasons and IsReasonDegraded are re-exported from api/storage for symmetry with
+// TerminalReadyReasons/IsReasonTerminal. The catalog is the single source of truth for presentation
+// (UI/d8); the core runtime does not consume it yet, but the alias gives core code shared access to
+// the classifier and keeps all reason sets in one place within the snapshot package.
+var (
+	DegradedReadyReasons = storagev1alpha1.DegradedReadyReasons
+	IsReasonDegraded     = storagev1alpha1.IsReasonDegraded
+)
+
 // Condition types: the public condition model
 // (ManifestsReady, DataReady, ChildrenReady, Ready).
 const (
