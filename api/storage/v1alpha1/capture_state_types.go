@@ -119,11 +119,14 @@ type DomainSpecificControllerCaptureState struct {
 	// +optional
 	Phase SnapshotCapturePhase `json:"phase,omitempty"`
 
-	// Reason is a short, machine-readable reason for Phase=Failed (free-form domain string).
+	// Reason is a short, machine-readable detail for the current Phase (free-form domain string):
+	// progress codes while Planning (e.g. Snapshotting), failure reason when Failed. Cleared on
+	// Planned/Finished.
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
-	// Message is a human-readable detail for Phase=Failed.
+	// Message is a human-readable detail for the current Phase (progress while Planning, failure detail
+	// when Failed). Cleared on Planned/Finished.
 	// +optional
 	Message string `json:"message,omitempty"`
 
