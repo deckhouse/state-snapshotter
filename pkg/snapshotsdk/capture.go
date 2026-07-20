@@ -53,7 +53,7 @@ type Planning interface {
 	// effects. An idempotent re-publish of the same set (desired ⊆ published, excluded unchanged) stays a
 	// no-op at any phase. The freeze mirrors the immutable SnapshotContent.childrenSnapshotContentRefs (a
 	// late-added edge would be rejected by that CEL and wedge the node at ChildrenLinkPending); the
-	// recommended domain reaction to the error is sdk.Fail(GraphPlanningFailed).
+	// recommended domain reaction is DomainCaptureStatus with phase=Failed and reason GraphPlanningFailed.
 	//
 	// excluded is the domain's DIRECT exclusion vetoes at this node — the source objects it dropped (via
 	// the exclude label) while enumerating children, obtained from PartitionExcluded. It is published in
@@ -89,40 +89,6 @@ type Planning interface {
 	// the first plan). Immutability of spec.targets is separately enforced at the apiserver via a CEL rule.
 	// Callers that want to skip building targets once the leg is planned gate on ManifestCaptureNeeded.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
-}
-
-// CaptureBarrier publishes the domain lifecycle phase the core controller reads to sequence its work
-// (barrier 1 = Planned, barrier 2 = Finished). The SDK writes only
-// status.captureState.domainSpecificController.phase; it never writes the Ready condition.
-type CaptureBarrier interface {
-	// MarkPlanned declares barrier 1 satisfied: all objects created and refs published (children + MCR/VCR).
-	// Sets phase=Planned.
-	MarkPlanned(ctx context.Context, t SnapshotAdapter) error
-	// ConfirmConsistent declares barrier 2 satisfied: the domain finished its side including consistency
-	// actions (e.g. fs unfreeze). Sets phase=Finished.
-	ConfirmConsistent(ctx context.Context, t SnapshotAdapter) error
-}
-
-// CaptureFault records a domain failure (phase=Failed + reason/message). The failure surfaces to users
-// through the core-derived Ready (the core mirrors phase=Failed into Ready=False). Fail is the quick
-// form (reason + underlying cause); Reject is the structured form (FailSpec).
-type CaptureFault interface {
-	Fail(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error
-	Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error
-}
-
-// CaptureProgress publishes a NON-terminal, domain-owned diagnostic into
-// status.captureState.domainSpecificController.message. It is the observable companion to a fail-closed
-// requeue (a planning leg that is retrying, e.g. an unreadable namespace manifest plan): the message says
-// WHY the leg is stuck, in the domain-owned status field the ADR status model keeps in every phase, so an
-// operator sees it in `kubectl get snapshot -o yaml` instead of only in controller logs.
-type CaptureProgress interface {
-	// ReportProgress writes ONLY the domain message, preserving the current phase and reason — it never
-	// advances/regresses the lifecycle phase and never writes the core-owned Ready condition (so it does
-	// not violate the Ready writer discipline). It is idempotent (no status write when the message is
-	// unchanged); an empty message clears a prior diagnostic. Unlike Fail/Reject this is non-terminal: the
-	// caller keeps requeuing, this only makes the wait observable.
-	ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error
 }
 
 // SourcePublisher publishes the captured live source's full reference into the top-level
@@ -164,17 +130,18 @@ type CaptureInspection interface {
 	ChildrenCaptureStates(ctx context.Context, t SnapshotAdapter) ([]ChildCaptureState, error)
 }
 
-// CaptureSDK is the capture-side protocol facade a domain snapshot controller drives. It hides all
-// Kubernetes transport (capture requests, owner references, optimistic-locked status patches, the
-// lifecycle phase) behind a small set of intent verbs.
+// CaptureSDK is the capture-side protocol a domain snapshot controller drives. It hides Kubernetes
+// transport (capture requests, owner references, optimistic-locked status patches) behind planning
+// verbs, and exposes DomainCaptureStatus as the single public API for writing the domain lifecycle
+// triple (phase / reason / message).
 type CaptureSDK interface {
 	Planning
-	CaptureBarrier
-	CaptureFault
-	CaptureProgress
 	SourcePublisher
 	ManifestExclude
 	CaptureInspection
+	// DomainCaptureStatus returns the single public writer for
+	// status.captureState.domainSpecificController.{phase,reason,message}.
+	DomainCaptureStatus(t SnapshotAdapter) DomainCaptureStatusWriter
 }
 
 // CoreCaptureOutcome derives the tri-state the domain switches its wait loop on, from the core's leg
@@ -224,7 +191,8 @@ type sdk struct {
 // Failed). The declared child set is the snapshot's point-in-time membership: once barrier 1 (Planned) is
 // declared it is immutable, mirroring the frozen SnapshotContent.status.childrenSnapshotContentRefs. The
 // guard is fail-closed and side-effect-free (it rejects BEFORE any child CR is created), so a violating
-// domain gets a clean error — recommended reaction sdk.Fail(GraphPlanningFailed) — instead of wedging the
+// domain gets a clean error — recommended reaction DomainCaptureStatus Failed/GraphPlanningFailed —
+// instead of wedging the
 // node in ChildrenLinkPending forever (the immutable content-ref CEL would reject the new edge). Callers
 // match it with errors.Is(err, ErrChildrenSetFrozen).
 var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phase>=Planned): EnsureChildren cannot grow the declared child set")
@@ -233,7 +201,8 @@ var ErrChildrenSetFrozen = errors.New("snapshotsdk: children set is frozen (phas
 // Every snapshot must capture at least its own source object's manifest — a single-object domain snapshot
 // passes its own source identity, the namespace-root aggregator always includes its own Namespace object —
 // and the SDK never injects the source on the domain's behalf. So an empty target set is a domain contract
-// violation (recommended reaction sdk.Fail(GraphPlanningFailed)), not a valid empty capture. Fail-closed
+// violation (recommended reaction DomainCaptureStatus Failed/GraphPlanningFailed), not a valid empty
+// capture. Fail-closed
 // and side-effect-free: it rejects BEFORE the ManifestCaptureRequest is created. The captured-latch
 // suppression wins over this guard: once the core has stamped the manifest leg captured the call is a
 // no-op (nil) regardless of input — nothing can be created anymore, so a late empty recomputation must
@@ -245,7 +214,7 @@ var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at lea
 // ManifestCaptureRequest already exists (its target set is the frozen point-in-time capture plan) and the
 // caller now declares a DIFFERENT set. The MCR name is ALWAYS published first (adopt), so the leg is
 // established regardless; this only reports that the freshly-declared set diverges from the frozen plan.
-// The caller decides: a domain typically reacts with sdk.Fail(GraphPlanningFailed); the namespace root
+// The caller decides: a domain typically reacts with DomainCaptureStatus Failed/GraphPlanningFailed; the namespace root
 // ignores it (it recomputes a shifting set over a live namespace and the first plan wins). Immutability of
 // the MCR targets is separately enforced at the apiserver by the CRD's CEL rule. Targets are compared as a
 // SET keyed by (apiVersion, kind, name), so reordering/duplicates never count as drift. Callers match it
@@ -501,59 +470,13 @@ func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src 
 	})
 }
 
-func (s *sdk) MarkPlanned(ctx context.Context, t SnapshotAdapter) error {
-	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhasePlanned, "", "")
-}
-
-func (s *sdk) ConfirmConsistent(ctx context.Context, t SnapshotAdapter) error {
-	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFinished, "", "")
-}
-
-func (s *sdk) Fail(ctx context.Context, t SnapshotAdapter, reason Reason, cause error) error {
-	message := ""
-	if cause != nil {
-		message = cause.Error()
-	}
-	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFailed, string(reason), message)
-}
-
-func (s *sdk) Reject(ctx context.Context, t SnapshotAdapter, in FailSpec) error {
-	message := in.Message
-	if message == "" && in.Cause != nil {
-		message = in.Cause.Error()
-	}
-	return s.setPhase(ctx, t, storagev1alpha1.SnapshotCapturePhaseFailed, string(in.Reason), message)
-}
-
-// ReportProgress patches ONLY status.captureState.domainSpecificController.message, leaving the phase and
-// reason untouched — a non-terminal, observable-only write (see CaptureProgress). It intentionally does
-// NOT go through setPhase (which is the phase-transition path with the monotonic barrier guard): a
-// diagnostic is unordered and must never disturb the lifecycle phase or clear a real failure reason.
-func (s *sdk) ReportProgress(ctx context.Context, t SnapshotAdapter, message string) error {
-	obj := t.Object()
-	return patch.Status(ctx, s.client, obj, func() bool {
-		st := t.GetDomainCaptureState()
-		// Failed is terminal: a non-terminal progress note must never overwrite the terminal
-		// reason/message (ReportProgress is the Pending-only diagnostic channel).
-		if st.Phase == storagev1alpha1.SnapshotCapturePhaseFailed {
-			return false
-		}
-		if st.Message == message {
-			return false
-		}
-		st.Message = message
-		t.SetDomainCaptureState(st)
-		return true
-	})
-}
-
 // setPhase patches status.captureState.domainSpecificController.phase (+ reason/message) via the adapter.
 func (s *sdk) setPhase(ctx context.Context, t SnapshotAdapter, phase storagev1alpha1.SnapshotCapturePhase, reason, message string) error {
 	obj := t.Object()
 	return patch.Status(ctx, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		// Monotonic barrier guard. Domain controllers call MarkPlanned on every reconcile (before
-		// switching on the capture outcome), so without this a snapshot that already advanced to Finished
+		// Monotonic barrier guard. Domains re-assert barrier 1 (phase=Planned) on every reconcile before
+		// switching on the capture outcome, so without this a snapshot that already advanced to Finished
 		// would be dragged back to Planned. That regression makes each reconcile emit two status writes
 		// (Planned then Finished) and, because the domain watches its own object, the pair re-triggers the
 		// reconcile — a self-sustaining phase write storm (Planned<->Finished) that starves the core
@@ -589,16 +512,16 @@ func phaseRank(p storagev1alpha1.SnapshotCapturePhase) int {
 
 // phaseCanAdvance reports whether a from->to phase transition is allowed. Two rules:
 //
-//   - the forward chain Planning<Planned<Finished must never regress — this is what stops MarkPlanned from
-//     dragging a Finished snapshot back to Planned;
+//   - the forward chain Planning<Planned<Finished must never regress — this is what stops a per-reconcile
+//     re-assert of phase=Planned from dragging a Finished snapshot back to Planned;
 //   - Failed is a TERMINAL SINK: once a capture fails it can never leave Failed. A snapshot is a
 //     point-in-time capture with an immutable spec, so it never re-plans (the rest of the system already
 //     treats Failed as terminal — see childrenSetFrozen and ownerDomainCaptureAtLeastPlanned). Making it a
-//     sink here also kills the phase write storm where a domain's unconditional per-reconcile MarkPlanned
+//     sink here also kills the phase write storm where an unconditional per-reconcile Planned re-assert
 //     dragged Failed->Planned and the terminal outcome immediately re-Failed it (flapping the mirrored
-//     Ready). Only Fail/Reject enter Failed; a NON-terminal, recoverable "waiting for X" state must NOT use
-//     them — it stays in its current phase and surfaces the reason via ReportProgress (message-only), the
-//     way a Pod stays Pending with a diagnostic instead of moving to a terminal phase.
+//     Ready). A NON-terminal, recoverable "waiting for X" state must NOT use phase=Failed — it stays in
+//     Planning (or the current phase) and surfaces a diagnostic via DomainCaptureStatus, the way a Pod
+//     stays Pending with a message instead of moving to a terminal phase.
 //
 // A Failed->Failed transition stays allowed so an idempotent re-assert (or a refined terminal
 // reason/message) is a harmless no-op/refresh via setPhase's equality check.
