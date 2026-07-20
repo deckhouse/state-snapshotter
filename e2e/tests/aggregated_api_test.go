@@ -444,5 +444,132 @@ func aggregatedAPISpecs() {
 				}
 			}
 		})
+
+		It("latches commonController.childSubtreesManifestsPersisted=true on every xxxSnapshot node (main-written, snapshot-native, vacuously true on childless leaves), never on content (childSubtreesManifestsPersisted contract)", func() {
+			// childSubtreesManifestsPersisted (capture_legs.go): main writes this children-only aggregate
+			// SIDEWAYS onto every xxxSnapshot — "the subtrees of ALL declared direct children are fully
+			// persisted" — DECLARED false at capture barrier 1 and monotonically flipped to true, never left
+			// nil (a nil field silently disables the SDK manifest-exclude pre-gate). Because it deliberately
+			// excludes the node's OWN manifests (those are manifestCaptured), a childless node is vacuously
+			// true and latches on the first pass. On a fully Ready tree every node therefore carries it true.
+			// It is snapshot-native: the content keeps its own subtreeManifestsPersisted latch and must NEVER
+			// carry this mirror.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			ns := captured.namespace
+
+			nodes := []childRef{{kind: "Snapshot", name: captured.rootSnap}}
+			descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			nodes = append(nodes, descendants...)
+
+			By("Asserting every node carries childSubtreesManifestsPersisted=true on its xxxSnapshot and never on its content")
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: no owning xxxSnapshot commonController of its own
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, gvr, ns, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					val, found := snapshotCommonControllerLatch(snap, "childSubtreesManifestsPersisted")
+					g.Expect(found).To(BeTrue(), "node %s/%s must carry commonController.childSubtreesManifestsPersisted (declared false then latched true; never left nil past barrier 1)", node.kind, node.name)
+					g.Expect(val).To(BeTrue(), "node %s/%s childSubtreesManifestsPersisted must latch true once every declared child subtree is persisted (a childless node is vacuously true)", node.kind, node.name)
+
+					// Contrast with childrenSettled (nil on a leaf): childSubtreesManifestsPersisted IS declared
+					// on a childless node too, latching vacuously true — this is what keeps it usable as the SDK
+					// manifest-exclude pre-gate. Pin that difference on every leaf node in the tree.
+					if len(childSnapshotRefs(snap)) == 0 {
+						_, settledFound := snapshotCommonControllerLatch(snap, "childrenSettled")
+						g.Expect(settledFound).To(BeFalse(),
+							"leaf node %s/%s must NOT declare childrenSettled (nil) while it DOES declare childSubtreesManifestsPersisted — the two latches differ on leaves", node.kind, node.name)
+					}
+
+					contentName, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+					g.Expect(contentName).NotTo(BeEmpty())
+					content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+					g.Expect(err).NotTo(HaveOccurred())
+					_, onContent := snapshotCommonControllerLatch(content, "childSubtreesManifestsPersisted")
+					g.Expect(onContent).To(BeFalse(),
+						"childSubtreesManifestsPersisted is snapshot-native: SnapshotContent %s must NOT carry it (the content keeps its own subtreeManifestsPersisted latch)", contentName)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+
+			By("Asserting the ROOT (always has the VM child) carries childSubtreesManifestsPersisted=true so the aggregate is non-vacuous")
+			root, err := getResource(ctx, snapshotGVR, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childSnapshotRefs(root)).NotTo(BeEmpty(), "the root must have at least the VM child so this assertion is non-vacuous")
+			rval, rfound := snapshotCommonControllerLatch(root, "childSubtreesManifestsPersisted")
+			Expect(rfound).To(BeTrue(), "the root has children, so it must carry childSubtreesManifestsPersisted")
+			Expect(rval).To(BeTrue(), "the root childSubtreesManifestsPersisted must be true once every declared child subtree is persisted")
+		})
+
+		It("composes whole-subtree-persisted as manifestCaptured && childSubtreesManifestsPersisted, and gates the root manifest-exclude on it (design §8.3, SDK pre-gate)", func() {
+			// The two core-owned latches decompose "the whole node subtree is durably persisted":
+			// manifestCaptured (this node's OWN manifests handed off) AND childSubtreesManifestsPersisted (every
+			// declared child subtree persisted). On a Ready tree both are true on every node. The children-only
+			// half is the SDK manifest-exclude pre-gate: SubtreeManifestIdentities returns 409 without a REST
+			// call while it is false, so the root only computes its exclude once its children's subtrees are
+			// persisted — the black-box effect is that, once the root latch is true, the fail-closed
+			// subtree-manifest-identities endpoint is servable and the child-captured VM is dropped from the
+			// root own-manifests (no double capture).
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			ns := captured.namespace
+
+			nodes := []childRef{{kind: "Snapshot", name: captured.rootSnap}}
+			descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			nodes = append(nodes, descendants...)
+
+			By("Asserting every node satisfies the decomposition manifestCaptured && childSubtreesManifestsPersisted == true")
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: no owning xxxSnapshot commonController of its own
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+				Eventually(func(g Gomega) {
+					snap, err := getResource(ctx, gvr, ns, node.name)
+					g.Expect(err).NotTo(HaveOccurred())
+					own, ownFound := snapshotCommonControllerLatch(snap, "manifestCaptured")
+					children, childrenFound := snapshotCommonControllerLatch(snap, "childSubtreesManifestsPersisted")
+					g.Expect(ownFound).To(BeTrue(), "node %s/%s must carry manifestCaptured", node.kind, node.name)
+					g.Expect(childrenFound).To(BeTrue(), "node %s/%s must carry childSubtreesManifestsPersisted", node.kind, node.name)
+					g.Expect(own && children).To(BeTrue(),
+						"node %s/%s whole subtree persisted == manifestCaptured(%v) && childSubtreesManifestsPersisted(%v)", node.kind, node.name, own, children)
+				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			}
+
+			By("Asserting the root latch gates the manifest-exclude: once childSubtreesManifestsPersisted=true, subtree-manifest-identities is servable and carries the child-captured VM")
+			var own []unstructured.Unstructured
+			Eventually(func(g Gomega) {
+				root, err := getResource(ctx, snapshotGVR, ns, captured.rootSnap)
+				g.Expect(err).NotTo(HaveOccurred())
+				val, found := snapshotCommonControllerLatch(root, "childSubtreesManifestsPersisted")
+				g.Expect(found && val).To(BeTrue(), "root childSubtreesManifestsPersisted must be true (the manifest-exclude pre-gate is open)")
+
+				body, err := aggGet(ctx, coreContentSubPath(captured.rootContent, subManifestsIdentities), nil)
+				g.Expect(err).NotTo(HaveOccurred(),
+					"with the pre-gate open the fail-closed subtree-manifest-identities endpoint must be servable (409 => a child subtree is not persisted yet)")
+				ids, err := decodeSubtreeIdentities(body)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(hasSubtreeIdentity(ids, "DemoVirtualMachine", srcVMName)).To(BeTrue(),
+					"the child DemoVirtualMachineSnapshot subtree must contribute DemoVirtualMachine %s to the exclude set", srcVMName)
+
+				own, err = getRootOwnManifests(ctx, ns, captured.rootSnap)
+				g.Expect(err).NotTo(HaveOccurred(), "root own-manifests are served only after main latches manifestCaptured")
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting the pre-gated exclude dropped the child-captured VM from the root own-manifests without over-dropping the root's own ConfigMap")
+			_, reCaptured := findManifest(own, "DemoVirtualMachine", srcVMName)
+			Expect(reCaptured).To(BeFalse(),
+				"the child-captured DemoVirtualMachine %s must be dropped from the root own-manifests by the pre-gated exclude (no double capture)", srcVMName)
+			_, hasCM := findManifest(own, "ConfigMap", srcConfigMapName)
+			Expect(hasCM).To(BeTrue(),
+				"the pre-gated exclude must not over-drop: the root-owned ConfigMap %s must remain in the root own-manifests", srcConfigMapName)
+		})
 	})
 }
