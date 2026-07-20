@@ -46,7 +46,7 @@ import (
 // the content-missing/deleting degradation Ready — a deleted content produces no reconcile here to mirror
 // from, so the binder co-writes ContentMissing, woken by its bound-content watch — and (b) the excludedRefs
 // side-channel mirror (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
-// watch is not removed. The subtreeManifestsPersisted mirror moved to main (capture_legs.go, decision #10).
+// watch is not removed. The childSubtreesManifestsPersisted latch is main-owned (capture_legs.go, decision #10).
 //
 // vcr-watch-core-terminal (decision D2): a failed data-leg VCR (or a Variant-A >1-artifact fault) is now
 // made terminal on the CONTENT itself by reconcileDataLegProjection (DataReady=VolumeCaptureFailed), so

@@ -52,8 +52,11 @@ import (
 //     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
 //   - data leg (native-CSI VolumeSnapshot owners, design §11.4): no VCR — latch dataCaptured once the
 //     content carries a published status.data (the projection performs the VSC handoff first);
-//   - subtreeManifestsPersisted: mirror the content's monotonic recursive latch onto the owner's
-//     commonController (true-only), so parent domains read the manifest-exclude pre-gate namespaced.
+//   - childSubtreesManifestsPersisted: eager-declare false, then monotonically latch true, the children-only
+//     aggregate onto the owner's commonController — "the subtrees of ALL declared direct children are fully
+//     persisted" — so a parent aggregator reads it namespaced as the SDK manifest-exclude pre-gate. It is
+//     declared false (not left nil, which would disable the pre-gate) and EXCLUDES this node's own manifests,
+//     so it can flip true before this node's own MCR exists (the chicken-and-egg is removed).
 //
 // Recovery reap (idempotent): the latch-and-reap for each request leg is gated on the leg latch being
 // false, so once the latch is written that block never runs again. If a pass crashes, requeues, or hits a
@@ -252,12 +255,34 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		}
 	}
 
-	// subtreeManifestsPersisted mirror (true-only, monotonic): content latch -> owner commonController.
-	if persisted, found, _ := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted"); found && persisted {
-		if !ownerCommonLegCaptured(owner, "subtreeManifestsPersisted") {
-			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "subtreeManifestsPersisted"); mErr != nil {
-				return false, mErr
+	// childSubtreesManifestsPersisted (eager-declared false, monotonic false -> true): the subtrees of ALL
+	// declared direct children are fully persisted (each child node and its descendants durably archived
+	// their manifests). This is the children-only aggregate — it deliberately EXCLUDES this node's own
+	// manifests (tracked by manifestCaptured), so it can flip true BEFORE this node creates its own MCR,
+	// which is what makes it usable as the SDK manifest-exclude pre-gate. It is DECLARED false as soon as the
+	// node reaches this step (like the eager-init capture legs) and never left nil once past barrier 1 — a
+	// nil field would silently disable the SDK pre-gate (nil = pre-gate off), so declaring false is what
+	// keeps the pre-gate live. Value: this content's OWN subtreeManifestsPersisted latch ("node + all
+	// descendants") being true IMPLIES the children-only aggregate is true (own persisted ⊇ children
+	// persisted), so it short-circuits without a child walk; otherwise it is computed directly via
+	// aggregateChildrenSubtreeManifestsPersisted (same declared-vs-linked fail-closed as the content Ready
+	// gate; a childless node is vacuously true, latching true on the first pass). The setter is monotonic
+	// (never downgrades a latched true), so the latch never flips true over a partial child set and never
+	// re-opens. Not-persisted is not requeued here: a child content status change re-drives this owner
+	// content, so the false declaration is re-evaluated and flips to true when the subtree persists.
+	if !ownerCommonLegCaptured(owner, "childSubtreesManifestsPersisted") {
+		childSubtreesPersisted := false
+		if persisted, found, _ := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted"); found && persisted {
+			childSubtreesPersisted = true
+		} else {
+			aggregated, _, aErr := r.aggregateChildrenSubtreeManifestsPersisted(ctx, contentObj)
+			if aErr != nil {
+				return false, aErr
 			}
+			childSubtreesPersisted = aggregated
+		}
+		if mErr := r.setOwnerChildSubtreesManifestsPersisted(ctx, owner, childSubtreesPersisted); mErr != nil {
+			return false, mErr
 		}
 	}
 
@@ -552,6 +577,39 @@ func (r *SnapshotContentController) setOwnerCaptureLegCaptured(ctx context.Conte
 		}
 		base := fresh.DeepCopy()
 		if err := unstructured.SetNestedField(fresh.Object, true, "status", "captureState", "commonController", leg); err != nil {
+			return err
+		}
+		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// setOwnerChildSubtreesManifestsPersisted writes the core-computed children-only latch
+// status.captureState.commonController.childSubtreesManifestsPersisted on the owner snapshot, monotonically
+// (false -> true, never back). Unlike setOwnerCaptureLegCaptured (true-only), it also DECLARES the field
+// false: leaving it nil would silently disable the SDK manifest-exclude pre-gate (nil = pre-gate off), so
+// the field must exist as false while the children's subtrees are still capturing. It never downgrades a
+// latched true and skips a redundant patch when the value is unchanged. Sideways write under an
+// optimistic-lock merge patch (main owns commonController, decision #10).
+func (r *SnapshotContentController) setOwnerChildSubtreesManifestsPersisted(ctx context.Context, owner *unstructured.Unstructured, persisted bool) error {
+	gvk := owner.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: owner.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		cur, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "childSubtreesManifestsPersisted")
+		if found && cur {
+			// Monotonic: a latched true is never downgraded.
+			return nil
+		}
+		if found && cur == persisted {
+			// Already declared with the desired value (false): no churn.
+			return nil
+		}
+		base := fresh.DeepCopy()
+		if err := unstructured.SetNestedField(fresh.Object, persisted, "status", "captureState", "commonController", "childSubtreesManifestsPersisted"); err != nil {
 			return err
 		}
 		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))

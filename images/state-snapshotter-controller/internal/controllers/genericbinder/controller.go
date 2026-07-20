@@ -678,8 +678,9 @@ func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSp
 // content.Ready (no cross-controller staleness, INV-FAIL-PROP). The binder no longer re-derives content.Ready
 // here. It still owns the "bound content gone/deleting" degradation, because a deleted content produces no
 // content reconcile to mirror from; the bound-content watch (mapBoundContentToSnapshots) wakes the binder
-// for that. The excludedRefs and subtreeManifestsPersisted mirrors stay here too (they are not Ready and are
-// triggered by the same watch). This function is only reached after the Step-1 barrier
+// for that. The excludedRefs mirror stays here too (it is not Ready and is triggered by the same watch); the
+// childSubtreesManifestsPersisted latch is main-owned (snapshotcontent/capture_legs.go). This function is
+// only reached after the Step-1 barrier
 // (isDomainPlanningComplete) confirmed phase>=Planned; the domain phase itself is never written here (owned
 // by the domain SDK).
 func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
@@ -721,7 +722,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 		logger.V(1).Info("Failed to mirror SnapshotContent excludedRefs; will retry", "error", err.Error())
 	}
 
-	// The subtreeManifestsPersisted mirror onto commonController moved to main
+	// The childSubtreesManifestsPersisted latch onto commonController is written by main
 	// (snapshotcontent/capture_legs.go — main-owned commonController, decision #10).
 
 	// Steady-state Ready (content.Ready mirror + phase=Failed bubble + barrier-2 gate) is owned by the

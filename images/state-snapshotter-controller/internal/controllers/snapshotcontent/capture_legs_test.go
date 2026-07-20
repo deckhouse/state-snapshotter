@@ -37,8 +37,8 @@ import (
 // These tests cover the main-owned capture-leg lifecycle (reconcileOwnerCaptureLegs) that moved off the
 // binder onto the SnapshotContentController aggregator (main-owned commonController, decision #10): the
 // eager-init, the manifestCaptured/dataCaptured latch-and-reap (latch strictly before the delete), the
-// native-CSI dataCaptured latch, and the subtreeManifestsPersisted snapshot-mirror. They reuse the
-// projTest* fixtures + helpers from datarefs_projection_test.go (same package).
+// native-CSI dataCaptured latch, and the childSubtreesManifestsPersisted children-only latch. They reuse
+// the projTest* fixtures + helpers from datarefs_projection_test.go (same package).
 
 const (
 	clOwnerName = "owner-snap"
@@ -445,43 +445,165 @@ func TestReconcileOwnerCaptureLegs_NativeCSIPendingRequeues(t *testing.T) {
 	}
 }
 
-// subtreeManifestsPersisted mirror: a persisted content latch is mirrored (true-only, monotonic) onto the
-// owner's commonController; a false/absent content latch leaves the mirror unset.
-func TestReconcileOwnerCaptureLegs_SubtreeManifestsPersistedMirror(t *testing.T) {
-	trueV := true
-	falseV := false
-	for _, tc := range []struct {
-		name       string
-		persisted  *bool
-		wantMirror bool
-	}{
-		{"persisted true mirrors", &trueV, true},
-		{"persisted false no-op", &falseV, false},
-		{"absent no-op", nil, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			scheme := captureLegsScheme(t)
-			owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
+// childSubtreesManifestsPersisted (short-circuit): this content's OWN subtreeManifestsPersisted latch
+// ("node + all descendants") implies the children-only aggregate, so the owner latches
+// childSubtreesManifestsPersisted=true — even though this node's OWN manifest leg is NOT yet captured
+// (chicken-and-egg removed: the children-only latch can precede this node's own MCR).
+func TestReconcileOwnerCaptureLegs_ChildSubtreesManifestsPersistedShortCircuit(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
+	persisted := true
 
-			cl := fake.NewClientBuilder().
-				WithScheme(scheme).
-				WithStatusSubresource(owner).
-				WithObjects(owner, captureLegsContentTyped("", nil)).
-				Build()
-			r := captureLegsController(cl, clSnapGVK, false)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil)).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
 
-			if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, tc.persisted)); err != nil {
-				t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
-			}
-			got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "subtreeManifestsPersisted")
-			if tc.wantMirror && (!found || !got) {
-				t.Fatalf("want subtreeManifestsPersisted mirror=true, got found=%v value=%v", found, got)
-			}
-			if !tc.wantMirror && found {
-				t.Fatalf("subtreeManifestsPersisted mirror must stay unset for a %s content latch", tc.name)
-			}
-		})
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, &persisted)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childSubtreesManifestsPersisted"); !found || !got {
+		t.Fatalf("want childSubtreesManifestsPersisted=true, got found=%v value=%v", found, got)
+	}
+	// Chicken-and-egg: the children-only latch flips true while this node's own manifest leg is still
+	// uncaptured (no MCR/MCP handoff).
+	if mv, _ := captureLegsOwnerLatch(t, cl, clSnapGVK, "manifestCaptured"); mv {
+		t.Fatalf("manifestCaptured must still be false: the children-only latch precedes the own MCR")
+	}
+}
+
+// childSubtreesManifestsPersisted (aggregated true from a real child): the flagship "chicken-and-egg
+// removed" window. The owner declares one direct child that is bound AND linked into the parent content's
+// childrenSnapshotContentRefs AND whose own content latch subtreeManifestsPersisted=true, while the owner's
+// OWN content subtree latch is ABSENT (own manifest not yet persisted). The children-only aggregate is
+// computed directly (no short-circuit), so the owner latches childSubtreesManifestsPersisted=true even
+// though its own MCR does not exist yet — exactly the pre-gate window a parent aggregator relies on.
+func TestReconcileOwnerCaptureLegs_ChildSubtreesManifestsPersistedAggregatesRealChild(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+
+	// Owner declares one direct child (child-a), bound to projTestContent, phase Planned.
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-a"),
+	)
+
+	// child-a snapshot: subtreePlanned (so the sibling legs converge) and bound to its content.
+	childSnap := captureLegsChildSnapshot(clSnapGVK, "child-a", true)
+	_ = unstructured.SetNestedField(childSnap.Object, "child-content", "status", "boundSnapshotContentName")
+	// child-a's content carries its own persisted subtree latch (reused helper from content_aggregation_test).
+	childContent := contentWithSubtreeManifestsPersisted("child-content", true)
+
+	// Parent content: spec.snapshotRef → owner, OWN subtree latch ABSENT (nil), child content linked.
+	contentObj := captureLegsContentObj(clSnapGVK, nil)
+	_ = unstructured.SetNestedSlice(contentObj.Object, []interface{}{
+		map[string]interface{}{"name": "child-content"},
+	}, "status", "childrenSnapshotContentRefs")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil), childSnap, childContent).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, contentObj); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childSubtreesManifestsPersisted"); !found || !got {
+		t.Fatalf("owner must latch childSubtreesManifestsPersisted=true from an aggregated persisted child, got found=%v value=%v", found, got)
+	}
+	// Chicken-and-egg: the children-only latch is true while this node's own manifest leg is uncaptured.
+	if mv, _ := captureLegsOwnerLatch(t, cl, clSnapGVK, "manifestCaptured"); mv {
+		t.Fatalf("manifestCaptured must still be false: the children-only aggregate precedes the own MCR")
+	}
+}
+
+// childSubtreesManifestsPersisted (childless node): a node with no declared children is vacuously
+// persisted, so the latch flips true even when the node's own subtree latch is absent (own manifest still
+// pending). This is the children-only aggregate over an empty child set.
+func TestReconcileOwnerCaptureLegs_ChildSubtreesManifestsPersistedChildlessVacuous(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil)).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	// Own content subtree latch absent (nil): the childless children-only aggregate is still vacuously true.
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childSubtreesManifestsPersisted"); !found || !got {
+		t.Fatalf("childless owner must latch childSubtreesManifestsPersisted=true (vacuous), got found=%v value=%v", found, got)
+	}
+}
+
+// childSubtreesManifestsPersisted (declared-but-unlinked child → declared false): while a declared direct
+// child is not created/linked yet, the children-only aggregate is fail-closed (declared-vs-linked), so the
+// latch is DECLARED false (not left nil — a nil field disables the SDK pre-gate) and never latches true over
+// a partial child set.
+func TestReconcileOwnerCaptureLegs_ChildSubtreesManifestsPersistedDeclaredFalseWhileChildPending(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-a"),
+	)
+
+	// child-a is declared but not created: declaredNonLeafChildContentNames reports the set incomplete.
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil)).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childSubtreesManifestsPersisted")
+	if !found {
+		t.Fatalf("childSubtreesManifestsPersisted must be DECLARED (not nil) while a declared child is unlinked — a nil field disables the SDK pre-gate")
+	}
+	if got {
+		t.Fatalf("childSubtreesManifestsPersisted must be false while a declared child is unlinked, got true")
+	}
+}
+
+// childSubtreesManifestsPersisted (monotonic): once latched true it is never dragged back to false, even if
+// a later pass observes a declared-but-unlinked child (the block is guarded on the existing latch).
+func TestReconcileOwnerCaptureLegs_ChildSubtreesManifestsPersistedMonotonic(t *testing.T) {
+	ctx := context.Background()
+	scheme := captureLegsScheme(t)
+	owner := captureLegsWithChildrenRefs(
+		captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned)),
+		captureLegsChildRef(clSnapGVK, "child-a"),
+	)
+	// Pre-latch childSubtreesManifestsPersisted (and subtreePlanned/childrenSettled so the pass does not
+	// requeue on the sibling legs), then reconcile with a declared-but-unlinked child.
+	_ = unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "childSubtreesManifestsPersisted")
+	_ = unstructured.SetNestedField(owner.Object, true, "status", "captureState", "commonController", "subtreePlanned")
+
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(owner).
+		WithObjects(owner, captureLegsContentTyped("", nil)).
+		Build()
+	r := captureLegsController(cl, clSnapGVK, false)
+
+	if _, err := r.reconcileOwnerCaptureLegs(ctx, captureLegsContentObj(clSnapGVK, nil)); err != nil {
+		t.Fatalf("reconcileOwnerCaptureLegs: %v", err)
+	}
+	if got, found := captureLegsOwnerLatch(t, cl, clSnapGVK, "childSubtreesManifestsPersisted"); !found || !got {
+		t.Fatalf("childSubtreesManifestsPersisted must stay true (monotonic), got found=%v value=%v", found, got)
 	}
 }
 

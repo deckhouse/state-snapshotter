@@ -88,7 +88,9 @@ type SnapshotGVKRef struct {
 type CustomSnapshotDefinitionStatus struct {
 	// Conditions carry three distinct signals, each with a single writer:
 	//   - Accepted — the spec is valid and registrable (written by the CSD reconciler);
-	//   - AccessGranted — the domain RBAC has been applied (written by the 030-domain-rbac hook);
+	//   - AccessGranted — core-side RBAC for this CSD's GVRs applied (core SA + DataExport SA); written by
+	//     the core 030-domain-rbac hook. The domain's own SA rights ship statically with the domain module
+	//     and are NOT covered by this condition;
 	//   - Ready — the aggregate Ready = Accepted && AccessGranted.
 	// Accepted and Ready diverge when Accepted=True but AccessGranted=False (spec accepted, RBAC not yet
 	// applied) → Ready=False; the printer columns surface all three so this is visible at a glance.

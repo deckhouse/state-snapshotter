@@ -41,7 +41,7 @@ import (
 )
 
 // The domain-capture request lifecycle (capture-leg eager-init, manifestCaptured/dataCaptured latches, the
-// subtreeManifestsPersisted snapshot-mirror, and the MCR/VCR reap) moved to the SnapshotContentController
+// childSubtreesManifestsPersisted latch, and the MCR/VCR reap) moved to the SnapshotContentController
 // aggregator (main-owned commonController, decision #10); its coverage lives in
 // snapshotcontent/capture_legs_test.go. What remains on the binder is the leaf status.data export mirror
 // (mirrorLeafDataFromContent) and the pure data-binding renderer — covered below.

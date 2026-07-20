@@ -208,8 +208,9 @@ type SnapshotContentStatus struct {
 	// SubtreeManifestsPersisted is a core-internal monotonic recursive latch (true once this node's own
 	// ManifestCheckpoint is Ready AND every declared child SnapshotContent has subtreeManifestsPersisted=true,
 	// fail-closed). This SnapshotContent field is the durable truth; user-facing objects do not carry this
-	// top-level field but DO carry a core-written mirror at captureState.commonController.subtreeManifestsPersisted
-	// (see CommonControllerCaptureState) used as the manifest-exclude pre-gate. It serves purposes not
+	// top-level field but DO carry a core-written children-only latch at
+	// captureState.commonController.childSubtreesManifestsPersisted (see CommonControllerCaptureState) used as
+	// the manifest-exclude pre-gate. It serves purposes not
 	// reducible to per-node manifestCaptured: (1) gate the FIRST Ready=True against declared-but-unlinked
 	// children, (2) drive the wave-barrier exclude-set of an aggregator MCR (subtree completeness + linkage
 	// => no 409 double-capture; identities served by the subtree-manifest-identities subresource),

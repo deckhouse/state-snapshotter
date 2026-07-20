@@ -148,9 +148,10 @@ func coreCaptureStateFrom(cs *storagev1alpha1.CaptureStateStatus) snapshotsdk.Co
 		return snapshotsdk.CoreCaptureState{}
 	}
 	return snapshotsdk.CoreCaptureState{
-		ManifestCaptured: cs.CommonController.ManifestCaptured,
-		DataCaptured:     cs.CommonController.DataCaptured,
-		ChildrenSettled:  cs.CommonController.ChildrenSettled,
+		ManifestCaptured:                cs.CommonController.ManifestCaptured,
+		DataCaptured:                    cs.CommonController.DataCaptured,
+		ChildrenSettled:                 cs.CommonController.ChildrenSettled,
+		ChildSubtreesManifestsPersisted: cs.CommonController.ChildSubtreesManifestsPersisted,
 	}
 }
 

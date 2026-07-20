@@ -98,7 +98,7 @@ type SnapshotContentController struct {
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
 	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). For these
 	// owners main runs the capture-leg lifecycle (main-owned commonController, decision #10): eager-init +
-	// manifestCaptured/dataCaptured latches + subtreeManifestsPersisted mirror, written sideways onto the
+	// manifestCaptured/dataCaptured latches + childSubtreesManifestsPersisted latch, written sideways onto the
 	// xxxSnapshot, and the MCR/VCR reap after a durable handoff (latch-before-reap). Marked by the same
 	// callers that mark the binder (unifiedruntime.Syncer, main.go). Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex

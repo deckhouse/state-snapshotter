@@ -34,9 +34,10 @@ import (
 const subtreeManifestIdentitiesBasePath = "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/snapshotcontents/%s/subtree-manifest-identities"
 
 // ErrSubtreeIdentitiesPending is the fail-closed sentinel SubtreeManifestIdentities returns when the
-// subtree exclude set is not yet complete: a child has not bound its content, or the subresource returned
-// 409 (some subtree ManifestCheckpoint is not Ready). Callers requeue; they must never build a manifest
-// MCR from a partial exclude.
+// subtree exclude set is not yet complete: the built-in pre-gate observed the node's
+// ChildSubtreesManifestsPersisted latch is explicitly false, a child has not bound its content, or the
+// subresource returned 409 (some subtree ManifestCheckpoint is not Ready). Callers requeue; they must never
+// build a manifest MCR from a partial exclude.
 var ErrSubtreeIdentitiesPending = errors.New("snapshotsdk: subtree manifest identities pending (subtree not fully persisted)")
 
 // SubtreeManifestIdentity is one object identity captured somewhere in a snapshot subtree, as returned by
@@ -68,12 +69,25 @@ type SubtreeManifestIdentitiesResponse struct {
 // subtree-manifest-identities subresource on each, unioning (de-duplicating on
 // apiVersion|kind|namespace|name) the results into the aggregator's exclude set. It is fail-closed: any
 // unbound child or any 409 from the subresource yields ErrSubtreeIdentitiesPending (never a partial set).
+//
+// Built-in pre-gate: before touching the subresource it consults the node's own
+// CoreCaptureState().ChildSubtreesManifestsPersisted latch. A non-nil false means the direct children's
+// subtrees are not fully persisted yet, so it returns ErrSubtreeIdentitiesPending WITHOUT any REST call —
+// saving the endpoint round-trips and 409-requeue cycles while descendants are still capturing. A nil latch
+// (the adapter does not map it, or it is not computed yet) skips the pre-gate and preserves the prior
+// behavior; correctness is still held by the subresource's fail-closed 409, which remains the backstop.
 func (s *sdk) SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error) {
 	children := t.GetDomainCaptureState().ChildrenSnapshotRefs
 	// A node with no children has an empty exclude set: nothing was captured beneath it. Return early
 	// (no REST call needed), so leaf-shaped aggregators need not wire the subresource client.
 	if len(children) == 0 {
 		return []SubtreeManifestIdentity{}, nil
+	}
+	// Pre-gate: the direct children's subtrees are not fully persisted yet -> fail closed without any REST
+	// call. nil = pre-gate off (adapter did not map the latch); the 409 fail-closed below still guards
+	// correctness.
+	if v := t.CoreCaptureState().ChildSubtreesManifestsPersisted; v != nil && !*v {
+		return nil, ErrSubtreeIdentitiesPending
 	}
 	if s.subresourceREST == nil {
 		return nil, fmt.Errorf("snapshotsdk: SubtreeManifestIdentities requires a subresource REST client (New(..., WithSubresourceREST(...)))")

@@ -63,8 +63,8 @@ func (in *CommonControllerCaptureState) DeepCopyInto(out *CommonControllerCaptur
 		*out = new(bool)
 		**out = **in
 	}
-	if in.SubtreeManifestsPersisted != nil {
-		in, out := &in.SubtreeManifestsPersisted, &out.SubtreeManifestsPersisted
+	if in.ChildSubtreesManifestsPersisted != nil {
+		in, out := &in.ChildSubtreesManifestsPersisted, &out.ChildSubtreesManifestsPersisted
 		*out = new(bool)
 		**out = **in
 	}

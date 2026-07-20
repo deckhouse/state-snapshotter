@@ -772,7 +772,7 @@ func truncate(b []byte, n int) string {
 // snapshotCommonControllerLatch reads a core-owned capture-leg latch
 // status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
 // commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
-// subtreeManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
+// childSubtreesManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
 // SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
 // found=false for these latches (the aggregator never writes them onto its own content). Returns
 // (value, found).

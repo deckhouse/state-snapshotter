@@ -162,6 +162,36 @@ func TestNamespaceSnapshotAdapter_CoreCaptureStateReadsCommon(t *testing.T) {
 	}
 }
 
+// The in-core namespace adapter maps commonController.childSubtreesManifestsPersisted into CoreCaptureState
+// so the SDK manifest-exclude pre-gate applies to the namespace root automatically (nil/false/true).
+func TestNamespaceSnapshotAdapter_CoreCaptureStateMapsChildSubtreesManifestsPersisted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  *bool
+	}{
+		{"nil (unset)", nil},
+		{"false", boolPtr(false)},
+		{"true", boolPtr(true)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := newRootSnapshot()
+			snap.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{
+				CommonController: &storagev1alpha1.CommonControllerCaptureState{ChildSubtreesManifestsPersisted: tc.set},
+			}
+			cs := NewNamespaceSnapshotAdapter(snap).CoreCaptureState()
+			if tc.set == nil {
+				if cs.ChildSubtreesManifestsPersisted != nil {
+					t.Fatalf("want nil, got %v", *cs.ChildSubtreesManifestsPersisted)
+				}
+				return
+			}
+			if cs.ChildSubtreesManifestsPersisted == nil || *cs.ChildSubtreesManifestsPersisted != *tc.set {
+				t.Fatalf("want %v, got %v", *tc.set, cs.ChildSubtreesManifestsPersisted)
+			}
+		})
+	}
+}
+
 func TestNamespaceSnapshotAdapter_ReadyReasonMessage(t *testing.T) {
 	snap := newRootSnapshot()
 	a := NewNamespaceSnapshotAdapter(snap)

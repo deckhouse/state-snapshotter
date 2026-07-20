@@ -80,6 +80,42 @@ func newSubtreeTestServer(t *testing.T, responses map[string]contentResponse) (r
 	return rc, srv.Close
 }
 
+// newCountingSubtreeTestServer is newSubtreeTestServer plus a request counter, so a test can assert the
+// built-in pre-gate short-circuits WITHOUT any REST call to the subresource.
+func newCountingSubtreeTestServer(t *testing.T, responses map[string]contentResponse) (rest.Interface, *int, func()) {
+	t.Helper()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		name := contentNameFromSubtreePath(r.URL.Path)
+		resp, ok := responses[name]
+		if !ok {
+			writeStatus(w, http.StatusNotFound, "NotFound", "no canned response for "+name)
+			return
+		}
+		if resp.status != 0 && resp.status != http.StatusOK {
+			writeStatus(w, resp.status, "Conflict", "subtree not fully persisted")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(SubtreeManifestIdentitiesResponse{Identities: resp.identities})
+	}))
+
+	cfg := &rest.Config{
+		Host: srv.URL,
+		ContentConfig: rest.ContentConfig{
+			GroupVersion:         &schema.GroupVersion{Group: "subresources.state-snapshotter.deckhouse.io", Version: "v1alpha1"},
+			NegotiatedSerializer: serializer.NewCodecFactory(runtime.NewScheme()).WithoutConversion(),
+		},
+	}
+	rc, err := rest.RESTClientFor(cfg)
+	if err != nil {
+		srv.Close()
+		t.Fatalf("RESTClientFor: %v", err)
+	}
+	return rc, &calls, srv.Close
+}
+
 func contentNameFromSubtreePath(path string) string {
 	// .../snapshotcontents/<name>/subtree-manifest-identities
 	parts := strings.Split(strings.Trim(path, "/"), "/")
@@ -109,6 +145,14 @@ func newSubtreeAdapter(children ...SnapshotChildRef) *subtreeAdapter {
 	a := &subtreeAdapter{}
 	a.obj = &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "root"}}
 	a.domain = DomainCaptureState{ChildrenSnapshotRefs: children}
+	return a
+}
+
+// newSubtreeAdapterWithPreGate builds a subtree adapter whose CoreCaptureState exposes the
+// ChildSubtreesManifestsPersisted pre-gate latch (nil = pre-gate off).
+func newSubtreeAdapterWithPreGate(preGate *bool, children ...SnapshotChildRef) *subtreeAdapter {
+	a := newSubtreeAdapter(children...)
+	a.core = CoreCaptureState{ChildSubtreesManifestsPersisted: preGate}
 	return a
 }
 
@@ -239,6 +283,89 @@ func TestSubtreeManifestIdentities_MissingChildPending(t *testing.T) {
 	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
 	if !errors.Is(err, ErrSubtreeIdentitiesPending) {
 		t.Fatalf("want ErrSubtreeIdentitiesPending for a missing child, got %v", err)
+	}
+}
+
+// TestSubtreeManifestIdentities_PreGateFalseShortCircuits verifies the built-in pre-gate: a non-nil false
+// ChildSubtreesManifestsPersisted latch returns ErrSubtreeIdentitiesPending WITHOUT any REST call to the
+// subresource (the children's subtrees are known-not-persisted, so the endpoint would only 409-requeue).
+func TestSubtreeManifestIdentities_PreGateFalseShortCircuits(t *testing.T) {
+	scheme := newRefreshTestScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(childSnapshot("child-a", "content-a")).
+		Build()
+
+	rc, calls, closeSrv := newCountingSubtreeTestServer(t, map[string]contentResponse{
+		"content-a": {identities: []SubtreeManifestIdentity{id("obj-1")}},
+	})
+	defer closeSrv()
+
+	s := New(cl, nil, nil, WithSubresourceREST(rc))
+	adapter := newSubtreeAdapterWithPreGate(refreshBoolPtr(false), childRef("child-a"))
+
+	_, err := s.SubtreeManifestIdentities(context.Background(), adapter)
+	if !errors.Is(err, ErrSubtreeIdentitiesPending) {
+		t.Fatalf("want ErrSubtreeIdentitiesPending from the pre-gate, got %v", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("pre-gate must short-circuit without any REST call, got %d calls", *calls)
+	}
+}
+
+// TestSubtreeManifestIdentities_PreGateNilCallsEndpoint verifies a nil pre-gate latch (adapter does not map
+// the field — backward compatible) preserves the prior behavior: the subresource is called and its
+// identities returned.
+func TestSubtreeManifestIdentities_PreGateNilCallsEndpoint(t *testing.T) {
+	scheme := newRefreshTestScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(childSnapshot("child-a", "content-a")).
+		Build()
+
+	rc, calls, closeSrv := newCountingSubtreeTestServer(t, map[string]contentResponse{
+		"content-a": {identities: []SubtreeManifestIdentity{id("obj-1")}},
+	})
+	defer closeSrv()
+
+	s := New(cl, nil, nil, WithSubresourceREST(rc))
+	adapter := newSubtreeAdapterWithPreGate(nil, childRef("child-a")) // nil = pre-gate off
+
+	got, err := s.SubtreeManifestIdentities(context.Background(), adapter)
+	if err != nil {
+		t.Fatalf("SubtreeManifestIdentities: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "obj-1" {
+		t.Fatalf("want the endpoint's identities, got %v", got)
+	}
+	if *calls == 0 {
+		t.Fatalf("a nil pre-gate must call the subresource endpoint")
+	}
+}
+
+// TestSubtreeManifestIdentities_PreGateTrueCallsEndpoint verifies a true pre-gate latch (the children's
+// subtrees are persisted) proceeds to call the subresource and returns its identities.
+func TestSubtreeManifestIdentities_PreGateTrueCallsEndpoint(t *testing.T) {
+	scheme := newRefreshTestScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(childSnapshot("child-a", "content-a")).
+		Build()
+
+	rc, calls, closeSrv := newCountingSubtreeTestServer(t, map[string]contentResponse{
+		"content-a": {identities: []SubtreeManifestIdentity{id("obj-1")}},
+	})
+	defer closeSrv()
+
+	s := New(cl, nil, nil, WithSubresourceREST(rc))
+	adapter := newSubtreeAdapterWithPreGate(refreshBoolPtr(true), childRef("child-a"))
+
+	got, err := s.SubtreeManifestIdentities(context.Background(), adapter)
+	if err != nil {
+		t.Fatalf("SubtreeManifestIdentities: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "obj-1" {
+		t.Fatalf("want the endpoint's identities, got %v", got)
+	}
+	if *calls == 0 {
+		t.Fatalf("a true pre-gate must proceed to call the subresource endpoint")
 	}
 }
 

@@ -115,6 +115,15 @@ type CoreCaptureState struct {
 	// (e.g. fs unfreeze) that must fire even when a child data snapshot failed. nil = no direct children (leaf)
 	// or not computed yet; true once every direct child is terminal.
 	ChildrenSettled *bool
+	// ChildSubtreesManifestsPersisted is the core-computed "the subtrees of ALL declared direct children are
+	// fully persisted (every descendant durably archived its manifests)" latch
+	// (captureState.commonController.childSubtreesManifestsPersisted). It excludes this node's own manifests,
+	// so it can be true before this node creates its own MCR; a childless node is vacuously true. It is NOT a
+	// capture leg: it does NOT participate in AllLegsCaptured or CoreCaptureOutcome. The SDK reads it as the
+	// built-in pre-gate of SubtreeManifestIdentities (a non-nil false short-circuits to
+	// ErrSubtreeIdentitiesPending without any REST call). nil = the adapter does not map it (pre-gate off,
+	// backward compatible) or not computed yet.
+	ChildSubtreesManifestsPersisted *bool
 }
 
 // manifestCaptured reports whether the manifest leg is captured (nil latch => not captured).
@@ -180,7 +189,8 @@ type FailSpec struct {
 
 // CaptureOutcome is the tri-state the SDK derives for the domain from the core's leg latches plus the
 // terminal Ready reason. The domain switches its wait loop on it (Captured -> ConfirmConsistent,
-// Failed -> Fail/Reject, Capturing -> wait).
+// Failed -> stop (the core owns and bubbles the terminal; the domain must still compensate its consistency
+// action, e.g. fs unfreeze), Capturing -> wait).
 type CaptureOutcome int
 
 const (
@@ -199,10 +209,11 @@ type CaptureOutcomeResult struct {
 	Message string
 }
 
-// ChildCaptureState is the read-only view of one declared child snapshot the domain inspects (via
-// ChildrenCaptureStates) to build its own Finished/wait/stop logic — for example a VM aggregator that
-// confirms consistency only once every child disk's data leg is latched, and that stops waiting once a
-// child has gone terminal (the core owns and bubbles that terminal; the domain must not re-drive it).
+// ChildCaptureState is the read-only per-child view the domain inspects via ChildrenCaptureStates —
+// diagnostics/inspection only. It MUST NOT be used to gate a consistency action: looping on each child's
+// terminal Ready reason hangs forever on a child that fails with a domain free-form reason (not in
+// TerminalReadyReasons). Gate the consistency action on this node's own CoreCaptureState().ChildrenSettled
+// / CoreCaptureOutcome (or a domain freeze-deadline) instead — see CaptureOutcome and ChildrenSettled.
 type ChildCaptureState struct {
 	// Ref is the child snapshot's published ref (status.childrenSnapshotRefs entry).
 	Ref SnapshotChildRef

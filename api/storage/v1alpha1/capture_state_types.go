@@ -63,7 +63,8 @@ type CaptureStateStatus struct {
 // means "no such leg"), then monotonically flips them to true as each leg is captured. Success-only:
 // a capture failure is NOT written here — it surfaces as a terminal Ready reason (IsReasonTerminal).
 // There is no rollup field; "all legs captured" is computed by the SDK over the declared legs.
-// It also carries the non-leg SubtreeManifestsPersisted mirror (a manifest-exclude pre-gate), see below.
+// It also carries the non-leg ChildSubtreesManifestsPersisted children-only latch (a manifest-exclude
+// pre-gate), see below.
 // +k8s:deepcopy-gen=true
 type CommonControllerCaptureState struct {
 	// ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
@@ -77,17 +78,26 @@ type CommonControllerCaptureState struct {
 	// +optional
 	DataCaptured *bool `json:"dataCaptured,omitempty"`
 
-	// SubtreeManifestsPersisted is a core-written MIRROR of the bound SnapshotContent.status.subtreeManifestsPersisted
-	// (the recursive "this node and all descendants archived their manifests" latch). It is NOT a capture
-	// leg: it is NOT part of CoreCaptureOutcome, and it is distinct from ManifestCaptured (which the root
-	// RBAC hook reads). Its purpose is a cheap namespaced pre-gate for the SDK manifest-exclude computation:
-	// an aggregator reads its DIRECT children's mirror to decide when to attempt building its own MCR
-	// (base - exclude) — it cannot gate on its OWN subtree latch, which would include its not-yet-created
-	// own manifest (circular). The gate is best-effort: the subtree-manifest-identities subresource is
-	// fail-closed (409 while any subtree MCP is not Ready), so correctness holds even for children that
-	// carry no mirror. nil = not yet mirrored / no bound content. Monotonic (false -> true).
+	// ChildSubtreesManifestsPersisted records that the subtrees of ALL declared direct children of this node
+	// are fully persisted — every descendant node beneath each direct child has durably archived its
+	// manifests. It deliberately EXCLUDES this node's OWN manifests (those are tracked by ManifestCaptured):
+	// "the whole node is persisted" decomposes as ManifestCaptured && ChildSubtreesManifestsPersisted.
+	// Because it does not depend on this node's own manifest leg, it can flip true BEFORE this node creates
+	// its own MCR — which is exactly what makes it usable as a manifest-exclude pre-gate. A childless node is
+	// vacuously persisted (true). It is NOT a capture leg: it is NOT part of CoreCaptureOutcome, and it is
+	// distinct from ManifestCaptured (which the root RBAC hook reads). Its purpose is a cheap namespaced
+	// pre-gate for the SDK manifest-exclude computation (SubtreeManifestIdentities): an aggregator reads its
+	// OWN latch to decide when to attempt building its own MCR (base - exclude) without hitting the
+	// subtree-manifest-identities subresource while descendants are still capturing. The gate is best-effort:
+	// that subresource is fail-closed (409 while any subtree MCP is not Ready), so correctness holds even
+	// when the latch is absent. Core-computed from the direct children's content latches (declared-vs-linked
+	// fail-closed; a leaf is vacuously true). The core eager-declares it false at capture barrier 1 and
+	// monotonically flips it to true once the children's subtrees persist (a childless node latches true on
+	// the first pass) — it is deliberately NOT left nil past barrier 1, since a nil field disables the SDK
+	// pre-gate (nil = pre-gate off). Written sideways onto the snapshot. nil = not yet computed / no bound
+	// content, or an adapter that does not map it (SDK pre-gate off, backward compatible). Monotonic (false -> true).
 	// +optional
-	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty"`
+	ChildSubtreesManifestsPersisted *bool `json:"childSubtreesManifestsPersisted,omitempty"`
 
 	// SubtreePlanned is a core-computed monotonic recursive latch: true once THIS node reached capture
 	// barrier 1 (domainSpecificController.phase >= Planned) AND every DIRECT child's own SubtreePlanned is
