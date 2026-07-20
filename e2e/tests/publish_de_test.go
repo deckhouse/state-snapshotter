@@ -369,7 +369,8 @@ func publishDataExportSpecs() {
 
 			By("Asserting the DataExport export identity is immutable (spec.targetRef cannot change)")
 			// Only the export identity spec.targetRef is locked after creation, via a CEL transition rule
-			// (crds/dataexports.yaml: spec x-kubernetes-validations self.targetRef == oldSelf.targetRef);
+			// (crds/dataexports.yaml: spec x-kubernetes-validations pins targetRef.kind/name/group, with the
+			// optional group normalized so the controller's omitempty round-trip is not seen as a change);
 			// ttl/publish/publicIngress remain mutable (DataExport mirrors DataImport, which locks only
 			// spec.mode + spec.snapshotRef). Patching targetRef.name must be rejected by admission; probe by
 			// attempting the mutation rather than reading the CRD (Deckhouse strips vendor schema extensions).
