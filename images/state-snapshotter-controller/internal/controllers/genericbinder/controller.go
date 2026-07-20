@@ -425,7 +425,16 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	if contentName != "" {
 		if r.GVKRegistry.RequiresDataArtifact(obj.GetObjectKind().GroupVersionKind().Kind) {
 			if err := r.mirrorLeafDataFromContent(ctx, obj, contentName, ""); err != nil {
-				logger.Error(err, "Failed to mirror captured volume data to leaf status")
+				// A NotFound is the bound content being deleted out from under the leaf (E3
+				// degradation): do NOT error-requeue here, or the leaf wedges in an infinite
+				// error loop with a stale Ready=True. Fall through to Step 5, where
+				// checkConsistencyAndSetReady co-writes Ready=False/ContentMissing. A real Get/Patch
+				// or schema failure on an EXISTING content still requeues so wire-shape drift fails loud.
+				if !errors.IsNotFound(err) {
+					logger.Error(err, "Failed to mirror captured volume data to leaf status")
+					return ctrl.Result{}, err
+				}
+				logger.V(1).Info("Bound SnapshotContent not found while mirroring data; deferring to Ready degradation", "content", contentName)
 			}
 		}
 	}

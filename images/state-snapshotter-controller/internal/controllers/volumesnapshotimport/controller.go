@@ -317,7 +317,15 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
 	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data, scOverride); mErr != nil {
-		logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
+		// The content was already confirmed present above, so mirrorDataToImportVolumeSnapshot's own
+		// NotFound can only be the reconciled VolumeSnapshot itself vanishing mid-reconcile: swallow it
+		// (standard "object gone, nothing to do"), don't error-requeue. Any other failure (real Patch/
+		// schema rejection) still requeues so a wire-shape drift fails loud, matching the genericbinder path.
+		if !errors.IsNotFound(mErr) {
+			logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
+			return ctrl.Result{}, mErr
+		}
+		logger.V(1).Info("Import VolumeSnapshot not found while mirroring data; skipping", "volumeSnapshot", req.NamespacedName)
 	}
 	return ctrl.Result{}, nil
 }

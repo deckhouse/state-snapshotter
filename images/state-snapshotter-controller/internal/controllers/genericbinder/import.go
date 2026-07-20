@@ -217,7 +217,14 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		// source/artifact/size/volumeMode come from content.status.data.
 		scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
 		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
-			logger.Error(mErr, "Failed to mirror volume data to import leaf status")
+			// NotFound = the bound content is gone: do NOT error-requeue (that would wedge the leaf);
+			// the Ready mirror below drives the degradation. A real Get/Patch/schema failure on an
+			// existing content still requeues so wire-shape drift fails loud.
+			if !errors.IsNotFound(mErr) {
+				logger.Error(mErr, "Failed to mirror volume data to import leaf status")
+				return ctrl.Result{}, mErr
+			}
+			logger.V(1).Info("Bound SnapshotContent not found while mirroring import data; deferring to Ready mirror", "content", contentName)
 		}
 	}
 
