@@ -197,8 +197,14 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	if content.Status.Data != nil && content.Status.Data.ArtifactRef.Name == vscName {
-		// Already published and bound to the same VSC: latched.
+	if content.Status.Data != nil && content.Status.Data.ArtifactRef.Name == vscName && content.Status.Data.Size != "" {
+		// Already published, bound to the same VSC, AND the durable restore size captured: latched.
+		// Size MUST gate the latch: unlike the VCR path (whose VCR turns Ready only after the CSI snapshot
+		// completes, so restoreSize is already present at first publish), this native-CSI leg publishes as
+		// soon as the VolumeSnapshot binds its VSC (status.boundVolumeSnapshotContentName) — which can
+		// precede the fork's status.restoreSize. Latching on the VSC name alone would freeze status.data
+		// without size forever; re-enriching until size is captured backfills it once the driver publishes
+		// restoreSize (PublishSnapshotContentDataRef is a no-op once equal, so no churn after it lands).
 		return false, "", "", nil
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding})
