@@ -54,11 +54,27 @@ func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, sn
 	return r.ResolveRestoreSubtree(ctx, rootGVK, snapshotNamespace, snapshotName)
 }
 
+// ResolveRestoreNodeOnlyRoot resolves ONLY the root namespaced Snapshot node (scope=node): it runs the
+// same node validations as the subtree walk (Ready gate, bound content Ready, anti-spoofing back-ref
+// 403, non-empty MCP) but does NOT read the run-tree children at all — a not-ready child does not fail
+// the request. It backs manifests-with-data-restoration?scope=node.
+func (r *Resolver) ResolveRestoreNodeOnlyRoot(ctx context.Context, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
+	rootGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	return r.resolveFromRoot(ctx, rootGVK, snapshotNamespace, snapshotName, false)
+}
+
 // ResolveRestoreSubtree resolves the restore tree starting from an arbitrary snapshot node identified
 // by its GVK (the namespaced root Snapshot, or any domain snapshot CR, e.g. a per-VM or per-disk
 // snapshot). It compiles that node and everything below it, so the restore endpoint can return
 // apply-ready manifests for a single subtree, not only the whole namespace.
 func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
+	return r.resolveFromRoot(ctx, gvk, snapshotNamespace, snapshotName, true)
+}
+
+// resolveFromRoot resolves an addressed snapshot node. descend selects the run-tree depth: true walks
+// the whole subtree (childrenSnapshotRefs) fail-closed; false resolves ONLY the addressed node
+// (scope=node) and reads no children. The root's own validations are identical in both modes.
+func (r *Resolver) resolveFromRoot(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string, descend bool) (*RestoreNode, error) {
 	// Domain boundary at the root: a kind owned by an out-of-process domain controller is restored by
 	// the domain's aggregated apiserver, not here. Short-circuit BEFORE the Get so core never reads the
 	// domain CR (it keeps core domain-free: no demo RBAC, no extra round-trip). compileNode delegates it.
@@ -73,7 +89,7 @@ func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVe
 		}
 		return nil, fmt.Errorf("failed to get snapshot %s/%s: %w", snapshotNamespace, snapshotName, err)
 	}
-	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{}, true)
+	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{}, true, descend)
 }
 
 // domainRestoreNode builds the marker node for a domain snapshot boundary. It carries only the
@@ -94,7 +110,10 @@ func domainRestoreNode(apiVersion, kind, name, namespace string) *RestoreNode {
 // buildRestoreNode resolves one snapshot node and its subtree. isRoot marks the user-addressed entry node
 // (vs a node reached via the trusted childrenSnapshotRefs tree-walk), which controls the back-reference
 // mismatch status: 403 for the root, 409 for tree-walk children (see the anti-spoofing check below).
-func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}, isRoot bool) (*RestoreNode, error) {
+// descend controls the run-tree walk: when false (scope=node) the childrenSnapshotRefs are NOT read at
+// all — only this node is resolved and validated — so a not-ready child cannot fail the request. The
+// recursive calls always pass descend=true: a subtree is resolved in full or not at all (fail-closed).
+func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}, isRoot, descend bool) (*RestoreNode, error) {
 	key := snapshotObj.GetAPIVersion() + "/" + snapshotObj.GetKind() + "/" + snapshotObj.GetName()
 	if _, ok := visited[key]; ok {
 		return nil, fmt.Errorf("%w: snapshot run-tree cycle at %s", ErrContractViolation, key)
@@ -162,6 +181,13 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 		VSCToVS:                map[string]string{},
 	}
 
+	// scope=node: do not read the run-tree children at all — only this node's own manifests are
+	// compiled, and a not-ready child must not fail the request. The node's own validations above have
+	// already run identically to the subtree path.
+	if !descend {
+		return node, nil
+	}
+
 	// Read childrenSnapshotRefs directly: the unstructured SnapshotLike wrapper does not surface
 	// apiVersion, which we need to tell VolumeSnapshot leaves from child snapshot CRs and to Get the
 	// child with its own GVK.
@@ -203,7 +229,7 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 			}
 			return nil, fmt.Errorf("failed to get child snapshot %s/%s: %w", namespace, ref.Name, err)
 		}
-		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited, false)
+		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited, false, true)
 		if err != nil {
 			return nil, err
 		}

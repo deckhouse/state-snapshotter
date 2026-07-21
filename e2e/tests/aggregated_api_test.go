@@ -205,6 +205,58 @@ func aggregatedAPISpecs() {
 		})
 	})
 
+	// scope=node and the object filter narrow manifests-with-data-restoration to a single node (children
+	// not read) or a single object, without introducing a new subresource (same GET, same JSON array).
+	Context("scope=node and object filter (manifests-with-data-restoration)", func() {
+		BeforeAll(func() {
+			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
+			Expect(captured.rootSnap).NotTo(BeEmpty(), "root Snapshot must be resolved")
+		})
+
+		It("scope=node returns only the root's own manifests, not the child subtree", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			body, err := aggGet(ctx, path, map[string]string{"scope": "node"})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node", path)
+
+			objs, err := decodeManifestArray(body)
+			Expect(err).NotTo(HaveOccurred())
+			_, hasCM := findManifest(objs, "ConfigMap", srcConfigMapName)
+			Expect(hasCM).To(BeTrue(), "scope=node must return the root's own ConfigMap %s", srcConfigMapName)
+			_, hasVM := findManifest(objs, "DemoVirtualMachine", srcVMName)
+			Expect(hasVM).To(BeFalse(), "scope=node must NOT descend into the child subtree (DemoVirtualMachine %s belongs to a child node)", srcVMName)
+		})
+
+		It("scope=node with a kind/name filter returns exactly the addressed object, namespace-rewritten", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			const targetNS = "restore-read-probe"
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			body, err := aggGet(ctx, path, map[string]string{"scope": "node", "kind": "ConfigMap", "name": srcConfigMapName, "targetNamespace": targetNS})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node&kind=ConfigMap&name=%s", path, srcConfigMapName)
+
+			objs, err := decodeManifestArray(body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objs).To(HaveLen(1), "the object filter must return exactly one object")
+			Expect(objs[0].GetKind()).To(Equal("ConfigMap"))
+			Expect(objs[0].GetName()).To(Equal(srcConfigMapName))
+			Expect(objs[0].GetNamespace()).To(Equal(targetNS), "the single filtered object must be namespace-rewritten")
+		})
+
+		It("rejects an object filter without scope=node (subtree) with 400 BadRequest", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			_, err := aggGet(ctx, path, map[string]string{"kind": "ConfigMap", "name": srcConfigMapName})
+			Expect(err).To(HaveOccurred(), "an object filter at scope=subtree must be rejected")
+			Expect(apierrors.IsBadRequest(err)).To(BeTrue(), "expected 400 BadRequest, got %v", err)
+		})
+	})
+
 	// Block 7 (content-single-writer design §2/§3/§8.1/§8.3, decision #10 — main-owned commonController):
 	// the whole captureState.commonController (the manifest/data capture-leg latches plus the new
 	// subtreePlanned field) is written by the SnapshotContentController (main) SIDEWAYS onto the

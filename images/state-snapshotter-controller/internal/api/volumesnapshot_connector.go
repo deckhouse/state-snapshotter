@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -164,17 +163,22 @@ func (h *RestoreHandler) handleVolumeSnapshotManifestsDownload(w http.ResponseWr
 // generic-PVC extended VolumeSnapshot leaf (the PVC bound to its VolumeSnapshot dataSourceRef).
 func (h *RestoreHandler) handleVolumeSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, name string) {
 	start := time.Now()
-	// SnapshotName is intentionally omitted: BuildManifestsWithDataRestorationForVolumeSnapshot takes the
-	// VS name explicitly and the compiler only consumes SnapshotNamespace/TargetNamespace.
-	opts := restore.Options{
-		SnapshotNamespace: namespace,
-		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
+	// Same query contract as the core snapshot handler (one shared parser). A VS is a leaf, so
+	// scope=node ≡ scope=subtree, but an object filter (e.g. kind=PersistentVolumeClaim) still applies.
+	opts, err := parseRestoreQueryOptions(r)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
 	}
+	// SnapshotName is intentionally omitted: BuildManifestsWithDataRestorationForVolumeSnapshot takes the
+	// VS name explicitly and the compiler only consumes SnapshotNamespace/TargetNamespace/filter.
+	opts.SnapshotNamespace = namespace
+	opts.TargetNamespace = r.URL.Query().Get("targetNamespace")
 	data, err := h.service.BuildManifestsWithDataRestorationForVolumeSnapshot(r.Context(), namespace, name, opts)
 	if err != nil {
 		h.writeRestoreError(w, err)
 		return
 	}
 	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned VolumeSnapshot manifests-with-data-restoration", "volumeSnapshot", name, "namespace", namespace, "duration", time.Since(start))
+	h.logger.Info("Returned VolumeSnapshot manifests-with-data-restoration", "volumeSnapshot", name, "namespace", namespace, "scope", opts.Scope, "filterKind", opts.FilterKind, "filterName", opts.FilterName, "duration", time.Since(start))
 }

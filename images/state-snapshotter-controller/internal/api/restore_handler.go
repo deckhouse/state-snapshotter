@@ -208,13 +208,59 @@ func (h *RestoreHandler) HandleListSnapshots(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(listResponse)
 }
 
+// parseRestoreQueryOptions reads and validates the shared manifests-with-data-restoration query
+// parameters (scope, kind, name, apiVersion) into the restore.Options subset they control. It is used
+// uniformly by the core Snapshot handler and the VolumeSnapshot connector so the contract is enforced in
+// one place. targetNamespace and the snapshot identity are orthogonal and set by the caller. Every
+// validation failure is an ErrBadRequest (writeRestoreError maps it to 400):
+//   - unknown scope value;
+//   - kind without name, or name without kind;
+//   - apiVersion without kind;
+//   - any object filter (kind/name/apiVersion) together with scope != node (the object filter is valid
+//     only with scope=node).
+func parseRestoreQueryOptions(r *http.Request) (restore.Options, error) {
+	q := r.URL.Query()
+	scope := q.Get("scope")
+	kind := q.Get("kind")
+	name := q.Get("name")
+	apiVersion := q.Get("apiVersion")
+
+	opts := restore.Options{}
+	switch scope {
+	case "", string(restore.ScopeSubtree):
+		opts.Scope = restore.ScopeSubtree
+	case string(restore.ScopeNode):
+		opts.Scope = restore.ScopeNode
+	default:
+		return restore.Options{}, fmt.Errorf("%w: unknown scope %q (want %q or %q)", restore.ErrBadRequest, scope, restore.ScopeSubtree, restore.ScopeNode)
+	}
+
+	if (kind == "") != (name == "") {
+		return restore.Options{}, fmt.Errorf("%w: object filter requires both kind and name", restore.ErrBadRequest)
+	}
+	if apiVersion != "" && kind == "" {
+		return restore.Options{}, fmt.Errorf("%w: apiVersion filter requires kind and name", restore.ErrBadRequest)
+	}
+	if (kind != "" || apiVersion != "") && opts.Scope != restore.ScopeNode {
+		return restore.Options{}, fmt.Errorf("%w: object filter (kind/name/apiVersion) is only allowed with scope=node", restore.ErrBadRequest)
+	}
+
+	opts.FilterKind = kind
+	opts.FilterName = name
+	opts.FilterAPIVersion = apiVersion
+	return opts, nil
+}
+
 func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
-	opts := restore.Options{
-		SnapshotName:      snapshotName,
-		SnapshotNamespace: namespace,
-		TargetNamespace:   r.URL.Query().Get("targetNamespace"),
+	opts, err := parseRestoreQueryOptions(r)
+	if err != nil {
+		h.writeRestoreError(w, err)
+		return
 	}
+	opts.SnapshotName = snapshotName
+	opts.SnapshotNamespace = namespace
+	opts.TargetNamespace = r.URL.Query().Get("targetNamespace")
 
 	data, err := h.service.BuildManifestsWithDataRestoration(r.Context(), opts)
 	if err != nil {
@@ -223,7 +269,7 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 	}
 
 	h.writeJSONResponse(w, r, data)
-	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "duration", time.Since(start))
+	h.logger.Info("Returned manifests-with-data-restoration", "snapshot", snapshotName, "namespace", namespace, "scope", opts.Scope, "filterKind", opts.FilterKind, "filterName", opts.FilterName, "duration", time.Since(start))
 }
 
 // HandleCoreSnapshotManifestsDownload returns the own-node (single-node) manifests of a core Snapshot
