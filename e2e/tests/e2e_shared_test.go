@@ -783,11 +783,11 @@ func snapshotCommonControllerLatch(obj *unstructured.Unstructured, leg string) (
 
 // --- condition waiters -----------------------------------------------------
 
-// conditionStatus returns the status of a status.conditions[type==condType] entry.
-func conditionStatus(obj *unstructured.Unstructured, condType string) (status, reason string, found bool) {
+// conditionDetails returns the status, reason, and message of a status.conditions[type==condType] entry.
+func conditionDetails(obj *unstructured.Unstructured, condType string) (status, reason, message string, found bool) {
 	conds, ok, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !ok {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, c := range conds {
 		m, ok := c.(map[string]interface{})
@@ -799,9 +799,16 @@ func conditionStatus(obj *unstructured.Unstructured, condType string) (status, r
 		}
 		status, _, _ = unstructured.NestedString(m, "status")
 		reason, _, _ = unstructured.NestedString(m, "reason")
-		return status, reason, true
+		message, _, _ = unstructured.NestedString(m, "message")
+		return status, reason, message, true
 	}
-	return "", "", false
+	return "", "", "", false
+}
+
+// conditionStatus returns the status and reason of a status.conditions[type==condType] entry.
+func conditionStatus(obj *unstructured.Unstructured, condType string) (status, reason string, found bool) {
+	status, reason, _, found = conditionDetails(obj, condType)
+	return status, reason, found
 }
 
 // snapshotNodeReady reports whether a snapshot tree node is ready. Demo/core snapshot kinds expose a
@@ -887,19 +894,45 @@ func waitDemoDiskReady(ctx context.Context, ns, name string, timeout time.Durati
 }
 
 // waitSnapshotReady waits for a namespaced Snapshot to reach Ready=True and returns its bound content name.
+// It fails immediately when either the domain phase reaches the terminal Failed sink or Ready=False carries
+// a canonical terminal reason. Continuing to poll those states cannot recover an immutable Snapshot and
+// only hides the actual failure behind the outer timeout.
 func waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Duration) (string, error) {
-	if err := waitObjectCondition(ctx, snapshotGVR, ns, name, condReady, "True", timeout); err != nil {
-		return "", err
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		snap, err := getResource(ctx, snapshotGVR, ns, name)
+		if err == nil {
+			st, reason, message, found := conditionDetails(snap, condReady)
+			if found && st == "True" {
+				content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+				if content == "" {
+					return "", fmt.Errorf("Snapshot %s/%s is Ready but has empty status.boundSnapshotContentName", ns, name)
+				}
+				return content, nil
+			}
+
+			phase, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "phase")
+			domainReason, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "reason")
+			domainMessage, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "message")
+			readyTerminal := found && st == "False" && storagev1alpha1.IsReasonTerminal(reason)
+			if phase == string(storagev1alpha1.SnapshotCapturePhaseFailed) || readyTerminal {
+				return "", fmt.Errorf(
+					"Snapshot %s/%s entered terminal capture failure: domain phase=%q reason=%q message=%q; Ready.status=%q reason=%q message=%q",
+					ns, name, phase, domainReason, domainMessage, st, reason, message,
+				)
+			}
+			last = fmt.Sprintf("found=%v status=%q reason=%q phase=%q", found, st, reason, phase)
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for snapshots %s/%s condition Ready=True; last: %s", ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return "", ctx.Err()
+		}
 	}
-	snap, err := getResource(ctx, snapshotGVR, ns, name)
-	if err != nil {
-		return "", err
-	}
-	content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
-	if content == "" {
-		return "", fmt.Errorf("Snapshot %s/%s is Ready but has empty status.boundSnapshotContentName", ns, name)
-	}
-	return content, nil
 }
 
 // waitSnapshotContentReady waits for a cluster-scoped SnapshotContent to have all four leg conditions
