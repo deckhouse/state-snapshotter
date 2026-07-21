@@ -146,6 +146,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  GC TTL (snapshotTtlAfterDelete): %s\n", suiteCfg.gcTTL)
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v  (default on; E2E_VOLUME_DATA=false to disable)\n", suiteCfg.volumeData)
 	GinkgoWriter.Printf("  GET-load measurement:       %v  (default on; E2E_GET_LOAD=false to disable)\n", suiteCfg.getLoad)
+	GinkgoWriter.Printf("  namespace-capture extended: %v  (default on; E2E_NS_CAPTURE_REWORK=false to disable)\n", envEnabledByDefault(os.Getenv(envNSCaptureRework)))
 	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
