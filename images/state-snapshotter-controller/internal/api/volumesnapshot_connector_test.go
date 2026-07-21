@@ -174,7 +174,7 @@ func TestVolumeSnapshotConnector_ManifestsDownload(t *testing.T) {
 	srv := newVSConnectorServer(t, cl)
 	defer srv.Close()
 
-	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download", http.StatusOK)
+	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download")
 	if len(objects) != 1 || !containsKindName(objects, "PersistentVolumeClaim", "orphan-pvc") {
 		t.Fatalf("manifests-download should return the single own-node PVC, got %#v", objects)
 	}
@@ -222,7 +222,7 @@ func TestVolumeSnapshotConnector_ManifestsWithDataRestoration(t *testing.T) {
 	srv := newVSConnectorServer(t, cl)
 	defer srv.Close()
 
-	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-with-data-restoration?targetNamespace=restore-ns", http.StatusOK)
+	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-with-data-restoration?targetNamespace=restore-ns")
 	pi := -1
 	for i, o := range objects {
 		u := unstructured.Unstructured{Object: o}

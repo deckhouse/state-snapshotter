@@ -61,7 +61,7 @@ func TestResolveRestoreNodeOnlyRoot_SkipsResolvableChildren(t *testing.T) {
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
+	diskSnap := demoDiskSnapshotObj()
 	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "disk-snap")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, diskSnap, diskContent).Build()
 

@@ -98,13 +98,13 @@ func diskSnapBoundContent(name, mcp, snapName string) *storagev1alpha1.SnapshotC
 	return c
 }
 
-func demoDiskSnapshotObj(name, contentName string) *unstructured.Unstructured {
+func demoDiskSnapshotObj() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
-		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
+		"metadata":   map[string]interface{}{"name": "disk-snap", "namespace": "source-ns"},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": contentName,
+			"boundSnapshotContentName": "disk-content",
 			"conditions":               []interface{}{map[string]interface{}{"type": "Ready", "status": "True"}},
 		},
 	}}
@@ -175,7 +175,7 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
 		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
 	})
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
+	diskSnap := demoDiskSnapshotObj()
 	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "disk-snap")
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
 
@@ -435,7 +435,7 @@ func TestResolveRestoreTree_ChildSnapshotContentBackRefMismatchFailsClosed(t *te
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
+	diskSnap := demoDiskSnapshotObj()
 	// The child content's spec.snapshotRef points at a DIFFERENT disk snapshot than the one binding it.
 	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "other-disk")
 
@@ -527,7 +527,7 @@ func TestResolveRestoreTree_ChildNotReadyFailsClosed(t *testing.T) {
 		{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
 	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
+	diskSnap := demoDiskSnapshotObj()
 	// disk content present but NOT Ready
 	diskContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},

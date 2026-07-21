@@ -174,7 +174,7 @@ func TestCoreHandler_ScopeNodeAndFilter(t *testing.T) {
 	}
 
 	// 200: scope=node returns only the node's own manifest, with targetNamespace applied.
-	objs := getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node&targetNamespace=restore-ns", http.StatusOK)
+	objs := getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node&targetNamespace=restore-ns")
 	if len(objs) != 1 || !containsKindName(objs, "ConfigMap", "app-config") {
 		t.Fatalf("scope=node output = %#v, want single ConfigMap/app-config", objs)
 	}
@@ -183,7 +183,7 @@ func TestCoreHandler_ScopeNodeAndFilter(t *testing.T) {
 	}
 
 	// 200: scope=node + filter returns exactly the addressed object.
-	objs = getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node&kind=ConfigMap&name=app-config", http.StatusOK)
+	objs = getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node&kind=ConfigMap&name=app-config")
 	if len(objs) != 1 || !containsKindName(objs, "ConfigMap", "app-config") {
 		t.Fatalf("scope=node filter output = %#v, want single ConfigMap/app-config", objs)
 	}
@@ -200,7 +200,7 @@ func TestVSConnector_ScopeNodeAndFilter(t *testing.T) {
 	base := srv.URL + "/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-with-data-restoration"
 
 	// scope=node + filter on the leaf PVC -> the single PVC.
-	objs := getAggregatedObjects(t, base+"?scope=node&kind=PersistentVolumeClaim&name=orphan-pvc&targetNamespace=restore-ns", http.StatusOK)
+	objs := getAggregatedObjects(t, base+"?scope=node&kind=PersistentVolumeClaim&name=orphan-pvc&targetNamespace=restore-ns")
 	if len(objs) != 1 || !containsKindName(objs, "PersistentVolumeClaim", "orphan-pvc") {
 		t.Fatalf("VS filter output = %#v, want single PVC/orphan-pvc", objs)
 	}
