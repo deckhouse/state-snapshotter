@@ -368,6 +368,15 @@ demo/manual API-compat поле, выводимое из аннотации. Gen
   контента, anti-spoofing back-ref корня → `403`, непустой MCP) и **детей не читает вовсе** —
   не-Ready ребёнок запрос не валит. Выдаются только собственные манифесты узла, прогнанные через тот
   же restore-safe путь (D3/D4).
+- **Degraded-корень при `scope=node`.** Для user-addressed КОРНЯ при `scope=node` Ready-гейт мягко
+  ослаблен: `Ready=False` с reason из каталога `DegradedReadyReasons` (SSOT — Go
+  `api/storage/v1alpha1`; единственный член `ChildSnapshotDeleted`: удалён namespaced-ребёнок, а
+  собственный манифест-лег корня цел) **не отклоняется** `409`. Собственные проверки узла сохраняются
+  полностью (`Ready` привязанного `SnapshotContent`, anti-spoofing back-ref → `403`, непустой MCP), а
+  дети при `scope=node` и так не читаются — поэтому per-node/per-object restore корня обязан работать.
+  `scope=subtree` (и дефолт без параметра) остаётся fail-closed `Ready=True` — деградировавший снимок
+  целиком не компилируется. Relax применяется **только** к user-addressed узлу при `scope=node`; узлы,
+  достигнутые tree-walk'ом, и VS-коннектор не меняются.
 - **`kind=<Kind>&name=<name>`** (+ опц. `apiVersion=<group[/version]>` — полный `group/version` **или**
   голая `group`) — фильтр одного объекта, допустим **только при `scope=node`**; применяется **после**
   трансформации по точному совпадению. Исходы: одно совпадение → массив из одного объекта (`200`);
@@ -403,6 +412,10 @@ SSOT / document-boundaries).
   дерева — и на Snapshot/доменном snapshot-CR, и на его SnapshotContent. **Отсутствующее** условие
   `Ready` трактуется как not-ready (`ErrNotReady`), а не как успех (mid-reconcile узел не должен
   попадать в restore). При не-Ready/missing/failed узле — fail-whole (`409`/`404`/`400`).
+  **Единственное исключение (D9 degraded-relax):** user-addressed КОРЕНЬ при `scope=node` с
+  `Ready=False` и reason из `DegradedReadyReasons` (сейчас — только `ChildSnapshotDeleted`) не
+  отклоняется; остальные проверки узла (`Ready` контента, anti-spoofing, непустой MCP) сохраняются.
+  `scope=subtree`/дефолт и tree-walk дети — по-прежнему строгий `Ready=True`.
 - **INV-RC7 (no name-coupling):** source identity извлекается через generic-контракт
   (annotation/adapter), а не через хардкод `spec.sourceRef` доменного CR.
 - **INV-RC8 (no new endpoint):** доменные restore-преобразования — внутренние Go-трансформеры;

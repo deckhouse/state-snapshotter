@@ -55,9 +55,11 @@ func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, sn
 }
 
 // ResolveRestoreNodeOnlyRoot resolves ONLY the root namespaced Snapshot node (scope=node): it runs the
-// same node validations as the subtree walk (Ready gate, bound content Ready, anti-spoofing back-ref
-// 403, non-empty MCP) but does NOT read the run-tree children at all — a not-ready child does not fail
-// the request. It backs manifests-with-data-restoration?scope=node.
+// same node validations as the subtree walk (bound content Ready, anti-spoofing back-ref 403, non-empty
+// MCP) but does NOT read the run-tree children at all — a not-ready child does not fail the request. The
+// one difference from the subtree walk is the Ready gate: for this user-addressed root it is relaxed for a
+// recoverable degradation (Ready=False with a DegradedReadyReasons reason is accepted — see
+// ensureSnapshotReadyOrDegraded / resolveFromRoot). It backs manifests-with-data-restoration?scope=node.
 func (r *Resolver) ResolveRestoreNodeOnlyRoot(ctx context.Context, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
 	rootGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
 	return r.resolveFromRoot(ctx, rootGVK, snapshotNamespace, snapshotName, false)
@@ -73,7 +75,11 @@ func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVe
 
 // resolveFromRoot resolves an addressed snapshot node. descend selects the run-tree depth: true walks
 // the whole subtree (childrenSnapshotRefs) fail-closed; false resolves ONLY the addressed node
-// (scope=node) and reads no children. The root's own validations are identical in both modes.
+// (scope=node) and reads no children. The root's own validations are the same in both modes EXCEPT the
+// Ready gate: at scope=node (descend=false) the user-addressed root's Ready gate is relaxed for a
+// recoverable degradation (Ready=False with a DegradedReadyReasons reason is accepted — see
+// ensureSnapshotReadyOrDegraded); every other node check (bound content Ready, anti-spoofing back-ref,
+// non-empty MCP) is identical.
 func (r *Resolver) resolveFromRoot(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string, descend bool) (*RestoreNode, error) {
 	// Domain boundary at the root: a kind owned by an out-of-process domain controller is restored by
 	// the domain's aggregated apiserver, not here. Short-circuit BEFORE the Get so core never reads the
@@ -120,7 +126,9 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 	}
 	visited[key] = struct{}{}
 
-	if err := ensureSnapshotReady(snapshotObj); err != nil {
+	// Ready gate. It is relaxed ONLY for the user-addressed root at scope=node (isRoot && !descend): a
+	// soft-degraded root still serves its own manifests. See ensureSnapshotReadyOrDegraded.
+	if err := ensureSnapshotReadyOrDegraded(snapshotObj, isRoot && !descend); err != nil {
 		return nil, err
 	}
 	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
@@ -183,7 +191,10 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 
 	// scope=node: do not read the run-tree children at all — only this node's own manifests are
 	// compiled, and a not-ready child must not fail the request. The node's own validations above have
-	// already run identically to the subtree path.
+	// already run as in the subtree path, except the Ready gate: for isRoot && !descend it was relaxed for
+	// a recoverable degradation (Ready=False with a DegradedReadyReasons reason — see
+	// ensureSnapshotReadyOrDegraded); every other node check (bound content Ready, anti-spoofing, MCP) is
+	// identical.
 	if !descend {
 		return node, nil
 	}
@@ -447,4 +458,36 @@ func ensureSnapshotReady(snapshotObj *unstructured.Unstructured) error {
 		return fmt.Errorf("%w: Snapshot %s is not Ready", ErrNotReady, snapshotObj.GetName())
 	}
 	return nil
+}
+
+// ensureSnapshotReadyOrDegraded gates the addressed snapshot node's readiness for the restore compiler.
+// It is ensureSnapshotReady with a single, narrow relaxation: when relaxDegraded is true it ALSO accepts a
+// Ready=False snapshot whose reason is a recoverable degradation (storagev1alpha1.IsReasonDegraded — the
+// DegradedReadyReasons catalog, currently the sole ChildSnapshotDeleted). buildRestoreNode sets
+// relaxDegraded ONLY for the user-addressed ROOT node at scope=node (isRoot && !descend); every other path
+// (scope=subtree, a tree-walk child, a missing Ready condition, a processing/terminal Ready=False reason)
+// keeps the strict Ready=True gate and fails closed with ErrNotReady.
+//
+// Why the relaxation is safe for exactly this case: at scope=node the resolver reads NO run-tree children
+// (buildRestoreNode returns right after this node when descend is false), and a soft-degraded root's own
+// captured data is intact — only a namespaced child snapshot CR was lost while its child SnapshotContent
+// survives in the recycle bin. The root's OWN manifest leg is still fully validated below — bound
+// SnapshotContent Ready (ensureReady), the anti-spoofing back-reference (snapshotRefMismatch -> 403), and a
+// non-empty MCP — so the root's own objects stay restorable while the degraded (unreadable) subtree is
+// never touched. scope=subtree/default keeps compiling the whole tree fail-closed.
+func ensureSnapshotReadyOrDegraded(snapshotObj *unstructured.Unstructured, relaxDegraded bool) error {
+	if !relaxDegraded {
+		return ensureSnapshotReady(snapshotObj)
+	}
+	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+	if err != nil {
+		return fmt.Errorf("%w: failed to parse Snapshot", ErrContractViolation)
+	}
+	ready := meta.FindStatusCondition(snapshotLike.GetStatusConditions(), storagev1alpha1.ConditionReady)
+	// Accept a recoverable degradation: Ready=False with a reason in DegradedReadyReasons. Everything else
+	// (Ready=True, missing Ready, processing/terminal Ready=False) defers to the strict gate.
+	if ready != nil && ready.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonDegraded(ready.Reason) {
+		return nil
+	}
+	return ensureSnapshotReady(snapshotObj)
 }

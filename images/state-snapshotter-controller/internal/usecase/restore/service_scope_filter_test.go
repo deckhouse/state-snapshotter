@@ -51,6 +51,16 @@ func scopeFilterScheme() *runtime.Scheme {
 // intentionally NOT seeded, so a subtree walk would fail — proving scope=node never reads them.
 func newRootNodeService(t *testing.T, objects []map[string]interface{}, childRefs []storagev1alpha1.SnapshotChildRef) *Service {
 	t.Helper()
+	return newRootNodeServiceReady(t, objects, childRefs, metav1.Condition{
+		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: snapshot.ReasonCompleted,
+	})
+}
+
+// newRootNodeServiceReady is newRootNodeService with an explicit root Snapshot Ready condition, so
+// degraded-root (Ready=False) scope=node cases can reuse the same MCP/content plumbing. The bound
+// SnapshotContent stays Ready — only the root Snapshot's own Ready condition varies.
+func newRootNodeServiceReady(t *testing.T, objects []map[string]interface{}, childRefs []storagev1alpha1.SnapshotChildRef, rootReady metav1.Condition) *Service {
+	t.Helper()
 	scheme := scopeFilterScheme()
 	log, _ := logger.NewLogger("error")
 
@@ -91,7 +101,7 @@ func newRootNodeService(t *testing.T, objects []map[string]interface{}, childRef
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "source-ns"},
 		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "root-content", ChildrenSnapshotRefs: childRefs},
 	}
-	meta.SetStatusCondition(&snap.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
+	meta.SetStatusCondition(&snap.Status.Conditions, rootReady)
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(chunk, mcp, content, snap).Build()
 	arch := usecase.NewArchiveService(cl, cl, log)

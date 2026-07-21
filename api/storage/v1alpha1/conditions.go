@@ -112,10 +112,12 @@ func IsReasonTerminal(reason string) bool {
 // dependency-free (same style as TerminalReadyReasons). ReasonContentMissing (core pkg/snapshot only;
 // the bound durable content itself vanished — terminal-shaped) is deliberately NOT in this set.
 //
-// There is no controller runtime consumer yet: this is a classification catalog for presentation, the
-// single source of truth mirrored verbatim by the UI/d8 surfaces exactly as they already mirror
-// TerminalReadyReasons. See the primary ADR (2026-06-29-unified-snapshots-overview, section
-// "Conditions & Reasons", subcategory "Восстановимая деградация — DegradedReadyReasons").
+// It is both a classification catalog for presentation — the single source of truth mirrored verbatim by
+// the UI/d8 surfaces exactly as they already mirror TerminalReadyReasons — and a runtime classifier: the
+// restore resolver applies IsReasonDegraded to relax the Ready gate for a user-addressed root at
+// scope=node (a recoverable Ready=False root still serves its own manifests). See the primary ADR
+// (2026-06-29-unified-snapshots-overview, section "Conditions & Reasons", subcategory "Восстановимая
+// деградация — DegradedReadyReasons").
 var DegradedReadyReasons = map[string]struct{}{
 	ReasonChildSnapshotDeleted: {},
 }

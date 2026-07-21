@@ -27,6 +27,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // Plural resource names of the demo snapshot kinds, as addressed on the aggregated subresource paths.
@@ -374,6 +376,57 @@ func aggregatedAPISpecs() {
 				Expect(err).To(HaveOccurred(), "%s must be rejected (params=%v)", tc.name, tc.params)
 				Expect(apierrors.IsBadRequest(err)).To(BeTrue(), "%s: expected 400 BadRequest, got %v", tc.name, err)
 			}
+		})
+	})
+
+	// Degraded root + scope=node (ADR degraded-relax): a user-addressed root whose Ready=False carries a
+	// recoverable DegradedReadyReasons reason (ChildSnapshotDeleted — a child snapshot CR was deleted while
+	// its content survives in the recycle bin) still serves its OWN manifests at scope=node, while the
+	// default subtree stays fail-closed (409). Runs on its OWN isolated tree so it never degrades the shared
+	// `captured` tree the other specs assert Ready on (the global Ready-consistency invariant tolerates a
+	// Ready=False root: it only enforces that a Ready=True parent has Ready children).
+	Context("Degraded root + scope=node (manifests-with-data-restoration)", func() {
+		It("serves the degraded root's own manifests at scope=node but fails the subtree closed with 409", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			ns := uniqueNS("p1-degraded-node")
+			Expect(ensureNamespace(ctx, ns)).To(Succeed())
+			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
+
+			By("Capturing an isolated manifest-only tree (root ConfigMap leg + a DemoVirtualMachineSnapshot child)")
+			Expect(applyObjects(ctx, buildManifestOnlySource(ns), ns)).To(Succeed())
+			const degradedRoot = "degraded-node-snap"
+			Expect(createRootSnapshot(ctx, ns, degradedRoot)).To(Succeed())
+			rootContent, err := waitSnapshotReady(ctx, ns, degradedRoot, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(waitSnapshotContentReady(ctx, rootContent, suiteCfg.captureReadyTO)).To(Succeed())
+
+			By("Degrading the root: delete the child DemoVirtualMachineSnapshot CR while its content survives (ChildSnapshotDeleted)")
+			nodes, err := walkSnapshotTree(ctx, ns, degradedRoot)
+			Expect(err).NotTo(HaveOccurred())
+			child, ok := firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot child node")
+			Expect(suiteDyn.Resource(demoVMSnapshotGVR).Namespace(ns).Delete(ctx, child.name, metav1.DeleteOptions{})).To(Succeed())
+			Expect(waitSnapshotReadyFalseReason(ctx, ns, degradedRoot, storagev1alpha1.ReasonChildSnapshotDeleted, 2*suiteCfg.captureReadyTO+time.Minute)).
+				To(Succeed(), "root must fold to Ready=False/ChildSnapshotDeleted after the child CR is deleted")
+
+			path := coreSnapshotSubPath(ns, degradedRoot, subManifestsRestore)
+
+			By("scope=node returns 200 with only the degraded root's own manifests (the child subtree is not read)")
+			body, err := aggGet(ctx, path, map[string]string{"scope": "node"})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node on a degraded root must succeed", path)
+			objs, err := decodeManifestArray(body)
+			Expect(err).NotTo(HaveOccurred())
+			_, hasCM := findManifest(objs, "ConfigMap", srcConfigMapName)
+			Expect(hasCM).To(BeTrue(), "scope=node must return the degraded root's own ConfigMap %s", srcConfigMapName)
+			_, hasVM := findManifest(objs, "DemoVirtualMachine", srcVMName)
+			Expect(hasVM).To(BeFalse(), "scope=node must NOT descend into the child subtree (DemoVirtualMachine %s belongs to the deleted child node)", srcVMName)
+
+			By("the default (subtree) stays fail-closed with 409 Conflict on the degraded root")
+			_, err = aggGet(ctx, path, nil)
+			Expect(err).To(HaveOccurred(), "a degraded root must fail the whole-subtree compile closed")
+			Expect(apierrors.IsConflict(err)).To(BeTrue(), "expected 409 Conflict for the subtree on a degraded root, got %v", err)
 		})
 	})
 
