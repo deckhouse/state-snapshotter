@@ -45,6 +45,18 @@ func findManifest(objs []unstructured.Unstructured, kind, name string) (*unstruc
 	return nil, false
 }
 
+// findManifestOfKind returns the first object of the given kind (any name) in a decoded manifest array.
+// Used where the object's name is not known up front (e.g. the VolumeSnapshot-connector restore emits a
+// single PVC whose name is discovered from the output before filtering by it).
+func findManifestOfKind(objs []unstructured.Unstructured, kind string) (*unstructured.Unstructured, bool) {
+	for i := range objs {
+		if objs[i].GetKind() == kind {
+			return &objs[i], true
+		}
+	}
+	return nil, false
+}
+
 // firstNodeOfKind returns the first walked child snapshot node of the requested kind.
 func firstNodeOfKind(nodes []childRef, kind string) (childRef, bool) {
 	for _, n := range nodes {
@@ -254,6 +266,114 @@ func aggregatedAPISpecs() {
 			_, err := aggGet(ctx, path, map[string]string{"kind": "ConfigMap", "name": srcConfigMapName})
 			Expect(err).To(HaveOccurred(), "an object filter at scope=subtree must be rejected")
 			Expect(apierrors.IsBadRequest(err)).To(BeTrue(), "expected 400 BadRequest, got %v", err)
+		})
+
+		It("explicit scope=subtree is backward-compatible: it returns the root's own manifests just like the default", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			// The default (no scope) already serves the whole subtree; an EXPLICIT scope=subtree must parse to
+			// the identical historical behavior. The root's own ConfigMap is present under both — this is the
+			// regression guard that adding the scope parameter did not change the zero-parameter contract.
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			for _, params := range []map[string]string{nil, {"scope": "subtree"}} {
+				body, err := aggGet(ctx, path, params)
+				Expect(err).NotTo(HaveOccurred(), "GET %s (params=%v)", path, params)
+				objs, err := decodeManifestArray(body)
+				Expect(err).NotTo(HaveOccurred())
+				_, hasCM := findManifest(objs, "ConfigMap", srcConfigMapName)
+				Expect(hasCM).To(BeTrue(), "scope=%v must still return the root's own ConfigMap %s", params, srcConfigMapName)
+			}
+		})
+
+		It("scope=node with a non-matching object name returns 404 NotFound", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			_, err := aggGet(ctx, path, map[string]string{"scope": "node", "kind": "ConfigMap", "name": srcConfigMapName + "-does-not-exist"})
+			Expect(err).To(HaveOccurred(), "a filter that matches nothing must not return 200")
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected 404 NotFound, got %v", err)
+		})
+
+		It("scope=node object filter is node-scoped: a kind captured only in a child subtree is 404 at the root", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			// DemoVirtualMachine vm-1 is captured by the child DemoVirtualMachineSnapshot node, NOT by the
+			// root's own manifests (proven by the subtree-manifest-identities exclude). scope=node compiles ONLY
+			// the root node, so a filter for the child-owned object must 404 — proving the filter is scoped to
+			// the addressed node, not the whole subtree (a subtree walk would otherwise surface the VM).
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			_, err := aggGet(ctx, path, map[string]string{"scope": "node", "kind": "DemoVirtualMachine", "name": srcVMName})
+			Expect(err).To(HaveOccurred(), "a child-owned object must not be restorable from the root node")
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected 404 NotFound, got %v", err)
+		})
+
+		It("scope=node object filter honors apiVersion: a matching apiVersion resolves the object, a mismatching one is 404", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+
+			By("a matching apiVersion (core v1) resolves the ConfigMap")
+			body, err := aggGet(ctx, path, map[string]string{"scope": "node", "kind": "ConfigMap", "name": srcConfigMapName, "apiVersion": "v1"})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node&kind=ConfigMap&name=%s&apiVersion=v1", path, srcConfigMapName)
+			objs, err := decodeManifestArray(body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objs).To(HaveLen(1), "an apiVersion-qualified filter must still return exactly one object")
+			Expect(objs[0].GetKind()).To(Equal("ConfigMap"))
+			Expect(objs[0].GetName()).To(Equal(srcConfigMapName))
+
+			By("a mismatching apiVersion for the same kind+name is a 404 (the object is not restorable under that group)")
+			_, err = aggGet(ctx, path, map[string]string{"scope": "node", "kind": "ConfigMap", "name": srcConfigMapName, "apiVersion": "apps/v1"})
+			Expect(err).To(HaveOccurred(), "a kind+name present only in a different apiVersion must not match")
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected 404 NotFound for a mismatching apiVersion, got %v", err)
+		})
+
+		It("scope=node object filter output is sanitized (no status/managedFields) and namespace-rewritten", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			const targetNS = "restore-read-probe"
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			body, err := aggGet(ctx, path, map[string]string{"scope": "node", "kind": "ConfigMap", "name": srcConfigMapName, "targetNamespace": targetNS})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node&kind=ConfigMap&name=%s", path, srcConfigMapName)
+			objs, err := decodeManifestArray(body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(objs).To(HaveLen(1))
+
+			cm := objs[0]
+			Expect(cm.GetNamespace()).To(Equal(targetNS), "the single filtered object must be namespace-rewritten")
+			_, hasStatus := cm.Object["status"]
+			Expect(hasStatus).To(BeFalse(), "the filtered restore output must strip status")
+			_, hasManagedFields, _ := unstructured.NestedFieldNoCopy(cm.Object, "metadata", "managedFields")
+			Expect(hasManagedFields).To(BeFalse(), "the filtered restore output must strip metadata.managedFields")
+		})
+
+		It("rejects invalid scope/filter parameter combinations with 400 BadRequest", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+
+			path := coreSnapshotSubPath(captured.namespace, captured.rootSnap, subManifestsRestore)
+			// Every row is a malformed query the shared parser must reject with ErrBadRequest (400) BEFORE any
+			// compilation: an unknown scope, a half-specified object filter, an apiVersion without a kind, and
+			// an object filter at an explicit scope=subtree (the object filter is valid only with scope=node).
+			badCases := []struct {
+				name   string
+				params map[string]string
+			}{
+				{"unknown scope", map[string]string{"scope": "bogus"}},
+				{"kind without name", map[string]string{"scope": "node", "kind": "ConfigMap"}},
+				{"name without kind", map[string]string{"scope": "node", "name": srcConfigMapName}},
+				{"apiVersion without kind", map[string]string{"scope": "node", "apiVersion": "v1"}},
+				{"object filter at explicit scope=subtree", map[string]string{"scope": "subtree", "kind": "ConfigMap", "name": srcConfigMapName}},
+			}
+			for _, tc := range badCases {
+				_, err := aggGet(ctx, path, tc.params)
+				Expect(err).To(HaveOccurred(), "%s must be rejected (params=%v)", tc.name, tc.params)
+				Expect(apierrors.IsBadRequest(err)).To(BeTrue(), "%s: expected 400 BadRequest, got %v", tc.name, err)
+			}
 		})
 	})
 

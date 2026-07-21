@@ -249,6 +249,48 @@ func publishDataImportSpecs() {
 			scName, scSize, scMode = s, z, m
 		})
 
+		It("(a2) serves the VolumeSnapshot connector restore (manifests-with-data-restoration) with scope=node and an object filter", func() {
+			// The VS connector (subresources.snapshot.storage.k8s.io) accepts the SAME query contract as the
+			// core Snapshot handler via one shared parser. A VS is a leaf (no children), so scope=node ≡
+			// scope=subtree, but an object filter (kind=PersistentVolumeClaim) still narrows the output, a miss
+			// is 404, and a filter without scope=node is 400 — proving the contract is uniform across surfaces.
+			Expect(orphanVS).NotTo(BeEmpty(), "the capture step (a) must have resolved the source VolumeSnapshot leaf")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			base := vsConnectorSubPath(srcNS, orphanVS, subManifestsRestore)
+			const targetNS = "vs-restore-read-probe"
+
+			By("scope=node returns the apply-ready PVC bound to the VolumeSnapshot, namespace-rewritten")
+			body, err := aggGet(ctx, base, map[string]string{"scope": "node", "targetNamespace": targetNS})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node", base)
+			objs, derr := decodeManifestArray(body)
+			Expect(derr).NotTo(HaveOccurred())
+			pvc, found := findManifestOfKind(objs, "PersistentVolumeClaim")
+			Expect(found).To(BeTrue(), "the VS leaf restore must carry the apply-ready PersistentVolumeClaim")
+			Expect(pvc.GetNamespace()).To(Equal(targetNS), "the restored PVC must be namespace-rewritten")
+			pvcName := pvc.GetName()
+
+			By("scope=node + kind/name filter narrows the leaf output to exactly that PVC")
+			body, err = aggGet(ctx, base, map[string]string{"scope": "node", "kind": "PersistentVolumeClaim", "name": pvcName, "targetNamespace": targetNS})
+			Expect(err).NotTo(HaveOccurred(), "GET %s?scope=node&kind=PersistentVolumeClaim&name=%s", base, pvcName)
+			objs, derr = decodeManifestArray(body)
+			Expect(derr).NotTo(HaveOccurred())
+			Expect(objs).To(HaveLen(1), "the object filter must return exactly one object")
+			Expect(objs[0].GetKind()).To(Equal("PersistentVolumeClaim"))
+			Expect(objs[0].GetName()).To(Equal(pvcName))
+
+			By("a non-matching name is a 404 NotFound")
+			_, err = aggGet(ctx, base, map[string]string{"scope": "node", "kind": "PersistentVolumeClaim", "name": pvcName + "-does-not-exist"})
+			Expect(err).To(HaveOccurred(), "a filter that matches nothing must not return 200")
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected 404 NotFound, got %v", err)
+
+			By("an object filter without scope=node is a 400 BadRequest (uniform contract, even though a VS leaf has no children)")
+			_, err = aggGet(ctx, base, map[string]string{"kind": "PersistentVolumeClaim", "name": pvcName})
+			Expect(err).To(HaveOccurred(), "an object filter at scope=subtree must be rejected")
+			Expect(apierrors.IsBadRequest(err)).To(BeTrue(), "expected 400 BadRequest, got %v", err)
+		})
+
 		It("(b) publishes the DataImport: import-root + VS leaf + DataImport(publish:true), Ready + publicURL + Ingress", func() {
 			Expect(orphanVS).NotTo(BeEmpty(), "the capture step must have resolved the source VolumeSnapshot leaf")
 
