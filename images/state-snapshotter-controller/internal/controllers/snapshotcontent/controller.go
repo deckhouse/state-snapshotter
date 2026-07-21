@@ -301,8 +301,9 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Step 1: Ensure the parent-protect finalizer (durable-node teardown barrier).
 	//
 	// parent-protect holds every SnapshotContent until its OWN deletion handler completes its reclaim; it is
-	// NOT released when the logical bound Snapshot is deleted. On bound-Snapshot deletion the binder only
-	// latches status.boundSnapshotDeleted (see markBoundSnapshotDeletedOnContent). So ensure the finalizer
+	// NOT released when the logical bound Snapshot is deleted. The binder normally latches
+	// status.boundSnapshotDeleted; this controller also self-heals the latch when a snapshot kind without a
+	// deletion finalizer disappears before the binder can observe a deletionTimestamp. Ensure the finalizer
 	// FIRST, even when boundSnapshotDeleted=true: this also self-heals a content left finalizer-less by the
 	// old code, which stripped parent-protect on bound-Snapshot deletion. Only AFTER the finalizer is
 	// confirmed present do we honor the bound-deleted early return, which skips status aggregation against a
@@ -422,6 +423,25 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	if ownerErr != nil {
 		logger.Error(ownerErr, "Failed to resolve owning snapshot")
 		return ctrl.Result{}, ownerErr
+	}
+	if !ownerFound {
+		// Domain snapshot CRs need not carry a deletion finalizer. Their delete event still wakes the bound
+		// content through mapSnapshotStatusToBoundCommonContent, but by reconcile time the CR may already be
+		// gone, so the binder cannot observe deletionTimestamp and publish boundSnapshotDeleted. Latch it
+		// here from the same authoritative NotFound result. The status update is also the event that wakes
+		// the parent content through mapSnapshotContentToParentContent, closing the steady Ready=True
+		// liveness gap without polling or another owner API read.
+		latched, changed, latchErr := r.latchBoundSnapshotDeletedForMissingOwner(ctx, obj)
+		if latchErr != nil {
+			logger.Error(latchErr, "Failed to latch boundSnapshotDeleted for missing owner")
+			return ctrl.Result{}, latchErr
+		}
+		if changed {
+			logger.Info("Latched boundSnapshotDeleted after the bound Snapshot disappeared")
+		}
+		if latched {
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
@@ -1465,6 +1485,54 @@ func (r *SnapshotContentController) ownerSnapshot(ctx context.Context, contentOb
 		return nil, "", false, err
 	}
 	return owner, namespace, true, nil
+}
+
+// latchBoundSnapshotDeletedForMissingOwner is the deletion-event fallback for snapshot kinds that do not
+// hold their CR in Terminating with a finalizer. ownerSnapshot has already established an authoritative
+// NotFound before this helper is called. A complete snapshotRef including UID proves that the content was
+// bound to a concrete snapshot instance; synthetic/legacy contents without that identity keep the previous
+// fail-soft behavior.
+//
+// The latch is monotonic and patched from a fresh APIReader object with optimistic locking. Besides opening
+// the recycle-bin re-point gate, this status write wakes the parent SnapshotContent through the existing
+// child-content watch, so lost-child detection runs immediately even when the parent was already Ready=True
+// and had stopped self-requeueing.
+func (r *SnapshotContentController) latchBoundSnapshotDeletedForMissingOwner(
+	ctx context.Context,
+	contentObj *unstructured.Unstructured,
+) (latched, changed bool, err error) {
+	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
+	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
+	uid, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "uid")
+	if apiVersion == "" || kind == "" || name == "" || uid == "" {
+		return false, false, nil
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.SnapshotContent{}
+		if getErr := r.APIReader.Get(ctx, client.ObjectKey{Name: contentObj.GetName()}, current); getErr != nil {
+			return getErr
+		}
+		if current.Status.BoundSnapshotDeleted {
+			latched = true
+			return nil
+		}
+
+		base := current.DeepCopy()
+		current.Status.BoundSnapshotDeleted = true
+		if patchErr := r.Status().Patch(
+			ctx,
+			current,
+			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+		); patchErr != nil {
+			return patchErr
+		}
+		latched = true
+		changed = true
+		return nil
+	})
+	return latched, changed, err
 }
 
 // snapshotChildRefsFromRaw converts the unstructured status.childrenSnapshotRefs slice into typed
