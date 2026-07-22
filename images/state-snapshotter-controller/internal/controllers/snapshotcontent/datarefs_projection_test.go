@@ -75,7 +75,7 @@ func projSourcePVC() *corev1.PersistentVolumeClaim {
 	}
 }
 
-// projReadyVCR builds a Ready VolumeCaptureRequest binding the PVC target to the VSC (status.data.artifact).
+// projReadyVCR builds a Ready VolumeCaptureRequest binding the PVC target to the VSC (status.data.artifactRef).
 func projReadyVCR() *unstructured.Unstructured {
 	target := vcpkg.Target{
 		UID:        projTestPVCUID,
@@ -93,7 +93,7 @@ func projReadyVCR() *unstructured.Unstructured {
 		},
 	}, "status", "conditions")
 	_ = unstructured.SetNestedMap(obj.Object, map[string]interface{}{
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": projTestVSCName,
 		},
 	}, "status", "data")
@@ -135,7 +135,7 @@ func projAssertPublishedAndHandedOff(t *testing.T, cl client.Client) {
 		t.Fatalf("expected status.data to be published by the aggregator, got none")
 	}
 	d := *got.Status.Data
-	if string(d.Source.UID) != projTestPVCUID || d.Artifact.Name != projTestVSCName {
+	if string(d.SourceRef.UID) != projTestPVCUID || d.ArtifactRef.Name != projTestVSCName {
 		t.Fatalf("unexpected published data binding: %#v", d)
 	}
 	if d.StorageClassName != "sc-a" || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(d.AccessModes) != 1 {
@@ -171,7 +171,7 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 	content := projContentTyped()
 
 	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
+	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
 	owner.SetNamespace(projTestNS)
 	owner.SetName("disk-snap")
 	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
@@ -205,7 +205,7 @@ func TestReconcileDataLegProjection_VCRFailedIsContentTerminal(t *testing.T) {
 	content := projContentTyped()
 
 	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
+	owner.SetGroupVersionKind(schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"})
 	owner.SetNamespace(projTestNS)
 	owner.SetName("disk-snap")
 	_ = unstructured.SetNestedField(owner.Object, projTestVCRName, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
@@ -289,4 +289,106 @@ func TestReconcileDataLegProjection_NativeCSIPublishesFromBoundVSC(t *testing.T)
 		t.Fatalf("a fresh native-CSI publish must requeue so the next pass re-reads the content with data")
 	}
 	projAssertPublishedAndHandedOff(t, cl)
+}
+
+// Native-CSI size backfill (regression): the fork binds the VolumeSnapshot to its VSC
+// (status.boundVolumeSnapshotContentName) BEFORE the CSI driver publishes status.restoreSize, so the first
+// projection publishes status.data without size. The projection MUST NOT latch on the VSC name alone: it
+// keeps re-enriching (requeue) while size is empty, backfills size once restoreSize appears, and only then
+// latches. Without this the durable restore size (needed to recreate the volume on restore/export) is lost
+// forever — the exact defect the e2e caught on sds-local-volume (late restoreSize).
+func TestReconcileDataLegProjection_NativeCSIBackfillsSizeThenLatches(t *testing.T) {
+	ctx := context.Background()
+	scheme := projScheme(t)
+	content := projContentTyped()
+
+	owner := &unstructured.Unstructured{}
+	owner.SetGroupVersionKind(projVSGVK)
+	owner.SetNamespace(projTestNS)
+	owner.SetName("user-vs")
+	_ = unstructured.SetNestedField(owner.Object, projTestVSCName, "status", "boundVolumeSnapshotContentName")
+	_ = unstructured.SetNestedMap(owner.Object, map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "PersistentVolumeClaim",
+		"name":       projTestPVCName,
+		"namespace":  projTestNS,
+		"uid":        projTestPVCUID,
+	}, "status", "sourceRef")
+
+	// The VSC is bound and readyToUse but has NOT published restoreSize yet (projVSCUnowned sets neither).
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
+		WithObjects(projSourcePVC(), content, projVSCUnowned()).
+		Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	reconcile := func() bool {
+		t.Helper()
+		requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+		if err != nil {
+			t.Fatalf("reconcileDataLegProjection: %v", err)
+		}
+		if termReason != "" {
+			t.Fatalf("a native-CSI publish must not be terminal, got %q", termReason)
+		}
+		return requeue
+	}
+	contentSize := func() string {
+		t.Helper()
+		got := &storagev1alpha1.SnapshotContent{}
+		if err := cl.Get(ctx, client.ObjectKey{Name: projTestContent}, got); err != nil {
+			t.Fatalf("get content: %v", err)
+		}
+		if got.Status.Data == nil {
+			t.Fatalf("expected status.data to be published")
+		}
+		return got.Status.Data.Size
+	}
+
+	// Pass 1: publishes the binding but restoreSize is absent, so size stays empty; must requeue.
+	if !reconcile() {
+		t.Fatalf("first publish must requeue")
+	}
+	if s := contentSize(); s != "" {
+		t.Fatalf("size must not be fabricated before restoreSize is published, got %q", s)
+	}
+
+	// Pass 2: restoreSize STILL absent. The projection must NOT latch on the VSC name — it keeps requeueing
+	// so a later restoreSize can be backfilled.
+	if !reconcile() {
+		t.Fatalf("projection must keep requeueing (not latch) while status.data.size is empty")
+	}
+	if s := contentSize(); s != "" {
+		t.Fatalf("size must still be empty while restoreSize is absent, got %q", s)
+	}
+
+	// The fork now publishes restoreSize (500Mi = 524288000 bytes) on the VSC.
+	liveVSC := &unstructured.Unstructured{}
+	liveVSC.SetGroupVersionKind(projVSCGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Name: projTestVSCName}, liveVSC); err != nil {
+		t.Fatalf("get VSC: %v", err)
+	}
+	if err := unstructured.SetNestedField(liveVSC.Object, int64(524288000), "status", "restoreSize"); err != nil {
+		t.Fatalf("set restoreSize: %v", err)
+	}
+	if err := cl.Update(ctx, liveVSC); err != nil {
+		t.Fatalf("update VSC restoreSize: %v", err)
+	}
+
+	// Pass 3: re-enriches and backfills size (the name-only latch would have skipped this); must requeue.
+	if !reconcile() {
+		t.Fatalf("the size-backfill publish must requeue so the next pass re-reads the content")
+	}
+	if s := contentSize(); s != "500Mi" {
+		t.Fatalf("size must be backfilled from restoreSize, got %q", s)
+	}
+
+	// Pass 4: size is now captured, so the projection latches — no more requeue, no churn.
+	if reconcile() {
+		t.Fatalf("once size is captured the projection must latch (no requeue)")
+	}
+	if s := contentSize(); s != "500Mi" {
+		t.Fatalf("latched size must remain 500Mi, got %q", s)
+	}
 }

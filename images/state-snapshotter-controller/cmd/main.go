@@ -495,7 +495,7 @@ func main() {
 	isOutOfProcessDomainKind := func(kind string) bool {
 		return unifiedbootstrap.IsOutOfProcessDomainSnapshotKind(graphRegProvider.Current(), kind)
 	}
-	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, isOutOfProcessDomainKind, apiTLSCertFile, apiTLSKeyFile, mapper)
+	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, isOutOfProcessDomainKind, apiTLSCertFile, apiTLSKeyFile)
 
 	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
 

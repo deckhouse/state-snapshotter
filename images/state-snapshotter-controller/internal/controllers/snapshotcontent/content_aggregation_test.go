@@ -380,7 +380,7 @@ func TestReconcileCommonStatusPublishesAllConditions(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "")
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", nil)
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestReconcileCommonStatusNotReadyWhileArchivePending(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent, false, "", "")
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, parent, false, "", "", nil)
 	if err != nil {
 		t.Fatalf("reconcile status: %v", err)
 	}
@@ -483,6 +483,7 @@ func TestTerminalChildContentFailureClassification(t *testing.T) {
 		snapshot.ReasonDataArtifactNotSupported,
 		snapshot.ReasonArtifactMissing,
 		snapshot.ReasonVolumeCaptureFailed,
+		snapshot.ReasonDomainCaptureFailed,
 		snapshot.ReasonChildrenFailed,
 	}
 	for _, reason := range terminal {
@@ -532,7 +533,7 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 
 	t.Run("dataLegPending downgrades the stale-empty volume leg and blocks Ready", func(t *testing.T) {
 		r, content, cl := build("dlp-pending")
-		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, "", "")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, "", "", nil)
 		if err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
@@ -549,7 +550,7 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 
 	t.Run("no data leg keeps Ready=True (manifest-only, empty dataRefs are N/A)", func(t *testing.T) {
 		r, content, cl := build("dlp-absent")
-		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", nil)
 		if err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
@@ -566,7 +567,7 @@ func TestReconcileCommonStatus_DataLegPendingGatesPrematureReady(t *testing.T) {
 	// (terminal beats the pending downgrade). This is what lets the failure propagate up as ChildrenFailed.
 	t.Run("dataLegTerminal makes the content terminal (VolumeCaptureFailed beats pending)", func(t *testing.T) {
 		r, content, cl := build("dlp-terminal")
-		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, snapshot.ReasonVolumeCaptureFailed, "data-leg volume capture failed: csi failed")
+		ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, true, snapshot.ReasonVolumeCaptureFailed, "data-leg volume capture failed: csi failed", nil)
 		if err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}

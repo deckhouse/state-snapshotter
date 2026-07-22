@@ -17,13 +17,16 @@ limitations under the License.
 package tests
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -33,11 +36,10 @@ import (
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
-// envChildBridgeFailure opts this spec in. It is OFF by default (even under E2E_VOLUME_DATA): the spec
-// mutates cluster-scoped StorageClass wiring and depends on the exact terminal behaviour of the demo
-// domain's volume-capture leg, so it must be validated on a real cluster before it is promoted to run in
-// the standard volume-data CI. Set E2E_CHILD_BRIDGE_FAILURE=true (with the phase-3 volume-data knobs) to
-// run it.
+// envChildBridgeFailure opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow):
+// the spec mutates cluster-scoped StorageClass wiring and depends on the exact terminal behaviour of the
+// demo domain's volume-capture leg, so an environment that cannot support it disables the spec with
+// E2E_CHILD_BRIDGE_FAILURE=false (and the whole flow with E2E_VOLUME_DATA=false).
 const envChildBridgeFailure = "E2E_CHILD_BRIDGE_FAILURE"
 
 // Child-bridge fixture object names (isolated from the phase-3 vol-tree names so this spec can run in the
@@ -54,6 +56,35 @@ const (
 	// disk's volume capture fail terminally while the disk itself provisions and reaches Ready normally.
 	cbMissingVSCName = "child-bridge-nonexistent-vsc"
 )
+
+// countSnapshotContentReconciles counts object-specific reconcile-start records in the current leader's
+// logs since a fixed measurement boundary. controller-runtime's process-wide reconcile metric has no object
+// label, so logs are the only low-cardinality way for this e2e to distinguish the deliberately terminal
+// fixture from unrelated pending fixtures retained by E2E_KEEP_CLUSTER.
+func countSnapshotContentReconciles(ctx context.Context, leaderPod, contentName string, since time.Time) (int, error) {
+	sinceTime := metav1.NewTime(since)
+	stream, err := suiteClientset.CoreV1().Pods(d8ModuleNS).GetLogs(leaderPod, &corev1.PodLogOptions{
+		SinceTime: &sinceTime,
+	}).Stream(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("stream controller logs from %s/%s: %w", d8ModuleNS, leaderPod, err)
+	}
+	defer stream.Close()
+
+	count := 0
+	scanner := bufio.NewScanner(stream)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "Reconciling SnapshotContent") && strings.Contains(line, contentName) {
+			count++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("scan controller logs from %s/%s: %w", d8ModuleNS, leaderPod, err)
+	}
+	return count, nil
+}
 
 // buildChildBridgeSource returns a minimal data-backed tree: a ConfigMap (manifest leg) plus a standalone
 // PVC-backed DemoVirtualDisk on badSC. The disk is a direct root-child data leaf whose
@@ -140,7 +171,7 @@ func cloneStorageClassWithBadVSC(ctx context.Context, srcSC, newSC, badVSC strin
 	}
 	// Annotation-only update on the existing SC (the only StorageClass mutation the sds-local-volume webhook
 	// permits): point the VolumeSnapshotClass annotation at a class that does not exist.
-	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, annStorageClassVSC, badVSC))
+	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`, annStorageClassVSC, badVSC)
 	if _, err := suiteClientset.StorageV1().StorageClasses().Patch(ctx, newSC, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("annotate clone StorageClass %s with %s=%s: %w", newSC, annStorageClassVSC, badVSC, err)
 	}
@@ -208,9 +239,9 @@ func waitSnapshotReadyFalseReason(ctx context.Context, ns, name, wantReason stri
 // images/state-snapshotter-controller/test/integration/snapshot_graph_integration_test.go and the unit
 // tests in internal/usecase/child_snapshot_terminal_failures_test.go).
 //
-// Opt-in only (E2E_CHILD_BRIDGE_FAILURE): it mutates cluster StorageClass wiring and depends on the demo
-// domain's exact terminal volume-capture behaviour, so it must be validated on a real cluster before being
-// promoted to the standard volume-data CI.
+// Opt-out (E2E_CHILD_BRIDGE_FAILURE=false): it mutates cluster StorageClass wiring and depends on the demo
+// domain's exact terminal volume-capture behaviour; it runs by default as part of the volume-data flow and
+// is disabled on environments that cannot support it.
 func childBridgeFailureSpecs() {
 	Context("Child-Snapshot terminal-failure bridge (domain-disk terminal volume capture)", func() {
 		var (
@@ -220,12 +251,12 @@ func childBridgeFailureSpecs() {
 		)
 
 		BeforeAll(func() {
-			if !suiteCfg.volumeData || !envBool(os.Getenv(envChildBridgeFailure)) {
-				Skip("child-bridge failure spec is opt-in: set E2E_VOLUME_DATA=true and " + envChildBridgeFailure + "=true (real cluster required)")
+			if !suiteCfg.volumeData || !envEnabledByDefault(os.Getenv(envChildBridgeFailure)) {
+				Skip("child-bridge failure spec disabled: it runs by default; set " + envChildBridgeFailure + "=false (or E2E_VOLUME_DATA=false) to disable")
 			}
 			sc = suiteCfg.storageClass
 			badSC = sc + "-nobind-vsc"
-			srcNS = uniqueNS("child-bridge")
+			srcNS = uniqueNS("p3-childbridge-neg")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
@@ -327,6 +358,62 @@ func childBridgeFailureSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			_, _, found := conditionStatus(root, condReady)
 			Expect(found).To(BeTrue(), "root Snapshot must carry a Ready condition")
+
+			By("Asserting the failed child counts as settled and latches childrenSettled=true on the parent")
+			Eventually(func(g Gomega) {
+				freshRoot, gerr := getResource(ctx, snapshotGVR, srcNS, cbRootSnapshotName)
+				g.Expect(gerr).NotTo(HaveOccurred())
+				g.Expect(childSnapshotRefs(freshRoot)).NotTo(BeEmpty(),
+					"childrenSettled assertion must be non-vacuous: the root must declare the failed child")
+
+				settled, settledFound := snapshotCommonControllerLatch(freshRoot, "childrenSettled")
+				g.Expect(settledFound).To(BeTrue(),
+					"the root with a terminal failed child must declare commonController.childrenSettled")
+				g.Expect(settled).To(BeTrue(),
+					"the terminal failed child must count as settled, not keep the parent waiting forever")
+			}).WithContext(ctx).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			By("Asserting the terminal child SnapshotContent stops active 500 ms self-polling")
+			child, err := getResource(ctx, demoDiskSnapshotGVR, srcNS, childName)
+			Expect(err).NotTo(HaveOccurred())
+			contentName, _, err := unstructured.NestedString(child.Object, "status", "boundSnapshotContentName")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(contentName).NotTo(BeEmpty(), "terminal child Snapshot must be bound to a SnapshotContent")
+
+			leaderPod, err := leaderControllerPod(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			measurementStart := time.Now().Add(-5 * time.Second)
+			lastCount, err := countSnapshotContentReconciles(ctx, leaderPod, contentName, measurementStart)
+			Expect(err).NotTo(HaveOccurred())
+			stableSamples := 0
+			Eventually(func(g Gomega) int {
+				currentLeader, lerr := leaderControllerPod(ctx)
+				g.Expect(lerr).NotTo(HaveOccurred())
+				g.Expect(currentLeader).To(Equal(leaderPod), "leader changed while measuring object-specific reconcile quiescence")
+
+				currentCount, cerr := countSnapshotContentReconciles(ctx, leaderPod, contentName, measurementStart)
+				g.Expect(cerr).NotTo(HaveOccurred())
+				if currentCount == lastCount {
+					stableSamples++
+				} else {
+					lastCount = currentCount
+					stableSamples = 0
+				}
+				return stableSamples
+			}).WithContext(ctx).WithTimeout(15*time.Second).WithPolling(500*time.Millisecond).
+				Should(BeNumerically(">=", 3), "terminal SnapshotContent %s never became quiescent", contentName)
+
+			baselineCount := lastCount
+			Consistently(func(g Gomega) int {
+				currentLeader, lerr := leaderControllerPod(ctx)
+				g.Expect(lerr).NotTo(HaveOccurred())
+				g.Expect(currentLeader).To(Equal(leaderPod), "leader changed while measuring object-specific reconcile quiescence")
+
+				currentCount, cerr := countSnapshotContentReconciles(ctx, leaderPod, contentName, measurementStart)
+				g.Expect(cerr).NotTo(HaveOccurred())
+				return currentCount
+			}).WithContext(ctx).WithTimeout(3*time.Second).WithPolling(500*time.Millisecond).
+				Should(Equal(baselineCount), "terminal SnapshotContent %s must remain event-driven instead of polling", contentName)
 		})
 	})
 }

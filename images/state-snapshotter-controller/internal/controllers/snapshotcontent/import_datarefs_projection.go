@@ -91,7 +91,7 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// artifact and the (source-derived) volumeMode (matches the binder's former fast-path so a content bound
 	// before volumeMode propagation existed still self-heals).
 	if content.Status.Data != nil &&
-		content.Status.Data.Artifact == binding.Artifact &&
+		content.Status.Data.ArtifactRef == binding.ArtifactRef &&
 		content.Status.Data.VolumeMode == binding.VolumeMode {
 		return false, "", "", nil
 	}
@@ -99,7 +99,7 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	return requeue, "", "", err
 }
 
-// BuildImportDataBinding maps a DataImport's produced artifact (status.data.artifact) into the single
+// BuildImportDataBinding maps a DataImport's produced artifact (status.data.artifactRef) into the single
 // SnapshotDataBinding for a generic imported leaf's content. ready=false (binding nil, no terminal reason)
 // means the DataImport has not produced its artifact yet. A non-empty terminalReason is a non-retryable
 // fault. Pure function (no client) so it is unit-tested directly and shared by the aggregator (publish) and
@@ -108,12 +108,12 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 // Moved from genericbinder to the aggregator's package in the import creator/main unification
 // (content-single-writer design §10): the aggregator is the sole writer of content.status.data.
 func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Unstructured) (binding *storagev1alpha1.SnapshotDataBinding, ready bool, terminalReason string, terminalMessage string) {
-	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "apiVersion")
-	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "kind")
-	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "name")
+	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "kind")
+	name, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "name")
 	// uid is best-effort (DataImport fills it from the VCR artifact uid). When empty, the dataRef
 	// enricher backfills it from the live VolumeSnapshotContent; when present, it is preserved.
-	uid, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifact", "uid")
+	uid, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "uid")
 	if apiVersion == "" || kind == "" || name == "" {
 		return nil, false, "", ""
 	}
@@ -136,14 +136,14 @@ func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 	return &storagev1alpha1.SnapshotDataBinding{
 		// The imported leaf has no live source PVC; use the leaf identity as the binding source so the
 		// data binding is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
-		Source: storagev1alpha1.SnapshotSubjectRef{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: leafGVK.GroupVersion().String(),
 			Kind:       leafGVK.Kind,
 			Namespace:  leaf.GetNamespace(),
 			Name:       leaf.GetName(),
 			UID:        leaf.GetUID(),
 		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: apiVersion,
 			Kind:       kind,
 			Name:       name,

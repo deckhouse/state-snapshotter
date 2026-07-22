@@ -62,10 +62,10 @@ func VolumeCaptureRequestSafeToDeleteWithHandoff(
 		return false, nil
 	}
 	for _, b := range content.DataList() {
-		if b.Artifact.Kind != "VolumeSnapshotContent" || b.Artifact.Name == "" {
+		if b.ArtifactRef.Kind != "VolumeSnapshotContent" || b.ArtifactRef.Name == "" {
 			continue
 		}
-		ok, err := VolumeSnapshotContentOwnedByContent(ctx, reader, b.Artifact.Name, content)
+		ok, err := VolumeSnapshotContentOwnedByContent(ctx, reader, b.ArtifactRef.Name, content)
 		if err != nil || !ok {
 			return false, err
 		}
@@ -79,16 +79,16 @@ func isPublishedDataRefsComplete(vcrRefs []vcpkg.DataBinding, published []storag
 	}
 	byUID := make(map[string]storagev1alpha1.SnapshotDataBinding, len(published))
 	for _, b := range published {
-		byUID[string(b.Source.UID)] = b
+		byUID[string(b.SourceRef.UID)] = b
 	}
 	for _, want := range vcrRefs {
 		got, ok := byUID[want.TargetUID]
 		if !ok {
 			return false
 		}
-		if got.Artifact.APIVersion != want.Artifact.APIVersion ||
-			got.Artifact.Kind != want.Artifact.Kind ||
-			got.Artifact.Name != want.Artifact.Name {
+		if got.ArtifactRef.APIVersion != want.Artifact.APIVersion ||
+			got.ArtifactRef.Kind != want.Artifact.Kind ||
+			got.ArtifactRef.Name != want.Artifact.Name {
 			return false
 		}
 	}

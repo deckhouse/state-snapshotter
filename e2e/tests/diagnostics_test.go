@@ -196,10 +196,10 @@ func dumpSingleDataImport(ctx context.Context, ns, name string) {
 	url, _, _ := unstructured.NestedString(obj.Object, "status", "url")
 	volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 	ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
-	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
+	artifact, _, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifactRef")
 	GinkgoWriter.Printf("DataImport %s/%s:\n", ns, name)
 	GinkgoWriter.Printf("    snapshotRef: apiVersion=%q kind=%q name=%q\n", snapAPIVersion, targetKind, targetName)
-	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t data.artifact=%v\n", url, volMode, ca != "", artifact)
+	GinkgoWriter.Printf("    status: url=%q volumeMode=%q ca=%t data.artifactRef=%v\n", url, volMode, ca != "", artifact)
 	dumpObjectConditions(obj)
 
 	// Resolve target leaf boundSnapshotContentName when DataImport waits on it. Only a

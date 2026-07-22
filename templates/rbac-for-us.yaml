@@ -61,19 +61,37 @@ rules:
   - update
 # Per-CR manifest read subresources. The whole-subtree /manifests aggregation was removed in C9: export
 # now walks the tree client-side and downloads each node's own manifests via /manifests-download.
-# Includes the per-domain-snapshot routes (demo domain export by a domain snapshot name); these demo
-# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
-# manifestcheckpoints/manifests is the raw single-checkpoint read served directly by the archive handler.
+# The core group serves manifests-download / manifests-with-data-restoration ONLY for the core Snapshot
+# kind; domain snapshot kinds are addressed through their own aggregated group (see the demo group grant
+# below). manifestcheckpoints/manifests is the raw single-checkpoint read served directly by the archive handler.
 - apiGroups:
   - subresources.state-snapshotter.deckhouse.io
   resources:
   - snapshots/manifests-download
   - snapshots/manifests-with-data-restoration
   - manifestcheckpoints/manifests
+  verbs:
+  - get
+# Demo domain aggregated group: a domain snapshot node is exported (manifests-download, a proxy to the
+# cluster-scoped content download), imported (manifests-and-children-refs-upload, the bind-first domain
+# facade that writes childRefs on its own CR and forwards manifests to the cluster-scoped content layer),
+# and restored (manifests-with-data-restoration) through its OWN group, not the core group. The core group
+# serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). These demo
+# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
+- apiGroups:
+  - subresources.sds-unified-snapshots-poc.deckhouse.io
+  resources:
   - demovirtualmachinesnapshots/manifests-download
   - demovirtualdisksnapshots/manifests-download
   verbs:
   - get
+- apiGroups:
+  - subresources.sds-unified-snapshots-poc.deckhouse.io
+  resources:
+  - demovirtualmachinesnapshots/manifests-and-children-refs-upload
+  - demovirtualdisksnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
 # C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
 # user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
 # import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
@@ -100,7 +118,7 @@ rules:
   - watch
 # Demo domain inventory + generated child snapshots (live demo / pre-e2e manual kubectl).
 - apiGroups:
-  - demo.state-snapshotter.deckhouse.io
+  - sds-unified-snapshots-poc.deckhouse.io
   resources:
   - demovirtualmachines
   - demovirtualdisks

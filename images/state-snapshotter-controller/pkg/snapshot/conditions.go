@@ -49,6 +49,17 @@ const (
 // core code and the wave-barrier reference the single canonical classifier.
 var IsReasonTerminal = storagev1alpha1.IsReasonTerminal
 
+// DegradedReadyReasons and IsReasonDegraded are re-exported from api/storage for symmetry with
+// TerminalReadyReasons/IsReasonTerminal. The catalog is the single source of truth for presentation
+// (UI/d8) AND a runtime classifier: the restore resolver applies IsReasonDegraded to relax the Ready
+// gate for a user-addressed root at scope=node (a recoverable Ready=False root still serves its own
+// manifests). The alias gives core code shared access to the classifier and keeps all reason sets in
+// one place within the snapshot package.
+var (
+	DegradedReadyReasons = storagev1alpha1.DegradedReadyReasons
+	IsReasonDegraded     = storagev1alpha1.IsReasonDegraded
+)
+
 // Condition types: the public condition model
 // (ManifestsReady, DataReady, ChildrenReady, Ready).
 const (
@@ -88,6 +99,16 @@ const (
 	// VolumeCaptureRequest (domain path) or a terminal CSI VolumeSnapshot/VolumeSnapshotContent error
 	// (namespace-root orphan-PVC path, ADR 2026-06-09 / spec §3.9.11).
 	ReasonVolumeCaptureFailed = "VolumeCaptureFailed"
+	// ReasonDomainCaptureFailed is the canonical, tree-propagating terminal reason placed on a
+	// SnapshotContent's OWN Ready when its owning Snapshot reported a domain capture failure
+	// (status.captureState.domainSpecificController.phase=Failed). The domain's own reason is free-form
+	// (e.g. ConsistencyDeadlineExceeded) and therefore NOT in terminalChildContentFailureReasons, so a
+	// parent content would otherwise misread a failed domain child as merely pending. Folding phase=Failed
+	// into this canonical reason on the content (mirroring how a data-leg failure surfaces as
+	// VolumeCaptureFailed on the content) lets the failure propagate up the content-aggregation tree as
+	// ChildrenFailed (INV-FAIL-PROP). The domain's original reason/message is preserved in the message.
+	// The domain CR's own user-facing Ready keeps the raw domain reason (see applyDomainPhaseFold).
+	ReasonDomainCaptureFailed = "DomainCaptureFailed"
 	// ReasonManifestCheckpointFailed is the terminal requests-leg reason when the bound ManifestCheckpoint
 	// is terminally failed. Used by SnapshotContent aggregation (own requests leg) and the terminal
 	// child-content classification.

@@ -105,7 +105,7 @@ func contentWithPVCUID(name, uid string) *storagev1alpha1.SnapshotContent {
 	return &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: types.UID(uid)}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: types.UID(uid)}},
 		},
 	}
 }

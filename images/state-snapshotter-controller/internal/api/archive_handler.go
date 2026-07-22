@@ -165,6 +165,14 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 				Kind:       "SnapshotContent",
 				Verbs:      []string{"get"},
 			},
+			{
+				// Internal, content-addressed import write (manifests-only). No bind-gate: the content
+				// exists by definition. It is the target the domain upload facade forwards manifests to.
+				Name:       "snapshotcontents/manifests-upload",
+				Namespaced: false,
+				Kind:       "SnapshotContent",
+				Verbs:      []string{"create"},
+			},
 		},
 	}
 

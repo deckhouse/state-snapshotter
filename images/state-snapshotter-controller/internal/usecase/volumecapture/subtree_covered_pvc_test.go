@@ -57,7 +57,7 @@ func TestCollectSubtreeCoveredPVCUIDs_oneChildDataRef(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "child"},
 		Status: storagev1alpha1.SnapshotContentStatus{
 			Data: &storagev1alpha1.SnapshotDataBinding{
-				Source: storagev1alpha1.SnapshotSubjectRef{
+				SourceRef: storagev1alpha1.SnapshotSubjectRef{
 					UID:        "uid-a",
 					APIVersion: corev1.SchemeGroupVersion.String(),
 					Kind:       "PersistentVolumeClaim",
@@ -88,13 +88,13 @@ func TestCollectSubtreeCoveredPVCUIDs_twoChildrenDifferentUIDs(t *testing.T) {
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-1"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-1"}},
 		},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-2"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-2"}},
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, c1, c2).Build()
@@ -118,13 +118,13 @@ func TestCollectSubtreeCoveredPVCUIDs_duplicateUIDFailsClosed(t *testing.T) {
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
 		},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}},
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, c1, c2).Build()
@@ -216,7 +216,7 @@ func TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "child"},
 		Spec:       storagev1alpha1.SnapshotContentSpec{SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{Kind: "ManifestOnly"}},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-a"}},
 		},
 	}
 	cl := fake.NewClientBuilder().WithScheme(testSubtreeScheme(t)).WithObjects(root, child).Build()
@@ -240,7 +240,7 @@ func TestListOwnedPVCTargets_residualExcludesSubtreeCovered(t *testing.T) {
 	childContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "child-content"},
 		Status: storagev1alpha1.SnapshotContentStatus{
-			Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "uid-child"}},
+			Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "uid-child"}},
 		},
 	}
 	childSnap := &storagev1alpha1.Snapshot{

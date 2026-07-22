@@ -26,6 +26,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -75,6 +76,10 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 			// new SnapshotContent -> Snapshot reverse wake-up watch.
 			Expect(binder.AddWatchForPair(mgr, snapshotGVK, commonGVK)).To(Succeed())
 		})
+		// The production unified-runtime syncer installs this watch for each eligible snapshot GVK. Install
+		// it explicitly for this isolated test GVK so deleting a finalizer-less snapshot enqueues its bound
+		// common content. AddSnapshotStatusWatch is idempotent across specs.
+		Expect(integrationContentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	})
 
 	It("converges Snapshot.Ready True->False->True driven only by SnapshotContent (watch wake-up, no manual reconcile)", func() {
@@ -173,5 +178,60 @@ var _ = Describe("Integration: generic Snapshot mirrors bound SnapshotContent Re
 		flipMCP(metav1.ConditionTrue, ssv1alpha1.ManifestCheckpointConditionReasonCompleted, "checkpoint recovered")
 		Eventually(snapshotReadyStatusIs(metav1.ConditionTrue), 90*time.Second, 200*time.Millisecond).
 			Should(Succeed(), "Snapshot.Ready must rise back to True after the bound content recovers")
+	})
+
+	It("latches boundSnapshotDeleted from a delete event after a finalizer-less Snapshot is already gone", func() {
+		snap := &unstructured.Unstructured{}
+		snap.SetGroupVersionKind(snapshotGVK)
+		snap.SetName("gen-owner-delete-wakeup")
+		snap.SetNamespace("default")
+		snap.Object["spec"] = map[string]interface{}{}
+		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, snap))
+		})
+
+		// The manager-driven binder eagerly creates and binds the common content. The UID-bearing ref is
+		// the proof that this content belonged to a concrete Snapshot instance, which permits the content
+		// controller's authoritative-NotFound fallback to latch deletion.
+		snapKey := types.NamespacedName{Namespace: snap.GetNamespace(), Name: snap.GetName()}
+		var contentName string
+		Eventually(func(g Gomega) {
+			fresh := &unstructured.Unstructured{}
+			fresh.SetGroupVersionKind(snapshotGVK)
+			g.Expect(k8sClient.Get(ctx, snapKey, fresh)).To(Succeed())
+			bound, _, _ := unstructured.NestedString(fresh.Object, "status", "boundSnapshotContentName")
+			g.Expect(bound).NotTo(BeEmpty())
+			contentName = bound
+		}, 90*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			content := &storagev1alpha1.SnapshotContent{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, content)).To(Succeed())
+			g.Expect(content.Spec.SnapshotRef).NotTo(BeNil())
+			g.Expect(content.Spec.SnapshotRef.UID).NotTo(BeEmpty())
+			g.Expect(content.Status.BoundSnapshotDeleted).To(BeFalse())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+		DeferCleanup(func() {
+			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}))
+		})
+
+		// RegistrationTestSnapshot has no deletion finalizer, so the API server removes it immediately:
+		// the generic binder never gets a live object with deletionTimestamp. Its delete event must still
+		// wake the bound content, whose controller performs one authoritative owner lookup, latches the
+		// missing owner, and publishes the status update that wakes any parent content.
+		Expect(k8sClient.Delete(ctx, snap)).To(Succeed())
+		Eventually(func() bool {
+			fresh := &unstructured.Unstructured{}
+			fresh.SetGroupVersionKind(snapshotGVK)
+			return apierrors.IsNotFound(k8sClient.Get(ctx, snapKey, fresh))
+		}, 30*time.Second, 200*time.Millisecond).Should(BeTrue())
+
+		Eventually(func(g Gomega) {
+			content := &storagev1alpha1.SnapshotContent{}
+			g.Expect(mgr.GetAPIReader().Get(ctx, client.ObjectKey{Name: contentName}, content)).To(Succeed())
+			g.Expect(content.Status.BoundSnapshotDeleted).To(BeTrue())
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed(),
+			"Snapshot delete event must latch boundSnapshotDeleted without polling or a binder deletionTimestamp pass")
 	})
 })

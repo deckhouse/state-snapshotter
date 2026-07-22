@@ -102,7 +102,7 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 		default:
 			cond = desiredAccessGrantedCondition(csd.Generation,
 				metav1.ConditionTrue, consts.AccessGrantedReasonApplied,
-				"domain RBAC applied for all source and snapshot GVRs")
+				"core-side RBAC applied for all source and snapshot GVRs")
 		}
 		if err := patchCSDAccessGranted(ctx, cl, csd.Name, cond); err != nil {
 			input.Logger.Error("patch AccessGranted on CSD", "name", csd.Name, "err", err)

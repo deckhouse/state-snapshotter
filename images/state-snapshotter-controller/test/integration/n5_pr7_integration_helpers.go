@@ -97,14 +97,14 @@ func pr7CreateNamespace(ctx context.Context, labelValue string) *corev1.Namespac
 
 func pr7PVCDataBinding(pvc *corev1.PersistentVolumeClaim, vscName string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		Source: storagev1alpha1.SnapshotSubjectRef{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
 			APIVersion: corev1.SchemeGroupVersion.String(),
 			Kind:       "PersistentVolumeClaim",
 			Name:       pvc.Name,
 			Namespace:  pvc.Namespace,
 			UID:        pvc.UID,
 		},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,

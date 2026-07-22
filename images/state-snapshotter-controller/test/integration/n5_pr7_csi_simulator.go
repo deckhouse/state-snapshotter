@@ -441,8 +441,8 @@ func pr7OrphanContentForPVC(ctx context.Context, pvc *corev1.PersistentVolumeCla
 		return false, err
 	}
 	for i := range list.Items {
-		name, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "name")
-		ns, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "namespace")
+		name, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "sourceRef", "name")
+		ns, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "sourceRef", "namespace")
 		if name == pvc.Name && ns == pvc.Namespace {
 			return true, nil
 		}

@@ -36,14 +36,14 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 
 	binding := func(name string) storagev1alpha1.SnapshotDataBinding {
 		return storagev1alpha1.SnapshotDataBinding{
-			Source: storagev1alpha1.SnapshotSubjectRef{
+			SourceRef: storagev1alpha1.SnapshotSubjectRef{
 				APIVersion: "v1",
 				Kind:       "PersistentVolumeClaim",
 				Name:       name,
 				Namespace:  "default",
 				UID:        types.UID(sourceUID),
 			},
-			Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+			ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 				APIVersion: "snapshot.storage.k8s.io/v1",
 				Kind:       "VolumeSnapshotContent",
 				Name:       "vsc-" + name,
@@ -53,7 +53,7 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 
 	// Variant A (cardinality ≤1): a SnapshotContent carries at most one data binding (a singular object,
 	// not a list), so a duplicate-in-a-list validation is structurally impossible. The wave5 hard rename
-	// dropped the standalone required targetUID; the volume identity is now data.source.uid (optional at
+	// dropped the standalone required targetUID; the volume identity is now data.sourceRef.uid (optional at
 	// the CRD level), so there is no longer a CRD-level "empty uid" rejection to assert here.
 	It("accepts a single status.data on Status().Update", func() {
 		name := "single-data-" + randomSuffix()

@@ -36,11 +36,11 @@ write_obj() {
 ready_condition='"conditions":[{"type":"Ready","status":"True","reason":"Completed","message":"ok"}]'
 
 write_obj snapshots.state-snapshotter.deckhouse.io root <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","volumeCaptureRequestName":"vcr-root","childrenSnapshotRefs":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","metadata":{"namespace":"ns1","name":"root","uid":"snap-root","ownerReferences":[]},"status":{"boundSnapshotContentName":"sc-root","manifestCaptureRequestName":"mcr-root","volumeCaptureRequestName":"vcr-root","childrenSnapshotRefs":[{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap"}],${ready_condition}}}
 EOF
 
-write_obj demovirtualdisksnapshots.demo.state-snapshotter.deckhouse.io disk-snap <<EOF
-{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","metadata":{"namespace":"ns1","name":"disk-snap","uid":"snap-disk","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"sourceRef":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"missing-disk"}},"status":{"boundSnapshotContentName":"sc-disk",${ready_condition}}}
+write_obj demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io disk-snap <<EOF
+{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","metadata":{"namespace":"ns1","name":"disk-snap","uid":"snap-disk","ownerReferences":[{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"Snapshot","name":"root","uid":"snap-root","controller":true}]},"spec":{"sourceRef":{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","name":"missing-disk"}},"status":{"boundSnapshotContentName":"sc-disk",${ready_condition}}}
 EOF
 
 write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-root <<EOF
@@ -52,7 +52,7 @@ write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-disk <<EOF
 EOF
 
 write_obj snapshotcontents.state-snapshotter.deckhouse.io sc-bad <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-bad","uid":"sc-bad-uid","ownerReferences":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap","uid":"snap-disk","controller":true}]},"status":{"manifestCheckpointName":"mcp-bad",${ready_condition}}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"SnapshotContent","metadata":{"name":"sc-bad","uid":"sc-bad-uid","ownerReferences":[{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot","name":"disk-snap","uid":"snap-disk","controller":true}]},"status":{"manifestCheckpointName":"mcp-bad",${ready_condition}}}
 EOF
 
 write_obj objectkeepers.deckhouse.io ok-root <<EOF
@@ -64,7 +64,7 @@ write_obj manifestcapturerequests.state-snapshotter.deckhouse.io mcr-root <<EOF
 EOF
 
 write_obj customsnapshotdefinitions.state-snapshotter.deckhouse.io smoke-demo <<EOF
-{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"snapshotResourceMapping":[{"source":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"AccessGranted","status":"True","reason":"Smoke"}]}}
+{"apiVersion":"state-snapshotter.deckhouse.io/v1alpha1","kind":"CustomSnapshotDefinition","metadata":{"name":"smoke-demo","uid":"csd-smoke-uid"},"spec":{"snapshotResourceMapping":[{"source":{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk"},"snapshot":{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDiskSnapshot"},"priority":0}]},"status":{"conditions":[{"type":"Accepted","status":"True","reason":"Valid"},{"type":"AccessGranted","status":"True","reason":"Smoke"}]}}
 EOF
 
 write_obj manifestcheckpoints.state-snapshotter.deckhouse.io mcp-root <<EOF
@@ -95,12 +95,12 @@ write_obj volumecapturerequests.storage-foundation.deckhouse.io vcr-root <<EOF
 {"apiVersion":"storage-foundation.deckhouse.io/v1alpha1","kind":"VolumeCaptureRequest","metadata":{"namespace":"ns1","name":"vcr-root","uid":"vcr-root-uid"},"spec":{"mode":"Snapshot","targets":[{"uid":"pvc-root-uid","apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"}]},"status":{"dataRefs":[{"targetUID":"pvc-root-uid","target":{"apiVersion":"v1","kind":"PersistentVolumeClaim","namespace":"ns1","name":"pvc-root"},"artifact":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshotContent","name":"vsc-root"}}],${ready_condition}}}
 EOF
 
-write_obj demovirtualdisks.demo.state-snapshotter.deckhouse.io live-disk <<EOF
-{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","metadata":{"namespace":"ns1","name":"live-disk","uid":"disk-live-uid","ownerReferences":[{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualMachine","name":"vm-live","uid":"vm-live-uid"}]}}
+write_obj demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io live-disk <<EOF
+{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualDisk","metadata":{"namespace":"ns1","name":"live-disk","uid":"disk-live-uid","ownerReferences":[{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualMachine","name":"vm-live","uid":"vm-live-uid"}]}}
 EOF
 
-write_obj demovirtualmachines.demo.state-snapshotter.deckhouse.io vm-live <<EOF
-{"apiVersion":"demo.state-snapshotter.deckhouse.io/v1alpha1","kind":"DemoVirtualMachine","metadata":{"namespace":"ns1","name":"vm-live","uid":"vm-live-uid"}}
+write_obj demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io vm-live <<EOF
+{"apiVersion":"sds-unified-snapshots-poc.deckhouse.io/v1alpha1","kind":"DemoVirtualMachine","metadata":{"namespace":"ns1","name":"vm-live","uid":"vm-live-uid"}}
 EOF
 
 cat >"${BIN_DIR}/kubectl" <<'EOF'
@@ -116,8 +116,8 @@ fi
 
 if [[ "${1:-}" == "api-resources" && "$*" == *"--namespaced=true"* ]]; then
 	cat <<'RES'
-demovirtualdisks.demo.state-snapshotter.deckhouse.io
-demovirtualmachines.demo.state-snapshotter.deckhouse.io
+demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io
+demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io
 RES
 	exit 0
 fi
@@ -125,9 +125,9 @@ fi
 if [[ "${1:-}" == "api-resources" ]]; then
 	cat <<'RES'
 NAME                         APIVERSION                                  NAMESPACED KIND
-demovirtualdisksnapshots     demo.state-snapshotter.deckhouse.io/v1alpha1 true       DemoVirtualDiskSnapshot
-demovirtualdisks             demo.state-snapshotter.deckhouse.io/v1alpha1 true       DemoVirtualDisk
-demovirtualmachines          demo.state-snapshotter.deckhouse.io/v1alpha1 true       DemoVirtualMachine
+demovirtualdisksnapshots     sds-unified-snapshots-poc.deckhouse.io/v1alpha1 true       DemoVirtualDiskSnapshot
+demovirtualdisks             sds-unified-snapshots-poc.deckhouse.io/v1alpha1 true       DemoVirtualDisk
+demovirtualmachines          sds-unified-snapshots-poc.deckhouse.io/v1alpha1 true       DemoVirtualMachine
 RES
 	exit 0
 fi

@@ -33,8 +33,8 @@ import (
 
 // domainSubresourceGroupPrefix is prepended to a domain snapshot's API group to address its aggregated
 // subresources group. The domain controller registers its restore subresources under
-// "subresources.<domain group>" (e.g. demo group "demo.state-snapshotter.deckhouse.io" ->
-// "subresources.demo.state-snapshotter.deckhouse.io"), distinct from core's own
+// "subresources.<domain group>" (e.g. demo group "sds-unified-snapshots-poc.deckhouse.io" ->
+// "subresources.sds-unified-snapshots-poc.deckhouse.io"), distinct from core's own
 // "subresources.state-snapshotter.deckhouse.io" so the two APIServices never collide. Keep this in
 // sync with the domain apiserver's served group (internal/domainapi handler).
 const domainSubresourceGroupPrefix = "subresources."

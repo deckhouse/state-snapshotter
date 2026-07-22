@@ -71,9 +71,9 @@ func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName string, object
 	}
 }
 
-func getAggregatedObjects(t *testing.T, url string, wantStatus int) []map[string]interface{} {
+func getAggregatedObjects(t *testing.T, url string) []map[string]interface{} {
 	t.Helper()
-	body := getRawResponse(t, url, wantStatus)
+	body := getRawResponse(t, url, http.StatusOK)
 	var arr []map[string]interface{}
 	if err := json.Unmarshal(body, &arr); err != nil {
 		t.Fatal(err)

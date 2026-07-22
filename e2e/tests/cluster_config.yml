@@ -108,14 +108,14 @@ clusterDefinition:
         version: 1
         enabled: true
         # Reference demo domain module: provides the demo domain controller, demo CRDs
-        # (demo.state-snapshotter.deckhouse.io) and the two demo CSDs the suite captures
+        # (sds-unified-snapshots-poc.deckhouse.io) and the two demo CSDs the suite captures
         # and restores against. Its GitLab CI publishes to the same dev registry as the
         # other modules; CI overrides the tag WITHOUT editing this file by exporting
         # SDS_UNIFIED_SNAPSHOTS_POC_MODULE_PULL_OVERRIDE (e.g. "mr<N>").
         modulePullOverride: "main"
         # Depends on state-snapshotter: the demo CSDs are CustomSnapshotDefinition
         # (group state-snapshotter.deckhouse.io) and the demo aggregated API sits under
-        # subresources.demo.state-snapshotter.deckhouse.io, so the core CSD CRD + core
+        # subresources.sds-unified-snapshots-poc.deckhouse.io, so the core CSD CRD + core
         # aggregation layer must be live first. (module.yaml declares no requirements.modules,
         # so this dependency graph is what enforces the ordering in e2e.)
         dependencies:

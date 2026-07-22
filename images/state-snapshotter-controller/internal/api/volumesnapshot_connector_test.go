@@ -34,7 +34,6 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -45,10 +44,6 @@ func vsConnectorScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
-	// Block 6a (§10.1): the upload path anchors the reconstructed import MCP with a dedicated ObjectKeeper,
-	// so the connector's client scheme must know the deckhouse.io ObjectKeeper type (production registers it
-	// in cmd/main.go's api-server fullScheme).
-	_ = deckhousev1alpha1.AddToScheme(scheme)
 	vsGVK := schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot}
 	scheme.AddKnownTypeWithName(vsGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: vsGVK.Group, Version: vsGVK.Version, Kind: "VolumeSnapshotList"}, &unstructured.UnstructuredList{})
@@ -159,8 +154,8 @@ func seedVolumeSnapshotLeaf(t *testing.T, cl client.Client, vsName string, ready
 		Status: storagev1alpha1.SnapshotContentStatus{
 			ManifestCheckpointName: "mcp-vol",
 			Data: &storagev1alpha1.SnapshotDataBinding{
-				Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
-				Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
+				SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "ns1", UID: "uid-pvc"},
+				ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-1"},
 			},
 		},
 	}
@@ -179,10 +174,46 @@ func TestVolumeSnapshotConnector_ManifestsDownload(t *testing.T) {
 	srv := newVSConnectorServer(t, cl)
 	defer srv.Close()
 
-	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download", http.StatusOK)
+	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download")
 	if len(objects) != 1 || !containsKindName(objects, "PersistentVolumeClaim", "orphan-pvc") {
 		t.Fatalf("manifests-download should return the single own-node PVC, got %#v", objects)
 	}
+}
+
+// TestVolumeSnapshotConnector_ManifestsDownloadBackRefMismatch pins the anti-spoofing handshake on the
+// download facade: a VolumeSnapshot whose status.boundSnapshotContentName points at a content that does
+// NOT reference it back (spec.snapshotRef aims at a different VS) is refused with 403 (Forbidden), never
+// served. Without this a status writer could aim boundSnapshotContentName at a foreign content.
+func TestVolumeSnapshotConnector_ManifestsDownloadBackRefMismatch(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(vsConnectorScheme()).Build()
+	pvc := map[string]interface{}{
+		"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+		"metadata": map[string]interface{}{"name": "orphan-pvc", "namespace": "ns1"},
+	}
+	createReadyMCPForAPI(t, cl, "mcp-vol", []map[string]interface{}{pvc})
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vol-content"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Namespace:  "ns1",
+				Name:       "vs-other", // back-reference points at a DIFFERENT VolumeSnapshot
+			},
+		},
+		Status: storagev1alpha1.SnapshotContentStatus{ManifestCheckpointName: "mcp-vol"},
+	}
+	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed"})
+	if err := cl.Create(context.Background(), content); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-1", "ns1", "vsc-1", "vol-content", false, true)); err != nil {
+		t.Fatal(err)
+	}
+	srv := newVSConnectorServer(t, cl)
+	defer srv.Close()
+
+	getRawResponse(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-download", http.StatusForbidden)
 }
 
 func TestVolumeSnapshotConnector_ManifestsWithDataRestoration(t *testing.T) {
@@ -191,7 +222,7 @@ func TestVolumeSnapshotConnector_ManifestsWithDataRestoration(t *testing.T) {
 	srv := newVSConnectorServer(t, cl)
 	defer srv.Close()
 
-	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-with-data-restoration?targetNamespace=restore-ns", http.StatusOK)
+	objects := getAggregatedObjects(t, srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-1/manifests-with-data-restoration?targetNamespace=restore-ns")
 	pi := -1
 	for i, o := range objects {
 		u := unstructured.Unstructured{Object: o}
@@ -210,16 +241,40 @@ func TestVolumeSnapshotConnector_ManifestsWithDataRestoration(t *testing.T) {
 	}
 }
 
-func TestVolumeSnapshotConnector_Upload(t *testing.T) {
+// vsImportBoundClient builds a fake client seeded with a bound import VolumeSnapshot and its
+// SnapshotContent (spec.snapshotRef back-ref + uid), so the bind-first namespaced upload passes and the
+// content-addressed layer keys the reconstructed MCP off the VS UID.
+func vsImportBoundClient(t *testing.T) client.Client {
+	t.Helper()
 	vsStatusStub := &unstructured.Unstructured{}
 	vsStatusStub.SetGroupVersionKind(volumeSnapshotGVK())
 	cl := fake.NewClientBuilder().
 		WithScheme(vsConnectorScheme()).
 		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}, vsStatusStub).
 		Build()
-	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-import", "ns1", "", "", true, false)); err != nil {
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-import", "ns1", "", "vs-content", true, false)); err != nil {
 		t.Fatal(err)
 	}
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "vs-content", UID: "vs-content-uid"},
+		Spec: storagev1alpha1.SnapshotContentSpec{
+			SnapshotRef: &storagev1alpha1.SnapshotSubjectRef{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       "VolumeSnapshot",
+				Namespace:  "ns1",
+				Name:       "vs-import",
+				UID:        "uid-vs-import",
+			},
+		},
+	}
+	if err := cl.Create(context.Background(), content); err != nil {
+		t.Fatal(err)
+	}
+	return cl
+}
+
+func TestVolumeSnapshotConnector_Upload(t *testing.T) {
+	cl := vsImportBoundClient(t)
 	srv := newVSConnectorServer(t, cl)
 	defer srv.Close()
 
@@ -239,8 +294,68 @@ func TestVolumeSnapshotConnector_Upload(t *testing.T) {
 	if out["status"] != "Success" {
 		t.Fatalf("upload response status = %v, want Success", out["status"])
 	}
-	if out["manifestCheckpointName"] == "" || out["manifestCheckpointName"] == nil {
+	mcpName, _ := out["manifestCheckpointName"].(string)
+	if mcpName == "" {
 		t.Fatalf("upload response missing manifestCheckpointName: %#v", out)
+	}
+	// The reconstructed MCP is owned by the SnapshotContent from birth.
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		t.Fatalf("get MCP: %v", err)
+	}
+	if ctrlRef := metav1.GetControllerOf(mcp); ctrlRef == nil || ctrlRef.Kind != "SnapshotContent" || ctrlRef.Name != "vs-content" {
+		t.Fatalf("VS import MCP must be owned by the SnapshotContent, got %#v", mcp.OwnerReferences)
+	}
+}
+
+// TestVolumeSnapshotConnector_UploadBindFirst pins bind-first on the VS connector: an import VolumeSnapshot
+// with no status.boundSnapshotContentName is refused with 409 ImportContentNotBound.
+func TestVolumeSnapshotConnector_UploadBindFirst(t *testing.T) {
+	vsStatusStub := &unstructured.Unstructured{}
+	vsStatusStub.SetGroupVersionKind(volumeSnapshotGVK())
+	cl := fake.NewClientBuilder().
+		WithScheme(vsConnectorScheme()).
+		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}, vsStatusStub).
+		Build()
+	if err := cl.Create(context.Background(), vsConnectorVolumeSnapshot("vs-unbound", "ns1", "", "", true, false)); err != nil {
+		t.Fatal(err)
+	}
+	srv := newVSConnectorServer(t, cl)
+	defer srv.Close()
+
+	payload := `{"manifests":[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"orphan-pvc","namespace":"ns1"}}],"childRefs":[]}`
+	resp, err := http.Post(srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-unbound/manifests-and-children-refs-upload", "application/json", bytes.NewReader([]byte(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("unbound VS upload status = %d, want 409", resp.StatusCode)
+	}
+	var st metav1.Status
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatalf("decode Status: %v", err)
+	}
+	if string(st.Reason) != usecase.ReasonImportContentNotBound {
+		t.Fatalf("unbound VS upload reason = %q, want %q", st.Reason, usecase.ReasonImportContentNotBound)
+	}
+}
+
+// TestVolumeSnapshotConnector_UploadRejectsChildRefs pins the leaf validation on the connector: a
+// VolumeSnapshot is always a leaf, so a non-empty childRefs payload is rejected with 400.
+func TestVolumeSnapshotConnector_UploadRejectsChildRefs(t *testing.T) {
+	cl := vsImportBoundClient(t)
+	srv := newVSConnectorServer(t, cl)
+	defer srv.Close()
+
+	payload := `{"manifests":[{"apiVersion":"v1","kind":"PersistentVolumeClaim","metadata":{"name":"orphan-pvc","namespace":"ns1"}}],"childRefs":[{"apiVersion":"v1","kind":"PersistentVolumeClaim","name":"child"}]}`
+	resp, err := http.Post(srv.URL+"/apis/subresources.snapshot.storage.k8s.io/v1/namespaces/ns1/volumesnapshots/vs-import/manifests-and-children-refs-upload", "application/json", bytes.NewReader([]byte(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("VS leaf upload with childRefs status = %d, want 400", resp.StatusCode)
 	}
 }
 

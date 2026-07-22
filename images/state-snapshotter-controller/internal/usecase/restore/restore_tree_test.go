@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,7 +36,7 @@ import (
 func restoreTreeScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
-	demoDiskSnapshotGVK := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
+	demoDiskSnapshotGVK := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
 	scheme.AddKnownTypeWithName(demoDiskSnapshotGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: demoDiskSnapshotGVK.Group, Version: demoDiskSnapshotGVK.Version, Kind: "DemoVirtualDiskSnapshotList"}, &unstructured.UnstructuredList{})
 	vsGVK := schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}
@@ -70,13 +71,40 @@ func orphanChildContent(name, mcp, vsName string, dataRef *storagev1alpha1.Snaps
 	return c
 }
 
-func demoDiskSnapshotObj(name, contentName string) *unstructured.Unstructured {
+// rootBoundContent builds a Ready root SnapshotContent for the core root Snapshot `rootName` (source-ns),
+// carrying the anti-spoofing back-reference (spec.snapshotRef) the resolver requires for snapshot nodes:
+// the content must point back at the snapshot subject that bound it via status.boundSnapshotContentName.
+func rootBoundContent(name, mcp, rootName string) *storagev1alpha1.SnapshotContent {
+	c := readySnapshotContent(name, mcp, nil)
+	c.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "Snapshot",
+		Namespace:  "source-ns",
+		Name:       rootName,
+	}
+	return c
+}
+
+// diskSnapBoundContent builds a Ready SnapshotContent bound to a demo DemoVirtualDiskSnapshot (source-ns),
+// carrying the anti-spoofing back-reference to that snapshot subject.
+func diskSnapBoundContent(name, mcp, snapName string) *storagev1alpha1.SnapshotContent {
+	c := readySnapshotContent(name, mcp, nil)
+	c.Spec.SnapshotRef = &storagev1alpha1.SnapshotSubjectRef{
+		APIVersion: demoGroupV,
+		Kind:       "DemoVirtualDiskSnapshot",
+		Namespace:  "source-ns",
+		Name:       snapName,
+	}
+	return c
+}
+
+func demoDiskSnapshotObj() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
-		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
+		"metadata":   map[string]interface{}{"name": "disk-snap", "namespace": "source-ns"},
 		"status": map[string]interface{}{
-			"boundSnapshotContentName": contentName,
+			"boundSnapshotContentName": "disk-content",
 			"conditions":               []interface{}{map[string]interface{}{"type": "Ready", "status": "True"}},
 		},
 	}}
@@ -121,7 +149,7 @@ func domainSnapshotObj(kind, name, contentName string, childRefs []storagev1alph
 		readyStatus = "False"
 	}
 	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       kind,
 		"metadata":   map[string]interface{}{"name": name, "namespace": "source-ns"},
 		"status": map[string]interface{}{
@@ -140,15 +168,15 @@ func TestResolveRestoreTree_ResolvesVSLeavesAndChildSnapshots(t *testing.T) {
 	// the root, so the resolver must materialize it as a child RestoreNode (not a root VSCToVS entry).
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
-		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+		{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-orphan", &storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
 	})
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
-	diskContent := readySnapshotContent("disk-content", "mcp-disk", nil)
+	diskSnap := demoDiskSnapshotObj()
+	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "disk-snap")
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).
@@ -210,7 +238,7 @@ func TestResolveRestoreTree_MissingVSLeafFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-missing"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent).Build()
 
@@ -228,7 +256,7 @@ func TestResolveRestoreTree_VSLeafEmptyBoundFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-unbound"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
@@ -252,7 +280,7 @@ func TestResolveRestoreTree_VSLeafNotReadyFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-pending"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
 		"kind":       "VolumeSnapshot",
@@ -276,7 +304,7 @@ func TestResolveRestoreTree_VSLeafDeletingFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-deleting"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	now := metav1.Now()
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1",
@@ -309,7 +337,7 @@ func TestResolveRestoreTree_OrphanVSMissingChildContentFailsClosed(t *testing.T)
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	// Handle points at a child content that was never materialized.
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-missing")
 
@@ -332,7 +360,7 @@ func TestResolveRestoreTree_OrphanVSEmptyBoundContentFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	// readyToUse + boundVSC set, but boundSnapshotContentName empty.
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "")
 
@@ -356,11 +384,11 @@ func TestResolveRestoreTree_OrphanContentSnapshotRefMismatchFailsClosed(t *testi
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "vs-orphan"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	// The child content's spec.snapshotRef points at a DIFFERENT VolumeSnapshot than the one binding it.
 	orphanContent := orphanChildContent("root-content-vol-orphan", "mcp-orphan", "vs-other", &storagev1alpha1.SnapshotDataBinding{
-		Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "orphan-pvc", Namespace: "source-ns", UID: "uid-orphan"},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-orphan"},
 	})
 	vs := volumeSnapshotObj("vs-orphan", "vsc-orphan", "root-content-vol-orphan")
 
@@ -375,6 +403,56 @@ func TestResolveRestoreTree_OrphanContentSnapshotRefMismatchFailsClosed(t *testi
 	}
 }
 
+// TestResolveRestoreTree_SnapshotContentBackRefMismatchForbidden proves the unified anti-spoofing
+// handshake for snapshot nodes: a bound SnapshotContent whose spec.snapshotRef does not point back at the
+// snapshot subject that referenced it (status.boundSnapshotContentName) is rejected fail-closed with a
+// 403 (Forbidden), even when the content is otherwise Ready. This prevents attaching a foreign content by
+// pointing status.boundSnapshotContentName at it.
+func TestResolveRestoreTree_SnapshotContentBackRefMismatchForbidden(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", nil)
+	// The bound content points its spec.snapshotRef at a DIFFERENT snapshot subject than the root.
+	rootContent := rootBoundContent("root-content", "mcp-root", "other-snap")
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when the bound content snapshotRef does not point back at the snapshot")
+	}
+	if !apierrors.IsForbidden(err) {
+		t.Fatalf("expected Forbidden (403), got %v", err)
+	}
+}
+
+// TestResolveRestoreTree_ChildSnapshotContentBackRefMismatchFailsClosed proves that a CHILD snapshot node
+// reached via the trusted childrenSnapshotRefs tree-walk, whose bound content's spec.snapshotRef does not
+// point back at it, is a data-integrity contract violation (409, ErrContractViolation) — NOT the 403 the
+// user-addressed root uses — consistent with the sibling orphan-VS child leg.
+func TestResolveRestoreTree_ChildSnapshotContentBackRefMismatchFailsClosed(t *testing.T) {
+	scheme := restoreTreeScheme()
+	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
+		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+	})
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
+	diskSnap := demoDiskSnapshotObj()
+	// The child content's spec.snapshotRef points at a DIFFERENT disk snapshot than the one binding it.
+	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "other-disk")
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, diskSnap, diskContent).Build()
+
+	_, err := NewResolver(cl).ResolveRestoreTree(context.Background(), "source-ns", "snap")
+	if err == nil {
+		t.Fatal("expected error when a child content snapshotRef does not point back at the child snapshot")
+	}
+	if !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("expected ErrContractViolation (409), got %v", err)
+	}
+	if apierrors.IsForbidden(err) {
+		t.Fatalf("child back-ref mismatch must be 409, not 403: %v", err)
+	}
+}
+
 func TestResolveRestoreTree_RootMissingReadyConditionFailsClosed(t *testing.T) {
 	scheme := restoreTreeScheme()
 	// Root snapshot has bound content + ready content, but NO Ready condition of its own.
@@ -382,7 +460,7 @@ func TestResolveRestoreTree_RootMissingReadyConditionFailsClosed(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "source-ns"},
 		Status:     storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "root-content"},
 	}
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent).Build()
 
@@ -400,10 +478,10 @@ func TestResolveRestoreTree_ChildSnapshotNotReadyFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	// Child snapshot CR itself is not Ready (its content is Ready).
 	diskSnap := domainSnapshotObj("DemoVirtualDiskSnapshot", "disk-snap", "disk-content", nil, false)
-	diskContent := readySnapshotContent("disk-content", "mcp-disk", nil)
+	diskContent := diskSnapBoundContent("disk-content", "mcp-disk", "disk-snap")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, diskSnap, diskContent).Build()
 
@@ -421,16 +499,16 @@ func TestResolveRestoreTree_CycleFailsClosed(t *testing.T) {
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "a"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
 	// a -> b -> a forms a cycle in the snapshot run tree.
 	a := domainSnapshotObj("DemoVirtualDiskSnapshot", "a", "a-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "b"},
 	}, true)
-	aContent := readySnapshotContent("a-content", "mcp-a", nil)
+	aContent := diskSnapBoundContent("a-content", "mcp-a", "a")
 	b := domainSnapshotObj("DemoVirtualDiskSnapshot", "b", "b-content", []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: demoGroupV, Kind: "DemoVirtualDiskSnapshot", Name: "a"},
 	}, true)
-	bContent := readySnapshotContent("b-content", "mcp-b", nil)
+	bContent := diskSnapBoundContent("b-content", "mcp-b", "b")
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(root, rootContent, a, aContent, b, bContent).Build()
 
@@ -446,10 +524,10 @@ func TestResolveRestoreTree_CycleFailsClosed(t *testing.T) {
 func TestResolveRestoreTree_ChildNotReadyFailsClosed(t *testing.T) {
 	scheme := restoreTreeScheme()
 	root := rootSnapshotObj("snap", "root-content", []storagev1alpha1.SnapshotChildRef{
-		{APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
+		{APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1", Kind: "DemoVirtualDiskSnapshot", Name: "disk-snap"},
 	})
-	rootContent := readySnapshotContent("root-content", "mcp-root", nil)
-	diskSnap := demoDiskSnapshotObj("disk-snap", "disk-content")
+	rootContent := rootBoundContent("root-content", "mcp-root", "snap")
+	diskSnap := demoDiskSnapshotObj()
 	// disk content present but NOT Ready
 	diskContent := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "disk-content"},

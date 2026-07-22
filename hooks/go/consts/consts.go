@@ -76,8 +76,8 @@ const (
 	DomainDataExportReadClusterRoleName = "d8:state-snapshotter:data-export:domain-read"
 
 	// DomainSubresourcesGroupPrefix is prepended to a domain snapshot's API group to address its
-	// aggregated subresources group (e.g. "demo.state-snapshotter.deckhouse.io" ->
-	// "subresources.demo.state-snapshotter.deckhouse.io"). Keep in sync with internal/api and
+	// aggregated subresources group (e.g. "sds-unified-snapshots-poc.deckhouse.io" ->
+	// "subresources.sds-unified-snapshots-poc.deckhouse.io"). Keep in sync with internal/api and
 	// internal/domainapi.
 	DomainSubresourcesGroupPrefix = "subresources."
 

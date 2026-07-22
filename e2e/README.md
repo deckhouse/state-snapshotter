@@ -53,6 +53,71 @@ functions in dependency order:
    from the phase-4 backup pod), wait for the imported tree Ready, restore-apply
    into a fresh namespace, and verify manifests + block checksums. Needs
    `storage-foundation`.
+5. **Publish - DataExport `publish: true`** (`publishDataExportSpecs`, env-gated by
+   `E2E_PUBLISH`, independent of `E2E_VOLUME_DATA`): export a live **Filesystem**
+   PVC directly (`targetRef` -> `PersistentVolumeClaim`, `publicURL` path
+   `/<ns>/pvc/<name>/`) with `publish: true`, and reach the exporter's Filesystem
+   data-plane (`/api/v1/files/`: JSON listing + per-file download) **both** from
+   inside the nested cluster (`status.url`, direct to the exporter pod, validated
+   against the exporter's own CA `status.ca` — issuer `data-exporter-CA`) **and**
+   from outside through the origin `kubernetes-api` ingress host (`status.publicURL`,
+   TLS terminated at nginx). The source PVC holds files in the root, a subdir, a deep
+   `subdir2/subdir/subsubdir`, and a 200Mi random file; the big file is streamed to
+   `sha256sum` in the runner pod (never to the runner disk) and asserted equal
+   inside == outside == source. Authentication is a ServiceAccount Bearer token
+   minted via the TokenRequest API. Negatives: (internal) the token is denied
+   (`403`) BEFORE its `RoleBinding` exists; (external) client certificates through
+   the ingress do NOT authenticate (`401/403`, nginx terminated TLS). The external
+   path runs from a `curlimages/curl` pod on the **base** cluster (in
+   `TEST_CLUSTER_NAMESPACE`, sharing the DVP network with the nested VMs), since the
+   test runner reaches the nested cluster only via the API SSH tunnel. Teardown
+   asserts the `DataExport` schema is immutable (`publish` cannot be toggled off)
+   and that deleting the `DataExport` reaps its Ingress + Service in
+   `d8-storage-foundation`. Needs `storage-foundation` and the publish
+   infrastructure (see `E2E_PUBLISH`).
+6. **Publish - DataImport `publish: true`** (`publishDataImportSpecs`, env-gated by
+   `E2E_PUBLISH`, independent of `E2E_VOLUME_DATA`): the upload counterpart of the
+   `DataExport` publish spec. Self-contained (no dependency on the phase-4/5 backup
+   fixture): it captures a source orphan **Block** PVC as a `VolumeSnapshot` leaf so
+   its captured PVC manifest can be re-uploaded on import and field-compared to the
+   live source on restore, materializes an import-mode root `Snapshot` + `VolumeSnapshot`
+   leaf, and creates a `DataImport` (`mode: PopulateData`, `publish: true`, `publicURL`
+   path `/<ns>/pvc/<name>/`). Manifests are uploaded in-cluster via the aggregated API,
+   but the **volume bytes are pushed from OUTSIDE** the nested cluster — a random block
+   payload generated in the base-cluster `curlimages/curl` pod is streamed through the
+   origin `kubernetes-api` ingress (`status.publicURL`) with `PUT /api/v1/block` + `POST
+   /api/v1/finished`, Bearer-authenticated with a ServiceAccount token minted via
+   TokenRequest (RBAC: `dataimports/download` create). Negative: the same request
+   WITHOUT a token is rejected (`401/403`). Terminal state is asserted per the current
+   status catalog (`phase: Completed`, `completionTimestamp`, `status.data.artifactRef`
+   pointing at a real `VolumeSnapshotContent`). Two-layer validation follows phase 5:
+   the restore output is field-compared to the live source objects, and the imported
+   snapshot is restored into a PVC + probe pod whose `sha256` must equal the external
+   payload. Teardown deletes the `DataImport` and asserts the importer server
+   infrastructure (Ingress + Service in `d8-storage-foundation`) is reaped — `sf` tears
+   the publish infra down only on idle-TTL expiry or `DataImport` deletion, not on the
+   terminal `Completed` phase. Needs `storage-foundation` and the publish infrastructure
+   (see `E2E_PUBLISH`).
+7. **Publish - aggregated manifests via the published kube-API**
+   (`publishManifestsSpecs`, env-gated by `E2E_PUBLISH`, independent of
+   `E2E_VOLUME_DATA`): proves the open question **"do the manifests need a separate
+   APIService ingress?"** — they do **not**. The aggregated apiserver
+   (`subresources.state-snapshotter.deckhouse.io`) is registered as an `APIService` in
+   the kube-apiserver, and the kube-apiserver is exactly what the origin
+   `kubernetes-api` ingress (user-authn `publishAPI`) exposes, so the aggregated API is
+   reachable from outside through the **same** host the `DataExport`/`DataImport`
+   ingresses reuse — no separate ingress is required. The spec captures a self-contained
+   manifest-only tree (ConfigMap + `DemoVirtualMachine`), then: (a) reads the root
+   `Snapshot` `manifests-download` **in-cluster** and asserts it matches the live
+   objects (the phase-4 raw comparator); (b) NEGATIVE — the **external** request from a
+   base-cluster `curlimages/curl` pod through `https://api.<domain>/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/<ns>/snapshots/<name>/manifests-download`
+   with a valid SA Bearer token but **no** `snapshots/manifests-download` RoleBinding is
+   Forbidden (`403`, the aggregated apiserver's delegated `SubjectAccessReview`); (c) once
+   the RoleBinding is granted, the external response is `200`, carries the **same object
+   set** as the internal aggregated response, and matches the live objects. RBAC:
+   `snapshots/manifests-download` `get` in group
+   `subresources.state-snapshotter.deckhouse.io`. Needs `state-snapshotter` and the
+   publish infrastructure (see `E2E_PUBLISH`).
 
 ## Module dependency note
 
@@ -109,29 +174,54 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 
 - `E2E_SNAPSHOTTER_NS_PREFIX`: prefix for the source/restore namespaces the suite
   creates. Defaults to `snap-e2e`.
+- `E2E_RUN_ID`: a per-run token embedded in every namespace name, which has the form
+  `<prefix>-<runID>-<role>` (e.g. `snap-e2e-0719-2259-9f-import`). One e2e pass shares one
+  `runID`, so all its namespaces carry the same prefix — list/clean a whole run with
+  `kubectl get ns | grep <prefix>-<runID>`, with no collision against leftovers from an
+  earlier keep-on-failure run. When unset, a compact `MMDD-HHMM-<2 rand>` token is
+  generated. A provided value (CI build id, git short sha, …) is lowercased, sanitized to a
+  DNS-1123 label, and capped at 32 chars so the full namespace stays within the 63-char
+  limit.
 - `E2E_SNAPSHOT_READY_TIMEOUT`: Go duration bounding Snapshot/SnapshotContent
   readiness waits. Defaults to `10m`.
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
 - `E2E_GC_TTL`: `snapshotTtlAfterDelete` applied for the GC spec. Defaults to `60s`.
-- `E2E_VOLUME_DATA`: when truthy (`true`/`1`/`yes`), runs phases 3-5 (full
-  volume-data flow, backup download, and backup restore). Off by default (phases 1-2 only).
-- `E2E_CHILD_BRIDGE_FAILURE`: opt-in regression for the child-Snapshot terminal-failure
-  bridge (INV-FAIL-PROP). Requires `E2E_VOLUME_DATA` too. It provisions a StorageClass
-  wired to a non-existent `VolumeSnapshotClass`, captures a data-backed `DemoVirtualDisk`
-  whose volume capture then fails terminally, and asserts the root `Snapshot` flips to
-  `Ready=False/ChildrenFailed`. Off by default even under `E2E_VOLUME_DATA` because it
-  mutates cluster StorageClass wiring and must be validated on a real cluster before being
-  promoted to the standard volume-data CI. The same invariant is covered deterministically
-  by unit tests (`internal/usecase/child_snapshot_terminal_failures_test.go`); the two
-  envtest specs in `snapshot_graph_integration_test.go` are skipped because a genuine
+All feature flags below are **opt-out**: they are **ON by default** so a plain run on a
+full cluster exercises the entire suite. Disable what your environment cannot support by
+setting the flag to a falsey value (`false`/`0`/`no`/`off`).
+
+- `E2E_VOLUME_DATA`: **on by default** — runs phases 3-5 (full volume-data flow, backup
+  download, and backup restore). Set `E2E_VOLUME_DATA=false` to run phases 1-2 only (no
+  volume provisioning); this also disables every spec that piggybacks on the volume-data
+  flow (`E2E_CHILD_BRIDGE_FAILURE`, `E2E_FREEZE_DEADLINE`, `E2E_MANIFEST_CHECKPOINT_LOSS`).
+- `E2E_CHILD_BRIDGE_FAILURE`: **on by default** (as part of the volume-data flow) —
+  regression for the child-Snapshot terminal-failure bridge (INV-FAIL-PROP). It provisions
+  a StorageClass wired to a non-existent `VolumeSnapshotClass`, captures a data-backed
+  `DemoVirtualDisk` whose volume capture then fails terminally, and asserts the root
+  `Snapshot` flips to `Ready=False/ChildrenFailed`. Set `E2E_CHILD_BRIDGE_FAILURE=false`
+  (or `E2E_VOLUME_DATA=false`) to disable — it mutates cluster StorageClass wiring, so
+  disable it on environments that cannot support that. The same invariant is covered
+  deterministically by unit tests (`internal/usecase/child_snapshot_terminal_failures_test.go`);
+  the two envtest specs in `snapshot_graph_integration_test.go` are skipped because a genuine
   terminal child volume capture cannot be synthesized under envtest.
-- `E2E_GET_LOAD`: when truthy, runs the opt-in GET-load measurement spec (REST
-  GET-load delta across the capture wave, scraped from the leader controller's
-  `/metrics`). Off by default even when `E2E_VOLUME_DATA` is set, because the
-  repeat-and-average run adds several minutes. It provisions its own thin
-  StorageClass, so it does not need `E2E_VOLUME_DATA`, but it does need the same
-  base-cluster knobs (`TEST_CLUSTER_NAMESPACE` / `TEST_CLUSTER_STORAGE_CLASS`).
+- `E2E_FREEZE_DEADLINE`: **on by default** (as part of the volume-data flow) — drives a hung
+  child disk snapshot so the VM aggregator self-fails with `ConsistencyDeadlineExceeded` and
+  clears its freeze marker. It patches the SHARED poc domain-controller Deployment
+  (a cluster-wide `FREEZE_DEADLINE` env change, restored on cleanup). Set
+  `E2E_FREEZE_DEADLINE=false` (or `E2E_VOLUME_DATA=false`) to disable. Tune the injected
+  deadline with `E2E_FREEZE_DEADLINE_VALUE` (a Go duration).
+- `E2E_MANIFEST_CHECKPOINT_LOSS`: **on by default** (as part of the volume-data flow) —
+  deletes a `ManifestCheckpoint` (or one of its chunks) at the root / child / grandchild
+  level AFTER capture and asserts the affected node flips to
+  `Ready=False/ManifestCheckpointFailed` and the root `Snapshot` to
+  `Ready=False/ChildrenFailed`. Set `E2E_MANIFEST_CHECKPOINT_LOSS=false`
+  (or `E2E_VOLUME_DATA=false`) to disable — it deletes cluster-scoped artifacts.
+- `E2E_GET_LOAD`: **on by default** — the GET-load measurement spec (REST GET-load delta
+  across the capture wave, scraped from the leader controller's `/metrics`). Set
+  `E2E_GET_LOAD=false` to disable (the repeat-and-average run adds several minutes). It
+  provisions its own thin StorageClass, so it does not need `E2E_VOLUME_DATA`, but it does
+  need the same base-cluster knobs (`TEST_CLUSTER_NAMESPACE` / `TEST_CLUSTER_STORAGE_CLASS`).
   Tuning knobs:
   - `E2E_GET_LOAD_ITERATIONS`: capture waves to run back-to-back over a shared
     source (default `5`).
@@ -139,6 +229,36 @@ pseudo-version. `state-snapshotter/api` is always consumed via
     cold-cache bias (default `1`).
   - `E2E_GET_LOAD_MAX_PER_SEC`: when set, hard-bound the MEAN GET/sec (leave unset
     for the baseline run; set it to the baseline figure for the new run).
+- `E2E_PUBLISH`: **on by default** — the publish (ingress + tokens) specs:
+  DataExport/DataImport with `publish: true`, downloaded/uploaded both from inside the
+  cluster (`status.url`) and from outside through the ingress (`status.publicURL`), plus
+  the aggregated **manifests** reachable externally through the same published
+  `kubernetes-api` ingress (no separate APIService ingress). Set `E2E_PUBLISH=false` to
+  disable (do this on clusters where you do not want the suite to touch ingress). It runs
+  a **BeforeSuite step BEFORE the module-readiness wait** (so a cluster that cannot support
+  publish fails fast), which asserts the prerequisites a test must not fabricate and
+  ensures the one it safely can:
+  - global `publicDomainTemplate = %s.<masterIP>.sslip.io` — a hard prerequisite (it is
+    cluster-global; `sslip.io` is a public wildcard DNS, so `api.<masterIP>.sslip.io`
+    resolves to the nested master from anywhere, and the external path can also fall back
+    to `curl --resolve api.<domain>:443:<masterIP>`). Empty ⇒ fail fast.
+  - the origin `kubernetes-api` Ingress (from user-authn `publishAPI.enabled=true`, whose
+    TLS secret the DataExport/DataImport ingresses reuse) — searched in `kube-system`
+    **and** `d8-user-authn` (its namespace is version-dependent); its host is recorded as
+    the expected `status.publicURL` prefix. Missing ⇒ fail fast.
+  - a working `nginx` IngressClass — **ensured**: if one already exists it is reused
+    (nothing is mutated); otherwise the step provisions it (enables the `ingress-nginx`
+    module and creates a HostPort `IngressNginxController` that also lands on the master,
+    whose IP the publish domain resolves to). The storage-e2e bootstrap wires the first
+    two only on `alwaysCreateNew`; it configures **no** ingress, so this ensure step is
+    what makes publish work on `alwaysUseExisting` (and on a fresh cluster).
+
+  TLS on the sslip.io host of a private master IP is typically self-signed (Let's Encrypt
+  cannot reach it), so external requests use `-k` or the ingress CA (`status.ca`).
+- `E2E_PUBLISH_INGRESS_INLET`: inlet for the `IngressNginxController` the publish step
+  provisions when a cluster has no ingress class. Defaults to `HostPort` (the only inlet
+  that works on the static nested cluster, whose publish domain is the master IP). Only
+  used on the provision path; ignored when a `nginx` class already exists.
 - `E2E_STORAGE_CLASS`: the thin, snapshot-capable StorageClass the suite
   provisions/uses for phase 3. Defaults to `e2e-thin`.
 - `E2E_PROBE_IMAGE`: container image (must ship `sh` + `cat`) for the PVC
@@ -175,18 +295,22 @@ export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=main   # module under test; or prN
 # export STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=prN
 # export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE=prN
 
-# Phases 1-2 only:
+# Everything, on a full cluster (all feature flags default ON):
 cd e2e
 make deps
 make test
 
-# Phases 3-5 (volume-data + backup download + backup restore) as well:
-E2E_VOLUME_DATA=true make test
+# Phases 1-2 only (no volume provisioning); this also disables the volume-data-backed
+# negative specs (child-bridge, freeze-deadline, manifest-checkpoint-loss):
+E2E_VOLUME_DATA=false make test
 
-# Opt-in GET-load measurement only (provisions its own SC; baseline = log only):
-E2E_GET_LOAD=true make test-focus FOCUS="GET-load measurement"
+# Trim what a partial cluster cannot run (e.g. no publish ingress, skip the slow GET-load):
+E2E_PUBLISH=false E2E_GET_LOAD=false make test
+
+# GET-load measurement only (provisions its own SC; baseline = log only):
+make test-focus FOCUS="GET-load measurement"
 # New image, hard-bound the mean against the baseline figure:
-E2E_GET_LOAD=true E2E_GET_LOAD_MAX_PER_SEC=<baseline> make test-focus FOCUS="GET-load measurement"
+E2E_GET_LOAD_MAX_PER_SEC=<baseline> make test-focus FOCUS="GET-load measurement"
 ```
 
 Run a subset:

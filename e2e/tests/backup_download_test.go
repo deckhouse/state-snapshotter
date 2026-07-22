@@ -270,7 +270,7 @@ func assertBackupTopology(ctx context.Context, ns, rootSnap string) error {
 			continue
 		}
 		// manifests-download on the nested disk snapshot should contain disk-a.
-		path := coreGenericSubPath(ns, resDemoDiskSnapshots, c.name, subManifestsDownload)
+		path := demoSubPath(ns, resDemoDiskSnapshots, c.name, subManifestsDownload)
 		body, aerr := aggGet(ctx, path, nil)
 		if aerr != nil {
 			return fmt.Errorf("GET %s: %w", path, aerr)
@@ -289,7 +289,7 @@ func assertBackupTopology(ctx context.Context, ns, rootSnap string) error {
 	}
 
 	// Standalone disk-b: root child manifests-download should reference disk-b.
-	path := coreGenericSubPath(ns, resDemoDiskSnapshots, diskBSnap.name, subManifestsDownload)
+	path := demoSubPath(ns, resDemoDiskSnapshots, diskBSnap.name, subManifestsDownload)
 	body, err := aggGet(ctx, path, nil)
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)
@@ -309,9 +309,9 @@ func manifestDownloadPath(ns string, ref childRef) string {
 	case "Snapshot":
 		return coreSnapshotSubPath(ns, ref.name, subManifestsDownload)
 	case "DemoVirtualMachineSnapshot":
-		return coreGenericSubPath(ns, resDemoVMSnapshots, ref.name, subManifestsDownload)
+		return demoSubPath(ns, resDemoVMSnapshots, ref.name, subManifestsDownload)
 	case "DemoVirtualDiskSnapshot":
-		return coreGenericSubPath(ns, resDemoDiskSnapshots, ref.name, subManifestsDownload)
+		return demoSubPath(ns, resDemoDiskSnapshots, ref.name, subManifestsDownload)
 	case "VolumeSnapshot":
 		// Orphan-PVC visibility leaf: its captured PVC manifest is served by the generic-PVC extended
 		// VolumeSnapshot connector (subresources.snapshot.storage.k8s.io), not the core/demo subresource.
@@ -331,6 +331,11 @@ func gvrForLiveKind(kind string) (schema.GroupVersionResource, bool) {
 		return demoVMGVR, true
 	case "DemoVirtualDisk":
 		return demoDiskGVR, true
+	case "Secret":
+		// The POC materializes a companion Secret for every DemoVirtualMachine, captured into the VM
+		// snapshot node's manifest leg ALONGSIDE the VM object (see veto_selector_test.go). Per-node
+		// manifests-download raw-vs-live comparison therefore encounters it and needs a live GVR mapping.
+		return secretGVR, true
 	default:
 		return schema.GroupVersionResource{}, false
 	}
@@ -575,7 +580,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 			if gerr != nil {
 				continue
 			}
-			targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
+			targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "sourceRef", "name")
 			if targetName == "" {
 				continue
 			}
@@ -601,7 +606,7 @@ func collectDataExportTargets(ctx context.Context, ns, rootContent string) ([]da
 		}
 		switch sk.kind {
 		case "DemoVirtualDiskSnapshot":
-			t.group = "demo.state-snapshotter.deckhouse.io"
+			t.group = "sds-unified-snapshots-poc.deckhouse.io"
 		case "VolumeSnapshot":
 			t.group = "snapshot.storage.k8s.io"
 		default:
@@ -833,7 +838,7 @@ func resolveBackupSnapRefs(ctx context.Context, ns, rootSnap, rootContent string
 		if gerr != nil {
 			continue
 		}
-		targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "source", "name")
+		targetName, _, _ := unstructured.NestedString(content.Object, "status", "data", "sourceRef", "name")
 		if targetName == bkPVCName {
 			orphanVS = vs.GetName()
 			break
@@ -890,10 +895,10 @@ func backupDownloadSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-4 backup download flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-4 backup download flow (it runs by default)")
 			}
 			backup.sc = suiteCfg.storageClass
-			backup.srcNS = uniqueNS("bk")
+			backup.srcNS = uniqueNS("p4-backup")
 			backup.checksums = map[string]string{}
 			backup.dataDir = bkBackupDataDir
 

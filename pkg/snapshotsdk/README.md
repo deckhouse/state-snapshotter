@@ -4,9 +4,11 @@
 
 > **Status: developer-facing usage guide** for teams integrating their domain with the
 > snapshot controller through `pkg/snapshotsdk`. This is *how to use it*, not the normative
-> contract. Normative sources are the godoc in `pkg/snapshotsdk` (interfaces and invariants)
-> and the code-quality contract in [`CLAUDE.md`](./CLAUDE.md). The reference implementation is
-> the demo controllers in the `sds-unified-snapshots-poc` repo (`images/domain-controller/internal/controllers/demo`).
+> contract. The normative source for the domain↔core contract is the SDK ADR
+> (`2026-06-29-domain-snapshot-sdk.md`); the godoc in `pkg/snapshotsdk` is normative for the exact
+> Go signatures and code-level invariants; this README is **not normative**. The code-quality
+> contract is [`CLAUDE.md`](./CLAUDE.md). The reference implementation is the demo controllers in the
+> `sds-unified-snapshots-poc` repo (`images/domain-controller/internal/controllers/demo`).
 >
 > SDK v1 scope is **capture-only** (snapshot planning: child snapshots + data capture +
 > manifest capture + lifecycle barriers). Restore is a separate sanctioned boundary
@@ -731,37 +733,51 @@ default: // CaptureOutcomeCapturing
 `CaptureOutcomeFailed` is checked first: a terminal `Ready` reason (`IsReasonTerminal`) wins over
 the success latches (which are success-only and never express failure).
 
-## Inspecting children — `ChildrenCaptureStates` (aggregators)
+## Barrier 2 in an aggregator — `childrenSettled` + `CoreCaptureOutcome`
 
-An aggregator (e.g. a VM whose child disks each own a data leg) can time its consistency action on
-the **fine-grained** per-child latch rather than a coarse child `Ready` rollup.
-`ChildrenCaptureStates(ctx, adapter)` resolves the declared child refs and returns, for each, its
-`Ready` status/reason/message and whether **all** its declared legs are latched captured:
+An aggregator (e.g. a VM whose child disks each own a data leg) declares barrier 2 not on a coarse
+child `Ready` rollup, but on the core-derived capture outcome of **its own** node plus the
+`childrenSettled` latch (every direct child is terminal — captured-OK OR failed). The only safe
+pattern is a switch on `CoreCaptureOutcome` (`Failed` checked FIRST), with the consistency action
+gated on `childrenSettled` OR the domain's own freeze-deadline:
 
 ```go
-children, err := sdk.ChildrenCaptureStates(ctx, adapter)
-if err != nil {
-	return ctrl.Result{}, err
-}
-// Stop waiting if any child has gone terminal (the core bubbles it up as ChildrenFailed; the domain
-// never re-drives the child terminal itself):
-for i := range children {
-	if storagev1alpha1.IsReasonTerminal(children[i].ReadyReason) {
-		return ctrl.Result{}, nil
+switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
+case snapshotsdk.CaptureOutcomeFailed:
+	// Checked FIRST. The terminal (including a bubbled ChildrenFailed from a failed child) is owned by the
+	// core — the domain does not re-drive it. But stopping does NOT excuse COMPENSATING the consistency
+	// action: if the fs was frozen, unfreeze MUST run here (else the freeze leaks); the Captured branch is
+	// unreachable in this case.
+	return ctrl.Result{}, r.thawIfFrozen(ctx, adapter) // compensation
+case snapshotsdk.CaptureOutcomeCaptured:
+	// Every OWN leg is captured. The consistency action (e.g. guest-fs unfreeze) is gated on the node's own
+	// childrenSettled OR a domain freeze-deadline: childrenSettled has no core TTL, a hung child never flips
+	// it, so liveness is the domain-side deadline's job, not the core's.
+	settled := adapter.CoreCaptureState().ChildrenSettled
+	if (settled == nil || !*settled) && !r.freezeDeadlineExceeded(adapter) {
+		return ctrl.Result{RequeueAfter: retry}, nil // wait for children to settle
 	}
-}
-// Otherwise wait until every child's data leg is latched, then (e.g.) unfreeze and confirm.
-for i := range children {
-	if !children[i].AllLegsCaptured {
-		return ctrl.Result{RequeueAfter: retry}, nil
+	if err := r.thawIfFrozen(ctx, adapter); err != nil { // consistency action
+		return ctrl.Result{}, err
 	}
+	return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+default: // CaptureOutcomeCapturing
+	return ctrl.Result{RequeueAfter: retry}, nil
 }
-return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
 ```
 
-Children are read as unstructured objects by their ref GVK, so this works across any domain child
-kind. A child not found yet is reported with an empty `Ready` and `AllLegsCaptured=false` (still
-pending).
+> **Why NOT a loop over `IsReasonTerminal(child.ReadyReason)`.** Stopping on each child's terminal
+> reason and otherwise waiting for every child's `AllLegsCaptured` is **dangerous**: a child can fail
+> with a domain free-form reason that is not in `TerminalReadyReasons`, and such a loop hangs forever.
+> `childrenSettled` counts a failure as terminal too (not only success), and `CaptureOutcomeFailed`
+> bubbles the core's `ChildrenFailed` — together they cover both a child failure and a child hang (the
+> latter via the domain freeze-deadline).
+
+For **fine-grained** per-child diagnostics there is `ChildrenCaptureStates(ctx, adapter)`: it resolves
+the declared child refs and returns, for each, its `Ready` status/reason/message and `AllLegsCaptured`
+(whether all its declared legs are latched). Children are read as unstructured by their ref GVK (any
+domain child kind); a child not found yet has an empty `Ready` and `AllLegsCaptured=false`. This is a
+read-only inspection, NOT a replacement for the gate above.
 
 ## Manifest exclude for aggregators — `SubtreeManifestIdentities` (optional)
 
@@ -777,6 +793,15 @@ if any subtree is not fully persisted or a child has not bound its content yet, 
 `snapshotsdk.ErrSubtreeIdentitiesPending` and the caller requeues — a partial exclude is never
 returned. A node with no children returns an empty set. A leaf/parent that does not aggregate
 overlapping manifests does not need this at all.
+
+**Built-in pre-gate.** Before touching the subresource the method consults **its own** node's
+`CoreCaptureState().ChildSubtreesManifestsPersisted` — the core-computed latch "the subtrees of ALL
+declared direct children are fully persisted" (children-only: this node's own manifests are NOT
+included, so it can flip `true` before this node's own MCR even exists). When it is explicitly `false`
+the method returns `ErrSubtreeIdentitiesPending` **without a single REST call** — saving endpoint
+round-trips and 409-requeue cycles while descendants are still capturing. `nil` (the adapter does not
+map the field, or it is not computed yet) disables the pre-gate and preserves the prior behavior;
+correctness is still held by the subresource's fail-closed 409.
 
 ---
 

@@ -56,9 +56,8 @@ import (
 // there are NO manual reconcile calls. The recursive genericbinder propagateReadyFalseToParent only ever
 // fired on child-Snapshot OBJECT deletion (a transient view), never on durable artifact/content loss, so it
 // is inert in this scenario: this spec stays green with or without that code, which is exactly the proof
-// required before removing it. Note that deleting the child Snapshot object alone is intentionally NOT a
-// parent-degradation signal in the durable-content model (the child SnapshotContent survives via
-// ObjectKeeper TTL); the real degradation signal is durable artifact/content loss, exercised below.
+// required before removing it. Child Snapshot deletion is covered separately by the
+// ChildSnapshotDeleted/ChildSnapshotLost fold; this scenario exercises durable artifact degradation.
 var _ = Describe("Integration: parent generic Snapshot degrades via SnapshotContent ChildrenReady (content-driven)", Serial, func() {
 	var (
 		ctx         context.Context
