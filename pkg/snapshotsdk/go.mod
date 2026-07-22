@@ -1,6 +1,6 @@
 module github.com/deckhouse/state-snapshotter/pkg/snapshotsdk
 
-go 1.26.5
+go 1.25.12
 
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
