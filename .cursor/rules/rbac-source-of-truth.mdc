@@ -8,6 +8,10 @@ alwaysApply: true
 - Do not use `// +kubebuilder:rbac` markers as a source of RBAC in this module.
 - Static production controller RBAC is maintained manually in `templates/controller/rbac-for-us.yaml`.
 - If the controller needs static core permissions, update `templates/controller/rbac-for-us.yaml`; do not add kubebuilder RBAC markers as the fix.
-- Domain/custom resource RBAC is granted externally by Deckhouse RBAC controller/hook and signaled through `DomainSpecificSnapshotController.status.conditions[AccessGranted=True]`.
+- Per-CSD **core-side** RBAC is reconciled by `hooks/go/030-domain-rbac`: access for the core
+  controller SA and storage-foundation DataExport SA, reflected by
+  `CustomSnapshotDefinition.status.conditions[AccessGranted]`. The hook grants nothing to an
+  out-of-process domain SA; each domain module declares its own SA rights statically in its Helm
+  templates.
 - Controller code under `images/state-snapshotter-controller/internal/controllers/` must not contain `+kubebuilder:rbac` markers; this prevents stale or misleading generated-RBAC hints.
-- Do not add demo/domain custom resources to production static RBAC; document them as external RBAC requirements instead.
+- Do not add demo/domain custom resources to core production static RBAC.

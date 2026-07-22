@@ -230,8 +230,8 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		// Recovery reap (idempotent): dataCaptured was latched in a PRIOR pass, but the domain VCR still
 		// exists. The latch-and-reap above is gated on !dataCaptured, so once the latch is set it never runs
 		// again — a crash, requeue, or transient API error in the window between the latch write and the VCR
-		// delete would otherwise orphan the VCR forever (swept only by its 10m TTL, and it also blocks
-		// namespace deletion). Reaping here is safe and NOT churn: the domain SDK suppresses VCR re-creation
+		// delete would otherwise leave it until storage-foundation generic GC (24h default), while it also
+		// blocks namespace deletion. Reaping here is safe and NOT churn: the domain SDK suppresses VCR re-creation
 		// whenever dataCaptured is true (EnsureVolumeCapture), so latch-before-reap still holds (the latch
 		// happened in the earlier pass).
 		//

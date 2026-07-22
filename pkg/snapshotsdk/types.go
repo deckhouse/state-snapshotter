@@ -56,8 +56,9 @@ const ExcludeLabelKey = storagev1alpha1.ExcludeLabelKey
 type Target = storagefoundation.Target
 
 // Reason is a stable, machine-readable condition reason published by the SDK on behalf of the domain. The
-// domain chooses the reason (for example "InvalidSourceRef", "SourceNotFound", "ArtifactMissing"); the SDK
-// never invents domain semantics.
+// domain chooses the reason for its own terminal contract failures (for example "InvalidSourceRef" or
+// "GraphPlanningFailed"); recoverable waits such as a source/PVC that may still appear use ReportProgress
+// instead of a terminal Reason. The SDK never invents domain semantics.
 type Reason string
 
 // Phase is the domain-owned capture lifecycle carried on
@@ -92,7 +93,9 @@ type DomainCaptureState struct {
 	// children); the SDK/adapter guarantees a non-nil slice on the wire (empty [] = "nothing excluded",
 	// which a leaf always writes). The domain never authors the durable aggregate or the top-level mirror.
 	ExcludedRefs []ExcludedObjectRef
-	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed). Planning is an optional
+	// explicit pre-barrier value; the SDK has no MarkPlanning verb, so SDK-first controllers normally leave
+	// phase empty until MarkPlanned.
 	Phase Phase
 	// Reason/Message carry the failure detail when Phase=Failed.
 	Reason  string
@@ -180,10 +183,13 @@ type FailSpec struct {
 	Reason Reason
 	// Message is an optional human-readable explanation.
 	Message string
-	// Cause, when set, is logged/returned so the manager can surface the underlying error.
+	// Cause, when set and Message is empty, is rendered into the published failure message. Reject returns
+	// only a status-write error; it does not return Cause to the caller.
 	Cause error
-	// Requeue asks the caller to requeue (for example, an artifact that may appear later). When false the
-	// outcome is treated as terminal-until-spec-change and the SDK returns no error and no requeue intent.
+	// Requeue is retained for source compatibility but has no effect: Reject is always terminal and returns
+	// no reconcile intent. Recoverable waits must use ReportProgress and return ctrl.Result from the caller.
+	//
+	// Deprecated: do not use; the caller owns requeue policy.
 	Requeue bool
 }
 

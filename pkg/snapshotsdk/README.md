@@ -14,6 +14,22 @@
 > manifest capture + lifecycle barriers). Restore is a separate sanctioned boundary
 > (`pkg/snapshotsdk/transform`) and is out of scope here.
 
+## Consuming the SDK from another module
+
+The SDK and its shared API are separate Go modules. An external domain controller must require
+**both** from one tested compatibility set (the simplest choice is the same state-snapshotter
+revision; use pseudo-versions until release tags are published):
+
+```bash
+go get github.com/deckhouse/state-snapshotter/api@<state-snapshotter-commit>
+go get github.com/deckhouse/state-snapshotter/pkg/snapshotsdk@<state-snapshotter-commit>
+```
+
+Do not copy the SDK repository's local `replace .../api => ../../api`: dependency-module `replace`
+directives are not inherited by consumers. The PoC `images/domain-controller/go.mod` is the tested
+integration baseline; pinning an arbitrary SDK revision against an unrelated deployed core is not a
+supported compatibility contract. A versioned compatibility policy is still pending.
+
 **In one paragraph:** `snapshotsdk` lets a domain controller **describe snapshot intent** (child
 snapshots, an optional data PVC, manifest targets, the captured source) without implementing
 snapshot orchestration. The domain decides **what** to snapshot; the SDK decides **how** capture
@@ -32,7 +48,8 @@ domain reads it back as its failure channel.
    - which candidate source objects are **excluded** (the exclude veto).
 4. The controller hands this to the SDK, which creates the capture requests, publishes the refs
    and the captured source, and stamps the domain lifecycle phase.
-5. The controller declares **barrier 1** (`MarkPlanned`, `phase=Planned`).
+5. In the normal leaf/simple-parent path the controller declares every capture leg and then
+   **barrier 1** (`MarkPlanned`, `phase=Planned`).
 6. The core controller captures the legs, materializes the `SnapshotContent`, flips the per-leg
    latches, and writes `Ready`.
 7. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
@@ -70,7 +87,9 @@ CoreCaptureOutcome
   |-- Capturing -> wait / requeue
 ```
 
-That is the whole flow. The rest of this guide covers each step in detail.
+That is the normal flow. A subtree-gated aggregator deliberately freezes/publishes its children with
+`MarkPlanned` first and declares its own `EnsureManifestCapture(base − exclude)` leg afterwards; see
+"Manifest exclude for aggregators". The rest of this guide covers each step in detail.
 
 ## What the snapshot SDK is and why it exists
 
@@ -148,8 +167,8 @@ It takes four values:
 
 | Phase | Meaning | Set by |
 |---|---|---|
-| `Planning` | the domain is creating objects/refs (children, MCR/VCR) | initial |
-| `Planned` | **barrier 1**: everything created and published | `MarkPlanned` |
+| `Planning` | optional explicit pre-barrier value; SDK-first controllers normally leave phase empty | domain-specific (the SDK has no `MarkPlanning`) |
+| `Planned` | **barrier 1**: the declared child/excluded set is frozen and core projection may start; a subtree-gated aggregator may declare its own manifest leg afterwards | `MarkPlanned` |
 | `Finished` | **barrier 2**: the domain finished its side (incl. consistency actions) | `ConfirmConsistent` |
 | `Failed` | terminal: the domain hit an unrecoverable error | `Fail` / `Reject` |
 
@@ -363,10 +382,13 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// 5. Manifest (always at least one target).
 	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: manifestTargets}); err != nil {
+		if errors.Is(err, snapshotsdk.ErrEmptyManifest) || errors.Is(err, snapshotsdk.ErrManifestTargetsDrift) {
+			return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+		}
 		return ctrl.Result{}, err
 	}
 
-	// 6. Barrier 1 — everything planned/published.
+	// 6. Barrier 1 — the normal leaf/simple-parent path has declared every leg.
 	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -383,13 +405,20 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 ```
 
-Order: the planning calls (`EnsureChildren` / `EnsureVolumeCapture` / `EnsureManifestCapture`) are
+Normal leaf/simple-parent order: the planning calls (`EnsureChildren` / `EnsureVolumeCapture` /
+`EnsureManifestCapture`) are
 **independent** and may run in any order relative to each other. Each verb depends only on its own
 spec and never reads another leg's result, so the requests they produce are identical regardless of
 call order — in particular `EnsureManifestCapture` builds the MCR solely from its declared `Targets`
 and does not consult the data-leg VCR. Barrier 1 (`MarkPlanned`) comes after all three planning
-calls; the barrier-2 outcome switch comes last. On an error from any `Ensure*`, just `return err`
-and the reconcile retries.
+calls; the barrier-2 outcome switch comes last. Classify the documented terminal planning
+sentinels (`ErrChildrenSetFrozen`, `ErrEmptyManifest`, `ErrManifestTargetsDrift`) as shown below;
+return other errors so the reconcile retries.
+
+A subtree-gated aggregator is the exception: it calls `EnsureChildren`, then `MarkPlanned` to freeze
+the child set and let the core bind child contents, then waits on `SubtreeManifestIdentities` and
+declares its own manifest leg. Calling `MarkPlanned` before that late manifest leg is intentional,
+not a partially planned leaf. The PoC `DemoVirtualMachineSnapshot` controller is the reference.
 
 ### Import-mode short-circuit
 
@@ -461,7 +490,7 @@ patches the targets. An identical re-declaration is a no-op.
 ```go
 if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: manifestTargets}); err != nil {
 	if errors.Is(err, snapshotsdk.ErrManifestTargetsDrift) {
-		_ = sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+		return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
 	}
 	return ctrl.Result{}, err
 }
@@ -786,6 +815,11 @@ snapshots already capture (e.g. a namespace-root Snapshot, or a VM whose disk ch
 of its objects). It builds the aggregator's MCR as `EnsureManifestCapture(base − exclude)`, where
 the exclude set is everything the subtree already captured.
 
+Because those identities become available only after child contents are bound and persisted, the
+reference order is intentionally split: `EnsureChildren` → `MarkPlanned` → wait for
+`SubtreeManifestIdentities` → `EnsureManifestCapture(base − exclude)` → barrier-2 outcome. This is
+the only documented exception to the normal "all Ensure calls before MarkPlanned" recipe.
+
 `SubtreeManifestIdentities(ctx, adapter)` returns the union of object identities captured across the
 node's DIRECT children subtrees. It requires the subresource REST client
 (`WithSubresourceREST`; without it the call returns a configuration error). It is **fail-closed**:
@@ -811,8 +845,9 @@ correctness is still held by the subresource's fail-closed 409.
   machine-readable `reason` and the cause's message. Use it for a domain contract violation such as
   `ErrChildrenSetFrozen` / `ErrManifestTargetsDrift` / `ErrEmptyManifest` (recommended reason
   `GraphPlanningFailed`).
-- `Reject(ctx, adapter, FailSpec{Reason, Message, Cause, Requeue})` — the structured terminal form
-  (e.g. an invalid `sourceRef`). Same effect: `phase=Failed`.
+- `Reject(ctx, adapter, FailSpec{Reason, Message, Cause})` — the structured terminal form
+  (e.g. an invalid `sourceRef`). Same effect: `phase=Failed`. The legacy `FailSpec.Requeue` field has
+  no effect and must not be used; the caller owns requeue policy.
 - `ReportProgress(ctx, adapter, message)` — a **non-terminal**, message-only diagnostic written into
   `status.captureState.domainSpecificController.message`. It preserves the phase and reason and never
   touches `Ready`. Use it for a recoverable wait ("waiting for PVC X to exist") and keep requeuing;

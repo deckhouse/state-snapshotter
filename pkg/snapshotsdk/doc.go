@@ -58,23 +58,31 @@ limitations under the License.
 //
 // # Lifecycle (capture-only, v1)
 //
-// A typical domain Reconcile resolves its source, then drives the three planning legs, publishes the
-// source, marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
-// (barrier 2 = Finished) or fail:
+// A typical leaf Reconcile resolves its source, drives the three planning legs, publishes the source,
+// marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
+// (barrier 2 = Finished) or stop on a core-owned failure:
 //
 //	if !valid { return sdk.Reject(ctx, t, FailSpec{Reason: "InvalidSourceRef"}) }
 //	kept, dropped := PartitionExcluded(sourceObjs) // honor the state-snapshotter.deckhouse.io/exclude veto
 //	children, excludedRefs := buildFrom(kept), refsOf(dropped)
-//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) } // a post-Planned set growth returns ErrChildrenSetFrozen
+//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil {
+//	    if errors.Is(err, ErrChildrenSetFrozen) { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) }
+//	    return err // adoption conflicts and API errors are recoverable
+//	}
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
 //	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})
 //	if err := sdk.MarkPlanned(ctx, t); err != nil { return err }
 //	switch o := CoreCaptureOutcome(t); o.Outcome {
 //	case CaptureOutcomeCaptured: return sdk.ConfirmConsistent(ctx, t) // after any consistency action (e.g. fs unfreeze)
-//	case CaptureOutcomeFailed:   return sdk.Fail(ctx, t, Reason(o.Reason), errors.New(o.Message))
+//	case CaptureOutcomeFailed:   return nil // core owns and bubbles the terminal Ready
 //	default: // CaptureOutcomeCapturing: wait
 //	}
+//
+// A subtree-gated aggregator is the deliberate exception to "all Ensure calls before MarkPlanned":
+// it publishes and freezes its child set with EnsureChildren + MarkPlanned first, then calls
+// SubtreeManifestIdentities and declares its own EnsureManifestCapture(base-minus-exclude) leg after
+// the child subtrees become durable. See the package README and the DemoVirtualMachineSnapshot reference.
 //
 // # Restart-safe recipe
 //

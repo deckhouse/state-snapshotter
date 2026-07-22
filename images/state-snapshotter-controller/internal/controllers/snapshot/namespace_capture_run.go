@@ -65,10 +65,11 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  2. planNamespaceChildren -> EnsureChildren (create/adopt + ADDITIVE publish of childrenSnapshotRefs).
 //  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 //     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
-//     FULL child set (domain + orphan) is enumerated before the content is created/frozen.
-//  4. MarkPlanned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent with the full
-//     frozen child set.
-//  5. Wait for the binder to bind the content; then maintain the RBAC latch.
+//     FULL child set (domain + orphan) is enumerated before its membership is frozen.
+//  4. MarkPlanned (barrier 1) — freezes that full child set and unblocks main-side leg/edge projection.
+//     The generic binder is claim-gated, not Planned-gated, so it may already have created/bound the eager
+//     SnapshotContent shell while these planning waves were running.
+//  5. Resolve the eagerly bound content (requeue if the bind has not landed yet); then maintain the RBAC latch.
 //  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
 //  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
