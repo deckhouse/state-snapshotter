@@ -511,11 +511,13 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
 		return ctrl.Result{}, err
 	}
-	// Keep actively requeuing until Ready is True. Ready includes the ManifestsArchived subtree latch as a
-	// (monotonic) gate, so while any descendant is still archiving this node's Ready stays False — this
-	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
+	// Keep actively requeuing until Ready is True OR Ready=False is terminal. Ready includes the
+	// ManifestsArchived subtree latch as a (monotonic) gate, so while any descendant is still archiving this
+	// node's non-terminal Ready=False self-requeues and drives the child->parent archive wave to converge
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
-	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
+	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes). A terminal
+	// Ready=False cannot converge through polling: stop ALL active requeue triggers (including stale
+	// projection/leg flags) and rely on the existing watches for any external recovery event.
 	//
 	// dataRequeue is deliberately NOT a requeue trigger anymore (vcr-watch-core-terminal Phase 3): a
 	// pending data leg keeps Ready=False, so the general !ready self-requeue already covers it, and the VCR
@@ -523,12 +525,31 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// instead of being polled. dataRequeue still feeds the aggregation as dataLegPending above. edges/mcp
 	// (separate optimistic patches observed next pass) and legs (subtreePlanned/subtree-manifests waves,
 	// only partially data-leg) stay as triggers.
-	if !ready || edgesRequeue || mcpRequeue || legsRequeue {
+	if snapshotContentNeedsActiveRequeue(obj, ready, edgesRequeue || mcpRequeue || legsRequeue) {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
+}
+
+// snapshotContentNeedsActiveRequeue classifies the settled aggregation result. Pending Ready=False keeps
+// the coarse 500 ms safety poll; Ready=True stops it after any same-pass projection has converged; terminal
+// Ready=False always stops it, even when a projection/leg helper asked to requeue. Terminal state cannot
+// make progress without an external object change, and all such inputs already have watches.
+//
+// SnapshotContent has a few core-internal terminal reasons (DomainCaptureFailed, ArtifactMissing, ...)
+// beyond the user-facing Snapshot TerminalReadyReasons catalog, so both canonical classifiers are used.
+func snapshotContentNeedsActiveRequeue(contentObj *unstructured.Unstructured, ready, projectionRequeue bool) bool {
+	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+	if err == nil {
+		readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
+			(snapshot.IsReasonTerminal(readyCond.Reason) || isTerminalChildContentFailure(readyCond.Reason)) {
+			return false
+		}
+	}
+	return !ready || projectionRequeue
 }
 
 func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
