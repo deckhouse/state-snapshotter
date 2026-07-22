@@ -359,6 +359,20 @@ func childBridgeFailureSpecs() {
 			_, _, found := conditionStatus(root, condReady)
 			Expect(found).To(BeTrue(), "root Snapshot must carry a Ready condition")
 
+			By("Asserting the failed child counts as settled and latches childrenSettled=true on the parent")
+			Eventually(func(g Gomega) {
+				freshRoot, gerr := getResource(ctx, snapshotGVR, srcNS, cbRootSnapshotName)
+				g.Expect(gerr).NotTo(HaveOccurred())
+				g.Expect(childSnapshotRefs(freshRoot)).NotTo(BeEmpty(),
+					"childrenSettled assertion must be non-vacuous: the root must declare the failed child")
+
+				settled, settledFound := snapshotCommonControllerLatch(freshRoot, "childrenSettled")
+				g.Expect(settledFound).To(BeTrue(),
+					"the root with a terminal failed child must declare commonController.childrenSettled")
+				g.Expect(settled).To(BeTrue(),
+					"the terminal failed child must count as settled, not keep the parent waiting forever")
+			}).WithContext(ctx).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
 			By("Asserting the terminal child SnapshotContent stops active 500 ms self-polling")
 			child, err := getResource(ctx, demoDiskSnapshotGVR, srcNS, childName)
 			Expect(err).NotTo(HaveOccurred())
