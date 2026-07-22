@@ -116,8 +116,8 @@ func IsReasonTerminal(reason string) bool {
 // the UI/d8 surfaces exactly as they already mirror TerminalReadyReasons — and a runtime classifier: the
 // restore resolver applies IsReasonDegraded to relax the Ready gate for a user-addressed root at
 // scope=node (a recoverable Ready=False root still serves its own manifests). See the primary ADR
-// (2026-06-29-unified-snapshots-overview, section "Conditions & Reasons", subcategory "Восстановимая
-// деградация — DegradedReadyReasons").
+// (2026-06-29-unified-snapshots-overview, section "Conditions & Reasons", subcategory
+// "Recoverable degradation — DegradedReadyReasons").
 var DegradedReadyReasons = map[string]struct{}{
 	ReasonChildSnapshotDeleted: {},
 }
