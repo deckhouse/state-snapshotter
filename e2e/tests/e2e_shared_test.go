@@ -996,6 +996,101 @@ func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, 
 	return wait, w.Stop, nil
 }
 
+// --- delete-protection helpers (delete-guard e2e + adapted deliberate deletions) ------------------
+
+const (
+	// breakGlassAnnotation is the persistent/reversible override that lets an operator delete a
+	// delete-protected object directly (design/delete-protection-contract.md §6.4). It matches the
+	// deckhouse-controller literal/polarity.
+	breakGlassAnnotation = "deckhouse.io/allow-delete"
+	// deleteProtectedLabel is the authoritative delete-protection marker (api/storage/v1alpha1).
+	deleteProtectedLabel = storagev1alpha1.LabelDeleteProtected
+	// holdFinalizer keeps a Terminating object around long enough to inspect it after an allowed DELETE
+	// (proving the marker persisted / the object degrades before it disappears). It is e2e-only.
+	holdFinalizer = "e2e.state-snapshotter.deckhouse.io/hold"
+)
+
+// annotateAllowDelete stamps the break-glass annotation deckhouse.io/allow-delete="true" on a (possibly
+// cluster-scoped) object so a subsequent DELETE of a delete-protected object is admitted by the guard. It
+// is the supported way for the suite to delete protected nodes it created; reused by every deliberate
+// deletion of a protected kind (adapted specs) and by the delete-guard spec's break-glass cases.
+func annotateAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) error {
+	obj, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return err
+	}
+	ann := obj.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[breakGlassAnnotation] = "true"
+	obj.SetAnnotations(ann)
+	if ns == "" {
+		_, err = suiteDyn.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
+	} else {
+		_, err = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+	}
+	return err
+}
+
+// deleteWithAllowDelete annotates a protected object with the break-glass annotation and then deletes it —
+// the supported teardown path for a delete-protected node the suite created. A NotFound on either step is
+// tolerated (the object may already be gone / unprotected). The ns parameter mirrors annotateAllowDelete
+// and handles namespaced kinds too; current callers only pass cluster-scoped ("") protected kinds.
+//
+//nolint:unparam // ns is kept for the namespaced-kind teardown path (future callers) and API symmetry.
+func deleteWithAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) error {
+	if err := annotateAllowDelete(ctx, gvr, ns, name); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	var err error
+	if ns == "" {
+		err = suiteDyn.Resource(gvr).Delete(ctx, name, metav1.DeleteOptions{})
+	} else {
+		err = suiteDyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	}
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// impersonatedDyn returns a dynamic client that impersonates the given username (and optional groups). The
+// delete-guard admission policy keys exemption on request.userInfo.username, so the suite drives it by
+// impersonating either a NON-exempt identity (in group system:masters, which bypasses RBAC authorization
+// so the request reaches admission) or an exempt controller ServiceAccount.
+func impersonatedDyn(username string, groups ...string) (dynamic.Interface, error) {
+	cfg := rest.CopyConfig(suiteRestCfg)
+	cfg.Impersonate = rest.ImpersonationConfig{UserName: username, Groups: groups}
+	return dynamic.NewForConfig(cfg)
+}
+
+// isProtected reports whether an object carries the delete-protected marker.
+func isProtected(obj *unstructured.Unstructured) bool {
+	return obj.GetLabels()[deleteProtectedLabel] == "true"
+}
+
+// firstProtectedName lists a (possibly namespaced) resource and returns the name of the first object that
+// carries the delete-protected marker, for the delete-guard spec to target.
+func firstProtectedName(ctx context.Context, gvr schema.GroupVersionResource, ns string) (string, bool, error) {
+	var list *unstructured.UnstructuredList
+	var err error
+	if ns == "" {
+		list, err = suiteDyn.Resource(gvr).List(ctx, metav1.ListOptions{})
+	} else {
+		list, err = suiteDyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for i := range list.Items {
+		if isProtected(&list.Items[i]) {
+			return list.Items[i].GetName(), true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // assertResourceGone blocks until the (possibly cluster-scoped) resource is NotFound, failing the spec
 // if it is still present at the deadline.
 func assertResourceGone(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) {

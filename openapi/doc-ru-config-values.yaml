@@ -7,3 +7,15 @@ properties:
       Окно хранения «корзины»: сколько долговечные данные снапшота хранятся после удаления Snapshot — в течение этого окна их ещё можно восстановить.
       Строка длительности Go, например "24h", "168h".
       Если не задано, то в контроллере действует встроенный дефолт 30 дней (720h).
+  deleteGuard:
+    description: |
+      Admission-защита дерева unified-снапшота от прямого удаления. Защищает внутренние узлы
+      (дочерние снапшоты, SnapshotContent, ManifestCheckpoint/чанки, ObjectKeeper, managed CSI
+      VolumeSnapshot/Content) по каноническому marker'у state-snapshotter.deckhouse.io/delete-protected.
+    properties:
+      enforcement:
+        description: |
+          Режим rollout политики delete-guard (ValidatingAdmissionPolicy).
+          Audit (по умолчанию) — только наблюдение/предупреждения; удаления НЕ блокируются.
+          Deny — блокировка; прямое удаление защищённого объекта отклоняется.
+          Переключать на Deny только ПОСЛЕ доказанного gate backfill (у всех защищаемых объектов есть marker).

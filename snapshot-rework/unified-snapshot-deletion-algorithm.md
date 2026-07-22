@@ -1,5 +1,18 @@
 # Алгоритм каскадного удаления дерева snapshot'ов
 
+> **Взаимодействие с delete protection.** Этот алгоритм описывает каскадное удаление дерева, но
+> сам факт «кто вообще имеет право удалить узел» задаёт нормативный контракт
+> [`design/delete-protection-contract.md`](../docs/internal/state-snapshotter-rework/design/delete-protection-contract.md).
+> Все внутренние узлы дерева (child `Snapshot`/`SnapshotContent`, `ObjectKeeper`, `ManifestCheckpoint`,
+> chunks, managed CSI `VolumeSnapshot`/`VolumeSnapshotContent`) несут маркер
+> `state-snapshotter.deckhouse.io/delete-protected`, а admission delete-guard (VAP) при
+> `enforcement: Deny` запрещает прямой `DELETE` и снятие/изменение маркера. Каскадный GC работает под
+> этим guard только потому, что его акторы (generic-garbage-collector, namespace-controller и контроллеры
+> `state-snapshotter`/`storage-foundation`) входят в exempt-список контракта; корневой `Snapshot`
+> маркера **не** несёт и удаляется свободно, запуская каскад. Ручное удаление узла требует break-glass
+> `deckhouse.io/allow-delete=true`. Терминальная деградация (`Ready=False`) на узле с
+> `deletionTimestamp != nil` — это fail-fast из contract §10.1, а не отдельная модель этого ADR.
+
 ## Критические инварианты
 
 ### Управление жизненным циклом `XxxxSnapshotContent` осуществляет `ObjectKeeper` через механизм "корзины" с TTL.

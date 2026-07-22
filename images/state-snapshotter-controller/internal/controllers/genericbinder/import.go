@@ -122,6 +122,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			},
 			Spec: importSnapshotContentSpec(obj),
 		}
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		storagev1alpha1.StampDeleteProtected(content)
 		if err := r.Create(ctx, content); err != nil && !errors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}

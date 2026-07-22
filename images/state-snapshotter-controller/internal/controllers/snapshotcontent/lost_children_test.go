@@ -123,6 +123,26 @@ func lostChildSnapshotCR(name string) *unstructured.Unstructured {
 	return child
 }
 
+// lostChildSnapshotCRTerminating builds a child Snapshot CR that is present but Terminating (has a
+// deletionTimestamp). A finalizer is required so the fake client keeps the object around instead of
+// dropping it on create.
+func lostChildSnapshotCRTerminating(name string) *unstructured.Unstructured {
+	child := lostChildSnapshotCR(name)
+	child.SetFinalizers([]string{"test.state-snapshotter.deckhouse.io/hold"})
+	now := metav1.Now()
+	child.SetDeletionTimestamp(&now)
+	return child
+}
+
+// lostChildContentTerminating builds a child SnapshotContent that is present but Terminating.
+func lostChildContentTerminating(name string, ready bool) *storagev1alpha1.SnapshotContent {
+	c := lostChildContent(name, ready)
+	c.Finalizers = []string{"test.state-snapshotter.deckhouse.io/hold"}
+	now := metav1.Now()
+	c.DeletionTimestamp = &now
+	return c
+}
+
 func newLostChildrenController(t *testing.T, objs ...client.Object) *SnapshotContentController {
 	t.Helper()
 	scheme := runtime.NewScheme()
@@ -243,6 +263,51 @@ func TestDetectLostDeclaredChildren(t *testing.T) {
 		}
 		if reason != snapshot.ReasonChildSnapshotLost {
 			t.Fatalf("reason = %q, want %q", reason, snapshot.ReasonChildSnapshotLost)
+		}
+	})
+
+	t.Run("frozen edge: owning child CR Terminating + content Ready -> Deleted (fail-fast)", func(t *testing.T) {
+		owner := lostOwnerSnapshot(t, finished)
+		content := lostFrozenContent(t, "child-1")
+		// Owning CR present but Terminating (doomed): treated as absent -> content still Ready -> Deleted.
+		r := newLostChildrenController(t, lostChildContent("child-1", true), lostChildSnapshotCRTerminating(childCRName("child-1")))
+		reason, _, err := r.detectLostDeclaredChildren(ctx, owner, content)
+		if err != nil {
+			t.Fatalf("detect: %v", err)
+		}
+		if reason != snapshot.ReasonChildSnapshotDeleted {
+			t.Fatalf("reason = %q, want %q (Terminating owner CR = deleted, content survives)", reason, snapshot.ReasonChildSnapshotDeleted)
+		}
+	})
+
+	t.Run("frozen edge: child content Terminating -> Lost (fail-fast)", func(t *testing.T) {
+		owner := lostOwnerSnapshot(t, finished)
+		content := lostFrozenContent(t, "child-1")
+		// The frozen child content itself is Terminating: its durable data is going away -> terminal Lost,
+		// even though its owning CR is still alive.
+		r := newLostChildrenController(t, lostChildContentTerminating("child-1", true), lostChildSnapshotCR(childCRName("child-1")))
+		reason, msg, err := r.detectLostDeclaredChildren(ctx, owner, content)
+		if err != nil {
+			t.Fatalf("detect: %v", err)
+		}
+		if reason != snapshot.ReasonChildSnapshotLost {
+			t.Fatalf("reason = %q, want %q (Terminating child content)", reason, snapshot.ReasonChildSnapshotLost)
+		}
+		if msg == "" {
+			t.Fatalf("expected a non-empty message")
+		}
+	})
+
+	t.Run("declared-ref mode: child CR Terminating -> Lost (fail-fast)", func(t *testing.T) {
+		owner := lostOwnerSnapshot(t, planned, "child-snap")
+		content := barrier2OwnedContent(t) // no frozen edges
+		r := newLostChildrenController(t, lostChildSnapshotCRTerminating("child-snap"))
+		reason, _, err := r.detectLostDeclaredChildren(ctx, owner, content)
+		if err != nil {
+			t.Fatalf("detect: %v", err)
+		}
+		if reason != snapshot.ReasonChildSnapshotLost {
+			t.Fatalf("reason = %q, want %q (Terminating declared child CR)", reason, snapshot.ReasonChildSnapshotLost)
 		}
 	})
 

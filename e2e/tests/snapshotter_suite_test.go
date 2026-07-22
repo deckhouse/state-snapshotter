@@ -110,6 +110,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
 	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
 	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
+	deleteGuardSpecs()               // delete_guard_test.go: unified-snapshot delete protection (opt-in E2E_DELETE_GUARD; needs admission enforcement=Deny)
 })
 
 func prepareSuite() {

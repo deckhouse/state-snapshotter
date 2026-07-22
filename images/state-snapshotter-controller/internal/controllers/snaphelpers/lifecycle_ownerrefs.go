@@ -106,6 +106,9 @@ func EnsureRootObjectKeeperWithTTL(
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       want,
 	}
+	// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
+	// (delete-protection-contract.md §6.1, §8.3).
+	storagev1alpha1.StampDeleteProtected(ok)
 	if err := c.Create(ctx, ok); err != nil {
 		return nil, ctrl.Result{}, err
 	}

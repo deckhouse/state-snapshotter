@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/api/names"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 )
 
@@ -85,6 +86,9 @@ func EnsureReconstructedManifestCheckpointObjectKeeper(
 				},
 			},
 		}
+		// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
+		// (delete-protection-contract.md §6.1, §8.3).
+		storagev1alpha1.StampDeleteProtected(ok)
 		if cerr := c.Create(ctx, ok); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
 			return metav1.OwnerReference{}, fmt.Errorf("create import ObjectKeeper %s: %w", name, cerr)
 		}

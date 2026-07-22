@@ -45,6 +45,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/backfill"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumesnapshotimport"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
@@ -73,6 +74,11 @@ var (
 	apiTLSCertFile string
 	apiTLSKeyFile  string
 
+	// Backfill (one-shot) flags. When -backfill is set the process runs the delete-protection marker
+	// backfill and exits instead of starting the controller manager.
+	runBackfillMode    bool
+	backfillVerifyOnly bool
+
 	// version is the human-readable build marker, injected at build time via
 	// -ldflags "-X main.version=...". It defaults to "dev" for local `go run` and is set by the dev
 	// image build (Makefile fox_build_and_push -> Dockerfile APP_VERSION) to git sha + dirty + timestamp,
@@ -85,6 +91,10 @@ func init() {
 	flag.StringVar(&apiAddr, "api-addr", ":8443", "Address for API server to listen on")
 	flag.StringVar(&apiTLSCertFile, "api-tls-cert-file", "", "Path to TLS certificate file for API server")
 	flag.StringVar(&apiTLSKeyFile, "api-tls-private-key-file", "", "Path to TLS private key file for API server")
+	flag.BoolVar(&runBackfillMode, "backfill", false,
+		"Run the one-shot cluster-wide delete-protection marker backfill (list-and-patch) and exit")
+	flag.BoolVar(&backfillVerifyOnly, "backfill-verify-only", false,
+		"With -backfill: only verify the rollout gate (read-only, no writes); exit non-zero if any classifier-protected object lacks the marker")
 }
 
 // buildTimeFromVersion extracts the UTC build timestamp embedded as the trailing
@@ -168,6 +178,13 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("[main] kubernetes config has been successfully created.")
+
+	// One-shot backfill mode: stamp the delete-protection marker onto legacy nodes (or just verify the
+	// rollout gate) and exit. This never starts the controller manager.
+	if runBackfillMode {
+		cancel()
+		os.Exit(runBackfill(context.Background(), log, kConfig, backfillVerifyOnly))
+	}
 
 	// Raise the client-go rate limiter above the conservative library defaults (QPS=5 / Burst=10).
 	// Those defaults serialize uncached reads and status patches on the shared manager client and
@@ -514,4 +531,75 @@ func main() {
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
+}
+
+// runBackfill executes the one-shot delete-protection marker backfill and returns the process exit code:
+//
+//	0 — success and the rollout gate is met (no classifier-protected object lacks the marker);
+//	1 — a hard failure (client/list/patch error);
+//	2 — the gate is NOT met (classifier-protected objects still lack the marker) — do NOT enable Deny.
+//
+// With verifyOnly it performs a read-only verify pass; otherwise it applies markers and then verifies.
+func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, verifyOnly bool) int {
+	scheme := runtime.NewScheme()
+	for _, add := range resourcesSchemeFuncs {
+		if err := add(scheme); err != nil {
+			log.Error(err, "[backfill] unable to build scheme")
+			return 1
+		}
+	}
+
+	httpClient, err := rest.HTTPClientFor(kConfig)
+	if err != nil {
+		log.Error(err, "[backfill] unable to create HTTP client")
+		return 1
+	}
+	mapper, err := apiutil.NewDynamicRESTMapper(kConfig, httpClient)
+	if err != nil {
+		log.Error(err, "[backfill] unable to create REST mapper")
+		return 1
+	}
+	cl, err := client.New(kConfig, client.Options{Scheme: scheme, Mapper: mapper})
+	if err != nil {
+		log.Error(err, "[backfill] unable to create client")
+		return 1
+	}
+
+	targets := backfill.DefaultTargets()
+
+	if !verifyOnly {
+		applied, aerr := backfill.Apply(ctx, cl, targets)
+		if aerr != nil {
+			log.Error(aerr, "[backfill] apply pass failed")
+			return 1
+		}
+		logBackfillReport(log, "apply", applied)
+	}
+
+	verified, verr := backfill.Verify(ctx, cl, targets)
+	if verr != nil {
+		log.Error(verr, "[backfill] verify pass failed")
+		return 1
+	}
+	logBackfillReport(log, "verify", verified)
+
+	if remaining := verified.OursUnmarkedTotal(); remaining > 0 {
+		log.Error(fmt.Errorf("%d classifier-protected object(s) still lack the marker", remaining),
+			"[backfill] rollout gate NOT met — do not enable enforcement=Deny yet")
+		return 2
+	}
+	log.Info("[backfill] rollout gate met: every classifier-protected object carries the delete-protected marker")
+	return 0
+}
+
+func logBackfillReport(log *logger.Logger, phase string, r backfill.Report) {
+	for _, k := range r.Kinds {
+		if k.Skipped {
+			log.Info(fmt.Sprintf("[backfill:%s] %s: skipped (CRD/API not installed)", phase, k.GVK.Kind))
+			continue
+		}
+		log.Info(fmt.Sprintf("[backfill:%s] %s: total=%d ours=%d alreadyProtected=%d patched=%d oursUnmarked=%d",
+			phase, k.GVK.Kind, k.Total, k.Ours, k.AlreadyProtect, k.Patched, k.OursUnmarked))
+	}
+	log.Info(fmt.Sprintf("[backfill:%s] TOTALS: patched=%d oursUnmarked=%d", phase, r.PatchedTotal(), r.OursUnmarkedTotal()))
 }
