@@ -197,7 +197,7 @@ func TestChildHasUnifiedSnapshotControllerOwner(t *testing.T) {
 		{
 			name: "grandchild owned by a domain snapshot",
 			child: newChild(metav1.OwnerReference{
-				APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+				APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 				Kind:       "DemoVirtualMachineSnapshot", Name: "vm", Controller: &ctrlTrue,
 			}),
 			want: false,

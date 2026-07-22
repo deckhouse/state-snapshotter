@@ -140,8 +140,8 @@ func recordGcTree(ctx context.Context, root, okName string) (gcTree, error) {
 			}
 		}
 
-		artifactKind, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifact", "kind")
-		vscName, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifact", "name")
+		artifactKind, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifactRef", "kind")
+		vscName, _, _ := unstructured.NestedString(co.Object, "status", "data", "artifactRef", "name")
 		if artifactKind == "VolumeSnapshotContent" && vscName != "" {
 			vsc, err := getResource(ctx, volumeSnapshotContentGVR, "", vscName)
 			if err != nil {
@@ -274,10 +274,10 @@ func volumeDataGcSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-3 durable volume-data teardown flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 durable volume-data teardown flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("vol-gc")
+			srcNS = uniqueNS("p3-voldata-gc")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()

@@ -1,0 +1,22 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://openvex.dev/docs/public/vex-state-snapshotter-state-snapshotter-controller",
+  "author": "Deckhouse <contact@deckhouse.io>",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "GO-2026-5932"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/golang.org/x/crypto@v0.53.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the state-snapshotter-controller binary golang.org/x/crypto is pulled in transitively only by the embedded aggregated apiserver (internal/api -> k8s.io/apiserver/pkg/server/options/encryptionconfig -> golang.org/x/crypto/nacl/secretbox and golang.org/x/crypto/hkdf for encryption-at-rest, and k8s.io/apiserver/pkg/server -> golang.org/x/crypto/cryptobyte for TLS); `go mod why golang.org/x/crypto/openpgp` reports the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
+    }
+  ],
+  "timestamp": "2026-07-20T00:00:00Z"
+}

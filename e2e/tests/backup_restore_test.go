@@ -44,10 +44,10 @@ const (
 	bkDataImportTTL    = "15m"
 	vsAPIVersion       = "snapshot.storage.k8s.io/v1"
 
-	bkImpNSVS   = "bk-imp-vs"
-	bkImpNSDisk = "bk-imp-disk"
-	bkImpNSVM   = "bk-imp-vm"
-	bkImpNSFull = "bk-imp-full"
+	bkImpNSVS   = "p5-import-vs"
+	bkImpNSDisk = "p5-import-disk"
+	bkImpNSVM   = "p5-import-vm"
+	bkImpNSFull = "p5-import-full"
 )
 
 // importNode describes one node in an import subtree (nested via children).
@@ -360,7 +360,7 @@ func waitDataImportCompleted(ctx context.Context, ns, name string, timeout time.
 		obj, gerr := getResource(ctx, dataImportGVR, ns, name)
 		if gerr == nil {
 			st, reason, found := conditionStatus(obj, "Completed")
-			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifact")
+			artifact, artFound, _ := unstructured.NestedMap(obj.Object, "status", "data", "artifactRef")
 			// New status model: a completed DataImport also carries status.phase=Completed and a
 			// status.completionTimestamp (stamped once by the controller at the terminal transition; the GC
 			// measures retention from it). The controller writes all three in the same status update, so
@@ -532,11 +532,11 @@ func restoreProbePodName(pvc string) string { return bkRestoreProbePod + "-" + p
 func emptyJSONArray() []byte { return []byte("[]") }
 
 func fetchVMSnapManifests(ctx context.Context, name string) ([]byte, error) {
-	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoVMSnapshots, name, subManifestsDownload), nil)
+	return aggGet(ctx, demoSubPath(backup.srcNS, resDemoVMSnapshots, name, subManifestsDownload), nil)
 }
 
 func fetchDiskSnapManifests(ctx context.Context, name string) ([]byte, error) {
-	return aggGet(ctx, coreGenericSubPath(backup.srcNS, resDemoDiskSnapshots, name, subManifestsDownload), nil)
+	return aggGet(ctx, demoSubPath(backup.srcNS, resDemoDiskSnapshots, name, subManifestsDownload), nil)
 }
 
 func fetchVSManifests(ctx context.Context, name string) ([]byte, error) {
@@ -559,7 +559,7 @@ func newDiskImportNode(ctx context.Context, snapName string) (*importNode, error
 	return &importNode{
 		name:       snapName,
 		kind:       "DemoVirtualDiskSnapshot",
-		group:      "demo.state-snapshotter.deckhouse.io",
+		group:      "sds-unified-snapshots-poc.deckhouse.io",
 		apiVersion: demoGroupVersion,
 		manifests:  manifests,
 		dataLeaf:   true,
@@ -595,7 +595,7 @@ func newVMImportNode(ctx context.Context, snapName string, children ...*importNo
 	return &importNode{
 		name:       snapName,
 		kind:       "DemoVirtualMachineSnapshot",
-		group:      "demo.state-snapshotter.deckhouse.io",
+		group:      "sds-unified-snapshots-poc.deckhouse.io",
 		apiVersion: demoGroupVersion,
 		manifests:  manifests,
 		children:   children,
@@ -613,9 +613,10 @@ func importNodeChildRefs(children []*importNode) []childRef {
 func importNodeUploadPath(ns string, node *importNode) string {
 	switch node.kind {
 	case "DemoVirtualMachineSnapshot":
-		return coreGenericSubPath(ns, resDemoVMSnapshots, node.name, subManifestsUpload)
+		// Domain upload is served by the DOMAIN group (bind-first facade), not the core group.
+		return demoSubPath(ns, resDemoVMSnapshots, node.name, subManifestsUpload)
 	case "DemoVirtualDiskSnapshot":
-		return coreGenericSubPath(ns, resDemoDiskSnapshots, node.name, subManifestsUpload)
+		return demoSubPath(ns, resDemoDiskSnapshots, node.name, subManifestsUpload)
 	case "VolumeSnapshot":
 		return vsConnectorSubPath(ns, node.name, subManifestsUpload)
 	default:
@@ -1030,7 +1031,7 @@ func importVariantsSpecs() {
 	Context("Phase 5: import any tree node (4 parallel variants)", func() {
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-5 import variants flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-5 import variants flow (it runs by default)")
 			}
 			if !backup.ready {
 				Skip("phase-4 backup download did not complete (extended-VS surface or download skipped)")
@@ -1171,6 +1172,15 @@ func importVariantsSpecs() {
 			for err := range errCh {
 				Expect(err).NotTo(HaveOccurred())
 			}
+
+			By("Asserting a domain upload addressed to the CORE group is refused with 404 (must use the domain group)")
+			// Symmetric with the download plan: the core group serves the upload subresource ONLY for the core
+			// Snapshot kind; a domain GVR under the core group is 404 (address the domain group). This is a
+			// routing refusal, independent of whether the addressed CR exists.
+			coreDomainUpload := coreGenericSubPath(runs[0].ns, resDemoVMSnapshots, "any-name", subManifestsUpload)
+			derr := aggPost(ctx, coreDomainUpload, []byte(`{"manifests":[],"childRefs":[]}`))
+			Expect(derr).To(HaveOccurred(), "domain upload under the core group must be refused")
+			Expect(apierrors.IsNotFound(derr)).To(BeTrue(), "domain upload under the core group must be 404 (POST %s): %v", coreDomainUpload, derr)
 		})
 	})
 }

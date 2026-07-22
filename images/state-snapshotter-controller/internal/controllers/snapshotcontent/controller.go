@@ -43,11 +43,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
-	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
@@ -100,7 +98,7 @@ type SnapshotContentController struct {
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
 	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). For these
 	// owners main runs the capture-leg lifecycle (main-owned commonController, decision #10): eager-init +
-	// manifestCaptured/dataCaptured latches + subtreeManifestsPersisted mirror, written sideways onto the
+	// manifestCaptured/dataCaptured latches + childSubtreesManifestsPersisted latch, written sideways onto the
 	// xxxSnapshot, and the MCR/VCR reap after a durable handoff (latch-before-reap). Marked by the same
 	// callers that mark the binder (unifiedruntime.Syncer, main.go). Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex
@@ -303,8 +301,9 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Step 1: Ensure the parent-protect finalizer (durable-node teardown barrier).
 	//
 	// parent-protect holds every SnapshotContent until its OWN deletion handler completes its reclaim; it is
-	// NOT released when the logical bound Snapshot is deleted. On bound-Snapshot deletion the binder only
-	// latches status.boundSnapshotDeleted (see markBoundSnapshotDeletedOnContent). So ensure the finalizer
+	// NOT released when the logical bound Snapshot is deleted. The binder normally latches
+	// status.boundSnapshotDeleted; this controller also self-heals the latch when a snapshot kind without a
+	// deletion finalizer disappears before the binder can observe a deletionTimestamp. Ensure the finalizer
 	// FIRST, even when boundSnapshotDeleted=true: this also self-heals a content left finalizer-less by the
 	// old code, which stripped parent-protect on bound-Snapshot deletion. Only AFTER the finalizer is
 	// confirmed present do we honor the bound-deleted early return, which skips status aggregation against a
@@ -425,6 +424,25 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(ownerErr, "Failed to resolve owning snapshot")
 		return ctrl.Result{}, ownerErr
 	}
+	if !ownerFound {
+		// Domain snapshot CRs need not carry a deletion finalizer. Their delete event still wakes the bound
+		// content through mapSnapshotStatusToBoundCommonContent, but by reconcile time the CR may already be
+		// gone, so the binder cannot observe deletionTimestamp and publish boundSnapshotDeleted. Latch it
+		// here from the same authoritative NotFound result. The status update is also the event that wakes
+		// the parent content through mapSnapshotContentToParentContent, closing the steady Ready=True
+		// liveness gap without polling or another owner API read.
+		latched, changed, latchErr := r.latchBoundSnapshotDeletedForMissingOwner(ctx, obj)
+		if latchErr != nil {
+			logger.Error(latchErr, "Failed to latch boundSnapshotDeleted for missing owner")
+			return ctrl.Result{}, latchErr
+		}
+		if changed {
+			logger.Info("Latched boundSnapshotDeleted after the bound Snapshot disappeared")
+		}
+		if latched {
+			return ctrl.Result{}, nil
+		}
+	}
 
 	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
 	// aggregator is the ONLY writer of status.childrenSnapshotContentRefs. Project them from the owning
@@ -467,7 +485,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// core-owned terminal data-leg failure (failed VCR / Variant-A fault, decision D2): the aggregation
 	// makes the CONTENT itself terminal (DataReady=VolumeCaptureFailed) so it propagates up the
 	// content-aggregation tree as ChildrenFailed. See reconcileCommonSnapshotContentStatus.
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage, owner)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
@@ -489,15 +507,17 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// content-terminal VolumeCaptureFailed) is reflected on the Snapshot too. Removing the cross-controller
 	// hop is what closes the staleness window where the binder re-derived a stale Ready. On a transient API
 	// error, requeue and retry.
-	if err := r.mirrorReadyToOwnerSnapshot(ctx, obj); err != nil {
+	if err := r.mirrorReadyToOwnerSnapshotWithOwner(ctx, obj, owner, ownerFound); err != nil {
 		logger.Error(err, "Failed to mirror content Ready onto owner Snapshot")
 		return ctrl.Result{}, err
 	}
-	// Keep actively requeuing until Ready is True. Ready includes the ManifestsArchived subtree latch as a
-	// (monotonic) gate, so while any descendant is still archiving this node's Ready stays False — this
-	// self-requeue is what drives the child->parent archive wave to converge via active re-evaluation
+	// Keep actively requeuing until Ready is True OR Ready=False is terminal. Ready includes the
+	// ManifestsArchived subtree latch as a (monotonic) gate, so while any descendant is still archiving this
+	// node's non-terminal Ready=False self-requeues and drives the child->parent archive wave to converge
 	// instead of stalling on a droppable wake-up event (declared-but-unlinked child, or a same-binary
-	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes).
+	// artifact event seen before its ownerRef handoff) or the next informer resync (~minutes). A terminal
+	// Ready=False cannot converge through polling: stop ALL active requeue triggers (including stale
+	// projection/leg flags) and rely on the existing watches for any external recovery event.
 	//
 	// dataRequeue is deliberately NOT a requeue trigger anymore (vcr-watch-core-terminal Phase 3): a
 	// pending data leg keeps Ready=False, so the general !ready self-requeue already covers it, and the VCR
@@ -505,12 +525,31 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// instead of being polled. dataRequeue still feeds the aggregation as dataLegPending above. edges/mcp
 	// (separate optimistic patches observed next pass) and legs (subtreePlanned/subtree-manifests waves,
 	// only partially data-leg) stay as triggers.
-	if !ready || edgesRequeue || mcpRequeue || legsRequeue {
+	if snapshotContentNeedsActiveRequeue(obj, ready, edgesRequeue || mcpRequeue || legsRequeue) {
 		return ctrl.Result{RequeueAfter: defaultSnapshotContentRequeueAfter}, nil
 	}
 
 	logger.Info("SnapshotContent reconciliation completed")
 	return ctrl.Result{}, nil
+}
+
+// snapshotContentNeedsActiveRequeue classifies the settled aggregation result. Pending Ready=False keeps
+// the coarse 500 ms safety poll; Ready=True stops it after any same-pass projection has converged; terminal
+// Ready=False always stops it, even when a projection/leg helper asked to requeue. Terminal state cannot
+// make progress without an external object change, and all such inputs already have watches.
+//
+// SnapshotContent has a few core-internal terminal reasons (DomainCaptureFailed, ArtifactMissing, ...)
+// beyond the user-facing Snapshot TerminalReadyReasons catalog, so both canonical classifiers are used.
+func snapshotContentNeedsActiveRequeue(contentObj *unstructured.Unstructured, ready, projectionRequeue bool) bool {
+	contentLike, err := snapshot.ExtractSnapshotContentLike(contentObj)
+	if err == nil {
+		readyCond := snapshot.GetCondition(contentLike, snapshot.ConditionReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse &&
+			(snapshot.IsReasonTerminal(readyCond.Reason) || isTerminalChildContentFailure(readyCond.Reason)) {
+			return false
+		}
+	}
+	return !ready || projectionRequeue
 }
 
 func isCommonSnapshotContentGVK(gvk schema.GroupVersionKind) bool {
@@ -557,7 +596,7 @@ type commonContentStatusPlan struct {
 // requeuing on !ready, which is what drives the child->parent archive wave to converge via active
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string) (ready bool, err error) {
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string, owner *unstructured.Unstructured) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -603,6 +642,43 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		plan.volumeFailed = true
 		deriveReadyStatus(&plan)
 	}
+
+	// Post-capture ManifestCheckpoint integrity: a published manifest artifact that DISAPPEARS after this
+	// node's manifest was captured is a terminal loss, symmetric with a missing chunk (which is already
+	// terminal via validateCommonContentManifestCheckpoint). buildCommonSnapshotContentStatusPlan reads the
+	// MCP from the CACHE and, by design, keeps a NotFound as the non-terminal ManifestCapturePending — the
+	// legitimate publish-before-create window (manifestCheckpointName is published before the MCP object
+	// exists). Once the owning snapshot's monotonic commonController.manifestCaptured latch is set that
+	// window is closed, so a manifest leg still pending here is confirmed UNCACHED (APIReader): a
+	// genuinely-absent published MCP is escalated to the terminal ManifestCheckpointFailed (which propagates
+	// up the content tree as ChildrenFailed), while a mere stale-cache miss (MCP still in the API) is left
+	// pending to converge next pass. Gated on (latch AND pending-and-not-already-failed manifest leg) so the
+	// happy path adds no extra GET, and confirmed uncached so a stale cache never terminally fails the tree.
+	if ownerManifestCaptured(owner) && plan.manifestsReady != metav1.ConditionTrue && !plan.manifestsFailed {
+		if mcpName, _, _ := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName"); mcpName != "" {
+			gone, goneErr := r.publishedManifestCheckpointGone(ctx, mcpName)
+			if goneErr != nil {
+				return false, goneErr
+			}
+			if gone {
+				plan.manifestsReady = metav1.ConditionFalse
+				plan.manifestsFailed = true
+				plan.manifestsReason = snapshot.ReasonManifestCheckpointFailed
+				plan.manifestsMessage = fmt.Sprintf("published ManifestCheckpoint %s was deleted after manifest capture", mcpName)
+				deriveReadyStatus(&plan)
+			}
+		}
+	}
+
+	// Barrier 2 on the CONTENT's OWN Ready (ADR §6.2): fold the owning Snapshot's domain capture phase into
+	// this content's derived Ready. A domain phase=Failed becomes the canonical terminal
+	// ReasonDomainCaptureFailed and a not-yet-Finished domain holds Ready=False/ChildrenPending, so the
+	// domain outcome propagates up the CONTENT-aggregation tree (a not-Ready child content holds/fails its
+	// parent) — not only onto the owning Snapshot via mirrorReadyToOwnerSnapshot. The SAME shared fold backs
+	// both post-bind writers so they always agree. owner==nil (ownerless/bucket content, or the exported
+	// test entry) and a non-domain owner (phase="") are no-ops. Applied AFTER the data-leg downgrades so a
+	// more specific own-leg terminal is already settled; the fold only ever downgrades Ready.
+	plan.readyStatus, plan.readyReason, plan.readyMessage = applyDomainPhaseFold(owner, true, plan.readyStatus, plan.readyReason, plan.readyMessage)
 
 	contentLike, err := snapshot.ExtractSnapshotContentLike(obj)
 	if err != nil {
@@ -702,11 +778,12 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 }
 
 // ReconcileCommonSnapshotContentStatus is the exported aggregation entry (tests/utility). It passes
-// dataLegPending=false and no terminal data-leg reason: callers that do not run the data-leg projection
-// this pass get the plain N/A treatment for an empty status.data (the aggregator's own Reconcile threads
-// the real pending/terminal signal).
+// dataLegPending=false, no terminal data-leg reason, and a nil owner: callers that do not run the data-leg
+// projection this pass get the plain N/A treatment for an empty status.data, and the domain-phase fold
+// (applyDomainPhaseFold) is skipped (owner==nil is a no-op). The aggregator's own Reconcile threads the
+// real pending/terminal signal and the resolved owning Snapshot.
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
-	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "")
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "", nil)
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, DataReady, ChildrenReady, the
@@ -1090,6 +1167,7 @@ var terminalChildContentFailureReasons = map[string]struct{}{
 	snapshot.ReasonDataArtifactNotSupported: {},
 	snapshot.ReasonArtifactMissing:          {},
 	snapshot.ReasonVolumeCaptureFailed:      {},
+	snapshot.ReasonDomainCaptureFailed:      {},
 	snapshot.ReasonChildrenFailed:           {},
 }
 
@@ -1430,6 +1508,54 @@ func (r *SnapshotContentController) ownerSnapshot(ctx context.Context, contentOb
 	return owner, namespace, true, nil
 }
 
+// latchBoundSnapshotDeletedForMissingOwner is the deletion-event fallback for snapshot kinds that do not
+// hold their CR in Terminating with a finalizer. ownerSnapshot has already established an authoritative
+// NotFound before this helper is called. A complete snapshotRef including UID proves that the content was
+// bound to a concrete snapshot instance; synthetic/legacy contents without that identity keep the previous
+// fail-soft behavior.
+//
+// The latch is monotonic and patched from a fresh APIReader object with optimistic locking. Besides opening
+// the recycle-bin re-point gate, this status write wakes the parent SnapshotContent through the existing
+// child-content watch, so lost-child detection runs immediately even when the parent was already Ready=True
+// and had stopped self-requeueing.
+func (r *SnapshotContentController) latchBoundSnapshotDeletedForMissingOwner(
+	ctx context.Context,
+	contentObj *unstructured.Unstructured,
+) (latched, changed bool, err error) {
+	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
+	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
+	uid, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "uid")
+	if apiVersion == "" || kind == "" || name == "" || uid == "" {
+		return false, false, nil
+	}
+
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &storagev1alpha1.SnapshotContent{}
+		if getErr := r.APIReader.Get(ctx, client.ObjectKey{Name: contentObj.GetName()}, current); getErr != nil {
+			return getErr
+		}
+		if current.Status.BoundSnapshotDeleted {
+			latched = true
+			return nil
+		}
+
+		base := current.DeepCopy()
+		current.Status.BoundSnapshotDeleted = true
+		if patchErr := r.Status().Patch(
+			ctx,
+			current,
+			client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}),
+		); patchErr != nil {
+			return patchErr
+		}
+		latched = true
+		changed = true
+		return nil
+	})
+	return latched, changed, err
+}
+
 // snapshotChildRefsFromRaw converts the unstructured status.childrenSnapshotRefs slice into typed
 // SnapshotChildRef values (apiVersion/kind/name). Non-map entries are skipped; missing string fields
 // default to empty. Shared by the edge-write projection (reconcileChildContentEdges) and the orphan-link
@@ -1541,15 +1667,17 @@ func (r *SnapshotContentController) firstMissingManifestCheckpointChunk(ctx cont
 	return "", nil
 }
 
+// ensureManifestCheckpointOwnedByContent makes the published ManifestCheckpoint controller-owned by this
+// SnapshotContent. On the CAPTURE path this is the handoff from the MCR execution ObjectKeeper; on the
+// IMPORT path the reconstructed MCP is already born owned by this content (bind-first — no ObjectKeeper
+// backstop), so the handoff degenerates to a no-op verification (changed=false). A conflicting existing
+// SnapshotContent owner fails closed.
 func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx context.Context, mcpName string, contentObj *unstructured.Unstructured) error {
-	reconstructed := false
-	contentOwned := false
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		mcp := &ssv1alpha1.ManifestCheckpoint{}
 		if err := r.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
 			return err
 		}
-		reconstructed = mcp.Labels[usecase.ReconstructedManifestCheckpointLabelKey] == "true"
 		ownerRef := metav1.OwnerReference{
 			APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
 			Kind:       "SnapshotContent",
@@ -1562,52 +1690,13 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 			return fmt.Errorf("ManifestCheckpoint %s: %w", mcpName, err)
 		}
 		if !changed {
-			// Already controller-owned by this SnapshotContent (handoff completed on a prior pass).
-			contentOwned = true
+			// Already controller-owned by this SnapshotContent (import: from birth; capture: prior handoff).
 			return nil
 		}
 		base := mcp.DeepCopy()
 		mcp.OwnerReferences = refs
-		if err := r.Patch(ctx, mcp, client.MergeFrom(base)); err != nil {
-			return err
-		}
-		contentOwned = true
-		return nil
-	}); err != nil {
-		return err
-	}
-	// Import-MCP durability backstop cleanup (content-single-writer design §10.1): a reconstructed (import)
-	// MCP was born owned by a dedicated import ObjectKeeper (usecase.EnsureReconstructedManifestCheckpointObjectKeeper)
-	// because at upload time the SnapshotContent shell may not yet exist. Now that the MCP is durably owned
-	// by its SnapshotContent, that keeper is redundant; unlike the capture execution OK (GC'd together with
-	// its MCR) nothing else deletes the import keeper — it FollowObjects the still-live snapshot — so remove
-	// it here. Gated on the reconstructed label so a capture MCP's execution OK is never touched, and on the
-	// MCP being content-owned NOW (not only the pass that patched it) so a handoff that completed on a prior
-	// reconcile — or was interrupted by a crash between the handoff patch and this delete — still gets swept
-	// on a later pass (the delete is idempotent: a missing keeper is a no-op).
-	if reconstructed && contentOwned {
-		r.deleteReconstructedManifestCheckpointObjectKeeper(ctx, contentObj)
-	}
-	return nil
-}
-
-// deleteReconstructedManifestCheckpointObjectKeeper best-effort deletes the dedicated import ObjectKeeper
-// that anchored a reconstructed MCP before it was handed off to this SnapshotContent (content-single-writer
-// design §10.1). The keeper name is derived from the owning snapshot UID (content.spec.snapshotRef.uid); a
-// missing UID or an already-deleted keeper is a no-op. Failures are logged, not returned: the ownerRef
-// handoff (the correctness-critical step) already succeeded, so a lingering keeper is benign cruft.
-func (r *SnapshotContentController) deleteReconstructedManifestCheckpointObjectKeeper(ctx context.Context, contentObj *unstructured.Unstructured) {
-	logger := log.FromContext(ctx)
-	snapshotUID, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "uid")
-	if snapshotUID == "" {
-		return
-	}
-	okName := names.ImportManifestCheckpointObjectKeeperName(types.UID(snapshotUID))
-	ok := &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: okName}}
-	if err := r.Delete(ctx, ok); err != nil && !errors.IsNotFound(err) {
-		logger.V(1).Info("failed to delete redundant import ObjectKeeper after MCP handoff; it follows a live snapshot and owns nothing, so this is benign",
-			"objectKeeper", okName, "err", err.Error())
-	}
+		return r.Patch(ctx, mcp, client.MergeFrom(base))
+	})
 }
 
 // selfHealDataArtifactOwnerRefs re-asserts the SnapshotContent ownerRef on every VolumeSnapshotContent
@@ -1707,6 +1796,36 @@ func (r *SnapshotContentController) resolveManifestCheckpointReady(ctx context.C
 		return mcp.Name, false, true, cond.Message, nil
 	}
 	return mcp.Name, false, false, fmt.Sprintf("waiting for ManifestCheckpoint %s to become Ready", mcp.Name), nil
+}
+
+// ownerManifestCaptured reports the owning snapshot's monotonic commonController.manifestCaptured latch
+// (status.captureState.commonController.manifestCaptured). Once true, this node's manifest artifact was
+// produced and its content's manifestCheckpointName published, so the publish-before-create window is
+// closed. A nil owner (ownerless/bucket content or the exported test entry) reports false — i.e. behaves as
+// pre-capture, where a missing MCP stays the non-terminal ManifestCapturePending.
+func ownerManifestCaptured(owner *unstructured.Unstructured) bool {
+	if owner == nil {
+		return false
+	}
+	v, _, _ := unstructured.NestedBool(owner.Object, "status", "captureState", "commonController", "manifestCaptured")
+	return v
+}
+
+// publishedManifestCheckpointGone confirms via an UNCACHED APIReader read that the named ManifestCheckpoint
+// is genuinely absent from the API server (not merely missing from the controller cache). It is called only
+// after a cached read already found the manifest leg not-ready AND the owner's manifest-capture latch is
+// set (see reconcileCommonSnapshotContentStatus), so it adds no GET on the happy path and never terminally
+// fails the tree on cache staleness. The uncached read mirrors firstMissingManifestCheckpointChunk's
+// APIReader chunk existence check (Phase 2a keeps get-only, no MCP list/watch beyond the existing informer).
+func (r *SnapshotContentController) publishedManifestCheckpointGone(ctx context.Context, mcpName string) (bool, error) {
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: mcpName}, mcp); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // ensureFinalizersOnChildrenForCascade ensures the parent-protect finalizer on every existing, non-deleting

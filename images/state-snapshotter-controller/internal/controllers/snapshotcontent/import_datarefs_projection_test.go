@@ -33,7 +33,7 @@ import (
 
 const (
 	importLeafKind     = "DemoVirtualDiskSnapshot"
-	importLeafGroup    = "demo.state-snapshotter.deckhouse.io"
+	importLeafGroup    = "sds-unified-snapshots-poc.deckhouse.io"
 	importLeafAPIVer   = importLeafGroup + "/v1alpha1"
 	importLeafObjName  = "disk-snap"
 	importDataImportNS = projTestNS
@@ -52,7 +52,7 @@ func importOwnerLeaf(kind string) *unstructured.Unstructured {
 }
 
 // importDataImportForLeaf builds a DataImport whose spec.snapshotRef targets the leaf and whose
-// status.data.artifact points at the produced VolumeSnapshotContent.
+// status.data.artifactRef points at the produced VolumeSnapshotContent.
 func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 	di := &unstructured.Unstructured{}
 	di.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"})
@@ -63,14 +63,14 @@ func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 	}, "spec", "snapshotRef")
 	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": vscName,
-	}, "status", "data", "artifact")
+	}, "status", "data", "artifactRef")
 	_ = unstructured.SetNestedField(di.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode")
 	return di
 }
 
 func importLeafObject() *unstructured.Unstructured {
 	o := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		"apiVersion": "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		"kind":       "DemoVirtualDiskSnapshot",
 		"metadata": map[string]interface{}{
 			"name":      "disk-snap",
@@ -101,7 +101,7 @@ func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstruc
 		if name != "" {
 			ref["name"] = name
 		}
-		_ = unstructured.SetNestedMap(di.Object, ref, "status", "data", "artifact")
+		_ = unstructured.SetNestedMap(di.Object, ref, "status", "data", "artifactRef")
 	}
 	return di
 }
@@ -115,8 +115,8 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	// fails closed on an empty volumeMode.
 	_ = unstructured.SetNestedField(di.Object, "Block", "status", "volumeMode")
 	// DataImport fills the durable artifact uid best-effort (from the VCR artifact uid); it must flow
-	// through into the published dataRef.artifact.uid.
-	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "data", "artifact", "uid")
+	// through into the published dataRef.artifactRef.uid.
+	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "data", "artifactRef", "uid")
 	leaf := importLeafObject()
 
 	binding, ready, reason, _ := BuildImportDataBinding(di, leaf)
@@ -126,27 +126,27 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	if !ready || binding == nil {
 		t.Fatalf("expected ready binding, got ready=%v binding=%v", ready, binding)
 	}
-	if binding.Artifact.Kind != snapshot.KindVolumeSnapshotContent || binding.Artifact.Name != "snapcontent-abc" {
-		t.Fatalf("unexpected artifact: %#v", binding.Artifact)
+	if binding.ArtifactRef.Kind != snapshot.KindVolumeSnapshotContent || binding.ArtifactRef.Name != "snapcontent-abc" {
+		t.Fatalf("unexpected artifact: %#v", binding.ArtifactRef)
 	}
-	if binding.Artifact.APIVersion != "snapshot.storage.k8s.io/v1" {
-		t.Fatalf("unexpected artifact apiVersion: %q", binding.Artifact.APIVersion)
+	if binding.ArtifactRef.APIVersion != "snapshot.storage.k8s.io/v1" {
+		t.Fatalf("unexpected artifact apiVersion: %q", binding.ArtifactRef.APIVersion)
 	}
-	if binding.Artifact.UID != "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a" {
-		t.Fatalf("expected artifact uid propagated from DataImport.status.data.artifact.uid, got %q", binding.Artifact.UID)
+	if binding.ArtifactRef.UID != "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a" {
+		t.Fatalf("expected artifact uid propagated from DataImport.status.data.artifactRef.uid, got %q", binding.ArtifactRef.UID)
 	}
-	if string(binding.Source.UID) != "leaf-uid-1" {
-		t.Fatalf("expected Source.UID from leaf UID, got %q", binding.Source.UID)
+	if string(binding.SourceRef.UID) != "leaf-uid-1" {
+		t.Fatalf("expected Source.UID from leaf UID, got %q", binding.SourceRef.UID)
 	}
-	if binding.Source.Kind != "DemoVirtualDiskSnapshot" || binding.Source.Name != "disk-snap" || binding.Source.Namespace != "project-a" {
-		t.Fatalf("unexpected source: %#v", binding.Source)
+	if binding.SourceRef.Kind != "DemoVirtualDiskSnapshot" || binding.SourceRef.Name != "disk-snap" || binding.SourceRef.Namespace != "project-a" {
+		t.Fatalf("unexpected source: %#v", binding.SourceRef)
 	}
 	if binding.VolumeMode != "Block" {
 		t.Fatalf("expected volumeMode propagated from DataImport.status.volumeMode, got %q", binding.VolumeMode)
 	}
 }
 
-// Before the DataImport produces its artifact (no status.data.artifact), the binding is pending
+// Before the DataImport produces its artifact (no status.data.artifactRef), the binding is pending
 // (not terminal) so the aggregator keeps requeuing rather than failing the import.
 func TestBuildImportDataBinding_PendingWhenArtifactAbsent(t *testing.T) {
 	di := dataImportWithArtifact("", "", "")
@@ -156,7 +156,7 @@ func TestBuildImportDataBinding_PendingWhenArtifactAbsent(t *testing.T) {
 	}
 }
 
-// A partially-written status.data.artifact (missing name) is still treated as not-yet-produced (pending).
+// A partially-written status.data.artifactRef (missing name) is still treated as not-yet-produced (pending).
 func TestBuildImportDataBinding_PendingWhenArtifactPartial(t *testing.T) {
 	di := dataImportWithArtifact("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "")
 	binding, ready, reason, _ := BuildImportDataBinding(di, importLeafObject())
@@ -253,11 +253,11 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 		t.Fatalf("expected status.data published by the aggregator from the DataImport artifact, got none")
 	}
 	d := *got.Status.Data
-	if d.Artifact.Name != projTestVSCName || d.Artifact.Kind != snapshot.KindVolumeSnapshotContent {
-		t.Fatalf("unexpected published artifact: %#v", d.Artifact)
+	if d.ArtifactRef.Name != projTestVSCName || d.ArtifactRef.Kind != snapshot.KindVolumeSnapshotContent {
+		t.Fatalf("unexpected published artifact: %#v", d.ArtifactRef)
 	}
-	if d.Source.Kind != importLeafKind || d.Source.Name != importLeafObjName {
-		t.Fatalf("import data source must be the leaf identity, got %#v", d.Source)
+	if d.SourceRef.Kind != importLeafKind || d.SourceRef.Name != importLeafObjName {
+		t.Fatalf("import data source must be the leaf identity, got %#v", d.SourceRef)
 	}
 	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
 		t.Fatalf("volumeMode must be projected from DataImport.status.volumeMode, got %q", d.VolumeMode)

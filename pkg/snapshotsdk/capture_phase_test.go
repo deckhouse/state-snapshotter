@@ -22,6 +22,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -115,5 +116,148 @@ func TestSetPhase_PlannedDoesNotRegressFinished(t *testing.T) {
 		if got := adapter.domain.Phase; got != storagev1alpha1.SnapshotCapturePhaseFinished {
 			t.Fatalf("re-Planned[%d]: phase regressed to %q, want Finished", i, got)
 		}
+	}
+}
+
+type statusBackedPhaseAdapter struct {
+	obj *storagev1alpha1.Snapshot
+}
+
+func (a *statusBackedPhaseAdapter) Object() client.Object { return a.obj }
+func (a *statusBackedPhaseAdapter) SourceRef() SourceRef  { return SourceRef{} }
+func (a *statusBackedPhaseAdapter) GetDomainCaptureState() DomainCaptureState {
+	st := DomainCaptureState{ChildrenSnapshotRefs: a.obj.Status.ChildrenSnapshotRefs}
+	if a.obj.Status.CaptureState == nil || a.obj.Status.CaptureState.DomainSpecificController == nil {
+		return st
+	}
+	domain := a.obj.Status.CaptureState.DomainSpecificController
+	st.ManifestCaptureRequestName = domain.ManifestCaptureRequestName
+	st.VolumeCaptureRequestName = domain.VolumeCaptureRequestName
+	st.ExcludedRefs = domain.ExcludedRefs
+	st.Phase = domain.Phase
+	st.Reason = domain.Reason
+	st.Message = domain.Message
+	return st
+}
+func (a *statusBackedPhaseAdapter) SetDomainCaptureState(st DomainCaptureState) {
+	a.obj.Status.ChildrenSnapshotRefs = st.ChildrenSnapshotRefs
+	if a.obj.Status.CaptureState == nil {
+		a.obj.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
+	}
+	a.obj.Status.CaptureState.DomainSpecificController = &storagev1alpha1.DomainSpecificControllerCaptureState{
+		ManifestCaptureRequestName: st.ManifestCaptureRequestName,
+		VolumeCaptureRequestName:   st.VolumeCaptureRequestName,
+		ExcludedRefs:               append([]ExcludedObjectRef{}, st.ExcludedRefs...),
+		Phase:                      st.Phase,
+		Reason:                     st.Reason,
+		Message:                    st.Message,
+	}
+}
+func (a *statusBackedPhaseAdapter) GetSnapshotSource() *SnapshotSource { return a.obj.Status.SourceRef }
+func (a *statusBackedPhaseAdapter) SetSnapshotSource(src *SnapshotSource) {
+	a.obj.Status.SourceRef = src
+}
+func (a *statusBackedPhaseAdapter) CoreCaptureState() CoreCaptureState  { return CoreCaptureState{} }
+func (a *statusBackedPhaseAdapter) ReadyStatus() metav1.ConditionStatus { return "" }
+func (a *statusBackedPhaseAdapter) ReadyReason() string                 { return "" }
+func (a *statusBackedPhaseAdapter) ReadyMessage() string                { return "" }
+
+type staleSnapshotReadClient struct {
+	client.Client
+	stale *storagev1alpha1.Snapshot
+}
+
+func (c *staleSnapshotReadClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	snapshot, ok := obj.(*storagev1alpha1.Snapshot)
+	if ok && key == client.ObjectKeyFromObject(c.stale) {
+		c.stale.DeepCopyInto(snapshot)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+type phaseCountingReader struct {
+	client.Reader
+	gets int
+}
+
+func (r *phaseCountingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	r.gets++
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+// EnsureChildren and the Planned barrier (DomainCaptureStatus Phase(Planned).Apply) are consecutive status
+// commits. If the Planned write bases its patch on an informer copy that predates EnsureChildren, the
+// non-omitempty excludedRefs field is serialized as [] and silently replaces the veto set just published by
+// EnsureChildren. The next reconcile then sees Planned with an empty frozen set and fails with
+// ErrChildrenSetFrozen.
+func TestMarkPlannedPreservesExcludedRefsAcrossCacheLag(t *testing.T) {
+	ctx := context.Background()
+	scheme := newRefreshTestScheme(t)
+
+	root := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns1",
+			Name:      "snap-cache-lag",
+			UID:       types.UID("snap-cache-lag-uid"),
+		},
+	}
+	root.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot"))
+
+	apiServer := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.Snapshot{}).
+		WithObjects(root).
+		Build()
+	cachedClient := &staleSnapshotReadClient{Client: apiServer, stale: root.DeepCopy()}
+	apiReader := &phaseCountingReader{Reader: apiServer}
+	adapter := &statusBackedPhaseAdapter{obj: root.DeepCopy()}
+	sdk := New(cachedClient, apiReader, &fakeVolumeProvider{name: "vcr"})
+	excluded := []ExcludedObjectRef{{
+		APIVersion: "demo.example.io/v1",
+		Kind:       "DemoVirtualDisk",
+		Name:       "disk-veto",
+	}}
+
+	if err := sdk.EnsureChildren(ctx, adapter, nil, excluded); err != nil {
+		t.Fatalf("EnsureChildren: %v", err)
+	}
+	if err := sdk.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+		t.Fatalf("Planned: %v", err)
+	}
+
+	got := &storagev1alpha1.Snapshot{}
+	if err := apiServer.Get(ctx, client.ObjectKeyFromObject(root), got); err != nil {
+		t.Fatalf("get persisted snapshot: %v", err)
+	}
+	if got.Status.CaptureState == nil || got.Status.CaptureState.DomainSpecificController == nil {
+		t.Fatal("persisted snapshot has no domain capture state")
+	}
+	domain := got.Status.CaptureState.DomainSpecificController
+	if domain.Phase != storagev1alpha1.SnapshotCapturePhasePlanned {
+		t.Fatalf("phase = %q, want Planned", domain.Phase)
+	}
+	if len(domain.ExcludedRefs) != 1 || domain.ExcludedRefs[0] != excluded[0] {
+		t.Fatalf("excludedRefs = %#v, want %#v", domain.ExcludedRefs, excluded)
+	}
+
+	getsAfterTransition := apiReader.gets
+	for i := 0; i < 3; i++ {
+		if err := sdk.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+			t.Fatalf("idempotent Planned[%d]: %v", i, err)
+		}
+	}
+	if apiReader.gets != getsAfterTransition {
+		t.Fatalf("idempotent Planned re-apply used %d additional APIReader GETs, want zero", apiReader.gets-getsAfterTransition)
 	}
 }

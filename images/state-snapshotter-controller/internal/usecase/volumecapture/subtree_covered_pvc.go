@@ -241,7 +241,7 @@ func pvcUIDsFromSnapshotContentDataRefs(content *storagev1alpha1.SnapshotContent
 	out := make([]string, 0, len(refs))
 	for i := range refs {
 		b := refs[i]
-		uid := string(b.Source.UID)
+		uid := string(b.SourceRef.UID)
 		if uid == "" {
 			return nil, fmt.Errorf("SnapshotContent %q data: empty source uid", content.Name)
 		}

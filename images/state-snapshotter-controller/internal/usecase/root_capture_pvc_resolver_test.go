@@ -51,11 +51,11 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	childB := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "child-b", Namespace: ns}, Status: storagev1alpha1.SnapshotStatus{BoundSnapshotContentName: "c2"}}
 	c1 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c1"},
-		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
+		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
 	}
 	c2 := &storagev1alpha1.SnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "c2"},
-		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{Source: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
+		Status:     storagev1alpha1.SnapshotContentStatus{Data: &storagev1alpha1.SnapshotDataBinding{SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: "dup"}}},
 	}
 	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(rootNS, childA, childB, c1, c2).Build()
 

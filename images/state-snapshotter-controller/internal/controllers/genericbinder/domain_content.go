@@ -29,7 +29,7 @@ import (
 )
 
 // The domain-capture request lifecycle that used to live here — the capture-leg eager-init, the
-// commonController.manifestCaptured/dataCaptured latches, the subtreeManifestsPersisted snapshot-mirror,
+// commonController.manifestCaptured/dataCaptured latches, the childSubtreesManifestsPersisted latch,
 // and the MCR/VCR reap — moved to the SnapshotContentController aggregator
 // (snapshotcontent/capture_legs.go): main-owned commonController, content-single-writer design §2/§3,
 // decision #10. The binder is a pure creator; it keeps only the leaf status.data mirror below (top-level

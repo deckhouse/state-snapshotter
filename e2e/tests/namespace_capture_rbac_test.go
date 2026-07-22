@@ -45,8 +45,9 @@ const (
 	captureClusterRoleName = "d8:state-snapshotter:capture-namespace"
 )
 
-// envNSCaptureRework gates the heavy extended specs (temporary CRD discovery, child degradation) that
-// need their own tree; the light specs run by default.
+// envNSCaptureRework is the opt-out flag for the heavy extended specs (temporary CRD discovery, child
+// degradation) that need their own tree. They run by default and can be disabled explicitly with
+// E2E_NS_CAPTURE_REWORK=false.
 const envNSCaptureRework = "E2E_NS_CAPTURE_REWORK"
 
 var (
@@ -116,8 +117,8 @@ func namespaceCaptureReworkSpecs() {
 	inclusionRuleSpecs()      // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
 	specImmutabilitySpecs()   // E6
 	eagerShellDeletionSpecs() // Block 0 (eager shell / pre-Planned deletion no-wedge)
-	arbitraryCRSpecs()        // E2 (env-gated)
-	childDegradationSpecs()   // E3 (env-gated)
+	arbitraryCRSpecs()        // E2 (default on; opt-out: E2E_NS_CAPTURE_REWORK=false)
+	childDegradationSpecs()   // E3 (default on; opt-out: E2E_NS_CAPTURE_REWORK=false)
 }
 
 // Block 0 — eager content shell / pre-Planned deletion. With the eager-shell fix (content-single-writer
@@ -133,7 +134,7 @@ func eagerShellDeletionSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("eager-del")
+			ns := uniqueNS("p1-eager-del")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -157,7 +158,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-life")
+			ns := uniqueNS("p1-rbac-lifecycle")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -195,7 +196,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-notrigger")
+			ns := uniqueNS("p1-rbac-import-notrigger")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -219,7 +220,7 @@ func captureRBACHookSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("rbac-del")
+			ns := uniqueNS("p1-rbac-del-before-archive")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -251,7 +252,7 @@ func rawSecretsSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("secrets")
+			ns := uniqueNS("p1-raw-secrets")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -327,7 +328,7 @@ func inclusionRuleSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("inclusion")
+			ns := uniqueNS("p1-discovery-inclusion")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -487,7 +488,7 @@ func specImmutabilitySpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("immutable")
+			ns := uniqueNS("p1-spec-immutable-neg")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -512,12 +513,12 @@ func specImmutabilitySpecs() {
 	})
 }
 
-// E2 — arbitrary namespaced CR discovery (the headline feature), env-gated (applies a temporary CRD).
+// E2 — arbitrary namespaced CR discovery (the headline feature), default-on (applies a temporary CRD).
 func arbitraryCRSpecs() {
 	Context("Commit 5 / E2: arbitrary CR discovery", func() {
 		It("captures an arbitrary namespaced CR with no CSD mapping via discovery + wildcard RBAC", func() {
-			if !envBool(os.Getenv(envNSCaptureRework)) {
-				Skip(envNSCaptureRework + " not set: skipping temporary-CRD discovery spec")
+			if !envEnabledByDefault(os.Getenv(envNSCaptureRework)) {
+				Skip(envNSCaptureRework + "=false: skipping temporary-CRD discovery spec")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+3*time.Minute)
 			defer cancel()
@@ -554,7 +555,7 @@ func arbitraryCRSpecs() {
 			})
 			Expect(waitObjectCondition(ctx, crdGVR, "", "widgetthings.e2e.snapshotter.test", "Established", "True", 2*time.Minute)).To(Succeed())
 
-			ns := uniqueNS("arbcr")
+			ns := uniqueNS("p1-arbitrary-cr")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -584,13 +585,13 @@ func arbitraryCRSpecs() {
 func childDegradationSpecs() {
 	Context("Commit 5 / E3: child degradation vs ManifestsArchived latch", func() {
 		It("keeps root ManifestsArchived=True and does not re-create capture RBAC on child loss", func() {
-			if !envBool(os.Getenv(envNSCaptureRework)) {
-				Skip(envNSCaptureRework + " not set: skipping child-degradation spec")
+			if !envEnabledByDefault(os.Getenv(envNSCaptureRework)) {
+				Skip(envNSCaptureRework + "=false: skipping child-degradation spec")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 4*suiteCfg.captureReadyTO+3*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("degrade")
+			ns := uniqueNS("p1-child-degrade")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 

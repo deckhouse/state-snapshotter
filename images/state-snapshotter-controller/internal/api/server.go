@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"time"
 
-	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -56,11 +55,7 @@ type Server struct {
 // Authentication (front-proxy requestheader + TokenReview) and authorization (SubjectAccessReview) are
 // provided by genericapiserver's delegated authn/authz, wired in Start; NewServer only assembles the
 // route handlers so it stays cheap and unit-testable (no port bind, no in-cluster lookup).
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, domainRestorer restore.DomainSubtreeRestorer, isDomainKind func(kind string) bool, tlsCertFile, tlsKeyFile string, restMappers ...meta.RESTMapper) *Server {
-	var restMapper meta.RESTMapper
-	if len(restMappers) > 0 {
-		restMapper = restMappers[0]
-	}
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, domainRestorer restore.DomainSubtreeRestorer, isDomainKind func(kind string) bool, tlsCertFile, tlsKeyFile string) *Server {
 	// Create archive service with directClient for all operations
 	// directClient is used for both ManifestCheckpoint and chunks to avoid informer requirements
 	archiveService := usecase.NewArchiveService(directClient, directClient, logger)
@@ -73,7 +68,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	restoreService := restore.NewService(directClient, archiveService, domainRestorer, isDomainKind)
 	nsAgg := usecase.NewAggregatedNamespaceManifests(directClient, archiveService, graphRegistry)
 	importUpload := usecase.NewImportUploadService(directClient)
-	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, importUpload, restMapper)
+	restoreHandler := NewRestoreHandler(directClient, restoreService, logger, nsAgg, importUpload)
 
 	// Setup routes
 	mux := http.NewServeMux()

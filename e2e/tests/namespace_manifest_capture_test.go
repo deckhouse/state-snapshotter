@@ -54,7 +54,7 @@ func namespaceManifestCaptureSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("nm")
+			ns := uniqueNS("p1-ns-object")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -83,7 +83,7 @@ func namespaceManifestCaptureSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("mcr-cs")
+			ns := uniqueNS("p1-mcr-nonns-reject-neg")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -100,7 +100,7 @@ func namespaceManifestCaptureSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("mcr-ns-other")
+			ns := uniqueNS("p1-mcr-ns-mismatch-neg")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -117,7 +117,7 @@ func namespaceManifestCaptureSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("mcr-ns-self")
+			ns := uniqueNS("p1-mcr-ns-match")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 

@@ -273,12 +273,13 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 	if err != nil {
 		return err
 	}
-	return patch.Status(ctx, s.client, obj, func() bool {
+	return patch.StatusFromCurrent(ctx, s.apiReader, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
-		// Additive publication: union the freshly planned refs into the currently published set instead
-		// of overwriting it. patch.Status re-reads the live object before every attempt, so st here holds
-		// FRESH refs — the union therefore preserves refs published by a co-writer of the same field (the
-		// root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not enumerate.
+		// Additive publication: union the freshly planned refs into the currently published set instead of
+		// overwriting it. StatusFromCurrent starts from the authoritative refresh above and re-reads on a
+		// conflict, so st here holds FRESH refs — the union therefore preserves refs published by a co-writer
+		// of the same field (the root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not
+		// enumerate.
 		mergedRefs := children.UnionRefs(st.ChildrenSnapshotRefs, newRefs)
 		refsGrew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs)
 		excludedChanged := !excludedRefsEqualIgnoreOrder(st.ExcludedRefs, newExcluded)
@@ -340,6 +341,7 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 	if err != nil {
 		return err
 	}
+	snapshotRefreshed := false
 	if existingTarget == nil {
 		if err := s.refresh(ctx, obj); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -350,6 +352,7 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 		if t.CoreCaptureState().dataCaptured() {
 			return nil
 		}
+		snapshotRefreshed = true
 	}
 	owner, err := s.ownerRef(t)
 	if err != nil {
@@ -358,7 +361,10 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 	if err := s.provider.EnsureVCR(ctx, namespace, name, owner, *in.DataRef); err != nil {
 		return err
 	}
-	return patch.Status(ctx, s.client, obj, func() bool {
+	if t.GetDomainCaptureState().VolumeCaptureRequestName == name {
+		return nil
+	}
+	mutateStatus := func() bool {
 		st := t.GetDomainCaptureState()
 		if st.VolumeCaptureRequestName == name {
 			return false
@@ -366,7 +372,11 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 		st.VolumeCaptureRequestName = name
 		t.SetDomainCaptureState(st)
 		return true
-	})
+	}
+	if snapshotRefreshed {
+		return patch.StatusFromCurrent(ctx, s.apiReader, s.client, obj, mutateStatus)
+	}
+	return patch.Status(ctx, s.apiReader, s.client, obj, mutateStatus)
 }
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
@@ -398,6 +408,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		return getErr
 	}
 	mcrExisted := getErr == nil
+	snapshotRefreshed := false
 	if apierrors.IsNotFound(getErr) {
 		if err := s.refresh(ctx, obj); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -408,6 +419,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 		if t.CoreCaptureState().manifestCaptured() {
 			return nil
 		}
+		snapshotRefreshed = true
 		owner, err := s.ownerRef(t)
 		if err != nil {
 			return err
@@ -432,16 +444,25 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	// ADOPT: publish the MCR name into the snapshot status (idempotent — no write if already set). Done for
 	// BOTH the just-created and the pre-existing MCR, so the leg always establishes even when the caller's
 	// freshly-declared set differs from the frozen plan (no wedge on a create-then-publish-failed retry).
-	if err := patch.Status(ctx, s.client, obj, func() bool {
-		st := t.GetDomainCaptureState()
-		if st.ManifestCaptureRequestName == mcrName {
-			return false
+	if t.GetDomainCaptureState().ManifestCaptureRequestName != mcrName {
+		mutateStatus := func() bool {
+			st := t.GetDomainCaptureState()
+			if st.ManifestCaptureRequestName == mcrName {
+				return false
+			}
+			st.ManifestCaptureRequestName = mcrName
+			t.SetDomainCaptureState(st)
+			return true
 		}
-		st.ManifestCaptureRequestName = mcrName
-		t.SetDomainCaptureState(st)
-		return true
-	}); err != nil {
-		return err
+		var err error
+		if snapshotRefreshed {
+			err = patch.StatusFromCurrent(ctx, s.apiReader, s.client, obj, mutateStatus)
+		} else {
+			err = patch.Status(ctx, s.apiReader, s.client, obj, mutateStatus)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	// DRIFT signal (AFTER adopt): the MCR pre-existed (its target set is the frozen point-in-time plan) and
 	// the caller now declares a DIFFERENT set — set-compared from the cached object, no apiserver call. The
@@ -459,7 +480,11 @@ func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src 
 		return nil
 	}
 	obj := t.Object()
-	return patch.Status(ctx, s.client, obj, func() bool {
+	cur := t.GetSnapshotSource()
+	if cur != nil && *cur == src {
+		return nil
+	}
+	return patch.Status(ctx, s.apiReader, s.client, obj, func() bool {
 		cur := t.GetSnapshotSource()
 		if cur != nil && *cur == src {
 			return false
@@ -473,7 +498,12 @@ func (s *sdk) PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src 
 // setPhase patches status.captureState.domainSpecificController.phase (+ reason/message) via the adapter.
 func (s *sdk) setPhase(ctx context.Context, t SnapshotAdapter, phase storagev1alpha1.SnapshotCapturePhase, reason, message string) error {
 	obj := t.Object()
-	return patch.Status(ctx, s.client, obj, func() bool {
+	current := t.GetDomainCaptureState()
+	if !phaseCanAdvance(current.Phase, phase) ||
+		(current.Phase == phase && current.Reason == reason && current.Message == message) {
+		return nil
+	}
+	return patch.Status(ctx, s.apiReader, s.client, obj, func() bool {
 		st := t.GetDomainCaptureState()
 		// Monotonic barrier guard. Domains re-assert barrier 1 (phase=Planned) on every reconcile before
 		// switching on the capture outcome, so without this a snapshot that already advanced to Finished

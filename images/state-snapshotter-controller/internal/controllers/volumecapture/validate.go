@@ -83,7 +83,7 @@ func ContentDataRefsCoverExpectedTargets(published []storagev1alpha1.SnapshotDat
 	}
 	seen := make(map[string]struct{}, len(published))
 	for _, b := range published {
-		uid := string(b.Source.UID)
+		uid := string(b.SourceRef.UID)
 		if uid == "" {
 			return false
 		}
@@ -94,7 +94,7 @@ func ContentDataRefsCoverExpectedTargets(published []storagev1alpha1.SnapshotDat
 			return false
 		}
 		seen[uid] = struct{}{}
-		if b.Artifact.APIVersion == "" || b.Artifact.Kind != kindVolumeSnapshotContent || b.Artifact.Name == "" {
+		if b.ArtifactRef.APIVersion == "" || b.ArtifactRef.Kind != kindVolumeSnapshotContent || b.ArtifactRef.Name == "" {
 			return false
 		}
 	}

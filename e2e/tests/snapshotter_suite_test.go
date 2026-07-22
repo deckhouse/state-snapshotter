@@ -75,6 +75,20 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		dumpFailedSpecDiagnostics(ctx)
 	})
 
+	// Global readiness invariant, enforced at the END of every spec that otherwise passed: no snapshot in
+	// the cluster may be Ready=True while any descendant in its tree is not Ready (the propagation bug the
+	// domain-phase-fold fix closes). Registered AFTER the diagnostics hook so it runs FIRST (Ginkgo runs
+	// AfterEach nodes in reverse registration order): if it trips, the diagnostics hook then dumps the
+	// offending tree. Skipped when the spec already failed (its own failure + diagnostics come first).
+	AfterEach(func() {
+		if CurrentSpecReport().Failed() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		assertReadyConsistencyAcrossTrees(ctx, 90*time.Second)
+	})
+
 	// Phases 1 & 2 merged into one manifest-only flow (no volume data): capture, aggregated subresource
 	// reads, namespace-capture rework, manifest restore, export->import round-trip, and TTL/GC cascade.
 	// These cheap specs share one `captured` tree and run sequentially, so they live under a single phase
@@ -101,15 +115,21 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		})
 	})
 	resourceSelectorSpecs()          // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
+	vetoSelectorSpecs()              // veto_selector_test.go: exclude-veto + resourceSelector across all tree levels (root object, VM child, disk grandchild, VM companion Secret, PVC/orphan, veto+selector combo) (default on; opt-out: E2E_VETO_SELECTOR=false; data fixture also needs E2E_VOLUME_DATA)
 	resourceSelectorAdmissionSpecs() // resource_selector_admission_test.go: CEL forbids spec.resourceSelector on mode: Import (admission rejection; skip-not-fail on an older CRD)
-	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3, env-gated)
-	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3, env-gated)
-	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (env-gated)
-	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (opt-in: E2E_CHILD_BRIDGE_FAILURE)
-	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (env-gated)
-	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (opt-in: E2E_GET_LOAD)
-	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4, env-gated)
-	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5, env-gated)
+	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
+	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
+	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (default on; opt-out: E2E_VOLUME_DATA=false)
+	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (default on; opt-out: E2E_CHILD_BRIDGE_FAILURE=false)
+	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (default on; opt-out: E2E_MANIFEST_CHECKPOINT_LOSS=false)
+	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (default on; opt-out: E2E_FREEZE_DEADLINE=false)
+	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (default on; opt-out: E2E_VOLUME_DATA=false)
+	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (default on; opt-out: E2E_GET_LOAD=false)
+	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4; default on; opt-out: E2E_VOLUME_DATA=false)
+	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5; default on; opt-out: E2E_VOLUME_DATA=false)
+	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
+	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
+	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
 	deleteGuardSpecs()               // delete_guard_test.go: unified-snapshot delete protection (opt-in E2E_DELETE_GUARD; needs admission enforcement=Deny)
 })
 
@@ -119,13 +139,16 @@ func prepareSuite() {
 	GinkgoWriter.Printf("E2E config:\n")
 	GinkgoWriter.Printf("  TEST_CLUSTER_CREATE_MODE:   %q\n", os.Getenv("TEST_CLUSTER_CREATE_MODE"))
 	GinkgoWriter.Printf("  namespace prefix:           %q\n", suiteCfg.nsPrefix)
+	GinkgoWriter.Printf("  run id (ns %s-<runID>-<role>): %q  (E2E_RUN_ID or generated MMDD-HHMM-<rand>)\n", suiteCfg.nsPrefix, suiteCfg.runID)
 	GinkgoWriter.Printf("  snapshot ready timeout:     %s\n", suiteCfg.snapshotReadyTO)
 	GinkgoWriter.Printf("  capture ready timeout:      %s\n", suiteCfg.captureReadyTO)
 	GinkgoWriter.Printf("  data transfer timeout:      %s\n", suiteCfg.dataTransferTO)
 	GinkgoWriter.Printf("  module ready timeout:       %s\n", suiteCfg.moduleReadyTO)
 	GinkgoWriter.Printf("  GC TTL (snapshotTtlAfterDelete): %s\n", suiteCfg.gcTTL)
-	GinkgoWriter.Printf("  volume-data phase enabled:  %v\n", suiteCfg.volumeData)
-	GinkgoWriter.Printf("  GET-load measurement (opt): %v\n", suiteCfg.getLoad)
+	GinkgoWriter.Printf("  volume-data phase enabled:  %v  (default on; E2E_VOLUME_DATA=false to disable)\n", suiteCfg.volumeData)
+	GinkgoWriter.Printf("  GET-load measurement:       %v  (default on; E2E_GET_LOAD=false to disable)\n", suiteCfg.getLoad)
+	GinkgoWriter.Printf("  namespace-capture extended: %v  (default on; E2E_NS_CAPTURE_REWORK=false to disable)\n", envEnabledByDefault(os.Getenv(envNSCaptureRework)))
+	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
@@ -143,6 +166,19 @@ func prepareSuite() {
 	suiteDyn, err = dynamic.NewForConfig(suiteRestCfg)
 	Expect(err).NotTo(HaveOccurred(), "build dynamic client")
 
+	// Publish (ingress + tokens) prerequisites are a hard, cluster-side gate that does NOT depend on the
+	// snapshot module stack, so check them FIRST — before the multi-minute module-readiness wait below —
+	// so a cluster that cannot support publish fails immediately instead of only after the whole stack
+	// converges. The gate is ON by default (opt-out via E2E_PUBLISH=false). The storage-e2e bootstrap
+	// wires these prerequisites (global publicDomainTemplate + user-authn publishAPI + a working `nginx`
+	// IngressClass) ONLY on alwaysCreateNew; an alwaysUseExisting/commander cluster must already provide
+	// them — they are cluster-global (publicDomainTemplate) or infra-specific (the ingress controller
+	// inlet) and thus NOT something a test can safely install — otherwise set E2E_PUBLISH=false.
+	// checkPublishInfra INSTALLS NOTHING: it asserts the profile (fail-fast) and records the ingress facts.
+	if suiteCfg.publish {
+		checkPublishInfra()
+	}
+
 	// waitModuleAndCSDReady enables + waits for the whole module stack (five modules across three
 	// dependency levels: state-snapshotter/sds-node-configurator -> storage-foundation/poc ->
 	// sds-local-volume), then the demo CSD. Each wait is bounded by moduleReadyTO; convergence is largely
@@ -151,8 +187,8 @@ func prepareSuite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 
-	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC) and the demo CSD to become Ready")
-	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD readiness")
+	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC), demo CSDs AccessGranted, and demo CRDs Established")
+	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD/CRD readiness")
 }
 
 // prepareSharedState runs once before the Ordered specs. Clients and module readiness are already set up

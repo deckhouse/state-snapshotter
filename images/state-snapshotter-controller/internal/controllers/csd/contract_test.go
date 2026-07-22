@@ -128,7 +128,7 @@ func TestCRDStatusSchemaForVersion(t *testing.T) {
 }
 
 func TestEvaluateSnapshotStatusContract(t *testing.T) {
-	gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
+	gvk := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualDiskSnapshot"}
 
 	t.Run("structural schema with contract fields is satisfied", func(t *testing.T) {
 		crd := crdWithVersionSchema("v1alpha1", &extv1.JSONSchemaProps{

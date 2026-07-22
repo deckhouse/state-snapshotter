@@ -42,10 +42,10 @@ func commonContentReadyWithMCPAndDataRefs(name, vscName string) *unstructured.Un
 		"status": map[string]interface{}{
 			"manifestCheckpointName": "mcp-ok",
 			"data": map[string]interface{}{
-				"source": map[string]interface{}{
+				"sourceRef": map[string]interface{}{
 					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-1", "namespace": "default", "uid": "pvc-1",
 				},
-				"artifact": map[string]interface{}{
+				"artifactRef": map[string]interface{}{
 					"apiVersion": volumeSnapshotContentAPIVersion,
 					"kind":       kindVolumeSnapshotContent,
 					"name":       vscName,
@@ -202,10 +202,10 @@ func TestChildrenReadySuccessMessageReflectsState(t *testing.T) {
 
 func dataRefEntry(targetUID, vscName string) map[string]interface{} {
 	return map[string]interface{}{
-		"source": map[string]interface{}{
+		"sourceRef": map[string]interface{}{
 			"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": targetUID, "namespace": "default", "uid": targetUID,
 		},
-		"artifact": map[string]interface{}{
+		"artifactRef": map[string]interface{}{
 			"apiVersion": volumeSnapshotContentAPIVersion,
 			"kind":       kindVolumeSnapshotContent,
 			"name":       vscName,

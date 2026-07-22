@@ -54,11 +54,33 @@ func (r *Resolver) ResolveRestoreTree(ctx context.Context, snapshotNamespace, sn
 	return r.ResolveRestoreSubtree(ctx, rootGVK, snapshotNamespace, snapshotName)
 }
 
+// ResolveRestoreNodeOnlyRoot resolves ONLY the root namespaced Snapshot node (scope=node): it runs the
+// same node validations as the subtree walk (bound content Ready, anti-spoofing back-ref 403, non-empty
+// MCP) but does NOT read the run-tree children at all — a not-ready child does not fail the request. The
+// one difference from the subtree walk is the Ready gate: for this user-addressed root it is relaxed for a
+// recoverable degradation (Ready=False with a DegradedReadyReasons reason is accepted — see
+// ensureSnapshotReadyOrDegraded / resolveFromRoot). It backs manifests-with-data-restoration?scope=node.
+func (r *Resolver) ResolveRestoreNodeOnlyRoot(ctx context.Context, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
+	rootGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")
+	return r.resolveFromRoot(ctx, rootGVK, snapshotNamespace, snapshotName, false)
+}
+
 // ResolveRestoreSubtree resolves the restore tree starting from an arbitrary snapshot node identified
 // by its GVK (the namespaced root Snapshot, or any domain snapshot CR, e.g. a per-VM or per-disk
 // snapshot). It compiles that node and everything below it, so the restore endpoint can return
 // apply-ready manifests for a single subtree, not only the whole namespace.
 func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string) (*RestoreNode, error) {
+	return r.resolveFromRoot(ctx, gvk, snapshotNamespace, snapshotName, true)
+}
+
+// resolveFromRoot resolves an addressed snapshot node. descend selects the run-tree depth: true walks
+// the whole subtree (childrenSnapshotRefs) fail-closed; false resolves ONLY the addressed node
+// (scope=node) and reads no children. The root's own validations are the same in both modes EXCEPT the
+// Ready gate: at scope=node (descend=false) the user-addressed root's Ready gate is relaxed for a
+// recoverable degradation (Ready=False with a DegradedReadyReasons reason is accepted — see
+// ensureSnapshotReadyOrDegraded); every other node check (bound content Ready, anti-spoofing back-ref,
+// non-empty MCP) is identical.
+func (r *Resolver) resolveFromRoot(ctx context.Context, gvk schema.GroupVersionKind, snapshotNamespace, snapshotName string, descend bool) (*RestoreNode, error) {
 	// Domain boundary at the root: a kind owned by an out-of-process domain controller is restored by
 	// the domain's aggregated apiserver, not here. Short-circuit BEFORE the Get so core never reads the
 	// domain CR (it keeps core domain-free: no demo RBAC, no extra round-trip). compileNode delegates it.
@@ -73,7 +95,7 @@ func (r *Resolver) ResolveRestoreSubtree(ctx context.Context, gvk schema.GroupVe
 		}
 		return nil, fmt.Errorf("failed to get snapshot %s/%s: %w", snapshotNamespace, snapshotName, err)
 	}
-	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{})
+	return r.buildRestoreNode(ctx, rootObj, snapshotNamespace, map[string]struct{}{}, true, descend)
 }
 
 // domainRestoreNode builds the marker node for a domain snapshot boundary. It carries only the
@@ -91,14 +113,22 @@ func domainRestoreNode(apiVersion, kind, name, namespace string) *RestoreNode {
 	}
 }
 
-func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}) (*RestoreNode, error) {
+// buildRestoreNode resolves one snapshot node and its subtree. isRoot marks the user-addressed entry node
+// (vs a node reached via the trusted childrenSnapshotRefs tree-walk), which controls the back-reference
+// mismatch status: 403 for the root, 409 for tree-walk children (see the anti-spoofing check below).
+// descend controls the run-tree walk: when false (scope=node) the childrenSnapshotRefs are NOT read at
+// all — only this node is resolved and validated — so a not-ready child cannot fail the request. The
+// recursive calls always pass descend=true: a subtree is resolved in full or not at all (fail-closed).
+func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructured.Unstructured, namespace string, visited map[string]struct{}, isRoot, descend bool) (*RestoreNode, error) {
 	key := snapshotObj.GetAPIVersion() + "/" + snapshotObj.GetKind() + "/" + snapshotObj.GetName()
 	if _, ok := visited[key]; ok {
 		return nil, fmt.Errorf("%w: snapshot run-tree cycle at %s", ErrContractViolation, key)
 	}
 	visited[key] = struct{}{}
 
-	if err := ensureSnapshotReady(snapshotObj); err != nil {
+	// Ready gate. It is relaxed ONLY for the user-addressed root at scope=node (isRoot && !descend): a
+	// soft-degraded root still serves its own manifests. See ensureSnapshotReadyOrDegraded.
+	if err := ensureSnapshotReadyOrDegraded(snapshotObj, isRoot && !descend); err != nil {
 		return nil, err
 	}
 	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
@@ -122,6 +152,22 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 	if err := ensureReady(content); err != nil {
 		return nil, err
 	}
+	// Anti-spoofing handshake (unified facade contract): status.boundSnapshotContentName is written on the
+	// snapshot side and is not trustworthy alone — a status writer could aim it at a foreign content. The
+	// bound content must carry a spec.snapshotRef pointing back at this very snapshot subject
+	// (apiVersion/kind/namespace/name; uid only when both sides carry one). For the user-addressed ROOT node
+	// a mismatch is a 403 (Forbidden), mirroring the domain-side facade; for a CHILD node reached via the
+	// trusted childrenSnapshotRefs tree-walk a mismatch is a data-integrity contract violation (409),
+	// consistent with the sibling orphan-VS child leg (verifyOrphanContentSnapshotRef). Either way, fail-closed.
+	if reason := snapshotRefMismatch(content, snapshotObj.GetAPIVersion(), snapshotObj.GetKind(), namespace, snapshotObj.GetName(), string(snapshotObj.GetUID())); reason != "" {
+		if isRoot {
+			return nil, errors.NewForbidden(
+				schema.GroupResource{Group: contentGVK.Group, Resource: "snapshotcontents"}, boundName,
+				fmt.Errorf("bound SnapshotContent %s does not belong to snapshot %s/%s: %s", boundName, namespace, snapshotObj.GetName(), reason),
+			)
+		}
+		return nil, fmt.Errorf("%w: bound SnapshotContent %s does not belong to child snapshot %s/%s: %s", ErrContractViolation, boundName, namespace, snapshotObj.GetName(), reason)
+	}
 	contentLike, err := snapshot.ExtractSnapshotContentLike(content)
 	if err != nil {
 		return nil, fmt.Errorf("%w: failed to parse SnapshotContent %s", ErrContractViolation, boundName)
@@ -141,6 +187,16 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 		ManifestCheckpointName: mcpName,
 		DataBindings:           cloneDataBindings(contentLike.GetStatusDataRefs()),
 		VSCToVS:                map[string]string{},
+	}
+
+	// scope=node: do not read the run-tree children at all — only this node's own manifests are
+	// compiled, and a not-ready child must not fail the request. The node's own validations above have
+	// already run as in the subtree path, except the Ready gate: for isRoot && !descend it was relaxed for
+	// a recoverable degradation (Ready=False with a DegradedReadyReasons reason — see
+	// ensureSnapshotReadyOrDegraded); every other node check (bound content Ready, anti-spoofing, MCP) is
+	// identical.
+	if !descend {
+		return node, nil
 	}
 
 	// Read childrenSnapshotRefs directly: the unstructured SnapshotLike wrapper does not surface
@@ -184,7 +240,7 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 			}
 			return nil, fmt.Errorf("failed to get child snapshot %s/%s: %w", namespace, ref.Name, err)
 		}
-		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited)
+		childNode, err := r.buildRestoreNode(ctx, childObj, namespace, visited, false, true)
 		if err != nil {
 			return nil, err
 		}
@@ -311,6 +367,31 @@ func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsN
 	return boundVSC, boundContentName, string(vs.GetUID()), nil
 }
 
+// snapshotRefMismatch is the shared anti-spoofing primitive: it compares a SnapshotContent's
+// spec.snapshotRef back-reference against the expected snapshot subject identity
+// (apiVersion/kind/namespace/name; uid only when both the ref and the live subject carry one). It returns
+// a human-readable reason describing the first mismatch, or "" when the back-reference is present and
+// points at the expected subject. Callers wrap the reason in their own status (409 contract violation for
+// the orphan-VS tree-walk leg, 403 Forbidden for user-addressed snapshot-node resolution).
+func snapshotRefMismatch(content *unstructured.Unstructured, wantAPIVersion, wantKind, wantNamespace, wantName, wantUID string) string {
+	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
+	if err != nil || !found || len(ref) == 0 {
+		return "missing spec.snapshotRef back-reference"
+	}
+	apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
+	kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
+	ns, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+	name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+	uid, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
+	if apiVersion != wantAPIVersion || kind != wantKind || ns != wantNamespace || name != wantName {
+		return fmt.Sprintf("spec.snapshotRef (apiVersion=%q kind=%q %s/%s) does not point back at %s/%s (apiVersion=%q kind=%q)", apiVersion, kind, ns, name, wantNamespace, wantName, wantAPIVersion, wantKind)
+	}
+	if uid != "" && wantUID != "" && uid != wantUID {
+		return fmt.Sprintf("spec.snapshotRef.uid %q does not match subject %s/%s uid %q", uid, wantNamespace, wantName, wantUID)
+	}
+	return ""
+}
+
 // verifyOrphanContentSnapshotRef enforces the anti-spoofing handshake for the orphan child volume node:
 // the bound child SnapshotContent must carry a spec.snapshotRef that points back at the VolumeSnapshot
 // handle (apiVersion/kind/namespace/name). The UID is matched only when the ref carries one — both the
@@ -319,20 +400,8 @@ func (r *Resolver) resolveVolumeSnapshotLeaf(ctx context.Context, namespace, vsN
 // against the live VS whenever present. Any missing/mismatched field is a contract violation (409), never
 // a transient not-ready.
 func verifyOrphanContentSnapshotRef(content *unstructured.Unstructured, namespace, vsName, vsUID, childContentName string) error {
-	ref, found, err := unstructured.NestedMap(content.Object, "spec", "snapshotRef")
-	if err != nil || !found || len(ref) == 0 {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s has no spec.snapshotRef back-reference to VolumeSnapshot %s/%s", ErrContractViolation, childContentName, namespace, vsName)
-	}
-	apiVersion, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "kind")
-	ns, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
-	name, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
-	uid, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
-	if apiVersion != snapshot.CSISnapshotAPIVersion || kind != snapshot.KindVolumeSnapshot || ns != namespace || name != vsName {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef (apiVersion=%q kind=%q %s/%s) does not point back at VolumeSnapshot %s/%s", ErrContractViolation, childContentName, apiVersion, kind, ns, name, namespace, vsName)
-	}
-	if uid != "" && vsUID != "" && uid != vsUID {
-		return fmt.Errorf("%w: orphan child SnapshotContent %s spec.snapshotRef.uid %q does not match VolumeSnapshot %s/%s uid %q", ErrContractViolation, childContentName, uid, namespace, vsName, vsUID)
+	if reason := snapshotRefMismatch(content, snapshot.CSISnapshotAPIVersion, snapshot.KindVolumeSnapshot, namespace, vsName, vsUID); reason != "" {
+		return fmt.Errorf("%w: orphan child SnapshotContent %s %s (expected VolumeSnapshot %s/%s)", ErrContractViolation, childContentName, reason, namespace, vsName)
 	}
 	return nil
 }
@@ -389,4 +458,36 @@ func ensureSnapshotReady(snapshotObj *unstructured.Unstructured) error {
 		return fmt.Errorf("%w: Snapshot %s is not Ready", ErrNotReady, snapshotObj.GetName())
 	}
 	return nil
+}
+
+// ensureSnapshotReadyOrDegraded gates the addressed snapshot node's readiness for the restore compiler.
+// It is ensureSnapshotReady with a single, narrow relaxation: when relaxDegraded is true it ALSO accepts a
+// Ready=False snapshot whose reason is a recoverable degradation (storagev1alpha1.IsReasonDegraded — the
+// DegradedReadyReasons catalog, currently the sole ChildSnapshotDeleted). buildRestoreNode sets
+// relaxDegraded ONLY for the user-addressed ROOT node at scope=node (isRoot && !descend); every other path
+// (scope=subtree, a tree-walk child, a missing Ready condition, a processing/terminal Ready=False reason)
+// keeps the strict Ready=True gate and fails closed with ErrNotReady.
+//
+// Why the relaxation is safe for exactly this case: at scope=node the resolver reads NO run-tree children
+// (buildRestoreNode returns right after this node when descend is false), and a soft-degraded root's own
+// captured data is intact — only a namespaced child snapshot CR was lost while its child SnapshotContent
+// survives in the recycle bin. The root's OWN manifest leg is still fully validated below — bound
+// SnapshotContent Ready (ensureReady), the anti-spoofing back-reference (snapshotRefMismatch -> 403), and a
+// non-empty MCP — so the root's own objects stay restorable while the degraded (unreadable) subtree is
+// never touched. scope=subtree/default keeps compiling the whole tree fail-closed.
+func ensureSnapshotReadyOrDegraded(snapshotObj *unstructured.Unstructured, relaxDegraded bool) error {
+	if !relaxDegraded {
+		return ensureSnapshotReady(snapshotObj)
+	}
+	snapshotLike, err := snapshot.ExtractSnapshotLike(snapshotObj)
+	if err != nil {
+		return fmt.Errorf("%w: failed to parse Snapshot", ErrContractViolation)
+	}
+	ready := meta.FindStatusCondition(snapshotLike.GetStatusConditions(), storagev1alpha1.ConditionReady)
+	// Accept a recoverable degradation: Ready=False with a reason in DegradedReadyReasons. Everything else
+	// (Ready=True, missing Ready, processing/terminal Ready=False) defers to the strict gate.
+	if ready != nil && ready.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonDegraded(ready.Reason) {
+		return nil
+	}
+	return ensureSnapshotReady(snapshotObj)
 }

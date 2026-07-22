@@ -113,7 +113,7 @@ func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 
 	content := readTemplate(t, controllerTemplate)
 	for _, forbidden := range []string{
-		"demo.state-snapshotter.deckhouse.io",
+		"sds-unified-snapshots-poc.deckhouse.io",
 		"demovirtualmachines",
 		"demovirtualdisks",
 	} {

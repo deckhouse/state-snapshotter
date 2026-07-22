@@ -20,10 +20,8 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -48,7 +46,7 @@ import (
 // the content-missing/deleting degradation Ready — a deleted content produces no reconcile here to mirror
 // from, so the binder co-writes ContentMissing, woken by its bound-content watch — and (b) the excludedRefs
 // side-channel mirror (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
-// watch is not removed. The subtreeManifestsPersisted mirror moved to main (capture_legs.go, decision #10).
+// watch is not removed. The childSubtreesManifestsPersisted latch is main-owned (capture_legs.go, decision #10).
 //
 // vcr-watch-core-terminal (decision D2): a failed data-leg VCR (or a Variant-A >1-artifact fault) is now
 // made terminal on the CONTENT itself by reconcileDataLegProjection (DataReady=VolumeCaptureFailed), so
@@ -59,27 +57,22 @@ import (
 // Best-effort: an owner that is gone or not yet bound, or content with no owning Snapshot (bucket
 // content), is a no-op; a transient API error is returned so the content reconcile requeues and retries.
 func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Context, contentObj *unstructured.Unstructured) error {
-	apiVersion, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "apiVersion")
-	kind, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "kind")
-	namespace, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "namespace")
-	name, _, _ := unstructured.NestedString(contentObj.Object, "spec", "snapshotRef", "name")
-	if apiVersion == "" || kind == "" || name == "" {
-		// Ownerless / bucket content: no owning Snapshot to mirror onto.
-		return nil
-	}
-	gv, err := schema.ParseGroupVersion(apiVersion)
+	owner, _, ownerFound, err := r.ownerSnapshot(ctx, contentObj)
 	if err != nil {
-		return fmt.Errorf("parse snapshotRef.apiVersion %q: %w", apiVersion, err)
+		return err
 	}
-	ownerGVK := gv.WithKind(kind)
+	return r.mirrorReadyToOwnerSnapshotWithOwner(ctx, contentObj, owner, ownerFound)
+}
 
-	owner := &unstructured.Unstructured{}
-	owner.SetGroupVersionKind(ownerGVK)
-	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, owner); err != nil {
-		if errors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("get owner Snapshot %s/%s: %w", namespace, name, err)
+// mirrorReadyToOwnerSnapshotWithOwner is mirrorReadyToOwnerSnapshot with the owning Snapshot ALREADY
+// resolved. Reconcile resolves the owner ONCE per pass (ownerSnapshot) and shares that same object with the
+// content-side domain-phase fold (reconcileCommonSnapshotContentStatus) and with this mirror, so the hot
+// path does not re-Get the owner here and both post-bind Ready writers fold from the SAME phase snapshot.
+// owner==nil / !ownerFound (ownerless/bucket content, owner gone, or not yet observable) is a no-op; the
+// actual Ready write still re-reads a fresh owner under an optimistic lock (patchOwnerReadyFromContent).
+func (r *SnapshotContentController) mirrorReadyToOwnerSnapshotWithOwner(ctx context.Context, contentObj *unstructured.Unstructured, owner *unstructured.Unstructured, ownerFound bool) error {
+	if !ownerFound || owner == nil {
+		return nil
 	}
 
 	// Writer switch (creator -> main): only mirror once the owner has adopted THIS content. Pre-bind the
@@ -104,32 +97,12 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshot(ctx context.Conte
 		reason = readyCond.Reason
 		message = readyCond.Message
 	}
-	// Bubble a domain-reported terminal failure (captureState.domainSpecificController.phase=Failed) into
-	// the user-facing Ready: a content mirror cannot express a domain planning/consistency failure.
-	if failed, freason, fmsg := ownerDomainCaptureFailed(owner); failed {
-		status = metav1.ConditionFalse
-		if freason != "" {
-			reason = freason
-		}
-		if fmsg != "" {
-			message = fmsg
-		}
-	}
-	// Barrier 2 (ADR §6.2 — "finalize Ready ONLY after domain phase=Finished"): on a
-	// domain-capture owner, do NOT finalize a mirrored Ready=True until the domain reported
-	// captureState.domainSpecificController.phase=Finished — the domain may still be running consistency
-	// actions (fs freeze/unfreeze, verify) after publishing its objects. While phase is Planning/Planned the
-	// aggregate is held Ready=False with a non-terminal ChildrenPending (phase=Failed is already bubbled
-	// above; a non-domain owner has no phase field and is unaffected). The content reconcile re-runs on the
-	// owner-status watch when the phase advances, so this converges without a dedicated wake-up.
-	if status == metav1.ConditionTrue {
-		if phase := ownerDomainCapturePhase(owner); phase != "" &&
-			storagev1alpha1.SnapshotCapturePhase(phase) != storagev1alpha1.SnapshotCapturePhaseFinished {
-			status = metav1.ConditionFalse
-			reason = snapshot.ReasonChildrenPending
-			message = fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
-		}
-	}
+	// Barrier 2 (ADR §6.2 — "finalize Ready ONLY after domain phase=Finished") + domain-failure bubble.
+	// The SAME shared fold is applied to the SnapshotContent's OWN Ready in
+	// reconcileCommonSnapshotContentStatus (forContent=true), so both post-bind Ready writers agree and a
+	// domain phase=Failed / not-yet-Finished propagates up the content-aggregation tree. forContent=false
+	// keeps the raw domain reason/message for the domain CR's user-facing Ready.
+	status, reason, message = applyDomainPhaseFold(owner, false, status, reason, message)
 	// Fold a vanished declared child into the owner mirror (main-detected structural degradation; the
 	// content's own Ready stays intact — only the namespaced user surface degrades, because d8 download
 	// reads namespaced CRs). Applied LAST so a terminal ChildSnapshotLost always surfaces, while a
@@ -209,6 +182,72 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 		}
 		return nil
 	})
+}
+
+// applyDomainPhaseFold folds the owning Snapshot's domain capture phase
+// (status.captureState.domainSpecificController.phase) into a base Ready triple. It is the SINGLE shared
+// implementation of ADR §6.2 "barrier 2", used by BOTH post-bind Ready writers so they always agree:
+//
+//   - reconcileCommonSnapshotContentStatus applies it to the SnapshotContent's OWN Ready (forContent=true)
+//     so a domain phase=Failed / not-yet-Finished propagates up the CONTENT-aggregation tree — a child
+//     content that is not Ready holds (ChildrenPending) or fails (ChildrenFailed) its parent. This is the
+//     domain-phase twin of the data-leg terminal that already lives on the content (VolumeCaptureFailed).
+//   - mirrorReadyToOwnerSnapshot applies it to the owning Snapshot's mirrored Ready (forContent=false).
+//
+// It only ever DOWNGRADES a Ready (never upgrades False->True):
+//   - phase=Failed -> Ready=False. forContent=true uses the canonical, tree-propagating terminal reason
+//     ReasonDomainCaptureFailed (the domain's free-form reason is NOT in terminalChildContentFailureReasons,
+//     so a parent content would otherwise misread a failed domain child as pending); forContent=false keeps
+//     the raw domain reason/message for the domain CR's user-facing Ready. The raw domain reason/message is
+//     preserved in the message in both cases.
+//   - Ready=True AND phase set AND phase!=Finished -> Ready=False/ChildrenPending (non-terminal): the domain
+//     may still be running consistency actions (fs freeze/unfreeze, verify) after publishing its objects.
+//   - phase="" (non-domain owner) or owner nil -> unchanged (verbatim). The content reconcile re-runs on the
+//     owner-status watch when the phase advances, so this converges without a dedicated wake-up.
+func applyDomainPhaseFold(owner *unstructured.Unstructured, forContent bool, status metav1.ConditionStatus, reason, message string) (metav1.ConditionStatus, string, string) {
+	if owner == nil {
+		return status, reason, message
+	}
+	phase := ownerDomainCapturePhase(owner)
+	if phase == "" {
+		return status, reason, message
+	}
+	if failed, freason, fmsg := ownerDomainCaptureFailed(owner); failed {
+		if forContent {
+			return metav1.ConditionFalse, snapshot.ReasonDomainCaptureFailed, domainFailedMessage(freason, fmsg, message)
+		}
+		outReason, outMessage := reason, message
+		if freason != "" {
+			outReason = freason
+		}
+		if fmsg != "" {
+			outMessage = fmsg
+		}
+		return metav1.ConditionFalse, outReason, outMessage
+	}
+	if status == metav1.ConditionTrue &&
+		storagev1alpha1.SnapshotCapturePhase(phase) != storagev1alpha1.SnapshotCapturePhaseFinished {
+		return metav1.ConditionFalse, snapshot.ReasonChildrenPending,
+			fmt.Sprintf("waiting for domain capture to finish (phase=%s)", phase)
+	}
+	return status, reason, message
+}
+
+// domainFailedMessage composes the SnapshotContent-side message for a domain phase=Failed fold, preserving
+// the domain's original reason/message (falling back to the pre-fold content message, then a generic).
+func domainFailedMessage(freason, fmsg, fallback string) string {
+	switch {
+	case freason != "" && fmsg != "":
+		return fmt.Sprintf("domain capture failed: %s: %s", freason, fmsg)
+	case freason != "":
+		return "domain capture failed: " + freason
+	case fmsg != "":
+		return "domain capture failed: " + fmsg
+	case fallback != "":
+		return "domain capture failed: " + fallback
+	default:
+		return "domain capture failed"
+	}
 }
 
 // ownerDomainCapturePhase reads status.captureState.domainSpecificController.phase off the owning Snapshot.

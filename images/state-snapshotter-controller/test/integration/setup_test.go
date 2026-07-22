@@ -85,13 +85,13 @@ func ptrInt64(v int64) *int64 {
 
 // snapshotContentDataRefSchema is the Variant A singular status.data schema (cardinality ≤1): a
 // SnapshotContent carries at most one data binding as an object, not a list. wave5 renamed the binding
-// (status.dataRef->data), moved the source PVC under data.source, and dropped the standalone targetUID
-// (the volume identity is data.source.uid).
+// (status.dataRef->data), moved the source PVC under data.sourceRef, and dropped the standalone targetUID
+// (the volume identity is data.sourceRef.uid).
 func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 	return apiextensionsv1.JSONSchemaProps{
 		Type: "object",
 		Properties: map[string]apiextensionsv1.JSONSchemaProps{
-			"source": {
+			"sourceRef": {
 				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
 					"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
@@ -102,7 +102,7 @@ func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 				},
 				Required: []string{"apiVersion", "kind", "name"},
 			},
-			"artifact": {
+			"artifactRef": {
 				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
 					"apiVersion": {Type: "string", MinLength: ptrInt64(1)},
@@ -112,7 +112,7 @@ func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
 				Required: []string{"apiVersion", "kind", "name"},
 			},
 		},
-		Required: []string{"source", "artifact"},
+		Required: []string{"sourceRef", "artifactRef"},
 	}
 }
 

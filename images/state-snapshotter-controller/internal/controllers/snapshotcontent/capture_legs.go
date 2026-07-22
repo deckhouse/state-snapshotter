@@ -31,6 +31,7 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
@@ -51,8 +52,11 @@ import (
 //     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
 //   - data leg (native-CSI VolumeSnapshot owners, design §11.4): no VCR — latch dataCaptured once the
 //     content carries a published status.data (the projection performs the VSC handoff first);
-//   - subtreeManifestsPersisted: mirror the content's monotonic recursive latch onto the owner's
-//     commonController (true-only), so parent domains read the manifest-exclude pre-gate namespaced.
+//   - childSubtreesManifestsPersisted: eager-declare false, then monotonically latch true, the children-only
+//     aggregate onto the owner's commonController — "the subtrees of ALL declared direct children are fully
+//     persisted" — so a parent aggregator reads it namespaced as the SDK manifest-exclude pre-gate. It is
+//     declared false (not left nil, which would disable the pre-gate) and EXCLUDES this node's own manifests,
+//     so it can flip true before this node's own MCR exists (the chicken-and-egg is removed).
 //
 // Recovery reap (idempotent): the latch-and-reap for each request leg is gated on the leg latch being
 // false, so once the latch is written that block never runs again. If a pass crashes, requeues, or hits a
@@ -251,12 +255,34 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		}
 	}
 
-	// subtreeManifestsPersisted mirror (true-only, monotonic): content latch -> owner commonController.
-	if persisted, found, _ := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted"); found && persisted {
-		if !ownerCommonLegCaptured(owner, "subtreeManifestsPersisted") {
-			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "subtreeManifestsPersisted"); mErr != nil {
-				return false, mErr
+	// childSubtreesManifestsPersisted (eager-declared false, monotonic false -> true): the subtrees of ALL
+	// declared direct children are fully persisted (each child node and its descendants durably archived
+	// their manifests). This is the children-only aggregate — it deliberately EXCLUDES this node's own
+	// manifests (tracked by manifestCaptured), so it can flip true BEFORE this node creates its own MCR,
+	// which is what makes it usable as the SDK manifest-exclude pre-gate. It is DECLARED false as soon as the
+	// node reaches this step (like the eager-init capture legs) and never left nil once past barrier 1 — a
+	// nil field would silently disable the SDK pre-gate (nil = pre-gate off), so declaring false is what
+	// keeps the pre-gate live. Value: this content's OWN subtreeManifestsPersisted latch ("node + all
+	// descendants") being true IMPLIES the children-only aggregate is true (own persisted ⊇ children
+	// persisted), so it short-circuits without a child walk; otherwise it is computed directly via
+	// aggregateChildrenSubtreeManifestsPersisted (same declared-vs-linked fail-closed as the content Ready
+	// gate; a childless node is vacuously true, latching true on the first pass). The setter is monotonic
+	// (never downgrades a latched true), so the latch never flips true over a partial child set and never
+	// re-opens. Not-persisted is not requeued here: a child content status change re-drives this owner
+	// content, so the false declaration is re-evaluated and flips to true when the subtree persists.
+	if !ownerCommonLegCaptured(owner, "childSubtreesManifestsPersisted") {
+		childSubtreesPersisted := false
+		if persisted, found, _ := unstructured.NestedBool(contentObj.Object, "status", "subtreeManifestsPersisted"); found && persisted {
+			childSubtreesPersisted = true
+		} else {
+			aggregated, _, aErr := r.aggregateChildrenSubtreeManifestsPersisted(ctx, contentObj)
+			if aErr != nil {
+				return false, aErr
 			}
+			childSubtreesPersisted = aggregated
+		}
+		if mErr := r.setOwnerChildSubtreesManifestsPersisted(ctx, owner, childSubtreesPersisted); mErr != nil {
+			return false, mErr
 		}
 	}
 
@@ -277,6 +303,32 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 			}
 		} else {
 			requeue = true
+		}
+	}
+
+	// childrenSettled (main-owned, snapshot-native, monotonic): true once EVERY DIRECT child has gone
+	// terminal — captured-OK OR failed. Unlike subtreePlanned (a success/planning latch) it counts a terminal
+	// child FAILURE as settled, so it is a completeness signal ORTHOGONAL to success: a domain reads it to
+	// time a barrier-2 action (e.g. fs unfreeze) that must fire even when a child data snapshot failed. A leaf
+	// (no declared children) never declares the latch (nil = nothing to settle). While any direct child is
+	// still non-terminal — or not created yet — the owner does not latch and requeues, so the 500 ms
+	// self-requeue re-evaluates as children go terminal (a child's Ready/phase write also wakes its bound
+	// content, which re-mirrors and re-drives this owner). The direct-child set is frozen at barrier 1
+	// (guaranteed past ownerDomainCaptureAtLeastPlanned above), and NotFound children are fail-closed, so the
+	// latch never flips true over an incomplete set.
+	if !ownerCommonLegCaptured(owner, "childrenSettled") {
+		settled, hasChildren, csErr := r.allDirectChildrenSettled(ctx, owner)
+		if csErr != nil {
+			return false, csErr
+		}
+		if hasChildren {
+			if settled {
+				if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "childrenSettled"); mErr != nil {
+					return false, mErr
+				}
+			} else {
+				requeue = true
+			}
 		}
 	}
 
@@ -327,6 +379,83 @@ func (r *SnapshotContentController) allDirectChildrenSubtreePlanned(ctx context.
 		}
 	}
 	return true, nil
+}
+
+// allDirectChildrenSettled reports whether every DIRECT child declared on the owner's
+// status.childrenSnapshotRefs has gone terminal (childSnapshotSettled). It mirrors
+// allDirectChildrenSubtreePlanned: the direct-child set is frozen at capture barrier 1 (the caller only runs
+// past phase>=Planned, when childrenSnapshotRefs is set-once), and a declared-but-not-yet-created child
+// (NotFound) reads as not-settled (fail-closed), so childrenSettled never latches true over an incomplete
+// child set — the same fail-closed-until-frozen discipline ChildrenReady uses. hasChildren=false means a leaf
+// node (no declared children): the caller leaves the latch nil, since a leaf has nothing to settle. Children
+// are read from the owner's fresh status; each is resolved by its ref GVK in the owner's namespace.
+func (r *SnapshotContentController) allDirectChildrenSettled(ctx context.Context, owner *unstructured.Unstructured) (settled bool, hasChildren bool, err error) {
+	refs, found, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
+	if err != nil {
+		return false, false, err
+	}
+	if !found || len(refs) == 0 {
+		return false, false, nil
+	}
+	namespace := owner.GetNamespace()
+	for _, raw := range refs {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			return false, true, fmt.Errorf("owner %s/%s has a malformed childrenSnapshotRefs entry %T", namespace, owner.GetName(), raw)
+		}
+		apiVersion, _ := m["apiVersion"].(string)
+		kind, _ := m["kind"].(string)
+		name, _ := m["name"].(string)
+		if apiVersion == "" || kind == "" || name == "" {
+			return false, true, fmt.Errorf("owner %s/%s has an incomplete childrenSnapshotRefs entry %v", namespace, owner.GetName(), m)
+		}
+		gv, gvErr := schema.ParseGroupVersion(apiVersion)
+		if gvErr != nil {
+			return false, true, gvErr
+		}
+		child := &unstructured.Unstructured{}
+		child.SetGroupVersionKind(gv.WithKind(kind))
+		if gErr := r.APIReader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, child); gErr != nil {
+			if errors.IsNotFound(gErr) {
+				// Declared but not created yet: not settled (fail-closed).
+				return false, true, nil
+			}
+			return false, true, gErr
+		}
+		if !childSnapshotSettled(child) {
+			return false, true, nil
+		}
+	}
+	return true, true, nil
+}
+
+// childSnapshotSettled reports whether a child snapshot has gone terminal for childrenSettled purposes —
+// captured-OK OR failed. Terminal = child Ready==True, OR domain phase in {Finished,Failed}, OR a terminal
+// Ready=False reason (IsReasonTerminal). Both terminal channels are read explicitly:
+//
+//   - The domain phase=Failed is read DIRECTLY off status.captureState.domainSpecificController.phase. The
+//     core bubbles a domain's FREE-FORM phase=Failed reason VERBATIM onto the child Ready (ready_mirror.go),
+//     and a free-form domain reason is not in TerminalReadyReasons, so IsReasonTerminal(Ready) alone would
+//     miss a domain failure (e.g. a consistency-deadline reject). Reading phase catches it. phase=Finished
+//     (barrier 2, domain done) is the settled-OK domain channel.
+//   - The core-derived terminals a child's data-leg or subtree failure surfaces on its Ready
+//     (VolumeCaptureFailed, ChildrenFailed, ...) are caught by the IsReasonTerminal channel.
+//
+// Ready==True is the plain captured-OK channel (e.g. a manifest-only leaf child). No observedGeneration gate
+// is needed: the snapshot spec is immutable (no recapture) and the latch is monotonic.
+func childSnapshotSettled(child *unstructured.Unstructured) bool {
+	switch storagev1alpha1.SnapshotCapturePhase(ownerDomainCapturePhase(child)) {
+	case storagev1alpha1.SnapshotCapturePhaseFinished, storagev1alpha1.SnapshotCapturePhaseFailed:
+		return true
+	}
+	rc := usecase.CurrentReadyCondition(child)
+	if rc == nil {
+		return false
+	}
+	if rc.Status == metav1.ConditionTrue {
+		return true
+	}
+	return rc.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(rc.Reason)
 }
 
 // observeOwnerDataLegVCR observes the domain-created VolumeCaptureRequest to drive the main-owned VCR
@@ -448,6 +577,39 @@ func (r *SnapshotContentController) setOwnerCaptureLegCaptured(ctx context.Conte
 		}
 		base := fresh.DeepCopy()
 		if err := unstructured.SetNestedField(fresh.Object, true, "status", "captureState", "commonController", leg); err != nil {
+			return err
+		}
+		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// setOwnerChildSubtreesManifestsPersisted writes the core-computed children-only latch
+// status.captureState.commonController.childSubtreesManifestsPersisted on the owner snapshot, monotonically
+// (false -> true, never back). Unlike setOwnerCaptureLegCaptured (true-only), it also DECLARES the field
+// false: leaving it nil would silently disable the SDK manifest-exclude pre-gate (nil = pre-gate off), so
+// the field must exist as false while the children's subtrees are still capturing. It never downgrades a
+// latched true and skips a redundant patch when the value is unchanged. Sideways write under an
+// optimistic-lock merge patch (main owns commonController, decision #10).
+func (r *SnapshotContentController) setOwnerChildSubtreesManifestsPersisted(ctx context.Context, owner *unstructured.Unstructured, persisted bool) error {
+	gvk := owner.GetObjectKind().GroupVersionKind()
+	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: owner.GetName()}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &unstructured.Unstructured{}
+		fresh.SetGroupVersionKind(gvk)
+		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
+			return err
+		}
+		cur, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "childSubtreesManifestsPersisted")
+		if found && cur {
+			// Monotonic: a latched true is never downgraded.
+			return nil
+		}
+		if found && cur == persisted {
+			// Already declared with the desired value (false): no churn.
+			return nil
+		}
+		base := fresh.DeepCopy()
+		if err := unstructured.SetNestedField(fresh.Object, persisted, "status", "captureState", "commonController", "childSubtreesManifestsPersisted"); err != nil {
 			return err
 		}
 		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))

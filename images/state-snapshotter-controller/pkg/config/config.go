@@ -43,7 +43,8 @@ const (
 	DefaultTTLStr            = "10m"            // String representation for annotation
 	ConfigMapName            = consts.ConfigMapName
 
-	// DefaultSnapshotTTLAfterDelete is spec.ttl on the root ObjectKeeper (ret-snap-* and unified ret-* snapshot)
+	// DefaultSnapshotTTLAfterDelete is spec.ttl on the root ObjectKeeper (unified naming scheme: the root
+	// ObjectKeeper is nss-ok-*, retaining the nss-* snapshot content tree)
 	// when STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE is not set.
 	//
 	// Production default: 30 days (720h). This is the "recycle bin" retention window (wave4B) — how long the

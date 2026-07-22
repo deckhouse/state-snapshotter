@@ -4,8 +4,9 @@
 
 > Статус: **developer-facing usage guide** для команд, интегрирующих свой домен со
 > snapshot-контроллером через `pkg/snapshotsdk`. Это «как пользоваться», а не нормативный контракт.
-> Нормативные источники: godoc в `pkg/snapshotsdk` (интерфейсы и инварианты) и
-> [`CLAUDE.md`](./CLAUDE.md) (контракт качества). Reference-реализация —
+> Норматив контракта домен↔ядро — SDK-ADR (`2026-06-29-domain-snapshot-sdk.md`); godoc в
+> `pkg/snapshotsdk` — норматив точных Go-сигнатур и инвариантов уровня кода; этот README — **не
+> норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
 > demo-контроллеры в репозитории `sds-unified-snapshots-poc` (`images/domain-controller/internal/controllers/demo`).
 >
 > Скоуп SDK v1 — **capture-only** (планирование снапшота: дочерние снапшоты + захват данных + захват
@@ -726,36 +727,49 @@ default: // CaptureOutcomeCapturing
 `CaptureOutcomeFailed` проверяется первым: терминальный `Ready`-reason (`IsReasonTerminal`) побеждает
 success-latch-и (они success-only и никогда не выражают отказ).
 
-## Инспекция детей — `ChildrenCaptureStates` (агрегаторы)
+## Барьер 2 у агрегатора — `childrenSettled` + `CoreCaptureOutcome`
 
-Агрегатор (например VM, чьи дочерние диски каждый владеет data-ногой) может тайминговать своё consistency-
-действие по **тонкому** per-child latch-у, а не по грубому rollup-у child `Ready`.
-`ChildrenCaptureStates(ctx, adapter)` резолвит объявленные child-refs и возвращает для каждого его
-`Ready` status/reason/message и признак того, захвачены ли **все** его объявленные ноги (latched):
+Агрегатор (например VM, чьи дочерние диски каждый владеет data-ногой) объявляет барьер 2 не по грубому
+rollup-у child `Ready`, а по core-derived исходу захвата **своего** узла и по латчу `childrenSettled` (все
+прямые дети терминальны — captured-OK ЛИБО провалились). Единственный безопасный паттерн — свитч на
+`CoreCaptureOutcome` (`Failed` проверяется ПЕРВЫМ), а действие согласованности гейтится на `childrenSettled`
+ЛИБО на собственном freeze-deadline домена:
 
 ```go
-children, err := sdk.ChildrenCaptureStates(ctx, adapter)
-if err != nil {
-	return ctrl.Result{}, err
-}
-// Перестань ждать, если любой ребёнок ушёл в терминал (core всплывёт это как ChildrenFailed; домен сам
-// child-терминал не re-drive-ит):
-for i := range children {
-	if storagev1alpha1.IsReasonTerminal(children[i].ReadyReason) {
-		return ctrl.Result{}, nil
+switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
+case snapshotsdk.CaptureOutcomeFailed:
+	// ПЕРВЫМ. Терминал (в т.ч. всплывший ChildrenFailed от упавшего ребёнка) принадлежит ядру — домен его
+	// не re-drive-ит. Но остановка НЕ освобождает от КОМПЕНСАЦИИ действия согласованности: если ФС была
+	// заморожена — unfreeze обязан отработать именно здесь (иначе заморозка утечёт), ветка Captured тут
+	// недостижима.
+	return ctrl.Result{}, r.thawIfFrozen(ctx, adapter) // компенсация
+case snapshotsdk.CaptureOutcomeCaptured:
+	// Все СВОИ ноги захвачены. Действие согласованности (напр. unfreeze гостевой ФС) гейтится на собственном
+	// childrenSettled ЛИБО на domain freeze-deadline: у childrenSettled нет core-TTL, зависший ребёнок его
+	// никогда не флипнет, поэтому живость закрывает domain-side deadline, а не ядро.
+	settled := adapter.CoreCaptureState().ChildrenSettled
+	if (settled == nil || !*settled) && !r.freezeDeadlineExceeded(adapter) {
+		return ctrl.Result{RequeueAfter: retry}, nil // ждём, пока дети устаканятся
 	}
-}
-// Иначе жди, пока data-нога каждого ребёнка не залатчится, затем (например) unfreeze и confirm.
-for i := range children {
-	if !children[i].AllLegsCaptured {
-		return ctrl.Result{RequeueAfter: retry}, nil
+	if err := r.thawIfFrozen(ctx, adapter); err != nil { // consistency-действие
+		return ctrl.Result{}, err
 	}
+	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
+default: // CaptureOutcomeCapturing
+	return ctrl.Result{RequeueAfter: retry}, nil
 }
-return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 ```
 
-Дети читаются как unstructured-объекты по GVK их ref-а, так что это работает для любого доменного child-kind.
-Ещё не найденный ребёнок сообщается с пустым `Ready` и `AllLegsCaptured=false` (всё ещё pending).
+> **Почему НЕ цикл по `IsReasonTerminal(child.ReadyReason)`.** Останавливаться по терминальному reason-у
+> каждого ребёнка, а иначе ждать `AllLegsCaptured` всех детей — **опасно**: ребёнок может упасть по доменной
+> free-form причине, которой нет в `TerminalReadyReasons`, и такой цикл повиснет навсегда. `childrenSettled`
+> считает терминалом и провал (не только успех), а `CaptureOutcomeFailed` бабблит `ChildrenFailed` от ядра —
+> вместе они закрывают и провал ребёнка, и его зависание (последнее — через domain freeze-deadline).
+
+Для **тонкой** диагностики отдельных детей есть `ChildrenCaptureStates(ctx, adapter)`: резолвит объявленные
+child-refs и возвращает для каждого его `Ready` status/reason/message и `AllLegsCaptured` (захвачены ли все
+его объявленные ноги). Дети читаются как unstructured по GVK их ref-а (любой доменный child-kind); ещё не
+найденный ребёнок — пустой `Ready`, `AllLegsCaptured=false`. Это read-only инспекция, НЕ замена гейта выше.
 
 ## Manifest-exclude для агрегаторов — `SubtreeManifestIdentities` (опционально)
 
@@ -770,6 +784,14 @@ return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFi
 свой content, она возвращает `snapshotsdk.ErrSubtreeIdentitiesPending` и вызывающий делает requeue — частичный
 exclude никогда не возвращается. Узел без детей возвращает пустой набор. Лист/родитель, не агрегирующий
 перекрывающиеся манифесты, в этом вообще не нуждается.
+
+**Встроенный pre-gate.** Перед обращением к сабресурсу метод сверяется с полем
+`CoreCaptureState().ChildSubtreesManifestsPersisted` **своего** узла — core-computed латчем «поддеревья ВСЕХ
+объявленных прямых детей полностью персистированы» (children-only: манифесты самого узла в него НЕ входят,
+поэтому он может стать `true` ещё до создания собственного MCR). Если он явно `false`, метод сразу возвращает
+`ErrSubtreeIdentitiesPending` **без единого REST-вызова** — экономя обращения к эндпоинту и 409-requeue-циклы,
+пока потомки ещё захватываются. `nil` (адаптер не мапит поле или оно ещё не вычислено) выключает pre-gate и
+сохраняет прежнее поведение; корректность в любом случае держит fail-closed 409 сабресурса.
 
 ---
 

@@ -519,18 +519,18 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 	}
 	// Variant A: status.data is a single object (cardinality <=1), not a list. Return it as a
 	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The wave5 rename moved the
-	// binding under status.data and the source PVC under data.source (the standalone targetUID was dropped;
-	// the volume identity is data.source.uid). The internal DataBindingRef keeps its field names.
+	// binding under status.data and the source PVC under data.sourceRef (the standalone targetUID was dropped;
+	// the volume identity is data.sourceRef.uid). The internal DataBindingRef keeps its field names.
 	entry, ok := status["data"].(map[string]interface{})
 	if !ok {
 		return nil
 	}
 	binding := DataBindingRef{}
-	if sourceRaw, ok := entry["source"].(map[string]interface{}); ok {
+	if sourceRaw, ok := entry["sourceRef"].(map[string]interface{}); ok {
 		binding.Target = objectRefFromMap(sourceRaw)
 		binding.TargetUID = binding.Target.UID
 	}
-	if artifactRaw, ok := entry["artifact"].(map[string]interface{}); ok {
+	if artifactRaw, ok := entry["artifactRef"].(map[string]interface{}); ok {
 		binding.Artifact = objectRefFromMap(artifactRaw)
 	}
 	if volumeMode, ok := entry["volumeMode"].(string); ok {

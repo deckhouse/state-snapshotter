@@ -100,3 +100,32 @@ func IsReasonTerminal(reason string) bool {
 	_, ok := TerminalReadyReasons[reason]
 	return ok
 }
+
+// DegradedReadyReasons is the canonical set of Ready=False reasons that represent a recoverable
+// degradation: capture already completed, the captured data is intact in the recycle bin, and the
+// snapshot degraded without failing — it will not heal on its own but is recoverable by manual
+// intervention. Its single member is ReasonChildSnapshotDeleted (a declared namespaced child snapshot
+// CR was deleted while its child SnapshotContent survives). This set is DISJOINT from
+// TerminalReadyReasons (a reason is either recoverable-degraded or terminal, never both).
+//
+// The reason string values are listed via the canonical constants to keep the api module
+// dependency-free (same style as TerminalReadyReasons). ReasonContentMissing (core pkg/snapshot only;
+// the bound durable content itself vanished — terminal-shaped) is deliberately NOT in this set.
+//
+// It is both a classification catalog for presentation — the single source of truth mirrored verbatim by
+// the UI/d8 surfaces exactly as they already mirror TerminalReadyReasons — and a runtime classifier: the
+// restore resolver applies IsReasonDegraded to relax the Ready gate for a user-addressed root at
+// scope=node (a recoverable Ready=False root still serves its own manifests). See the primary ADR
+// (2026-06-29-unified-snapshots-overview, section "Conditions & Reasons", subcategory
+// "Recoverable degradation — DegradedReadyReasons").
+var DegradedReadyReasons = map[string]struct{}{
+	ReasonChildSnapshotDeleted: {},
+}
+
+// IsReasonDegraded reports whether a Ready=False reason is a recoverable degradation (capture done,
+// data intact, recoverable by manual intervention — see DegradedReadyReasons). It is the canonical
+// degradation classifier, disjoint from IsReasonTerminal.
+func IsReasonDegraded(reason string) bool {
+	_, ok := DegradedReadyReasons[reason]
+	return ok
+}

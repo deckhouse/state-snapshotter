@@ -60,9 +60,9 @@ func TestNamespaceManifestSpec_Empty(t *testing.T) {
 // buildNamespaceChildSpec builds a child snapshot object carrying kind/name/namespace + the immutable
 // spec.sourceRef, with the correct GVK and WITHOUT an owner reference (the SDK stamps adoption).
 func TestBuildNamespaceChildSpec(t *testing.T) {
-	gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
+	gvk := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
 	src := controllercommon.SnapshotSourceIdentity{
-		APIVersion: "demo.state-snapshotter.deckhouse.io/v1alpha1",
+		APIVersion: "sds-unified-snapshots-poc.deckhouse.io/v1alpha1",
 		Kind:       "DemoVirtualMachine",
 		Namespace:  "my-app",
 		Name:       "vm-a",

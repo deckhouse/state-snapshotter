@@ -159,6 +159,65 @@ func newLostChildrenController(t *testing.T, objs ...client.Object) *SnapshotCon
 	return &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 }
 
+func TestLatchBoundSnapshotDeletedForMissingOwner(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("UID-bearing binding latches once", func(t *testing.T) {
+		content := lostChildContent("child-1", true)
+		content.Spec.SnapshotRef.UID = "snapshot-uid"
+		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(content)
+		if err != nil {
+			t.Fatalf("convert content: %v", err)
+		}
+		contentObj := &unstructured.Unstructured{Object: raw}
+		contentObj.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("SnapshotContent"))
+		r := newLostChildrenController(t, content)
+
+		latched, changed, err := r.latchBoundSnapshotDeletedForMissingOwner(ctx, contentObj)
+		if err != nil {
+			t.Fatalf("latch: %v", err)
+		}
+		if !latched || !changed {
+			t.Fatalf("first latch = latched:%t changed:%t, want true/true", latched, changed)
+		}
+
+		fresh := &storagev1alpha1.SnapshotContent{}
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: content.Name}, fresh); err != nil {
+			t.Fatalf("get content: %v", err)
+		}
+		if !fresh.Status.BoundSnapshotDeleted {
+			t.Fatal("boundSnapshotDeleted = false, want true")
+		}
+
+		latched, changed, err = r.latchBoundSnapshotDeletedForMissingOwner(ctx, contentObj)
+		if err != nil {
+			t.Fatalf("repeat latch: %v", err)
+		}
+		if !latched || changed {
+			t.Fatalf("repeat latch = latched:%t changed:%t, want true/false", latched, changed)
+		}
+	})
+
+	t.Run("incomplete legacy binding stays fail-soft", func(t *testing.T) {
+		content := lostChildContent("child-legacy", true)
+		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(content)
+		if err != nil {
+			t.Fatalf("convert content: %v", err)
+		}
+		contentObj := &unstructured.Unstructured{Object: raw}
+		contentObj.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("SnapshotContent"))
+		r := newLostChildrenController(t, content)
+
+		latched, changed, err := r.latchBoundSnapshotDeletedForMissingOwner(ctx, contentObj)
+		if err != nil {
+			t.Fatalf("latch: %v", err)
+		}
+		if latched || changed {
+			t.Fatalf("incomplete binding latch = latched:%t changed:%t, want false/false", latched, changed)
+		}
+	})
+}
+
 // detectLostDeclaredchildren covers the full detection matrix in isolation.
 func TestDetectLostDeclaredChildren(t *testing.T) {
 	ctx := context.Background()

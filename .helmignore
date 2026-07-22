@@ -8,8 +8,10 @@ hooks
 hack
 images
 images_digests.json
+known_vulnerabilities.vex
 lib
 Makefile
+module.yaml
 monitoring_test
 openapi
 release.yaml

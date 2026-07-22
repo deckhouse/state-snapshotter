@@ -63,7 +63,7 @@ func deletingNodeWithVSC(t *testing.T, extraInterceptors interceptor.Funcs) (*Sn
 		t.Fatalf("get seeded content: %v", err)
 	}
 	seeded.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		Artifact: storagev1alpha1.SnapshotDataArtifactRef{
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       "vsc-x",

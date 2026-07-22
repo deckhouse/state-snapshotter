@@ -52,23 +52,52 @@ func Condition(
 	})
 }
 
-// Status applies a domain-status mutation to obj under a plain merge patch, retrying on conflict. mutate
-// reports whether it changed anything; when it does not, no patch is sent.
+// Status applies a domain-status mutation from an authoritative API-server read under optimistic lock,
+// retrying on conflict. Domain capture fields are committed in several consecutive SDK operations; reading
+// them from an informer between writes could make a later patch replace fields the cache has not observed
+// yet. mutate reports whether it changed anything; when it does not, no patch is sent.
 func Status(
 	ctx context.Context,
+	apiReader client.Reader,
 	c client.Client,
 	obj client.Object,
 	mutate func() (changed bool),
 ) error {
 	key := client.ObjectKeyFromObject(obj)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := c.Get(ctx, key, obj); err != nil {
+		if err := apiReader.Get(ctx, key, obj); err != nil {
 			return err
 		}
 		base := obj.DeepCopyObject().(client.Object)
 		if !mutate() {
 			return nil
 		}
-		return c.Status().Patch(ctx, obj, client.MergeFrom(base))
+		return c.Status().Patch(ctx, obj, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
+// StatusFromCurrent is Status for a caller that has already refreshed obj through the API reader. The
+// first optimistic attempt reuses that authoritative object instead of issuing a duplicate GET; a conflict
+// retries from a new authoritative read.
+func StatusFromCurrent(
+	ctx context.Context,
+	apiReader client.Reader,
+	c client.Client,
+	obj client.Object,
+	mutate func() (changed bool),
+) error {
+	key := client.ObjectKeyFromObject(obj)
+	firstAttempt := true
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if firstAttempt {
+			firstAttempt = false
+		} else if err := apiReader.Get(ctx, key, obj); err != nil {
+			return err
+		}
+		base := obj.DeepCopyObject().(client.Object)
+		if !mutate() {
+			return nil
+		}
+		return c.Status().Patch(ctx, obj, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 }

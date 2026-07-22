@@ -161,8 +161,8 @@ func assertContentManifestLegReady(ctx context.Context, g Gomega, contentName st
 func assertContentDataRetainOwned(ctx context.Context, g Gomega, contentName string) {
 	content, err := getResource(ctx, snapshotContentGVR, "", contentName)
 	g.Expect(err).NotTo(HaveOccurred(), "get SnapshotContent %s", contentName)
-	artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "kind")
-	vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "name")
+	artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "kind")
+	vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "name")
 	g.Expect(artifactKind).To(Equal("VolumeSnapshotContent"), "content %s must project a VolumeSnapshotContent data artifact", contentName)
 	g.Expect(vscName).NotTo(BeEmpty(), "content %s data artifact name must be set", contentName)
 	vsc, err := getResource(ctx, volumeSnapshotContentGVR, "", vscName)
@@ -171,6 +171,35 @@ func assertContentDataRetainOwned(ctx context.Context, g Gomega, contentName str
 	g.Expect(policy).To(Equal("Retain"), "VolumeSnapshotContent %s must be Retain", vscName)
 	g.Expect(ownedBySnapshotContent(vsc, contentName)).To(BeTrue(),
 		"VolumeSnapshotContent %s must be owned by its SnapshotContent %s (aggregator handoff)", vscName, contentName)
+}
+
+// assertVolumeSnapshotStatusDataMirrored asserts the core binder mirrored SnapshotContent.status.data onto
+// the extended VolumeSnapshot's top-level status.data in the unified wire-shape (sourceRef/artifactRef +
+// flat size/storageClassName). This is what UI size/SC badges and d8 self-contained export read.
+func assertVolumeSnapshotStatusDataMirrored(ctx context.Context, g Gomega, ns, name string) {
+	vs, err := getResource(ctx, volumeSnapshotGVR, ns, name)
+	g.Expect(err).NotTo(HaveOccurred(), "get VolumeSnapshot %s/%s", ns, name)
+
+	srcAPI, _, _ := unstructured.NestedString(vs.Object, "status", "data", "sourceRef", "apiVersion")
+	srcKind, _, _ := unstructured.NestedString(vs.Object, "status", "data", "sourceRef", "kind")
+	srcName, _, _ := unstructured.NestedString(vs.Object, "status", "data", "sourceRef", "name")
+	srcUID, _, _ := unstructured.NestedString(vs.Object, "status", "data", "sourceRef", "uid")
+	g.Expect(srcAPI).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.sourceRef.apiVersion", ns, name)
+	g.Expect(srcKind).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.sourceRef.kind", ns, name)
+	g.Expect(srcName).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.sourceRef.name", ns, name)
+	g.Expect(srcUID).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.sourceRef.uid", ns, name)
+
+	artAPI, _, _ := unstructured.NestedString(vs.Object, "status", "data", "artifactRef", "apiVersion")
+	artKind, _, _ := unstructured.NestedString(vs.Object, "status", "data", "artifactRef", "kind")
+	artName, _, _ := unstructured.NestedString(vs.Object, "status", "data", "artifactRef", "name")
+	g.Expect(artAPI).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.artifactRef.apiVersion", ns, name)
+	g.Expect(artKind).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.artifactRef.kind", ns, name)
+	g.Expect(artName).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.artifactRef.name", ns, name)
+
+	size, _, _ := unstructured.NestedString(vs.Object, "status", "data", "size")
+	sc, _, _ := unstructured.NestedString(vs.Object, "status", "data", "storageClassName")
+	g.Expect(size).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.size", ns, name)
+	g.Expect(sc).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.storageClassName", ns, name)
 }
 
 // volumeSnapshotDomainSpecs registers the Block 3d VolumeSnapshot-domain specs (env-gated by
@@ -194,10 +223,10 @@ func volumeSnapshotDomainSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the Block 3d VolumeSnapshot-domain specs")
+				Skip("E2E_VOLUME_DATA=false: skipping the Block 3d VolumeSnapshot-domain specs (they run by default)")
 			}
 			sc = suiteCfg.storageClass
-			ns = uniqueNS("vsdom")
+			ns = uniqueNS("p3d-vsdom")
 
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
@@ -264,6 +293,11 @@ func volumeSnapshotDomainSpecs() {
 
 			By("Asserting conditions[Ready] is mirrored onto the VolumeSnapshot")
 			Expect(waitObjectCondition(ctx, volumeSnapshotGVR, ns, userVSName, condReady, "True", suiteCfg.snapshotReadyTO)).To(Succeed())
+
+			By("Asserting the core binder mirrored content.status.data onto the VolumeSnapshot (sourceRef/artifactRef + flat size/SC)")
+			Eventually(func(g Gomega) {
+				assertVolumeSnapshotStatusDataMirrored(ctx, g, ns, userVSName)
+			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
 
 			By("Reading the VS connector manifests-download (one-node tree with the PVC)")
 			body, err := aggGet(ctx, vsConnectorSubPath(ns, userVSName, subManifestsDownload), nil)

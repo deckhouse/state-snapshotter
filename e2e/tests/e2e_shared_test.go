@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ import (
 // --- Suite env knobs (storage-e2e cluster knobs are read by storage-e2e itself) ---
 const (
 	envNSPrefix             = "E2E_SNAPSHOTTER_NS_PREFIX"
+	envRunID                = "E2E_RUN_ID"
 	envSnapshotReadyTO      = "E2E_SNAPSHOT_READY_TIMEOUT"
 	envCaptureReadyTO       = "E2E_CAPTURE_READY_TIMEOUT"
 	envDataTransferTO       = "E2E_DATA_TRANSFER_TIMEOUT"
@@ -51,6 +53,7 @@ const (
 	envGCTTL                = "E2E_GC_TTL"
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envGetLoad              = "E2E_GET_LOAD"
+	envPublish              = "E2E_PUBLISH"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -105,6 +108,16 @@ const (
 	d8DataManagerNS = "d8-storage-foundation"
 )
 
+// demoCRDNames are the PoC-group CRDs the suite applies against. Module Ready + CSD AccessGranted can
+// latch from a previous install while an MPO roll is still installing these CRDs — wait for Established
+// so the first applyObjects(DemoVirtualMachine) does not race discovery.
+var demoCRDNames = []string{
+	"demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
+}
+
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
 var phase5ImportNS string
 
@@ -114,7 +127,7 @@ var phase5ImportNS string
 const (
 	coreSubresGroup   = "subresources.state-snapshotter.deckhouse.io"
 	coreSubresVersion = "v1alpha1"
-	demoSubresGroup   = "subresources.demo.state-snapshotter.deckhouse.io"
+	demoSubresGroup   = "subresources.sds-unified-snapshots-poc.deckhouse.io"
 	demoSubresVersion = "v1alpha1"
 	vsConnectorGroup  = "subresources.snapshot.storage.k8s.io"
 	vsConnectorVer    = "v1"
@@ -147,7 +160,7 @@ const (
 // demoGroupVersion is the demo domain apiVersion. The demo types live in the PoC module; the suite
 // accesses demo objects purely via unstructured + literal GVRs, so this is a plain constant (the group
 // is identical whether the types are compiled from state-snapshotter or the PoC).
-const demoGroupVersion = "demo.state-snapshotter.deckhouse.io/v1alpha1"
+const demoGroupVersion = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
 
 // GVRs used across the suite (all CRD access goes through the dynamic client).
 var (
@@ -158,16 +171,16 @@ var (
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "snapshotcontents",
 	}
 	demoVMGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines",
 	}
 	demoDiskGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks",
 	}
 	demoVMSnapshotGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachinesnapshots",
 	}
 	demoDiskSnapshotGVR = schema.GroupVersionResource{
-		Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots",
+		Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisksnapshots",
 	}
 	csdGVR = schema.GroupVersionResource{
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "customsnapshotdefinitions",
@@ -256,14 +269,23 @@ var backup backupFixture
 const pollInterval = 5 * time.Second
 
 type e2eConfig struct {
-	nsPrefix          string
-	snapshotReadyTO   time.Duration
-	captureReadyTO    time.Duration
-	dataTransferTO    time.Duration
-	moduleReadyTO     time.Duration
-	gcTTL             string
-	volumeData        bool
-	getLoad           bool
+	nsPrefix string
+	// runID is a per-run token shared by EVERY namespace this suite creates (snap-e2e-<runID>-<role>), so
+	// all namespaces of a single e2e pass carry the same prefix (list/clean them at once, no collision with
+	// leftovers from a previous keep-on-failure run). It is E2E_RUN_ID when set (sanitized), otherwise a
+	// generated MMDD-HHMM-<2 rand> token. See resolveRunID / uniqueNS.
+	runID           string
+	snapshotReadyTO time.Duration
+	captureReadyTO  time.Duration
+	dataTransferTO  time.Duration
+	moduleReadyTO   time.Duration
+	gcTTL           string
+	volumeData      bool
+	getLoad         bool
+	// publish opts into the publish (ingress + tokens) specs. It is a BeforeSuite sanity-check gate
+	// (mirrors volumeData): the infra is provisioned by the storage-e2e bootstrap, so this flag only
+	// asserts it is present and records the discovered ingress facts in suitePublishInfra.
+	publish           bool
 	storageClass      string
 	probeImage        string
 	backupClientImage string
@@ -290,8 +312,9 @@ func loadConfig() e2eConfig {
 		storageClass:      strings.TrimSpace(os.Getenv(envStorageClass)),
 		probeImage:        strings.TrimSpace(os.Getenv(envProbeImage)),
 		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
-		volumeData:        envBool(os.Getenv(envVolumeData)),
-		getLoad:           envBool(os.Getenv(envGetLoad)),
+		volumeData:        envEnabledByDefault(os.Getenv(envVolumeData)),
+		getLoad:           envEnabledByDefault(os.Getenv(envGetLoad)),
+		publish:           envEnabledByDefault(os.Getenv(envPublish)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
@@ -300,6 +323,7 @@ func loadConfig() e2eConfig {
 	if cfg.nsPrefix == "" {
 		cfg.nsPrefix = defaultNSPrefix
 	}
+	cfg.runID = resolveRunID(os.Getenv(envRunID))
 	if cfg.gcTTL == "" {
 		cfg.gcTTL = defaultGCTTL
 	}
@@ -328,6 +352,20 @@ func envBool(raw string) bool {
 	}
 }
 
+// envEnabledByDefault reports whether an OPT-OUT feature flag is enabled. Opt-out flags default to ON
+// (empty/unset => enabled); the feature is disabled ONLY when its env var is explicitly set to a falsey
+// value (false/0/no/n/off). It is the inverse of envBool: every gated spec now runs by default and is
+// switched OFF with `E2E_<FEATURE>=false`, so a default run exercises the whole suite on a full cluster and
+// operators disable only what their environment cannot support.
+func envEnabledByDefault(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "no", "n", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 func parseDuration(raw string, def time.Duration) time.Duration {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -339,9 +377,63 @@ func parseDuration(raw string, def time.Duration) time.Duration {
 	return def
 }
 
-// uniqueNS returns a DNS-1123 namespace name with the configured prefix and a short run suffix.
+// uniqueNS returns a DNS-1123 namespace name of the form <nsPrefix>-<runID>-<role> (default
+// snap-e2e-<runID>-<role>). runID is shared across the whole e2e pass (see e2eConfig.runID), so every
+// namespace of one run carries the same prefix while <role> distinguishes them. Roles are unique per run,
+// so the name is unique without any per-call random suffix (list a whole run with
+// `kubectl get ns | grep <nsPrefix>-<runID>`). Falls back to <nsPrefix>-<role> only if runID is empty,
+// which never happens in practice (loadConfig always sets it).
 func uniqueNS(role string) string {
-	return fmt.Sprintf("%s-%s-%d", suiteCfg.nsPrefix, role, time.Now().UnixNano()%100000)
+	if suiteCfg.runID == "" {
+		return fmt.Sprintf("%s-%s", suiteCfg.nsPrefix, role)
+	}
+	return fmt.Sprintf("%s-%s-%s", suiteCfg.nsPrefix, suiteCfg.runID, role)
+}
+
+// resolveRunID returns the per-run token embedded in every namespace name. A non-empty E2E_RUN_ID (CI build
+// id, git short sha, ...) is sanitized to a DNS-1123 label and capped so the full namespace stays inside the
+// 63-char limit; when unset it generates a compact MMDD-HHMM-<2 rand> token — minute resolution plus two
+// random chars, so two runs starting in the same minute on one cluster still do not collide. Called once
+// from loadConfig (BeforeSuite), before any uniqueNS call.
+func resolveRunID(raw string) string {
+	if s := sanitizeDNSLabel(raw); s != "" {
+		if len(s) > 32 {
+			s = strings.TrimRight(s[:32], "-")
+		}
+		return s
+	}
+	return fmt.Sprintf("%s-%s", time.Now().Format("0102-1504"), randToken(2))
+}
+
+// sanitizeDNSLabel lowercases raw and collapses every run of characters outside [a-z0-9] into a single '-',
+// then trims leading/trailing '-', yielding a value safe to embed in a DNS-1123 namespace label. Returns ""
+// for input that has no usable characters.
+func sanitizeDNSLabel(raw string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash && b.Len() > 0 {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// randToken returns n random chars drawn from [a-z0-9] (the generated run token's collision-avoidance tail).
+func randToken(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = alphabet[rand.IntN(len(alphabet))]
+	}
+	return string(b)
 }
 
 // --- cluster lifecycle (mirror sds-elastic) --------------------------------
@@ -440,8 +532,8 @@ func moduleTagFromEnv(moduleName string) string {
 	return "main"
 }
 
-// waitModuleAndCSDReady blocks until the state-snapshotter module is Ready and the demo CSD has reached
-// AccessGranted=True (the 030-domain-rbac hook signal that domain RBAC is granted and the demo graph is live).
+// waitModuleAndCSDReady blocks until the required modules are Ready, the demo CSDs have reached
+// AccessGranted=True (030-domain-rbac), and the PoC demo CRDs are Established (discoverable for apply).
 func waitModuleAndCSDReady(ctx context.Context) error {
 	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
 	// The suite does not otherwise enable modules — it relies on storage-e2e applying
@@ -454,6 +546,10 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// Wait for EVERY required module to be Ready (not just state-snapshotter + the PoC), in dependency
 	// order. Without this the suite races the still-converging storage-foundation data plane and the
 	// sds-local-volume StorageClass the specs provision against.
+	//
+	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
+	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. The Established
+	// wait below closes that race for the demo API surface the specs apply first.
 	for _, m := range requiredModulesInReadyOrder {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
@@ -462,6 +558,11 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	for _, csd := range []string{demoVMCSDName, demoDiskCSDName} {
 		if err := waitObjectCondition(ctx, csdGVR, "", csd, "AccessGranted", "True", suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("demo CSD %s not AccessGranted: %w", csd, err)
+		}
+	}
+	for _, crd := range demoCRDNames {
+		if err := waitObjectCondition(ctx, crdGVR, "", crd, "Established", "True", suiteCfg.moduleReadyTO); err != nil {
+			return fmt.Errorf("demo CRD %s not Established: %w", crd, err)
 		}
 	}
 	return nil
@@ -573,6 +674,58 @@ func aggPost(ctx context.Context, path string, body []byte) error {
 	return nil
 }
 
+// aggPostStatusReason performs an aggregated-apiserver POST and returns the HTTP status code and the
+// metav1.Status.reason from the response body (empty reason on a 2xx Success). Used by the bind-first
+// negative assertions that must distinguish the canonical 409 ImportContentNotBound from other errors.
+func aggPostStatusReason(ctx context.Context, path string, body []byte) (int, string) {
+	var code int
+	res := suiteClientset.Discovery().RESTClient().Post().
+		AbsPath(path).
+		SetHeader("Content-Type", "application/json").
+		Body(body).
+		Do(ctx)
+	res.StatusCode(&code)
+	raw, _ := res.Raw()
+	var st metav1.Status
+	_ = json.Unmarshal(raw, &st)
+	return code, string(st.Reason)
+}
+
+// boundSnapshotContentName reads status.boundSnapshotContentName off a snapshot-like CR ("" until bound).
+func boundSnapshotContentName(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) (string, error) {
+	obj, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return "", err
+	}
+	bound, _, _ := unstructured.NestedString(obj.Object, "status", "boundSnapshotContentName")
+	return bound, nil
+}
+
+// waitSnapshotBound blocks until a snapshot-like CR has a non-empty status.boundSnapshotContentName (the
+// binder has created + bound its SnapshotContent), returning that content name. Bind-first: the namespaced
+// upload is refused (409 ImportContentNotBound) until this holds.
+func waitSnapshotBound(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		bound, err := boundSnapshotContentName(ctx, gvr, ns, name)
+		if err == nil && bound != "" {
+			return bound, nil
+		}
+		if err != nil {
+			last = fmt.Sprintf("get err=%v", err)
+		} else {
+			last = "boundSnapshotContentName empty"
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for %s %s/%s to bind; last: %s", gvr.Resource, ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return "", ctx.Err()
+		}
+	}
+}
+
 func coreSnapshotSubPath(ns, name, sub string) string {
 	return fmt.Sprintf("/apis/%s/%s/namespaces/%s/snapshots/%s/%s", coreSubresGroup, coreSubresVersion, ns, name, sub)
 }
@@ -619,7 +772,7 @@ func truncate(b []byte, n int) string {
 // snapshotCommonControllerLatch reads a core-owned capture-leg latch
 // status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
 // commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
-// subtreeManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
+// childSubtreesManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
 // SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
 // found=false for these latches (the aggregator never writes them onto its own content). Returns
 // (value, found).
@@ -630,11 +783,11 @@ func snapshotCommonControllerLatch(obj *unstructured.Unstructured, leg string) (
 
 // --- condition waiters -----------------------------------------------------
 
-// conditionStatus returns the status of a status.conditions[type==condType] entry.
-func conditionStatus(obj *unstructured.Unstructured, condType string) (status, reason string, found bool) {
+// conditionDetails returns the status, reason, and message of a status.conditions[type==condType] entry.
+func conditionDetails(obj *unstructured.Unstructured, condType string) (status, reason, message string, found bool) {
 	conds, ok, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if !ok {
-		return "", "", false
+		return "", "", "", false
 	}
 	for _, c := range conds {
 		m, ok := c.(map[string]interface{})
@@ -646,9 +799,16 @@ func conditionStatus(obj *unstructured.Unstructured, condType string) (status, r
 		}
 		status, _, _ = unstructured.NestedString(m, "status")
 		reason, _, _ = unstructured.NestedString(m, "reason")
-		return status, reason, true
+		message, _, _ = unstructured.NestedString(m, "message")
+		return status, reason, message, true
 	}
-	return "", "", false
+	return "", "", "", false
+}
+
+// conditionStatus returns the status and reason of a status.conditions[type==condType] entry.
+func conditionStatus(obj *unstructured.Unstructured, condType string) (status, reason string, found bool) {
+	status, reason, _, found = conditionDetails(obj, condType)
+	return status, reason, found
 }
 
 // snapshotNodeReady reports whether a snapshot tree node is ready. Demo/core snapshot kinds expose a
@@ -734,19 +894,45 @@ func waitDemoDiskReady(ctx context.Context, ns, name string, timeout time.Durati
 }
 
 // waitSnapshotReady waits for a namespaced Snapshot to reach Ready=True and returns its bound content name.
+// It fails immediately when either the domain phase reaches the terminal Failed sink or Ready=False carries
+// a canonical terminal reason. Continuing to poll those states cannot recover an immutable Snapshot and
+// only hides the actual failure behind the outer timeout.
 func waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Duration) (string, error) {
-	if err := waitObjectCondition(ctx, snapshotGVR, ns, name, condReady, "True", timeout); err != nil {
-		return "", err
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		snap, err := getResource(ctx, snapshotGVR, ns, name)
+		if err == nil {
+			st, reason, message, found := conditionDetails(snap, condReady)
+			if found && st == "True" {
+				content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
+				if content == "" {
+					return "", fmt.Errorf("Snapshot %s/%s is Ready but has empty status.boundSnapshotContentName", ns, name)
+				}
+				return content, nil
+			}
+
+			phase, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "phase")
+			domainReason, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "reason")
+			domainMessage, _, _ := unstructured.NestedString(snap.Object, "status", "captureState", "domainSpecificController", "message")
+			readyTerminal := found && st == "False" && storagev1alpha1.IsReasonTerminal(reason)
+			if phase == string(storagev1alpha1.SnapshotCapturePhaseFailed) || readyTerminal {
+				return "", fmt.Errorf(
+					"Snapshot %s/%s entered terminal capture failure: domain phase=%q reason=%q message=%q; Ready.status=%q reason=%q message=%q",
+					ns, name, phase, domainReason, domainMessage, st, reason, message,
+				)
+			}
+			last = fmt.Sprintf("found=%v status=%q reason=%q phase=%q", found, st, reason, phase)
+		} else {
+			last = fmt.Sprintf("get err=%v", err)
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout waiting for snapshots %s/%s condition Ready=True; last: %s", ns, name, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return "", ctx.Err()
+		}
 	}
-	snap, err := getResource(ctx, snapshotGVR, ns, name)
-	if err != nil {
-		return "", err
-	}
-	content, _, _ := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
-	if content == "" {
-		return "", fmt.Errorf("Snapshot %s/%s is Ready but has empty status.boundSnapshotContentName", ns, name)
-	}
-	return content, nil
 }
 
 // waitSnapshotContentReady waits for a cluster-scoped SnapshotContent to have all four leg conditions
@@ -931,6 +1117,90 @@ func walkSnapshotTree(ctx context.Context, ns, rootSnapshot string) ([]childRef,
 		queue = append(queue, childSnapshotRefs(node)...)
 	}
 	return out, nil
+}
+
+// --- global readiness-consistency invariant ---------------------------------
+
+// snapshotNodeReadyViolations recursively walks a snapshot node and its status.childrenSnapshotRefs
+// subtree, collecting violations of the readiness invariant: a node that is Ready=True MUST have every
+// direct child Ready=True (so a Ready node never hides an un-ready descendant). A NOT-ready node is
+// allowed to have not-ready children (it is still converging or terminally failed), so only Ready parents
+// are enforced. Nodes that vanish mid-walk (GC/teardown) are skipped, not reported. seen guards against
+// re-visiting a shared/looping ref. This is the recursive core of the domain-phase-fold guarantee (a
+// child that fails or is not yet finished must hold/fail its ancestors).
+func snapshotNodeReadyViolations(ctx context.Context, ns string, ref childRef, seen map[string]bool) []string {
+	key := ref.kind + "/" + ref.name
+	if seen[key] {
+		return nil
+	}
+	seen[key] = true
+
+	gvr, ok := gvrForSnapshotKind(ref.kind)
+	if !ok {
+		return nil // unknown kind: not part of the enforced snapshot tree
+	}
+	obj, err := getResource(ctx, gvr, ns, ref.name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil // node GC'd/torn down mid-walk
+		}
+		return []string{fmt.Sprintf("get %s %s/%s: %v", ref.kind, ns, ref.name, err)}
+	}
+	parentReady, _ := snapshotNodeReady(obj, ref.kind)
+
+	var out []string
+	for _, ch := range childSnapshotRefs(obj) {
+		chGVR, ok := gvrForSnapshotKind(ch.kind)
+		if !ok {
+			continue
+		}
+		chObj, err := getResource(ctx, chGVR, ns, ch.name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				continue // child GC'd/torn down mid-walk
+			}
+			out = append(out, fmt.Sprintf("get child %s %s/%s: %v", ch.kind, ns, ch.name, err))
+			continue
+		}
+		if childReady, detail := snapshotNodeReady(chObj, ch.kind); parentReady && !childReady {
+			out = append(out, fmt.Sprintf(
+				"%s %s/%s is Ready=True but child %s/%s is NOT Ready (%s)",
+				ref.kind, ns, ref.name, ch.kind, ch.name, detail))
+		}
+		out = append(out, snapshotNodeReadyViolations(ctx, ns, ch, seen)...)
+	}
+	return out
+}
+
+// readyConsistencyViolations lists EVERY namespaced root Snapshot in the cluster and walks each tree,
+// returning all readiness-invariant violations (see snapshotNodeReadyViolations). An empty result means
+// every Ready snapshot node in every tree has an all-Ready child set.
+func readyConsistencyViolations(ctx context.Context) ([]string, error) {
+	roots, err := suiteDyn.Resource(snapshotGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list Snapshots: %w", err)
+	}
+	var violations []string
+	for i := range roots.Items {
+		root := &roots.Items[i]
+		seen := map[string]bool{}
+		violations = append(violations, snapshotNodeReadyViolations(ctx, root.GetNamespace(),
+			childRef{kind: "Snapshot", name: root.GetName()}, seen)...)
+	}
+	return violations, nil
+}
+
+// assertReadyConsistencyAcrossTrees enforces the global readiness invariant across every snapshot tree in
+// the cluster, retrying under a bounded timeout so a tree that is still legitimately converging (a Ready
+// parent whose child is a beat behind) settles instead of flaking. A genuine violation (a Ready snapshot
+// that keeps hiding an un-ready/failed descendant — the bug the domain-phase-fold fix closes) persists and
+// trips the assertion. Used as an end-of-spec guard for every spec (see the suite AfterEach).
+func assertReadyConsistencyAcrossTrees(ctx context.Context, timeout time.Duration) {
+	GinkgoHelper()
+	Eventually(func() ([]string, error) {
+		return readyConsistencyViolations(ctx)
+	}).WithContext(ctx).WithTimeout(timeout).WithPolling(2*time.Second).Should(BeEmpty(),
+		"a Ready snapshot must not hide an un-ready descendant (Ready => every child Ready, recursively)")
 }
 
 // errIsNotFound reports whether err is a Kubernetes NotFound (used by GC assertions).

@@ -265,9 +265,9 @@ func walkContentDataRefs(ctx context.Context, rootContent string) ([]volBinding,
 			return nil, fmt.Errorf("get SnapshotContent %s: %w", name, err)
 		}
 		if dr, ok, _ := unstructured.NestedMap(obj.Object, "status", "data"); ok {
-			artifactKind, _, _ := unstructured.NestedString(dr, "artifact", "kind")
-			artifactName, _, _ := unstructured.NestedString(dr, "artifact", "name")
-			targetName, _, _ := unstructured.NestedString(dr, "source", "name")
+			artifactKind, _, _ := unstructured.NestedString(dr, "artifactRef", "kind")
+			artifactName, _, _ := unstructured.NestedString(dr, "artifactRef", "name")
+			targetName, _, _ := unstructured.NestedString(dr, "sourceRef", "name")
 			volumeMode, _, _ := unstructured.NestedString(dr, "volumeMode")
 			if artifactKind == "VolumeSnapshotContent" && artifactName != "" {
 				out = append(out, volBinding{pvc: targetName, vsc: artifactName, volumeMode: volumeMode})
@@ -408,7 +408,7 @@ func ensureStorageClassVolumeSnapshotClass(ctx context.Context, scName string) e
 }
 
 // pvcHasPublishedDataRef reports whether any SnapshotContent has published a durable data artifact
-// (status.data.artifact -> VolumeSnapshotContent) for the source PVC ns/pvc. Used to detect that the
+// (status.data.artifactRef -> VolumeSnapshotContent) for the source PVC ns/pvc. Used to detect that the
 // domain child has finished the volume leg, i.e. the pending-VCR coverage window is over.
 func pvcHasPublishedDataRef(ctx context.Context, ns, pvc string) bool {
 	list, err := suiteDyn.Resource(snapshotContentGVR).List(ctx, metav1.ListOptions{})
@@ -416,9 +416,9 @@ func pvcHasPublishedDataRef(ctx context.Context, ns, pvc string) bool {
 		return false
 	}
 	for i := range list.Items {
-		srcNS, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "namespace")
-		srcName, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "source", "name")
-		artifactKind, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "artifact", "kind")
+		srcNS, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "sourceRef", "namespace")
+		srcName, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "sourceRef", "name")
+		artifactKind, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "data", "artifactRef", "kind")
 		if srcNS == ns && srcName == pvc && artifactKind == "VolumeSnapshotContent" {
 			return true
 		}
@@ -503,10 +503,10 @@ func volumeDataSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA not set: skipping the phase-3 volume-data flow")
+				Skip("E2E_VOLUME_DATA=false: skipping the phase-3 volume-data flow (it runs by default)")
 			}
 			sc = suiteCfg.storageClass
-			srcNS = uniqueNS("vol")
+			srcNS = uniqueNS("p3-voldata")
 			markers[vdPVCRoot] = "root-" + fmt.Sprintf("%d", time.Now().UnixNano())
 			markers[vdPVCDisk] = "disk-" + fmt.Sprintf("%d", time.Now().UnixNano())
 			markers[vdPVCStandalone] = "standalone-" + fmt.Sprintf("%d", time.Now().UnixNano())
@@ -621,8 +621,8 @@ func volumeDataSpecs() {
 					content, cerr := getResource(ctx, snapshotContentGVR, "", name)
 					g.Expect(cerr).NotTo(HaveOccurred(), "get SnapshotContent %s", name)
 
-					artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "kind")
-					vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifact", "name")
+					artifactKind, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "kind")
+					vscName, _, _ := unstructured.NestedString(content.Object, "status", "data", "artifactRef", "name")
 					if artifactKind == "VolumeSnapshotContent" && vscName != "" {
 						vsc, verr := getResource(ctx, volumeSnapshotContentGVR, "", vscName)
 						g.Expect(verr).NotTo(HaveOccurred(), "get VolumeSnapshotContent %s (content %s)", vscName, name)
@@ -935,7 +935,7 @@ func volumeDataSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
 
-			restoreNS := uniqueNS("vol-restore")
+			restoreNS := uniqueNS("p3-voldata-restore")
 			By("Creating the restore namespace " + restoreNS)
 			Expect(ensureNamespace(ctx, restoreNS)).To(Succeed())
 			DeferCleanup(func() {

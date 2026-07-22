@@ -46,7 +46,7 @@ import (
 // with the domain controller in its own repo, not here; the demo kind names below are synthetic stand-ins
 // for the delegation predicate — core compiles no domain types.
 
-const demoGroupV = "demo.state-snapshotter.deckhouse.io/v1alpha1"
+const demoGroupV = "sds-unified-snapshots-poc.deckhouse.io/v1alpha1"
 
 func isDemoSnapshotKind(kind string) bool {
 	return kind == "DemoVirtualMachineSnapshot" || kind == "DemoVirtualDiskSnapshot"
@@ -71,7 +71,7 @@ func complexTreeScheme() *runtime.Scheme {
 	_ = ssv1alpha1.AddToScheme(scheme)
 	_ = storagev1alpha1.AddToScheme(scheme)
 	for _, k := range []string{"DemoVirtualMachineSnapshot", "DemoVirtualDiskSnapshot"} {
-		gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: k}
+		gvk := schema.GroupVersionKind{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Kind: k}
 		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 		scheme.AddKnownTypeWithName(schema.GroupVersionKind{Group: gvk.Group, Version: gvk.Version, Kind: k + "List"}, &unstructured.UnstructuredList{})
 	}
@@ -139,7 +139,7 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 
 	objs := materializeMCP(mcp, manifests)
 
-	contentObj := readySnapshotContent(content, mcp, nil)
+	contentObj := rootBoundContent(content, mcp, rootName)
 	if rootNotReady {
 		meta.SetStatusCondition(&contentObj.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending"})
 	}
@@ -152,8 +152,8 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 		childMCP := "mcp-vol-" + o.vsName
 		objs = append(objs, materializeMCP(childMCP, []map[string]interface{}{pvcManifestRaw(o.pvcName, o.pvcUID)})...)
 		objs = append(objs, orphanChildContent(childContentName, childMCP, o.vsName, &storagev1alpha1.SnapshotDataBinding{
-			Source:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
-			Artifact: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
+			SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: o.pvcName, Namespace: "source-ns", UID: types.UID(o.pvcUID)},
+			ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: o.vscName},
 		}))
 		objs = append(objs, volumeSnapshotObj(o.vsName, o.vscName, childContentName))
 		childRefs = append(childRefs, storagev1alpha1.SnapshotChildRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: o.vsName})
@@ -306,7 +306,7 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 		if c.namespace != "source-ns" || c.targetNamespace != "restore-ns" {
 			t.Fatalf("delegate call %s/%s: namespace=%q targetNamespace=%q", c.gvk.Kind, c.name, c.namespace, c.targetNamespace)
 		}
-		if c.gvk.Group != "demo.state-snapshotter.deckhouse.io" {
+		if c.gvk.Group != "sds-unified-snapshots-poc.deckhouse.io" {
 			t.Fatalf("delegate call gvk group = %q, want demo group", c.gvk.Group)
 		}
 	}
@@ -320,38 +320,6 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 	}
 	mustBefore("DemoVirtualMachine", "vm-a", "ConfigMap", "config")
 	mustBefore("DemoVirtualDisk", "disk-standalone", "ConfigMap", "config")
-}
-
-// TestBuildManifestsWithDataRestorationForNode_DomainKindFullyDelegated proves the per-node endpoint
-// for a domain kind delegates the whole subtree to the domain apiserver (core compiles nothing for it).
-func TestBuildManifestsWithDataRestorationForNode_DomainKindFullyDelegated(t *testing.T) {
-	objs := materializeRoot(t,
-		[]map[string]interface{}{cmManifest("config")},
-		nil,
-		[]domainChild{{kind: "DemoVirtualMachineSnapshot", name: "vm-a-snap"}}, false)
-
-	delegate := &recordingDelegate{byName: map[string][]map[string]interface{}{
-		"vm-a-snap": {{"apiVersion": demoGroupV, "kind": "DemoVirtualMachine", "metadata": map[string]interface{}{"name": "vm-a"}}},
-	}}
-	svc := newServiceWithDelegate(t, objs, delegate)
-
-	gvk := schema.GroupVersionKind{Group: "demo.state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "DemoVirtualMachineSnapshot"}
-	out, err := svc.BuildManifestsWithDataRestorationForNode(context.Background(), gvk, Options{
-		SnapshotName: "vm-a-snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
-	})
-	if err != nil {
-		t.Fatalf("BuildManifestsWithDataRestorationForNode: %v", err)
-	}
-	objects := decodeObjects(t, out)
-	if !hasObj(objects, "DemoVirtualMachine", "vm-a") {
-		t.Fatal("delegated VM subtree must contain vm-a")
-	}
-	if hasObj(objects, "ConfigMap", "config") {
-		t.Fatal("root namespace objects must not be compiled for a per-node domain restore")
-	}
-	if len(delegate.calls) != 1 || delegate.calls[0].name != "vm-a-snap" {
-		t.Fatalf("expected exactly one delegate call for vm-a-snap, got %#v", delegate.calls)
-	}
 }
 
 // TestBuildManifestsWithDataRestoration_DuplicateAcrossDelegatedFailsClosed proves the final dedup
