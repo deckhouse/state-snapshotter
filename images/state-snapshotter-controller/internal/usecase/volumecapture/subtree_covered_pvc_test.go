@@ -155,8 +155,8 @@ func TestCollectSubtreeCoveredPVCUIDs_missingChildContent(t *testing.T) {
 // TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback exercises the Block 5 A->B coverage window: a
 // data-bearing child whose status.data is not published yet is covered via its OWNING snapshot
 // (content.spec.snapshotRef), not a content-UID-derived VCR. The owner publishes the in-flight VCR name on
-// status.captureState.domainSpecificController.volumeCaptureRequestName; that VCR's spec.targets[].uid are
-// the covered PVC UIDs (design §8.5/§11.7).
+// status.captureState.domainSpecificController.volumeCaptureRequestName; that VCR's singular
+// spec.target.uid is the covered PVC UID (design §8.5/§11.7).
 func TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback(t *testing.T) {
 	t.Parallel()
 	root := &storagev1alpha1.SnapshotContent{

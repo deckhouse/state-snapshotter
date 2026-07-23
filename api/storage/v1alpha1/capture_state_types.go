@@ -32,8 +32,14 @@ type SnapshotCapturePhase string
 const (
 	// SnapshotCapturePhasePlanning: the domain controller is creating objects/refs (children, MCR/VCR).
 	SnapshotCapturePhasePlanning SnapshotCapturePhase = "Planning"
-	// SnapshotCapturePhasePlanned: barrier 1 — all objects created and refs published (children + MCR/VCR).
-	// The core planner expands the graph and the binder takes over the content.
+	// SnapshotCapturePhasePlanned is barrier 1.
+	//
+	// CURRENT (51eb6c2): the child/excluded set is frozen and core leg/edge/status projection may start.
+	// A subtree-gated aggregator may still create and publish its own MCR after this phase; the
+	// SnapshotContent shell itself may already have been eagerly created and bound.
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented in this revision): Planned
+	// proves the complete capture plan is published, including this node's MCR and selected data plan.
 	SnapshotCapturePhasePlanned SnapshotCapturePhase = "Planned"
 	// SnapshotCapturePhaseFinished: barrier 2 — the domain finished its side, including consistency
 	// actions (e.g. fs unfreeze). The core finalizes the aggregate Ready.
@@ -78,9 +84,10 @@ type CommonControllerCaptureState struct {
 	// +optional
 	DataCaptured *bool `json:"dataCaptured,omitempty"`
 
-	// ChildSubtreesManifestsPersisted records that the subtrees of ALL declared direct children of this node
-	// are fully persisted — every descendant node beneath each direct child has durably archived its
-	// manifests. It deliberately EXCLUDES this node's OWN manifests (those are tracked by ManifestCaptured):
+	// CURRENT (51eb6c2): ChildSubtreesManifestsPersisted records that the subtrees of ALL declared direct
+	// children of this node are fully persisted — every descendant node beneath each direct child has
+	// durably archived its manifests. It deliberately EXCLUDES this node's OWN manifests (those are tracked
+	// by ManifestCaptured):
 	// "the whole node is persisted" decomposes as ManifestCaptured && ChildSubtreesManifestsPersisted.
 	// Because it does not depend on this node's own manifest leg, it can flip true BEFORE this node creates
 	// its own MCR — which is exactly what makes it usable as a manifest-exclude pre-gate. A childless node is
@@ -96,6 +103,10 @@ type CommonControllerCaptureState struct {
 	// the first pass) — it is deliberately NOT left nil past barrier 1, since a nil field disables the SDK
 	// pre-gate (nil = pre-gate off). Written sideways onto the snapshot. nil = not yet computed / no bound
 	// content, or an adapter that does not map it (SDK pre-gate off, backward compatible). Monotonic (false -> true).
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented in this revision): namespace
+	// root planning reads published subtree plans before Planned; this snapshot-side persisted pre-gate is
+	// removed. SnapshotContent.status.subtreeManifestsPersisted remains the durable post-capture Ready gate.
 	// +optional
 	ChildSubtreesManifestsPersisted *bool `json:"childSubtreesManifestsPersisted,omitempty"`
 
@@ -113,20 +124,25 @@ type CommonControllerCaptureState struct {
 	SubtreePlanned *bool `json:"subtreePlanned,omitempty"`
 
 	// ChildrenSettled is a core-computed monotonic latch: true once EVERY DIRECT child of THIS node has gone
-	// terminal — terminal meaning captured-OK OR failed. Formally childrenSettled(n) = for every direct child
-	// c: isTerminal(c), where isTerminal(c) = c.Ready==True OR c.phase in {Finished,Failed} OR
-	// IsReasonTerminal(c.Ready). It is, in effect, ChildrenReady with a terminal child FAILURE also counted as
-	// "settled": a completeness signal ORTHOGONAL to success, not a success aggregate. (Ready cannot serve
-	// this role — its terminal False collapses "one child failed, others still in flight" and "one failed, all
-	// done" into an indistinguishable False, and a parent's own Ready=True is derived only AFTER its domain
-	// reaches phase=Finished, a circular dependency for a consumer that must act BEFORE finishing.)
+	// terminal — captured successfully or failed. It is a completeness signal ORTHOGONAL to success, not a
+	// success aggregate.
 	//
-	// It is snapshot-native and main-written, computed by resolving the owner's DIRECT children from
-	// status.childrenSnapshotRefs and reading each child's Ready condition AND domain phase, then written
+	// CURRENT (51eb6c2): child terminality accepts Ready=True, phase=Finished, phase=Failed, or a terminal
+	// Ready=False reason. The direct phase fallback is retained only to describe current runtime behavior.
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented in this revision): child
+	// terminality is Ready-only — Ready=True is success; Ready=False with a canonical terminal reason is
+	// failure; absent/pending Ready is not settled. A namespaced domain failure is mirrored as
+	// Ready=False/DomainCaptureFailed, with the original domain reason and message embedded in the condition
+	// message, so no direct phase fallback is needed.
+	//
+	// It is snapshot-native and main-written. CURRENT implementation resolves the owner's DIRECT children
+	// from status.childrenSnapshotRefs, reads each child's Ready condition and domain phase, then writes
 	// SIDEWAYS onto this snapshot (like SubtreePlanned; a SnapshotContent has no phase, so this cannot live on
-	// the content). The child's domain phase=Failed is read DIRECTLY (not inferred from a terminal Ready
-	// reason): the core bubbles a domain's free-form phase=Failed reason VERBATIM onto the child Ready, and a
-	// free-form reason is not in TerminalReadyReasons, so IsReasonTerminal alone would miss a domain failure.
+	// the content). CURRENT: the child's domain phase=Failed is read DIRECTLY (not inferred from a terminal
+	// Ready reason): the core bubbles a domain's free-form phase=Failed reason VERBATIM onto the child Ready,
+	// and a free-form reason is not in TerminalReadyReasons, so IsReasonTerminal alone would miss a domain
+	// failure.
 	//
 	// It uses the same fail-closed-until-frozen machinery as ChildrenReady: the owner's direct-child set is
 	// frozen at capture barrier 1 (phase >= Planned), and a declared-but-not-yet-created child is treated as

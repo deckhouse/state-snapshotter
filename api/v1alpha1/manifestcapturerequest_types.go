@@ -53,7 +53,9 @@ type ManifestCaptureRequestSpec struct {
 	// The set is the FROZEN point-in-time capture plan: it is IMMUTABLE once the request is created (the
 	// spec-level CEL transition rule "self.targets == oldSelf.targets" rejects any change). The SDK creates
 	// the request once and never patches it; a caller that recomputes a shifting set (e.g. the namespace
-	// root over a live namespace) is silently frozen to the first plan.
+	// root over a live namespace) is frozen to the first plan. The SDK adopts/publishes the existing MCR
+	// first and then signals ErrManifestTargetsDrift when the newly declared set differs; drift is
+	// observable and the caller decides how to react.
 	// All targets must be namespaced objects in the same namespace as the ManifestCaptureRequest, with a
 	// single exception: the capture's own Namespace object (core v1 Namespace whose name equals the
 	// ManifestCaptureRequest namespace) is the only allowed cluster-scoped target.

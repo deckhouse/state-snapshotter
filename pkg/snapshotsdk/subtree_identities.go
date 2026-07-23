@@ -38,14 +38,20 @@ const subtreeManifestIdentitiesBasePath = "/apis/subresources.state-snapshotter.
 // ChildSubtreesManifestsPersisted latch is explicitly false, a child has not bound its content, or the
 // subresource returned 409 (some subtree ManifestCheckpoint is not Ready). Callers requeue; they must never
 // build a manifest MCR from a partial exclude.
+//
+// This is CURRENT (51eb6c2) behavior. The active namespace-root-MCR-before-Planned target keeps a
+// fail-closed pending outcome but reads published manifest plans before Planned, with persisted MCPs only
+// as a post-reap fallback; that target is not implemented by this revision.
 var ErrSubtreeIdentitiesPending = errors.New("snapshotsdk: subtree manifest identities pending (subtree not fully persisted)")
 
 // SubtreeManifestIdentity is one object identity captured somewhere in a snapshot subtree, as returned by
 // the snapshotcontents/<name>/subtree-manifest-identities service subresource. It carries only identity
-// (no manifest body): apiVersion/kind/namespace/name plus uid (to distinguish a recreated object of the
-// same name). It is the wire contract SHARED by the service handler (server side) and
+// metadata (no manifest body): apiVersion/kind/namespace/name plus an optional UID diagnostic. UID is not
+// part of matching, exclusion, or de-duplication; a recreated object with the same
+// apiVersion/kind/namespace/name therefore has the same plan key. It is the wire contract SHARED by the
+// service handler (server side) and
 // SubtreeManifestIdentities (client side) so both marshal/unmarshal one definition. The matching key for
-// exclude computation is apiVersion|kind|namespace|name (uid disambiguates a recreated object).
+// exclude computation is apiVersion|kind|namespace|name.
 type SubtreeManifestIdentity struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
@@ -70,12 +76,14 @@ type SubtreeManifestIdentitiesResponse struct {
 // apiVersion|kind|namespace|name) the results into the aggregator's exclude set. It is fail-closed: any
 // unbound child or any 409 from the subresource yields ErrSubtreeIdentitiesPending (never a partial set).
 //
-// Built-in pre-gate: before touching the subresource it consults the node's own
+// CURRENT built-in pre-gate: before touching the subresource it consults the node's own
 // CoreCaptureState().ChildSubtreesManifestsPersisted latch. A non-nil false means the direct children's
 // subtrees are not fully persisted yet, so it returns ErrSubtreeIdentitiesPending WITHOUT any REST call —
 // saving the endpoint round-trips and 409-requeue cycles while descendants are still capturing. A nil latch
 // (the adapter does not map it, or it is not computed yet) skips the pre-gate and preserves the prior
 // behavior; correctness is still held by the subresource's fail-closed 409, which remains the backstop.
+// This persisted pre-gate is slated for replacement by the active plan and is not reusable guidance for a
+// new aggregator.
 func (s *sdk) SubtreeManifestIdentities(ctx context.Context, t SnapshotAdapter) ([]SubtreeManifestIdentity, error) {
 	children := t.GetDomainCaptureState().ChildrenSnapshotRefs
 	// A node with no children has an empty exclude set: nothing was captured beneath it. Return early

@@ -44,11 +44,16 @@ import (
 
 // captureSDK constructs the in-process capture SDK the namespace root drives — the SAME SDK external/demo
 // domains use ("dogfooding", wave5). Mirrors the demo controllers' capture() helper
-// (snapshotsdk.New(client, apiReader, NewStorageFoundationProvider(client))). The root is an aggregator
-// whose manifest leg spans objects its children also capture, so it wires the subresource REST client
-// (WithSubresourceREST) the ManifestExclude capability needs: reconcileNamespaceManifestLeg computes the
+// (snapshotsdk.New(client, apiReader, NewStorageFoundationProvider(client))).
+//
+// CURRENT (51eb6c2): the root is an aggregator whose manifest leg spans objects its children also capture,
+// so it wires the subresource REST client (WithSubresourceREST). reconcileNamespaceManifestLeg computes the
 // subtree exclude set via sdk.SubtreeManifestIdentities (the fail-closed subtree-manifest-identities
 // endpoint) instead of an in-reconciler archive read.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): the in-process root uses a
+// core-internal planned-target walker and no longer performs this aggregated-API self-call. The external SDK
+// capability and endpoint remain for out-of-process aggregators.
 func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client), snapshotsdk.WithSubresourceREST(r.SubresourceREST))
 }
@@ -59,21 +64,27 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 // SOLE SnapshotContent creator/binder/Ready-mirror, while the root only PLANS via the SDK and drives its
 // own residual/orphan + manifest legs.
 //
-// Recipe (mirrors demo/virtualmachinesnapshot_controller.go, adapted for the aggregator root whose
-// manifest leg is subtree-gated and therefore runs AFTER the content is bound):
+// CURRENT recipe (51eb6c2; retained only to describe this implementation while the active
+// namespace-root-MCR-before-Planned plan replaces its late-own-MCR/persisted-subtree protocol):
 //  1. PublishSnapshotSource (the captured Namespace) — d8-cli import-mode recreation.
 //  2. planNamespaceChildren -> EnsureChildren (create/adopt + ADDITIVE publish of childrenSnapshotRefs).
 //  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 //     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
-//     FULL child set (domain + orphan) is enumerated before the content is created/frozen.
-//  4. MarkPlanned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent with the full
-//     frozen child set.
-//  5. Wait for the binder to bind the content; then maintain the RBAC latch.
+//     FULL child set (domain + orphan) is enumerated before its membership is frozen.
+//  4. MarkPlanned (barrier 1) — freezes that full child set and unblocks main-side leg/edge projection.
+//     The generic binder is claim-gated, not Planned-gated, so it may already have created/bound the eager
+//     SnapshotContent shell while these planning waves were running.
+//  5. Resolve the eagerly bound content (requeue if the bind has not landed yet); main, not this reconciler,
+//     owns the projection/latches that the RBAC hook observes.
 //  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
 //  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
 //
-// PIT freeze (ADR "Late Planned" → "once a node is Planned, the plan is frozen and the set is not recomputed"):
+// CURRENT PIT freeze (not reusable external guidance): once this implementation reaches Planned, the child
+// set is frozen even though the root MCR is still created later. The active target moves root MCR
+// create/publish before Planned and retries CSD/orphan waves plus the namespace list until that MCR exists.
+//
+// Current behavior:
 // steps 1-5 (plan + enumerate + freeze the declared child set) run ONLY before barrier 1
 // (namespaceDomainPrePlanned — phase absent/Planning). Once the node is past Planned the composition is
 // frozen, so this reconciler stops re-planning entirely and drives only the post-bind legs (6-8); a
@@ -114,9 +125,10 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
 		if err != nil {
 			// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
-			// The binder is still gated on phase>=Planned here (MarkPlanned not reached), so it does not touch
-			// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
-			// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
+			// The eager binder may already have created/bound the SnapshotContent shell, but status projection
+			// and Ready remain gated on phase>=Planned here — no dual-writer. (A source-list Forbidden is not an
+			// error here: planNamespaceChildren folds it into the non-terminal Forbidden outcome, handled below
+			// via the not-AllPlanned requeue.)
 			if perr := r.patchSnapshotNotReadyLocal(ctx, key, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
 				return ctrl.Result{}, perr
 			}
@@ -130,6 +142,9 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			// With phase=Failed the mirror bubbles the SAME reason/message (ownerDomainCaptureFailed), so both
 			// writers agree and the terminal is stable at any timing. The local Ready patch below only
 			// fast-surfaces the value the mirror converges to in the same pass.
+			// TARGET (active plan; not implemented here): the namespaced owner instead receives canonical
+			// Ready=False/DomainCaptureFailed, with this original domain reason/message embedded in
+			// Condition.Message.
 			if ferr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(plan.reason), stderrors.New(plan.message)); ferr != nil {
 				return ctrl.Result{}, ferr
 			}
@@ -160,7 +175,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
 		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
 		//    enumeration before MarkPlanned means the FULL child set (domain children + orphan VolumeSnapshots)
-		//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
+		//    is present when main projects the root's immutable child-edge set, so no orphan child is missed.
 		if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
 			return ctrl.Result{}, err
 		} else if res.Requeue || res.RequeueAfter > 0 {
@@ -171,8 +186,8 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			return ctrl.Result{}, err
 		}
 
-		// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
-		//    with the full, frozen child set.
+		// 5. Barrier 1 (phase=Planned): unblocks main-side leg/edge/status projection into the root
+		//    SnapshotContent shell, which the claim-gated generic binder may already have created and bound.
 		if err := sdk.MarkPlanned(ctx, adapter); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -186,8 +201,8 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{}, nil
 	}
 
-	// 6. The binder owns the SnapshotContent now: wait for it to create + bind before the linking/manifest
-	//    legs, which read the bound content.
+	// 6. Resolve the generic binder's eagerly owned SnapshotContent shell; if create/bind has not been
+	//    observed yet, wait before the linking/manifest legs that read it.
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
@@ -225,8 +240,9 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return res, nil
 	}
 
-	// 8. Barrier 2: the manifest leg is captured. Confirm consistency (phase=Finished) or surface a
-	//    terminal capture failure the core latches produced (mirrors the demo VM aggregator switch).
+	// 8. Barrier 2. CURRENT: the Failed branch below re-drives the core-owned terminal through Reject.
+	//    TARGET (active plan): a core-owned CaptureOutcomeFailed is a clean stop; only the core writes the
+	//    canonical Ready terminal.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeFailed:
 		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
@@ -241,13 +257,14 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 }
 
 // ensureOrphanVolumeSnapshotsPrePlanned runs the root residual/orphan PVC volume wave BEFORE barrier 1
-// (MarkPlanned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
-// VolumeSnapshots for uncovered PVCs and declares them as REGULAR domain children (via the SDK
-// EnsureChildren), so the full child set is enumerated before the binder creates + freezes the root
-// content ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here on: it is
-// adopted + planned by the storage-foundation VolumeSnapshot domain controller, its content is created +
-// bound by the generic binder, and its content status is projected by the aggregator (content-single-
-// writer design §11.6) — the namespace domain writes no SnapshotContent.
+// (MarkPlanned), without writing the root SnapshotContent. The claim-gated generic binder may already have
+// eagerly created and bound the root content shell, but its capture legs and immutable child-edge set are
+// not projected until Planned. This wave creates CSI VolumeSnapshots for uncovered PVCs and declares them
+// as REGULAR domain children (via the SDK EnsureChildren), so the full child set is enumerated before that
+// projection freezes it ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from
+// here on: it is adopted + planned by the storage-foundation VolumeSnapshot domain controller; its content
+// shell is created/bound eagerly and its content status is projected by the aggregator
+// (content-single-writer design §11.6) — the namespace domain writes no SnapshotContent.
 //
 // The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
 // from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily
@@ -320,13 +337,16 @@ func nonOrphanCSIVolumeSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef
 	return out
 }
 
-// reconcileNamespaceManifestLeg ensures the root namespace manifest MCR via the SDK, using the
-// base-minus-subtree exclude computation: the subtree exclude set comes from the fail-closed
-// subtree-manifest-identities endpoint (sdk.SubtreeManifestIdentities, which enforces the subtree-persisted
-// wave barrier server-side), and BuildRootNamespaceManifestCaptureTargets subtracts it (plus the root's own
-// residual PVCs) from the namespace allowlist base. It returns a non-requeuing result ONLY once the
-// manifest leg is captured (commonController.manifestCaptured latched by main), so the caller proceeds to
-// barrier 2.
+// reconcileNamespaceManifestLeg implements the CURRENT (51eb6c2) late-own-MCR protocol. It ensures the
+// root namespace MCR via the SDK using base-minus-subtree exclusion: the fail-closed
+// subtree-manifest-identities endpoint waits for persisted child manifests, and
+// BuildRootNamespaceManifestCaptureTargets subtracts them (plus the root's own residual PVCs) from the
+// namespace allowlist base. It returns a non-requeuing result only after main latches
+// commonController.manifestCaptured.
+//
+// This is implementation documentation, not reusable aggregator guidance. The active target replaces this
+// persisted pre-gate and REST self-call with published planned-subtree identities, creates/publishes the
+// root MCR before Planned, and leaves durable MCPs only as the post-reap fallback.
 func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,

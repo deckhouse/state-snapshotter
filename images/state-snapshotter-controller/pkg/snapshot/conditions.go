@@ -107,7 +107,11 @@ const (
 	// into this canonical reason on the content (mirroring how a data-leg failure surfaces as
 	// VolumeCaptureFailed on the content) lets the failure propagate up the content-aggregation tree as
 	// ChildrenFailed (INV-FAIL-PROP). The domain's original reason/message is preserved in the message.
-	// The domain CR's own user-facing Ready keeps the raw domain reason (see applyDomainPhaseFold).
+	//
+	// CURRENT (51eb6c2): the namespaced owner's user-facing Ready keeps the raw domain reason. TARGET
+	// (active namespace-root-MCR-before-Planned plan; not implemented here): the namespaced owner also uses
+	// ReasonDomainCaptureFailed and embeds the original domain reason/message in Condition.Message. That
+	// canonical Ready surface lets childrenSettled classify domain failure without a direct phase fallback.
 	ReasonDomainCaptureFailed = "DomainCaptureFailed"
 	// ReasonManifestCheckpointFailed is the terminal requests-leg reason when the bound ManifestCheckpoint
 	// is terminally failed. Used by SnapshotContent aggregation (own requests leg) and the terminal

@@ -76,7 +76,11 @@ golangci-lint run --build-tags ce ./...
 
 - Do NOT use `// +kubebuilder:rbac` markers as an RBAC source in this module (prevents stale generated-RBAC hints). No such markers under `images/state-snapshotter-controller/internal/controllers/`.
 - Static production controller RBAC is maintained by hand in `templates/controller/rbac-for-us.yaml` — update that file for core-permission needs.
-- Domain/custom-resource RBAC is granted externally by the Deckhouse RBAC controller/hook and signaled via `DomainSpecificSnapshotController.status.conditions[AccessGranted=True]`. Do NOT add demo/domain CRs to production static RBAC — document them as external RBAC requirements.
+- Per-CSD **core-side** RBAC is reconciled by `hooks/go/030-domain-rbac`: access for the core
+  controller SA and storage-foundation DataExport SA, reflected by
+  `CustomSnapshotDefinition.status.conditions[AccessGranted]`. The hook grants nothing to an
+  out-of-process domain SA; each domain module declares its own SA rights statically in its Helm
+  templates. Do NOT add demo/domain CRs to core production static RBAC.
 
 ## Restore rollout guard — CSI VolumeSnapshot (MUST)
 

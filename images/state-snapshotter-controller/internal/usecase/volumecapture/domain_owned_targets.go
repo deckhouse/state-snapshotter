@@ -94,7 +94,7 @@ func filterPVCTargetsBySelector(selector labels.Selector, candidates []vcpkg.Tar
 }
 
 // listDomainNodeOwnedPVCTargets returns PVC volume targets explicitly owned by this logical node:
-// published dataRefs on the same SnapshotContent and pending VCR spec.targets[] for that content.
+// published dataRefs on the same SnapshotContent and the pending VCR's singular spec.target.
 // It does not list all namespace PVCs (domain scope is not root residual).
 func listDomainNodeOwnedPVCTargets(
 	ctx context.Context,
