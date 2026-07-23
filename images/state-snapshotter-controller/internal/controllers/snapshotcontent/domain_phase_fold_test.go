@@ -51,11 +51,11 @@ func ownerWithDomainPhase(phase, reason, message string) *unstructured.Unstructu
 	return o
 }
 
-// applyDomainPhaseFold is the single shared barrier-2 fold backing BOTH post-bind Ready writers. For the
-// SnapshotContent's own Ready (forContent=true) a domain phase=Failed becomes the canonical, tree-propagating
-// terminal ReasonDomainCaptureFailed and a not-yet-Finished domain holds ChildrenPending; for the owner
-// Snapshot mirror (forContent=false) the raw domain reason is kept. A nil/non-domain owner is a verbatim
-// no-op. This is what stops a root Snapshot from reading Ready=True over a domain child that never Finished.
+// This test pins CURRENT (51eb6c2) applyDomainPhaseFold behavior. For the SnapshotContent's own Ready
+// (forContent=true), phase=Failed becomes canonical ReasonDomainCaptureFailed; for the namespaced owner
+// (forContent=false), the raw reason is still kept. The active target updates these expectations so both
+// surfaces use DomainCaptureFailed with the original reason/message in Condition.Message; childrenSettled
+// can then read Ready only.
 func TestApplyDomainPhaseFold(t *testing.T) {
 	const (
 		baseReason  = snapshot.ReasonCompleted

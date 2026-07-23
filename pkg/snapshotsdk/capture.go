@@ -85,8 +85,11 @@ type Planning interface {
 	// SDK ADOPTS it — it (idempotently) publishes the name into status and never patches spec.targets — and
 	// then SIGNALS ErrManifestTargetsDrift if the caller's freshly-declared set differs from the frozen one
 	// (compared as a set). Drift is a signal, not a decision: the name is already published, so the leg is
-	// established; the caller decides (a domain typically Fails; the namespace root ignores it and freezes to
-	// the first plan). Immutability of spec.targets is separately enforced at the apiserver via a CEL rule.
+	// established; the caller decides (a domain typically Fails). CURRENT (51eb6c2): the namespace root
+	// ignores this signal and freezes to the first plan. The active namespace-root-MCR-before-Planned target
+	// adopts an existing committed root MCR without recomputing targets, so this current root exception is
+	// not reusable external guidance. Immutability of spec.targets is separately enforced at the apiserver
+	// via a CEL rule.
 	// Callers that want to skip building targets once the leg is planned gate on ManifestCaptureNeeded.
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
@@ -95,8 +98,14 @@ type Planning interface {
 // (barrier 1 = Planned, barrier 2 = Finished). The SDK writes only
 // status.captureState.domainSpecificController.phase; it never writes the Ready condition.
 type CaptureBarrier interface {
-	// MarkPlanned declares barrier 1 satisfied: all objects created and refs published (children + MCR/VCR).
-	// Sets phase=Planned.
+	// MarkPlanned sets phase=Planned.
+	//
+	// CURRENT (51eb6c2): this freezes the child/excluded set and enables core projection; a subtree-gated
+	// aggregator may still create/publish its own MCR afterwards.
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented by this API revision):
+	// Planned proves the complete capture plan is published, including this node's MCR and selected data
+	// plan. Do not infer that target-side completeness validation exists in this revision.
 	MarkPlanned(ctx context.Context, t SnapshotAdapter) error
 	// ConfirmConsistent declares barrier 2 satisfied: the domain finished its side including consistency
 	// actions (e.g. fs unfreeze). Sets phase=Finished.
@@ -132,11 +141,15 @@ type SourcePublisher interface {
 	PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error
 }
 
-// ManifestExclude is the reusable exclude-ordering capability (wave5 §6.3) any aggregator uses to build
-// its own manifest MCR as EnsureManifestCapture(base − exclude): the exclude set is everything its
-// descendant snapshots already captured. It is optional — only aggregators that own a manifest leg
-// spanning objects their children also capture need it (the namespace-root Snapshot; a VM whose disk
-// children capture part of its objects). It requires a subresource REST client (WithSubresourceREST).
+// ManifestExclude describes the CURRENT (51eb6c2) persisted-subtree exclude capability. An aggregator
+// builds its own manifest MCR as EnsureManifestCapture(base − exclude), where the exclude set is everything
+// its descendant snapshots already persisted. It is optional and requires a subresource REST client
+// (WithSubresourceREST).
+//
+// This current ordering is slated for replacement by the active namespace-root-MCR-before-Planned target
+// and must not be copied into a new external aggregator: the target reads published manifest plans before
+// Planned, with persisted checkpoints only as a post-reap fallback. The external capability/endpoint name
+// remains, but its target semantics are plan-first rather than persisted-only.
 type ManifestExclude interface {
 	// SubtreeManifestIdentities returns the union of object identities captured across this snapshot's
 	// DIRECT children subtrees — the exclude set for the aggregator's own manifest MCR. It resolves each
@@ -149,11 +162,16 @@ type ManifestExclude interface {
 }
 
 // CaptureInspection exposes read-only condition views the domain uses to build its own Finished/wait/stop
-// logic (Variant A): the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
-// owning snapshot, and it bubbles a failed leg up the content tree as ChildrenFailed. The domain never
-// turns a core-owned leg failure into a terminal itself — it only READS these to time its consistency
-// actions and to stop requeuing once the core has surfaced a terminal outcome. A snapshot's OWN Ready is
-// read directly off the adapter (ReadyStatus/ReadyReason/ReadyMessage); this capability adds the children.
+// logic (Variant A): the core is the SOLE writer of Ready on both the SnapshotContent and its owning
+// snapshot, and it bubbles failed legs up the content tree. The domain never turns a core-owned leg failure
+// into a terminal itself — it only READS these to time its consistency actions and to stop requeuing once
+// the core has surfaced a terminal outcome. A snapshot's OWN Ready is read directly off the adapter
+// (ReadyStatus/ReadyReason/ReadyMessage); this capability adds the children.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): namespaced domain failure
+// is Ready=False/DomainCaptureFailed, with the original domain reason and message embedded in
+// Condition.Message. Core childrenSettled uses Ready only (Ready=True success or terminal Ready=False
+// failure), without a direct phase fallback.
 type CaptureInspection interface {
 	// ChildrenCaptureStates resolves the snapshot's declared child snapshot refs
 	// (status.childrenSnapshotRefs) and returns, for each, its Ready condition (status/reason/message) and
@@ -245,11 +263,13 @@ var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at lea
 // ManifestCaptureRequest already exists (its target set is the frozen point-in-time capture plan) and the
 // caller now declares a DIFFERENT set. The MCR name is ALWAYS published first (adopt), so the leg is
 // established regardless; this only reports that the freshly-declared set diverges from the frozen plan.
-// The caller decides: a domain typically reacts with sdk.Fail(GraphPlanningFailed); the namespace root
-// ignores it (it recomputes a shifting set over a live namespace and the first plan wins). Immutability of
-// the MCR targets is separately enforced at the apiserver by the CRD's CEL rule. Targets are compared as a
-// SET keyed by (apiVersion, kind, name), so reordering/duplicates never count as drift. Callers match it
-// with errors.Is(err, ErrManifestTargetsDrift).
+// The caller decides: a domain typically reacts with sdk.Fail(GraphPlanningFailed). CURRENT (51eb6c2): the
+// namespace root ignores it because it recomputes a shifting live-namespace set and the first plan wins.
+// The active target adopts a committed root MCR without recomputing targets, so that current exception is
+// not reusable guidance. Immutability of the MCR targets is separately enforced at the apiserver by the
+// CRD's CEL rule. Targets are compared as a SET keyed by (apiVersion, kind, name), so
+// reordering/duplicates never count as drift. Callers match it with errors.Is(err,
+// ErrManifestTargetsDrift).
 var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets differ from the frozen ManifestCaptureRequest (point-in-time plan already set)")
 
 // ManifestCaptureNeeded reports whether the manifest leg still needs planning: true iff the
@@ -497,9 +517,10 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 	}
 	// DRIFT signal (AFTER adopt): the MCR pre-existed (its target set is the frozen point-in-time plan) and
 	// the caller now declares a DIFFERENT set — set-compared from the cached object, no apiserver call. The
-	// name is already published, so the leg is established; the caller decides (a domain typically Fails; the
-	// namespace root ignores it — it recomputes a shifting set over a live namespace and the first plan
-	// wins). MCR-target immutability is separately enforced at the apiserver by the CRD's CEL rule.
+	// name is already published, so the leg is established; the caller decides (a domain typically Fails).
+	// CURRENT (51eb6c2): namespace root ignores it and keeps the first live-namespace plan. The active target
+	// adopts a committed root MCR without recomputing targets, so that exception is not reusable guidance.
+	// MCR-target immutability is separately enforced at the apiserver by the CRD's CEL rule.
 	if mcrExisted && !manifest.SameSet(existing.Spec.Targets, in.Targets) {
 		return ErrManifestTargetsDrift
 	}

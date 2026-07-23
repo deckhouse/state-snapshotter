@@ -208,7 +208,7 @@ func coveredPVCUIDsForContent(
 
 // coveredPVCUIDsFromOwnerObject reads the covered PVC UID(s) DIRECTLY from an owning xxxSnapshot object in
 // hand (design §8.5/§11.7): the in-flight VCR name on status.captureState.domainSpecificController.
-// volumeCaptureRequestName → that VCR's spec.targets[].uid (VCR-based domains), or status.sourceRef.uid
+// volumeCaptureRequestName → that VCR's singular spec.target.uid (VCR-based domains), or status.sourceRef.uid
 // (native-CSI VolumeSnapshot, no VCR). Both are published by capture barrier 1 (Planned), so coverage is
 // computable at the relaxed phase>=Planned wave gate even before the node's SnapshotContent is bound.
 // Returns nil (no error) when neither signal is present yet; the caller decides pending vs benign.
@@ -257,7 +257,7 @@ func pvcUIDsFromPendingVCR(ctx context.Context, c client.Reader, namespace strin
 	return pvcUIDsFromNamedVCR(ctx, c, namespace, vcpkg.SnapshotContentVCRName(contentUID))
 }
 
-// pvcUIDsFromNamedVCR reads the covered PVC UIDs (spec.targets[].uid) from a VolumeCaptureRequest addressed
+// pvcUIDsFromNamedVCR reads the covered PVC UID (singular spec.target.uid) from a VolumeCaptureRequest addressed
 // by an explicit name in namespace. Used by the coverage owner-fallback for a domain data-leaf whose VCR is
 // snapshot-owned (its name comes from the owner's captureState.volumeCaptureRequestName, not the content
 // UID). A missing VCR contributes nothing (the wave re-evaluates); a parse/read error is a hard error.

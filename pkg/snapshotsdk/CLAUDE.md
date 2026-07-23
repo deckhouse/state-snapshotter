@@ -10,7 +10,10 @@
 ## Domain / SDK separation (MUST)
 
 The boundary must be visually obvious:
-- **SDK owns:** conditions, ownerRefs, capture orchestration, request lifecycle.
+- **SDK owns:** ownerRefs, capture orchestration, request lifecycle, and optimistic-lock writes to
+  the domain-owned status fields and lifecycle phase.
+- **Core owns:** the `Ready` condition and `captureState.commonController` latches. The SDK and
+  domain only read them.
 - **Domain owns:** source validation, child planning, domain-specific objects.
 
 ## No hidden magic (MUST)
@@ -21,6 +24,6 @@ No reflection / `unstructured.Unstructured` / raw GVK assembly / `map[string]any
 
 - **Data capture:** `VolumeCaptureSpec.DataRef` is a single optional pointer (≤1 PVC per node), never a slice; extra volumes are child snapshot nodes.
 - **Manifest capture — never empty:** the SDK does NOT inject the source object — supplying ≥1 manifest target is the domain's responsibility. Every snapshot MUST capture at least its own source object's manifest (a single-object domain snapshot passes its own source identity; the namespace-root aggregator always includes its own Namespace object), so the target set is never empty. `EnsureManifestCapture` fails closed with `ErrEmptyManifest` before any cluster mutation, and the MCR CRD rejects an empty `spec.targets` via CEL.
-- **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a decision (a domain reacts with `Fail(GraphPlanningFailed)`; the namespace-root ignores it, first plan wins). `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips re-planning the leg via `ManifestCaptureNeeded`.
+- **Manifest capture — independent leg, frozen set:** the manifest and volume legs are INDEPENDENT declarations; the SDK never derives or injects the data-leg PVC into the manifest targets. A domain that wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a decision; a domain reacts with `Fail(GraphPlanningFailed)`. CURRENT (51eb6c2): namespace-root ignores this signal and first plan wins. That exception is not reusable guidance: the active target adopts an existing committed root MCR without recomputing targets. `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips re-planning the leg via `ManifestCaptureNeeded`.
 
 See the full 8-point contract (naming bans, file layout, no accidental abstractions, the 30-minute litmus) in `.cursor/rules/demo-code-quality.mdc`.

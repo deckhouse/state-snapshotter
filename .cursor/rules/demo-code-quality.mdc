@@ -73,7 +73,10 @@ Reading the code, the boundary must be unambiguous; no grey zones. If you ask "i
 the boundary is leaking.
 
 - Domain owns: source validation, child planning, domain-specific objects.
-- SDK owns: conditions, ownerRefs, capture orchestration, request lifecycle.
+- SDK owns: ownerRefs, capture orchestration, request lifecycle, and optimistic-lock writes to the
+  domain-owned status fields and lifecycle phase.
+- Core owns: the `Ready` condition and `captureState.commonController` latches. The SDK and domain
+  only read them.
 
 ## 6. Zero accidental abstractions (MUST)
 
@@ -99,9 +102,10 @@ successfully.
   wants a PVC's YAML captured lists that PVC in `Targets` explicitly (alongside its own source object). Once
   the MCR exists `EnsureManifestCapture` ADOPTS it (idempotently publishes the name; never patches
   `spec.targets`) and then SIGNALS `ErrManifestTargetsDrift` if the declared set differs — a signal, not a
-  decision (a domain reacts with `Fail(GraphPlanningFailed)`; the namespace-root ignores it, first plan
-  wins). `spec.targets` immutability is enforced at the apiserver by a CRD CEL rule; a caller skips
-  re-planning the leg via `ManifestCaptureNeeded`.
+  decision; a domain reacts with `Fail(GraphPlanningFailed)`. CURRENT (51eb6c2): namespace-root ignores
+  this signal and first plan wins. That exception is not reusable guidance: the active target adopts an
+  existing committed root MCR without recomputing targets. `spec.targets` immutability is enforced at the
+  apiserver by a CRD CEL rule; a caller skips re-planning the leg via `ManifestCaptureNeeded`.
 
 ## 8. Litmus
 

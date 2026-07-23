@@ -100,8 +100,10 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshotWithOwner(ctx cont
 	// Barrier 2 (ADR §6.2 — "finalize Ready ONLY after domain phase=Finished") + domain-failure bubble.
 	// The SAME shared fold is applied to the SnapshotContent's OWN Ready in
 	// reconcileCommonSnapshotContentStatus (forContent=true), so both post-bind Ready writers agree and a
-	// domain phase=Failed / not-yet-Finished propagates up the content-aggregation tree. forContent=false
-	// keeps the raw domain reason/message for the domain CR's user-facing Ready.
+	// domain phase=Failed / not-yet-Finished propagates up the content-aggregation tree.
+	// CURRENT (51eb6c2): forContent=false keeps the raw domain reason/message on the namespaced owner.
+	// TARGET (active plan): it uses canonical DomainCaptureFailed and embeds those details in
+	// Condition.Message.
 	status, reason, message = applyDomainPhaseFold(owner, false, status, reason, message)
 	// Fold a vanished declared child into the owner mirror (main-detected structural degradation; the
 	// content's own Ready stays intact — only the namespaced user surface degrades, because d8 download
@@ -194,7 +196,7 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 //     domain-phase twin of the data-leg terminal that already lives on the content (VolumeCaptureFailed).
 //   - mirrorReadyToOwnerSnapshot applies it to the owning Snapshot's mirrored Ready (forContent=false).
 //
-// It only ever DOWNGRADES a Ready (never upgrades False->True):
+// CURRENT (51eb6c2) behavior only ever DOWNGRADES a Ready (never upgrades False->True):
 //   - phase=Failed -> Ready=False. forContent=true uses the canonical, tree-propagating terminal reason
 //     ReasonDomainCaptureFailed (the domain's free-form reason is NOT in terminalChildContentFailureReasons,
 //     so a parent content would otherwise misread a failed domain child as pending); forContent=false keeps
@@ -204,6 +206,11 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 //     may still be running consistency actions (fs freeze/unfreeze, verify) after publishing its objects.
 //   - phase="" (non-domain owner) or owner nil -> unchanged (verbatim). The content reconcile re-runs on the
 //     owner-status watch when the phase advances, so this converges without a dedicated wake-up.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): phase=Failed uses
+// ReasonDomainCaptureFailed for BOTH the content and namespaced owner; the original free-form domain
+// reason/message is embedded in Condition.Message. childrenSettled then reads child Ready only and has no
+// direct phase fallback.
 func applyDomainPhaseFold(owner *unstructured.Unstructured, forContent bool, status metav1.ConditionStatus, reason, message string) (metav1.ConditionStatus, string, string) {
 	if owner == nil {
 		return status, reason, message
@@ -233,8 +240,9 @@ func applyDomainPhaseFold(owner *unstructured.Unstructured, forContent bool, sta
 	return status, reason, message
 }
 
-// domainFailedMessage composes the SnapshotContent-side message for a domain phase=Failed fold, preserving
-// the domain's original reason/message (falling back to the pre-fold content message, then a generic).
+// domainFailedMessage currently composes the SnapshotContent-side message for a domain phase=Failed fold,
+// preserving the domain's original reason/message (falling back to the pre-fold content message, then a
+// generic). The active target reuses the same canonical message contract for the namespaced owner.
 func domainFailedMessage(freason, fmsg, fallback string) string {
 	switch {
 	case freason != "" && fmsg != "":

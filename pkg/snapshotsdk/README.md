@@ -13,6 +13,11 @@
 > SDK v1 scope is **capture-only** (snapshot planning: child snapshots + data capture +
 > manifest capture + lifecycle barriers). Restore is a separate sanctioned boundary
 > (`pkg/snapshotsdk/transform`) and is out of scope here.
+>
+> **Contract transition.** Labels below distinguish **CURRENT (51eb6c2)** behavior from the
+> **TARGET** of the active namespace-root-MCR-before-`Planned` plan. Target notes are handoff context,
+> not claims about APIs or guards available in this revision; only the signatures shown by this
+> revision can be called.
 
 ## Consuming the SDK from another module
 
@@ -49,9 +54,10 @@ domain reads it back as its failure channel.
 4. The controller hands this to the SDK, which creates the capture requests, publishes the refs
    and the captured source, and stamps the domain lifecycle phase.
 5. In the normal leaf/simple-parent path the controller declares every capture leg and then
-   **barrier 1** (`MarkPlanned`, `phase=Planned`).
-6. The core controller captures the legs, materializes the `SnapshotContent`, flips the per-leg
-   latches, and writes `Ready`.
+   **barrier 1** (`MarkPlanned`, `phase=Planned`). The claim-gated generic binder may already have
+   eagerly created and bound the `SnapshotContent` shell independently of this phase.
+6. `Planned` enables core leg/edge/status projection into that shell. The core captures the legs,
+   flips the per-leg latches, and writes `Ready`.
 7. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
    **barrier 2** (`ConfirmConsistent`, `phase=Finished`) after any consistency action.
 
@@ -78,7 +84,7 @@ Snapshot SDK
 Barrier 1: phase = Planned      (MarkPlanned)
   |
   v
-Core snapshot controller  --->  captures legs, materializes SnapshotContent,
+Core snapshot controller  --->  projects and captures legs in the eagerly bound SnapshotContent,
   |                              flips commonController latches, writes Ready
   v
 CoreCaptureOutcome
@@ -87,9 +93,14 @@ CoreCaptureOutcome
   |-- Capturing -> wait / requeue
 ```
 
-That is the normal flow. A subtree-gated aggregator deliberately freezes/publishes its children with
-`MarkPlanned` first and declares its own `EnsureManifestCapture(base − exclude)` leg afterwards; see
-"Manifest exclude for aggregators". The rest of this guide covers each step in detail.
+That is the normal flow.
+
+> **CURRENT implementation compatibility note — do not copy into a new aggregator.** At 51eb6c2 a
+> subtree-gated aggregator freezes/publishes its children with `MarkPlanned` first and declares its
+> own `EnsureManifestCapture(base − exclude)` leg after child manifests persist. The active TARGET
+> replaces this late-own-MCR/persisted-pre-gate ordering: published subtree plans and the node's own
+> MCR must exist before `Planned`. The current behavior remains documented only so maintainers can
+> understand and replace it safely.
 
 ## What the snapshot SDK is and why it exists
 
@@ -163,7 +174,7 @@ The domain team **no longer implements by hand**:
 
 There is **no `ChildrenSnapshotReady` condition**. The domain lifecycle is a single field —
 `status.captureState.domainSpecificController.phase` — that the SDK writes on the domain's behalf.
-It takes four values:
+The table describes **CURRENT (51eb6c2)** behavior:
 
 | Phase | Meaning | Set by |
 |---|---|---|
@@ -171,6 +182,9 @@ It takes four values:
 | `Planned` | **barrier 1**: the declared child/excluded set is frozen and core projection may start; a subtree-gated aggregator may declare its own manifest leg afterwards | `MarkPlanned` |
 | `Finished` | **barrier 2**: the domain finished its side (incl. consistency actions) | `ConfirmConsistent` |
 | `Failed` | terminal: the domain hit an unrecoverable error | `Fail` / `Reject` |
+
+**TARGET (not implemented in this revision):** `Planned` proves the complete capture plan is
+published, including this node's MCR and selected data plan. This target does not add a phase.
 
 Two properties matter:
 
@@ -185,8 +199,9 @@ Two properties matter:
   `Ready` on both the `SnapshotContent` and its owning snapshot. The domain **reads** `Ready` back
   (via the adapter and `CoreCaptureOutcome`) as its failure channel.
 
-`phase>=Planned` is the handoff: the core controller waits for barrier 1 before it takes over the
-`SnapshotContent`.
+`phase>=Planned` is the current projection handoff: the core may already have an eagerly created and
+bound `SnapshotContent` shell, but waits for barrier 1 before projecting capture legs, child edges,
+latches, and aggregate status into it.
 
 ## Where the contract lives (interface map)
 
@@ -223,8 +238,8 @@ outcome to declare barrier 2 (or stop):
    declares for this node. The manifest and data legs are **independent declarations**: if the
    domain also captures a PVC's data and wants that PVC's YAML, it lists the PVC in the manifest
    targets explicitly. The SDK never derives manifest targets from the data leg.
-4. **Barrier 1** (`MarkPlanned`) — "everything is planned"; the core waits for exactly this before
-   it takes over the `SnapshotContent`.
+4. **Barrier 1** (`MarkPlanned`) — in the current implementation, freezes child/excluded membership
+   and enables core projection into the possibly already bound `SnapshotContent` shell.
 5. **Barrier 2** (`ConfirmConsistent`) — declared once `CoreCaptureOutcome` reports every leg
    captured, after any consistency action (e.g. fs unfreeze).
 
@@ -315,9 +330,9 @@ func (r *MySnapshotReconciler) capture() snapshotsdk.CaptureSDK {
 - `VolumeCaptureProvider` — the data-capture backend; the default is the storage-foundation
   `VolumeCaptureRequest`.
 
-Optional dependencies are supplied via `Option`s. An **aggregator** that builds a manifest leg
-spanning objects its children also capture needs the subresource REST client for
-`SubtreeManifestIdentities` (see the manifest-exclude section):
+Optional dependencies are supplied via `Option`s. **CURRENT (51eb6c2):** an existing aggregator that
+uses the persisted-subtree compatibility path needs the subresource REST client for
+`SubtreeManifestIdentities` (see the current-compatibility section):
 
 ```go
 snapshotsdk.New(r.Client, r.APIReader, provider, snapshotsdk.WithSubresourceREST(restClient))
@@ -415,10 +430,12 @@ calls; the barrier-2 outcome switch comes last. Classify the documented terminal
 sentinels (`ErrChildrenSetFrozen`, `ErrEmptyManifest`, `ErrManifestTargetsDrift`) as shown below;
 return other errors so the reconcile retries.
 
-A subtree-gated aggregator is the exception: it calls `EnsureChildren`, then `MarkPlanned` to freeze
-the child set and let the core bind child contents, then waits on `SubtreeManifestIdentities` and
-declares its own manifest leg. Calling `MarkPlanned` before that late manifest leg is intentional,
-not a partially planned leaf. The PoC `DemoVirtualMachineSnapshot` controller is the reference.
+> **CURRENT implementation compatibility note — not reusable guidance.** A subtree-gated
+> aggregator at 51eb6c2 calls `EnsureChildren`, then `MarkPlanned` to freeze the child set and enable
+> core projection (content shells may already be eagerly bound), waits on persisted
+> `SubtreeManifestIdentities`, and declares its own manifest leg later. The PoC
+> `DemoVirtualMachineSnapshot` demonstrates this behavior only as migration input. The active TARGET
+> replaces it with published plan identities and own MCR before `Planned`.
 
 ### Import-mode short-circuit
 
@@ -481,9 +498,11 @@ into status, never patching `spec.targets` — and only THEN, if this reconcile 
 **different** set (compared as **sets** by `(apiVersion, kind, name)`; order and duplicates do not
 matter), it **signals** `snapshotsdk.ErrManifestTargetsDrift`. Drift is a **signal, not a
 decision**: the name is already published, so the leg is established regardless — the **caller**
-decides what to do. A domain typically reacts with `sdk.Fail(GraphPlanningFailed)`; the
-namespace-root aggregator **ignores** it (it recomputes a shifting set over a live namespace, and
-the first plan wins). Immutability of `spec.targets` is the apiserver's job: the MCR CRD's CEL
+decides what to do. A domain typically reacts with `sdk.Fail(GraphPlanningFailed)`. **CURRENT
+(51eb6c2):** the namespace-root aggregator ignores it because it recomputes a shifting set over a
+live namespace and the first plan wins. The active TARGET adopts an existing committed root MCR
+without recomputing targets, so the current exception is not reusable guidance. Immutability of
+`spec.targets` is the apiserver's job: the MCR CRD's CEL
 transition rule (`self.targets == oldSelf.targets`) rejects any change — the SDK itself never
 patches the targets. An identical re-declaration is a no-op.
 
@@ -663,8 +682,8 @@ VM Snapshot
 is **not** several `DataRef`s but several **child** snapshot nodes (each with its single PVC).
 
 The canonical model is **one logical data capture per snapshot** (Variant A, cardinality ≤1; see
-`api/storage/v1alpha1` `SnapshotContent.dataRef` — it too is a single pointer). That is why the
-field is a single pointer, not a slice:
+`api/storage/v1alpha1` `SnapshotContent.status.data` — it too is a single optional binding). That is
+why the field is a single pointer, not a slice:
 
 ```go
 type VolumeCaptureSpec struct {
@@ -675,21 +694,22 @@ type VolumeCaptureSpec struct {
 - **`DataRef == nil`** → a manifest-only snapshot: the SDK does not create a VCR and does not
   publish a name (an explicit no-op).
 - **`DataRef != nil`** → a normal data capture of a single PVC.
-- In the demo, `resolveDemoVirtualDiskDataRef` returns `*snapshotsdk.Target` (a PVC), or `nil` for a
-  manifest-only disk, or a non-empty "pending" message when the PVC is not present yet.
+
+`DataRef == nil` is available to a domain whose own CRD/CSD contract permits a manifest-only node.
+The currently served PoC `DemoVirtualDisk` CRD requires a PVC and rejects a manifest-only disk at
+admission, so its unreachable nil-PVC controller branch is not a reference for this SDK capability.
 
 > A `[]Target` slice is impossible here **by design**: the type itself forbids "several data
 > captures on one snapshot". PVC multiplicity is expressed only through child nodes. The only
-> place a list of targets actually exists is the unstructured wrapper over the foundation CRD
-> `VolumeCaptureRequest` (`spec.targets[]`) inside `internal/storagefoundation`; the SDK always
-> puts exactly one element there.
+> foundation CRD itself also has one target: the unstructured wrapper in
+> `internal/storagefoundation` writes the singular `VolumeCaptureRequest.spec.target`.
 
 ### How to build it (example: disk → its PVC)
 
 ```go
 pvcName := source.Spec.PersistentVolumeClaimName
 if pvcName == "" {
-	return nil, "", nil // manifest-only disk: DataRef stays nil
+	return nil, "", nil // only if this domain's CRD/CSD explicitly permits a manifest-only node
 }
 pvc := &corev1.PersistentVolumeClaim{}
 if err := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); err != nil {
@@ -770,6 +790,12 @@ child `Ready` rollup, but on the core-derived capture outcome of **its own** nod
 pattern is a switch on `CoreCaptureOutcome` (`Failed` checked FIRST), with the consistency action
 gated on `childrenSettled` OR the domain's own freeze-deadline:
 
+**CURRENT (51eb6c2):** core child terminality accepts `Ready=True`, terminal `Ready=False`, or a
+direct `phase=Finished|Failed` fallback. **TARGET (not implemented here):** `childrenSettled` reads
+Ready only — `Ready=True` is success, terminal `Ready=False` is failure, and absent/pending Ready is
+not settled. A namespaced domain failure becomes `Ready=False/DomainCaptureFailed`; the original
+domain reason and message are embedded in `Condition.Message`. There is no direct phase fallback.
+
 ```go
 switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 case snapshotsdk.CaptureOutcomeFailed:
@@ -795,12 +821,11 @@ default: // CaptureOutcomeCapturing
 }
 ```
 
-> **Why NOT a loop over `IsReasonTerminal(child.ReadyReason)`.** Stopping on each child's terminal
-> reason and otherwise waiting for every child's `AllLegsCaptured` is **dangerous**: a child can fail
-> with a domain free-form reason that is not in `TerminalReadyReasons`, and such a loop hangs forever.
-> `childrenSettled` counts a failure as terminal too (not only success), and `CaptureOutcomeFailed`
-> bubbles the core's `ChildrenFailed` — together they cover both a child failure and a child hang (the
-> latter via the domain freeze-deadline).
+> **Why domains still consume `childrenSettled` instead of rebuilding it.** In the current
+> implementation a child can fail with a domain free-form Ready reason outside
+> `TerminalReadyReasons`; in the target, the core canonicalizes that failure to
+> `DomainCaptureFailed`. In both cases the core owns the classification and latch. Domain code uses
+> `childrenSettled` (plus its freeze deadline), rather than maintaining a second terminality catalog.
 
 For **fine-grained** per-child diagnostics there is `ChildrenCaptureStates(ctx, adapter)`: it resolves
 the declared child refs and returns, for each, its `Ready` status/reason/message and `AllLegsCaptured`
@@ -808,17 +833,18 @@ the declared child refs and returns, for each, its `Ready` status/reason/message
 domain child kind); a child not found yet has an empty `Ready` and `AllLegsCaptured=false`. This is a
 read-only inspection, NOT a replacement for the gate above.
 
-## Manifest exclude for aggregators — `SubtreeManifestIdentities` (optional)
+## CURRENT manifest exclude compatibility — `SubtreeManifestIdentities`
 
-This capability is only for **aggregators** whose own manifest leg spans objects their descendant
+At 51eb6c2 this capability is used by **aggregators** whose own manifest leg spans objects their descendant
 snapshots already capture (e.g. a namespace-root Snapshot, or a VM whose disk children capture part
 of its objects). It builds the aggregator's MCR as `EnsureManifestCapture(base − exclude)`, where
 the exclude set is everything the subtree already captured.
 
-Because those identities become available only after child contents are bound and persisted, the
-reference order is intentionally split: `EnsureChildren` → `MarkPlanned` → wait for
+Because those identities currently become available only after child contents are bound and persisted,
+the current order is intentionally split: `EnsureChildren` → `MarkPlanned` → wait for
 `SubtreeManifestIdentities` → `EnsureManifestCapture(base − exclude)` → barrier-2 outcome. This is
-the only documented exception to the normal "all Ensure calls before MarkPlanned" recipe.
+the only current exception to the normal "all Ensure calls before MarkPlanned" recipe and is slated
+for replacement, not reuse.
 
 `SubtreeManifestIdentities(ctx, adapter)` returns the union of object identities captured across the
 node's DIRECT children subtrees. It requires the subresource REST client
@@ -827,6 +853,10 @@ if any subtree is not fully persisted or a child has not bound its content yet, 
 `snapshotsdk.ErrSubtreeIdentitiesPending` and the caller requeues — a partial exclude is never
 returned. A node with no children returns an empty set. A leaf/parent that does not aggregate
 overlapping manifests does not need this at all.
+
+This persisted-only ordering is **CURRENT implementation documentation, not a recipe for new
+aggregators**. The active TARGET keeps the external capability/endpoint but changes its semantics to
+read published manifest plans before `Planned`, using persisted MCPs only as a post-reap fallback.
 
 **Built-in pre-gate.** Before touching the subresource the method consults **its own** node's
 `CoreCaptureState().ChildSubtreesManifestsPersisted` — the core-computed latch "the subtrees of ALL
@@ -881,9 +911,9 @@ them via `CoreCaptureOutcome=Failed` and simply stops, it does not re-drive them
 
 Take the demo implementation as a starting point and adapt it to your type:
 1. `internal/controllers/demo/snapshot_adapter.go` — the adapter;
-2. `virtualdisksnapshot_controller.go` (a leaf with PVC data capture) **or**
-   `virtualmachinesnapshot_controller.go` (a parent with children, manifest-only) — the reconcile
-   skeleton.
+2. `virtualdisksnapshot_controller.go` — the current leaf skeleton.
 
-This is the reference implementation: the demo controllers in the `sds-unified-snapshots-poc` repo
-are deliberately kept as executable documentation of the SDK.
+The demo controllers live in `sds-unified-snapshots-poc`. Its current
+`virtualmachinesnapshot_controller.go` is useful only for understanding the split-barrier behavior
+being replaced; do not copy that aggregator ordering into a new integration. The active plan updates
+the executable reference to the target contract.

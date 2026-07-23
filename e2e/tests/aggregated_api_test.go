@@ -94,8 +94,8 @@ func decodeSubtreeIdentities(data []byte) ([]subtreeManifestIdentity, error) {
 	return resp.Identities, nil
 }
 
-// subtreeIdentityKey renders the exclude-match key (apiVersion|kind|namespace|name); uid disambiguates a
-// recreated object but is not part of the dedup key, matching the server/SDK contract.
+// subtreeIdentityKey renders the exclude/de-dup key (apiVersion|kind|namespace|name). UID is optional
+// diagnostic metadata only; it does not distinguish a recreated object for plan matching.
 func subtreeIdentityKey(id subtreeManifestIdentity) string {
 	return id.APIVersion + "|" + id.Kind + "|" + id.Namespace + "|" + id.Name
 }

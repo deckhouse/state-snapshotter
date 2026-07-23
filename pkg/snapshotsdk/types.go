@@ -55,10 +55,11 @@ const ExcludeLabelKey = storagev1alpha1.ExcludeLabelKey
 // storage-foundation VolumeCaptureRequest.
 type Target = storagefoundation.Target
 
-// Reason is a stable, machine-readable condition reason published by the SDK on behalf of the domain. The
-// domain chooses the reason for its own terminal contract failures (for example "InvalidSourceRef" or
-// "GraphPlanningFailed"); recoverable waits such as a source/PVC that may still appear use ReportProgress
-// instead of a terminal Reason. The SDK never invents domain semantics.
+// Reason is a stable, machine-readable domain failure reason published by the SDK in
+// status.captureState.domainSpecificController.reason. The domain chooses it for its own terminal contract
+// failures (for example "InvalidSourceRef" or "GraphPlanningFailed"); recoverable waits such as a source/PVC
+// that may still appear use ReportProgress instead of a terminal Reason. The SDK never invents domain
+// semantics and never writes Ready conditions.
 type Reason string
 
 // Phase is the domain-owned capture lifecycle carried on
@@ -96,6 +97,11 @@ type DomainCaptureState struct {
 	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed). Planning is an optional
 	// explicit pre-barrier value; the SDK has no MarkPlanning verb, so SDK-first controllers normally leave
 	// phase empty until MarkPlanned.
+	//
+	// CURRENT (51eb6c2): Planned freezes child/excluded membership and enables projection, but a
+	// subtree-gated aggregator may still publish its own MCR later. The active
+	// namespace-root-MCR-before-Planned target makes Planned prove the complete plan; that validation is not
+	// implemented by this revision.
 	Phase Phase
 	// Reason/Message carry the failure detail when Phase=Failed.
 	Reason  string
@@ -117,15 +123,25 @@ type CoreCaptureState struct {
 	// legs). It is the completeness signal a domain reads — orthogonal to success — to time a barrier-2 action
 	// (e.g. fs unfreeze) that must fire even when a child data snapshot failed. nil = no direct children (leaf)
 	// or not computed yet; true once every direct child is terminal.
+	//
+	// CURRENT (51eb6c2): the core also accepts child phase=Finished/Failed as a terminal fallback. TARGET
+	// (active namespace-root-MCR-before-Planned plan; not implemented here): Ready is the only input —
+	// Ready=True is success, terminal Ready=False is failure, and absent/pending Ready is not settled. A
+	// namespaced domain failure uses Ready=False/DomainCaptureFailed and embeds its original domain
+	// reason/message in Condition.Message.
 	ChildrenSettled *bool
-	// ChildSubtreesManifestsPersisted is the core-computed "the subtrees of ALL declared direct children are
-	// fully persisted (every descendant durably archived its manifests)" latch
+	// CURRENT (51eb6c2): ChildSubtreesManifestsPersisted is the core-computed "the subtrees of ALL declared
+	// direct children are fully persisted (every descendant durably archived its manifests)" latch
 	// (captureState.commonController.childSubtreesManifestsPersisted). It excludes this node's own manifests,
 	// so it can be true before this node creates its own MCR; a childless node is vacuously true. It is NOT a
 	// capture leg: it does NOT participate in AllLegsCaptured or CoreCaptureOutcome. The SDK reads it as the
 	// built-in pre-gate of SubtreeManifestIdentities (a non-nil false short-circuits to
 	// ErrSubtreeIdentitiesPending without any REST call). nil = the adapter does not map it (pre-gate off,
 	// backward compatible) or not computed yet.
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): planned subtree
+	// identities replace this snapshot-side persisted pre-gate; durable content persistence remains a
+	// post-capture Ready concern.
 	ChildSubtreesManifestsPersisted *bool
 }
 
@@ -216,10 +232,14 @@ type CaptureOutcomeResult struct {
 }
 
 // ChildCaptureState is the read-only per-child view the domain inspects via ChildrenCaptureStates —
-// diagnostics/inspection only. It MUST NOT be used to gate a consistency action: looping on each child's
-// terminal Ready reason hangs forever on a child that fails with a domain free-form reason (not in
-// TerminalReadyReasons). Gate the consistency action on this node's own CoreCaptureState().ChildrenSettled
-// / CoreCaptureOutcome (or a domain freeze-deadline) instead — see CaptureOutcome and ChildrenSettled.
+// diagnostics/inspection only. It MUST NOT be used to replace the core's ChildrenSettled gate.
+//
+// CURRENT (51eb6c2): a namespaced domain failure may surface a free-form Ready reason outside
+// TerminalReadyReasons, so client-side loops over terminal reasons can hang. TARGET (active
+// namespace-root-MCR-before-Planned plan; not implemented here): the core publishes canonical
+// Ready=False/DomainCaptureFailed and preserves the original domain reason/message in Condition.Message;
+// core ChildrenSettled then reads Ready only. Domains still consume the resulting latch rather than
+// reconstructing it from this diagnostic view.
 type ChildCaptureState struct {
 	// Ref is the child snapshot's published ref (status.childrenSnapshotRefs entry).
 	Ref SnapshotChildRef
@@ -235,9 +255,9 @@ type ChildCaptureState struct {
 
 // VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at
 // most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
-// multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A nil
-// DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
-// name.
+// multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A non-nil
+// DataRef becomes the foundation VCR's singular spec.target. A nil DataRef means the snapshot is
+// manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no name.
 type VolumeCaptureSpec struct {
 	// DataRef is the snapshot's single data-leg PVC, or nil for a manifest-only snapshot.
 	DataRef *Target

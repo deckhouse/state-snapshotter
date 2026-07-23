@@ -28,8 +28,14 @@ package v1alpha1
 // and SnapshotContent.status.subtreeManifestsPersisted.
 const (
 	// ConditionReady indicates the object is ready for use. On SnapshotContent it is the single
-	// aggregate; on Snapshot and domain CRs it mirrors the bound SnapshotContent.Ready plus a bubbled
-	// domain phase=Failed reason/message.
+	// aggregate; on Snapshot and domain CRs it mirrors the bound SnapshotContent.Ready.
+	//
+	// CURRENT (51eb6c2): a domain phase=Failed reason/message is bubbled verbatim onto the namespaced
+	// owner's Ready.
+	//
+	// TARGET (active namespace-root-MCR-before-Planned plan; not implemented in this revision): a domain
+	// phase=Failed is mirrored as Ready=False with canonical reason DomainCaptureFailed; the original
+	// domain reason and message are embedded in the condition message.
 	ConditionReady = "Ready"
 )
 
@@ -81,7 +87,12 @@ const (
 // GraphPlanningFailed, CreateChildFailed) — a manifest-phase failure surfaces on the root Ready as one
 // of these, NOT via a latch condition. The reason string values are defined canonically in core
 // pkg/snapshot; they are listed here as literals to keep the api module dependency-free. Domain-supplied
-// reasons (e.g. SourceNotFound) are free-form and NOT in this set.
+// reasons (e.g. SourceNotFound) are free-form and NOT in this set in the current implementation.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented in this revision):
+// DomainCaptureFailed becomes the canonical terminal Ready reason for namespaced domain failures, with
+// the original free-form domain reason/message preserved in Condition.Message. childrenSettled then
+// classifies children from Ready alone and does not read domain phase as a fallback.
 var TerminalReadyReasons = map[string]struct{}{
 	"ListFailed":               {},
 	"ManifestCheckpointFailed": {},

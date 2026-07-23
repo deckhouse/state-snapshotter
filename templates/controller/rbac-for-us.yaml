@@ -117,12 +117,12 @@ rules:
   - "snapshotcontents/status"
   verbs: ["get", "update", "patch"]
 
-# SnapshotContent subtree-manifest-identities: the controller both SERVES this aggregated subresource
-# (group subresources.state-snapshotter.deckhouse.io) and CONSUMES it — the root Namespace reconciler uses
-# the SDK ManifestExclude capability, whose REST call loops back through kube-apiserver -> APIService ->
-# this controller, authenticated as this SA. Read-only get; the reconciler stays content-free (it reads
-# captured identities, never SnapshotContent objects). Fail-closed 409 while any subtree checkpoint is not
-# Ready.
+# CURRENT (51eb6c2): the controller both SERVES and CONSUMES the SnapshotContent
+# subtree-manifest-identities aggregated subresource. The root Namespace reconciler's SDK call loops through
+# kube-apiserver -> APIService -> this controller, authenticated as this SA; hence this read-only get.
+# TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): namespace-root uses a
+# core-internal planned-target walker and this SA no longer needs the self-call grant. The endpoint remains
+# available for external aggregators, so remove this permission only with the runtime call site.
 - apiGroups: ["subresources.state-snapshotter.deckhouse.io"]
   resources: ["snapshotcontents/subtree-manifest-identities"]
   verbs: ["get"]
@@ -153,8 +153,9 @@ rules:
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
 # binder (C5) binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
 # (unifiedbootstrap.BuiltInVolumeSnapshotPair) — this static grant is its RBAC source of truth and does NOT
-# depend on any CustomSnapshotDefinition / the dynamic domain-RBAC hook (which grants the out-of-process
-# storage-foundation domain SA, not this controller SA).
+# depend on any CustomSnapshotDefinition or the 030-domain-rbac hook. That hook grants the core controller
+# SA rights for CSD-derived GVRs and read-only snapshot-GVR access to the storage-foundation DataExport SA;
+# it grants nothing to an out-of-process domain-controller SA.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -180,11 +181,10 @@ rules:
   verbs: ["get"]
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
-# Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
-# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD
-# condition AccessGranted=True. See docs/state-snapshotter-rework/operations/project-status.md for the
-# rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
-# until the AccessGranted hook lands).
+# Per rbac-source-of-truth, static controller RBAC stays domain-agnostic. The active
+# hooks/go/030-domain-rbac hook derives core-controller and DataExport access from eligible CSDs and signals
+# that core-side grant through AccessGranted=True. It does not own the domain controller's permissions;
+# every domain module ships its own SA rights statically in its Helm templates.
 
 ---
 # Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with

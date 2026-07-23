@@ -58,6 +58,17 @@ limitations under the License.
 //
 // # Lifecycle (capture-only, v1)
 //
+// CURRENT (51eb6c2): Planned freezes child/excluded membership and enables core projection. The generic
+// binder may already have eagerly created and bound the SnapshotContent shell; projection of capture
+// legs/edges/latches remains Planned-gated. A subtree-gated aggregator may still declare its own MCR after
+// Planned, as described below.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented by this package revision):
+// Planned proves the complete capture plan is published, including the node's own MCR and selected data
+// plan. Core childrenSettled uses child Ready only; namespaced domain failure is represented by canonical
+// Ready=False/DomainCaptureFailed with the original domain reason/message embedded in Condition.Message.
+// No target-only SDK signatures or guards should be inferred to exist in this revision.
+//
 // A typical leaf Reconcile resolves its source, drives the three planning legs, publishes the source,
 // marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
 // (barrier 2 = Finished) or stop on a core-owned failure:
@@ -79,10 +90,11 @@ limitations under the License.
 //	default: // CaptureOutcomeCapturing: wait
 //	}
 //
-// A subtree-gated aggregator is the deliberate exception to "all Ensure calls before MarkPlanned":
-// it publishes and freezes its child set with EnsureChildren + MarkPlanned first, then calls
-// SubtreeManifestIdentities and declares its own EnsureManifestCapture(base-minus-exclude) leg after
-// the child subtrees become durable. See the package README and the DemoVirtualMachineSnapshot reference.
+// CURRENT implementation compatibility note — not reusable external guidance: a subtree-gated aggregator
+// publishes and freezes its child set with EnsureChildren + MarkPlanned first, then calls
+// SubtreeManifestIdentities and declares its own EnsureManifestCapture(base-minus-exclude) leg after the
+// child subtrees become durable. The active target replaces this late-own-MCR/persisted-pre-gate ordering
+// with published plan identities and own MCR before Planned.
 //
 // # Restart-safe recipe
 //

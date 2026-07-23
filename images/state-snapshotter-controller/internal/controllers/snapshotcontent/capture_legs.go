@@ -389,6 +389,9 @@ func (r *SnapshotContentController) allDirectChildrenSubtreePlanned(ctx context.
 // child set — the same fail-closed-until-frozen discipline ChildrenReady uses. hasChildren=false means a leaf
 // node (no declared children): the caller leaves the latch nil, since a leaf has nothing to settle. Children
 // are read from the owner's fresh status; each is resolved by its ref GVK in the owner's namespace.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here) preserves this traversal and
+// fail-closed behavior but makes childSnapshotSettled Ready-only, with no direct phase fallback.
 func (r *SnapshotContentController) allDirectChildrenSettled(ctx context.Context, owner *unstructured.Unstructured) (settled bool, hasChildren bool, err error) {
 	refs, found, err := unstructured.NestedSlice(owner.Object, "status", "childrenSnapshotRefs")
 	if err != nil {
@@ -429,9 +432,9 @@ func (r *SnapshotContentController) allDirectChildrenSettled(ctx context.Context
 	return true, true, nil
 }
 
-// childSnapshotSettled reports whether a child snapshot has gone terminal for childrenSettled purposes —
-// captured-OK OR failed. Terminal = child Ready==True, OR domain phase in {Finished,Failed}, OR a terminal
-// Ready=False reason (IsReasonTerminal). Both terminal channels are read explicitly:
+// childSnapshotSettled implements CURRENT (51eb6c2) terminality for childrenSettled: child Ready==True,
+// domain phase in {Finished,Failed}, or a terminal Ready=False reason (IsReasonTerminal). Both current
+// terminal channels are read explicitly:
 //
 //   - The domain phase=Failed is read DIRECTLY off status.captureState.domainSpecificController.phase. The
 //     core bubbles a domain's FREE-FORM phase=Failed reason VERBATIM onto the child Ready (ready_mirror.go),
@@ -443,6 +446,11 @@ func (r *SnapshotContentController) allDirectChildrenSettled(ctx context.Context
 //
 // Ready==True is the plain captured-OK channel (e.g. a manifest-only leaf child). No observedGeneration gate
 // is needed: the snapshot spec is immutable (no recapture) and the latch is monotonic.
+//
+// TARGET (active namespace-root-MCR-before-Planned plan; not implemented here): this helper reads Ready
+// only. Ready=True is success; Ready=False with a canonical terminal reason is failure; absent/pending Ready
+// is not settled. A domain phase=Failed is mirrored onto the namespaced child as
+// Ready=False/DomainCaptureFailed, with the original domain reason/message embedded in Condition.Message.
 func childSnapshotSettled(child *unstructured.Unstructured) bool {
 	switch storagev1alpha1.SnapshotCapturePhase(ownerDomainCapturePhase(child)) {
 	case storagev1alpha1.SnapshotCapturePhaseFinished, storagev1alpha1.SnapshotCapturePhaseFailed:
