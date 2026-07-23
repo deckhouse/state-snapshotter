@@ -194,15 +194,20 @@ func TestClassifierFailsClosedForSharedKinds(t *testing.T) {
 		t.Fatalf("foreign ObjectKeeper must NOT classify as ours (fail closed)")
 	}
 
-	// VolumeSnapshotContent: ours iff owned by an ObjectKeeper.
-	vscOurs := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapshot-x", nil, kindObjectKeeper)
+	// VolumeSnapshotContent: ours iff owned by an ObjectKeeper (fresh managed VSC) OR a SnapshotContent
+	// (durable VSC after the ownership handoff re-parents it). Both must classify as ours; anything else foreign.
+	vscOursKeeper := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapshot-x", nil, kindObjectKeeper)
+	vscOursContent := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapshot-y", nil, kindSnapshotContent)
 	vscForeign := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapcontent-user", nil, "VolumeSnapshot")
-	oc := ownedByKind(kindObjectKeeper)
-	if !oc(vscOurs) {
+	oc := anyOf(ownedByKind(kindObjectKeeper), ownedByKind(kindSnapshotContent))
+	if !oc(vscOursKeeper) {
 		t.Fatalf("VSC owned by ObjectKeeper must classify as ours")
 	}
+	if !oc(vscOursContent) {
+		t.Fatalf("durable VSC owned by SnapshotContent (post-handoff) must classify as ours")
+	}
 	if oc(vscForeign) {
-		t.Fatalf("VSC not owned by our ObjectKeeper must NOT classify as ours (fail closed)")
+		t.Fatalf("VSC not owned by our ObjectKeeper/SnapshotContent must NOT classify as ours (fail closed)")
 	}
 
 	// VolumeSnapshot: ours iff managed=true or orphan-VS name.

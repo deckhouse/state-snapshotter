@@ -2,7 +2,7 @@
 
 - **Дата:** 2026-07-22 (rev. 3 — полировка контракта: терминология «authoritative protection state», философия «protection = часть protocol», жизненный цикл marker §6.5, инварианты P7–P10, идемпотентный backfill и доказуемый gate §6.3)
 - **Статус:** Draft (architecture / design) — модель принята; полируется формулировка контракта до реализации
-- **Тип:** design/ (модель данных и инварианты; не нормативный контракт — нормативная выжимка позже уходит в `spec/`)
+- **Тип:** design/ (модель данных и инварианты; не нормативный контракт — нормативная выжимка — в [`../spec/system-spec.md`](../spec/system-spec.md), раздел «Delete protection (admission)»)
 - **Область:** модель **принадлежности** объекта к дереву снапшота и отдельно — модель **защиты от прямого удаления**, а также их следствие для delete guard. Реализация (admission-механизм, политики, код) — вне документа.
 
 > Документ **не переписывает** план `docs/2026-07-20-1640-unified-snapshot-delete-protection.plan.md` и не содержит задач реализации, CEL/VAP, YAML-политик, кода или TODO. Задача — зафиксировать **модель данных**, чтобы delete guard стал механическим следствием одного признака, а не набором эвристик по каждому Kind.
@@ -352,5 +352,5 @@ Delete-protection закрывает **прямое** пользовательс
 ## 12. Связанные документы
 
 - План реализации защиты: `docs/2026-07-20-1640-unified-snapshot-delete-protection.plan.md` (этот документ предшествует его блоку определения принадлежности; предикаты плана упрощены до проверки одного `delete-protected` marker + UPDATE-защита marker + exempt + break-glass, а спец-исключение root убрано, т.к. root не помечается).
-- **Этот документ — SSOT контракта delete-protection** (marker-инвариант, DELETE+UPDATE, break-glass, exempt-акторы, backfill-gate, fail-fast). Отдельного `spec/system-spec.md` в репозитории нет; при его появлении нормативная выжимка должна ссылаться сюда, а не копировать. Пользовательское (не нормативное) резюме — раздел «Delete protection» в `docs/USER_GUIDE.md` / `docs/USER_GUIDE_RU.md`.
+- **Этот документ — SSOT контракта delete-protection** (marker-инвариант, DELETE+UPDATE, break-glass, exempt-акторы, backfill-gate, fail-fast). Нормативная выжимка (не копия) — раздел «Delete protection (admission)» в [`../spec/system-spec.md`](../spec/system-spec.md); он ссылается сюда за полной моделью и инвариантами P1–P10. Пользовательское (не нормативное) резюме — раздел «Delete protection» в `docs/USER_GUIDE.md` / `docs/USER_GUIDE_RU.md`.
 - ADR overview: `arch/.../2026-06-29-unified-snapshots-overview.md` — семантика деградации (`ChildSnapshotDeleted`/`Lost`) и корзины; delete guard — ортогональный слой поверх этой семантики.

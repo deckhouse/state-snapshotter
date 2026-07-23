@@ -1306,9 +1306,7 @@ func annotateAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, n
 // deleteWithAllowDelete annotates a protected object with the break-glass annotation and then deletes it —
 // the supported teardown path for a delete-protected node the suite created. A NotFound on either step is
 // tolerated (the object may already be gone / unprotected). The ns parameter mirrors annotateAllowDelete
-// and handles namespaced kinds too; current callers only pass cluster-scoped ("") protected kinds.
-//
-//nolint:unparam // ns is kept for the namespaced-kind teardown path (future callers) and API symmetry.
+// and handles both cluster-scoped ("") kinds (MCP / chunk) and namespaced kinds (domain snapshot CRs).
 func deleteWithAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) error {
 	if err := annotateAllowDelete(ctx, gvr, ns, name); err != nil && !apierrors.IsNotFound(err) {
 		return err

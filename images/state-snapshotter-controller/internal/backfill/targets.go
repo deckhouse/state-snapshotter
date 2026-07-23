@@ -40,8 +40,15 @@ const (
 	// It is set by storage-foundation; the backfill reads it ONLY as a migration provenance signal.
 	labelManaged = storagev1alpha1.APIGroup + "/managed"
 
-	// kindObjectKeeper is the ownerRef kind that marks a CSI VolumeSnapshotContent as one of ours.
+	// kindObjectKeeper is the ownerRef kind a freshly created managed CSI VolumeSnapshotContent carries
+	// (storage-foundation stamps ObjectKeeper as the initial durable retention controller-owner).
 	kindObjectKeeper = "ObjectKeeper"
+	// kindSnapshotContent is our EXCLUSIVE CRD and the steady-state controller-owner of a managed CSI
+	// VolumeSnapshotContent AFTER the SnapshotContent ownership handoff (EnsureVolumeSnapshotContentsOwnedByContent
+	// re-parents the VSC, REPLACING the ObjectKeeper controller-owner with a SnapshotContent one). A retained
+	// durable VSC therefore ends up owned by SnapshotContent, not ObjectKeeper, so the classifier MUST match
+	// both — otherwise every already-handed-off legacy VSC is missed and the provable Deny gate lies.
+	kindSnapshotContent = "SnapshotContent"
 )
 
 // DefaultTargets is the canonical set of protected kinds and their migration classifiers. Kinds whose CRD
@@ -68,9 +75,11 @@ func DefaultTargets() []Target {
 		// name. A vetoed (managed=false) or foreign VolumeSnapshot is left untouched.
 		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshot"), IsOurs: anyOf(managedIsTrue, hasNamePrefix(apinames.PrefixOrphanVS))},
 
-		// CSI VolumeSnapshotContent is SHARED: ours iff owned by one of our ObjectKeepers (the durable
-		// handoff owner storage-foundation stamps). No ownerRef to our keeper => not ours.
-		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshotContent"), IsOurs: ownedByKind(kindObjectKeeper)},
+		// CSI VolumeSnapshotContent is SHARED: ours iff owned by one of our ObjectKeepers (the owner a
+		// freshly created managed VSC carries) OR by one of our SnapshotContents (the owner it carries at
+		// steady state after the ownership handoff). Both owner kinds are ours-exclusive, so a foreign VSC —
+		// owned by neither — is left untouched (fail closed).
+		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshotContent"), IsOurs: anyOf(ownedByKind(kindObjectKeeper), ownedByKind(kindSnapshotContent))},
 	}
 }
 
