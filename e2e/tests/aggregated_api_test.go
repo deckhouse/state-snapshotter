@@ -407,7 +407,9 @@ func aggregatedAPISpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			child, ok := firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
 			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot child node")
-			Expect(suiteDyn.Resource(demoVMSnapshotGVR).Namespace(ns).Delete(ctx, child.name, metav1.DeleteOptions{})).To(Succeed())
+			// A child domain snapshot CR is delete-protected: break-glass before this deliberate deletion so
+			// the degradation trigger works under enforcement=Deny (a harmless no-op annotation under Audit).
+			Expect(deleteWithAllowDelete(ctx, demoVMSnapshotGVR, ns, child.name)).To(Succeed())
 			Expect(waitSnapshotReadyFalseReason(ctx, ns, degradedRoot, storagev1alpha1.ReasonChildSnapshotDeleted, 2*suiteCfg.captureReadyTO+time.Minute)).
 				To(Succeed(), "root must fold to Ready=False/ChildSnapshotDeleted after the child CR is deleted")
 

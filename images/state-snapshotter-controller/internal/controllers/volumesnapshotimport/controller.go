@@ -181,6 +181,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				controllercommon.SnapshotSubjectRefFromObject(vs),
 			),
 		}
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		storagev1alpha1.StampDeleteProtected(content)
 		if cErr := r.Create(ctx, content); cErr != nil && !errors.IsAlreadyExists(cErr) {
 			return ctrl.Result{}, cErr
 		}

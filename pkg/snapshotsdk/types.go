@@ -94,8 +94,9 @@ type DomainCaptureState struct {
 	ExcludedRefs []ExcludedObjectRef
 	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
 	Phase Phase
-	// Reason/Message carry the failure detail when Phase=Failed.
-	Reason  string
+	// Reason is a machine-readable detail (progress codes while Planning; failure reason when Failed).
+	Reason string
+	// Message is a human-readable detail in any phase (progress or failure).
 	Message string
 }
 
@@ -171,26 +172,10 @@ type ChildSpec struct {
 	Object client.Object
 }
 
-// FailSpec describes a Phase=Failed outcome the domain wants published (invalid source, missing
-// artifact, …). It generalizes the various failure paths into one verb (Reject). The failure surfaces to
-// users through the core-derived Ready (the core mirrors domain phase=Failed into Ready=False).
-type FailSpec struct {
-	// Reason is the machine-readable failure reason (domain-chosen), stored on
-	// captureState.domainSpecificController.reason.
-	Reason Reason
-	// Message is an optional human-readable explanation.
-	Message string
-	// Cause, when set, is logged/returned so the manager can surface the underlying error.
-	Cause error
-	// Requeue asks the caller to requeue (for example, an artifact that may appear later). When false the
-	// outcome is treated as terminal-until-spec-change and the SDK returns no error and no requeue intent.
-	Requeue bool
-}
-
 // CaptureOutcome is the tri-state the SDK derives for the domain from the core's leg latches plus the
-// terminal Ready reason. The domain switches its wait loop on it (Captured -> ConfirmConsistent,
-// Failed -> stop (the core owns and bubbles the terminal; the domain must still compensate its consistency
-// action, e.g. fs unfreeze), Capturing -> wait).
+// terminal Ready reason. The domain switches its wait loop on it: Captured -> publish phase=Finished via
+// DomainCaptureStatus; Failed -> stop (the core owns and bubbles the terminal Ready, but the domain must
+// still compensate its consistency action, e.g. fs unfreeze); Capturing -> wait.
 type CaptureOutcome int
 
 const (

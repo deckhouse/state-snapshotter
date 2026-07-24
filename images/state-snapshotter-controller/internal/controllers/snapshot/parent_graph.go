@@ -306,6 +306,9 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 		}
 		child.SetGroupVersionKind(gvk)
 		child.SetOwnerReferences([]metav1.OwnerReference{controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
+		// Child snapshot node introduced into the tree: stamp delete-protection into the CREATE payload
+		// (delete-protection-contract.md §6.1).
+		storagev1alpha1.StampDeleteProtected(child)
 		return r.Client.Create(ctx, child)
 	}
 	base := child.DeepCopy()

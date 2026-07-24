@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
@@ -226,6 +227,14 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
 			}
 		}
+		// Fail-fast self-report (P5): a snapshot CR with its OWN deletionTimestamp is doomed — it is being
+		// torn down and cannot be restored/downloaded. While a finalizer still holds it in Terminating, it
+		// must honestly say so instead of lingering at a stale Ready=True. This mirrors the symmetric
+		// content-deleting mirror below (patchSnapshotNotReadyFromContent with ReasonDeleting). Best-effort:
+		// on a plain (finalizer-less) object it may already be gone, which is fine.
+		if err := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, snapshot.ReasonDeleting, "this snapshot is being deleted"); err != nil {
+			logger.V(1).Info("Failed to self-report Deleting on the terminating snapshot; ignoring", "error", err.Error())
+		}
 		// Mark the bound SnapshotContent boundSnapshotDeleted on parent Snapshot deletion (watch-driven, no
 		// reverse content ref). We deliberately do NOT remove the content's parent-protect finalizer here: in
 		// the durable-content tree the content's Kubernetes GC owner is its root ObjectKeeper (root content)
@@ -368,6 +377,9 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		contentObj.SetOwnerReferences([]metav1.OwnerReference{*contentOwnerRef})
+		// Stamp the authoritative delete-protection state into the CREATE payload: SnapshotContent is a
+		// durable tree node and must appear in the API already protected (delete-protection-contract.md §6.1).
+		storagev1alpha1.StampDeleteProtected(contentObj)
 
 		if err := r.Create(ctx, contentObj); err != nil {
 			if !errors.IsAlreadyExists(err) {
@@ -562,6 +574,9 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 			},
 			Spec: wantSpec,
 		}
+		// Our ObjectKeeper is a protocol node (retention link of the tree): stamp delete-protection into
+		// the CREATE payload (delete-protection-contract.md §6.1, §8.3).
+		storagev1alpha1.StampDeleteProtected(objectKeeper)
 
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)

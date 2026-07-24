@@ -191,6 +191,26 @@ The capture source is selected by `spec.source` (immutable, exactly one member w
 - **Retention after deletion.** The stored `SnapshotContent` is retained for a TTL (configured on the controller) after the `Snapshot` object is deleted, anchored by an `ObjectKeeper`. This lets a captured state outlive the request object. After the TTL expires, the content and its checkpoints are garbage-collected.
 - **No background load.** The module only does work in response to explicit requests; it runs no continuous background capture.
 
+## Delete protection
+
+The internal objects that make up a snapshot tree are protected from accidental direct deletion by an
+admission delete-guard. This closes an incident class where deleting a child object (e.g. a managed CSI
+`VolumeSnapshot`) from a UI silently degrades the root `Snapshot` while the durable data still exists.
+
+- **What is protected.** Internal tree nodes only: child `Snapshot`s, `SnapshotContent`,
+  `ManifestCheckpoint` and its chunks, `ObjectKeeper`, and the managed CSI `VolumeSnapshot` /
+  `VolumeSnapshotContent`. They carry the marker `state-snapshotter.deckhouse.io/delete-protected: "true"`.
+- **What is NOT protected.** The **root `Snapshot`** is not marked — deleting it is the normal way to tear
+  down the whole tree (the controllers then remove the internal objects for you). Objects that are not part
+  of a snapshot tree are never affected.
+- **Force-delete (break-glass).** To delete a protected object directly, set the annotation
+  `deckhouse.io/allow-delete: "true"` on it, then delete. The marker itself cannot be removed or changed by
+  regular users; the annotation is the only supported override and is reversible until the delete happens.
+- **Rollout mode.** The guard ships in `Audit` mode (`settings.deleteGuard.enforcement: Audit`) — it observes
+  and warns but does not block. An administrator switches it to `Deny` to enforce.
+
+Normative contract: `state-snapshotter-rework/design/delete-protection-contract.md`.
+
 ## Notes and limitations
 
 - A `Snapshot` captures **only namespaced** resources in its own namespace; the cluster-scoped `Namespace` object itself is not captured.

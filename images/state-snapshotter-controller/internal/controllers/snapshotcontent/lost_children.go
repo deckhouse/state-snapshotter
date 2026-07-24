@@ -112,11 +112,18 @@ func (r *SnapshotContentController) detectLostFromFrozenEdges(
 			}
 			return "", "", fmt.Errorf("get child SnapshotContent %q: %w", name, getErr)
 		}
-		crPresent, existsErr := r.childOwningSnapshotExists(ctx, child)
+		if child.GetDeletionTimestamp() != nil {
+			// Fail-fast (P5): a frozen child SnapshotContent that is Terminating is doomed — its durable data
+			// is going away and cannot be recovered (UID-derived names, immutable edge set). Treat it as gone
+			// immediately instead of waiting for the object to disappear.
+			return snapshot.ReasonChildSnapshotLost,
+				fmt.Sprintf("child SnapshotContent %q is being deleted; the captured child snapshot is unrecoverably lost (content names are UID-derived and the frozen child edge set is immutable) — a new snapshot is required", name), nil
+		}
+		crAlive, existsErr := r.childOwningSnapshotAlive(ctx, child)
 		if existsErr != nil {
 			return "", "", existsErr
 		}
-		if crPresent {
+		if crAlive {
 			// The child CR is alive (or was manually restored): this edge is healthy. Checking the
 			// CR live — instead of the monotonic status.boundSnapshotDeleted latch — is what lets a restore
 			// self-heal the owner mirror back to Ready.
@@ -182,17 +189,27 @@ func (r *SnapshotContentController) detectLostFromDeclaredRefs(
 			}
 			return "", "", gErr
 		}
+		if child.GetDeletionTimestamp() != nil {
+			// Fail-fast (P5): a declared child CR that is Terminating is doomed and cannot relink into the
+			// frozen edge set the tree will build (UID-derived content names; ns domain does not re-plan
+			// after Planned). Treat it as lost now rather than after it disappears.
+			return snapshot.ReasonChildSnapshotLost,
+				fmt.Sprintf("declared child snapshot %s %q is being deleted after the plan was frozen (phase>=Planned); it cannot relink into the frozen child edge set — the child is unrecoverably lost, a new snapshot is required", kind, name), nil
+		}
 	}
 	return "", "", nil
 }
 
-// childOwningSnapshotExists reports whether the child SnapshotContent's owning child snapshot CR (resolved
-// live via the content's own spec.snapshotRef) currently exists. It is the authoritative "is the child CR
-// present?" signal for the frozen-edge fold: unlike the monotonic status.boundSnapshotDeleted latch it flips back
-// to true after a manual restore recreates the (deterministically-named) child CR, so the owner mirror
-// self-heals. A content with no resolvable snapshotRef is treated as present (fail-open — never a false
-// terminal). Namespace comes from the ref (child snapshots are namespaced); the CR is read UNCACHED.
-func (r *SnapshotContentController) childOwningSnapshotExists(ctx context.Context, child *storagev1alpha1.SnapshotContent) (bool, error) {
+// childOwningSnapshotAlive reports whether the child SnapshotContent's owning child snapshot CR (resolved
+// live via the content's own spec.snapshotRef) is currently ALIVE — present AND not Terminating. It is the
+// authoritative "is the child CR still a live tree node?" signal for the frozen-edge fold: unlike the
+// monotonic status.boundSnapshotDeleted latch it flips back to true after a manual restore recreates the
+// (deterministically-named) child CR, so the owner mirror self-heals. A CR that exists but carries a
+// deletionTimestamp is treated as NOT alive (fail-fast, P5): a Terminating child is doomed, so the fold
+// degrades the owner immediately instead of waiting for the object to disappear. A content with no
+// resolvable snapshotRef is treated as alive (fail-open — never a false terminal). Namespace comes from the
+// ref (child snapshots are namespaced); the CR is read UNCACHED.
+func (r *SnapshotContentController) childOwningSnapshotAlive(ctx context.Context, child *storagev1alpha1.SnapshotContent) (bool, error) {
 	ref := child.Spec.SnapshotRef
 	if ref == nil || ref.Name == "" || ref.APIVersion == "" || ref.Kind == "" {
 		return true, nil
@@ -208,6 +225,10 @@ func (r *SnapshotContentController) childOwningSnapshotExists(ctx context.Contex
 			return false, nil
 		}
 		return false, getErr
+	}
+	if owner.GetDeletionTimestamp() != nil {
+		// Terminating owner CR: doomed, treat as absent (fail-fast).
+		return false, nil
 	}
 	return true, nil
 }
