@@ -1,7 +1,7 @@
 ---
 name: unified-snapshot-delete-protection
 created: 2026-07-20
-updated: 2026-07-22
+updated: 2026-07-27
 overview: "API-уровневая защита unified-снапшот дерева от прямого удаления по МОДЕЛИ rev.2 (design/delete-protection-contract.md): вводится ОДИН канонический marker state-snapshotter.deckhouse.io/delete-protected: \"true\"; admission проверяет ТОЛЬКО его (+ exempt-акторы + break-glass), НЕ вычисляя принадлежность по ownerRef/finalizer/followObjectRef и НЕ зная про Kind'ы. Инцидент-первопричина: пользователь под super-admin удалил из UI дочерний CSI VolumeSnapshot, root Snapshot деградировал (Ready=False/ChildSnapshotDeleted), durable-слой цел, но in-cluster restore TBD → практически необратимо. Финализаторы НЕ являются механизмом запрета (объект виснет в Terminating; KEP-2839 Liens не реализован). Модель rev.2 (что изменилось относительно первой редакции плана): убрана дизъюнкция per-Kind предикатов (managed==true ИЛИ ownerRef; controller-ownerRef; followObjectRef-префикс; artifact-protect ИЛИ ownerRef) — заменена единым marker'ом, проставляемым на write-пути тем, кто вводит объект в дерево; спец-исключение root по Kind убрано (root marker НЕ получает: root — член дерева, но НЕ delete-protected, его DELETE = штатный teardown). Membership и delete-protection разведены: marker отвечает ТОЛЬКО за политику удаления, идентичность дерева держат логические рёбра. ЗАЩИТА ОТ ОБХОДА: admission защищает не только DELETE, но и UPDATE marker'а (нельзя снять/изменить delete-protected==true, кроме exempt-актора; единственный поддерживаемый обход — аннотация deckhouse.io/allow-delete, при которой marker ОСТАЁТСЯ, а DELETE разрешается из-за аннотации). Объём защиты (какие узлы получают marker): дочерние Snapshot/доменные снапшот-CR (demo.state-snapshotter.deckhouse.io и sds-unified-snapshots-poc.deckhouse.io), CSI VolumeSnapshot нашего дерева (marker при адопции managed=true, storage-foundation VS-домен), SnapshotContent (все наши), ManifestCheckpoint+ManifestCheckpointContentChunk (все наши), managed CSI VolumeSnapshotContent (marker в ИСХОДНОМ CREATE-payload у storage-foundation — НЕ post-create patch: между Create и patch нет ordering, объект мог бы кратко существовать в API без защиты; успешный Create — атомарная точка защищённого VSC. Нейтральная причина «объект появился в API → уже должен быть защищён», БЕЗ VCR/CSI-execution семантики), наш ObjectKeeper. Ordering invariant (P8): создаваемые нами узлы несут marker в CREATE-payload, adopted (CSI VS) — patch ДО публикации edge. NON-GOAL: план НЕ меняет контракт VCR, его retry/terminal-семантику, CSI operation ownership и восстановление утраченного VSC — это отдельный VCR-план (volume-capture-request-contract.md). Cross-repo (Вариант A): VS/VSC marker обязателен для полноты защиты и живёт в storage-foundation → в scope плана входит минимальная storage-foundation-часть (marker write-path на VS-адопции и VSC-создании) + необходимый bump версии SDK/констант + сборка/тесты + отдельный коммит; полный переезд прочих SDK-consumer'ов остаётся вне scope. Break-glass — аннотация deckhouse.io/allow-delete: \"true\" (литерал/полярность как у deckhouse-controller). Exempt-акторы (username, КРИТЕРИЙ — подтверждать инициатора каждой штатной delete-операции по audit/event/admission-request, а не только по ServiceAccount в Deployment): generic-garbage-collector, namespace-controller, d8-system:deckhouse (TTL ObjectKeeper), d8-state-snapshotter:controller, d8-storage-foundation:controller, verified d8-storage-foundation:snapshot-controller (VSC reclaim/lifecycle). system:masters НЕ exempt. Backfill (rollout-gate): ЕДИНЫЙ механизм — cluster-wide list-and-patch (List каждого защищаемого Kind → строгая legacy-классификация «наш объект» → patch marker → повторный полный проход), ИДЕМПОТЕНТЕН ПО КОНТРАКТУ (можно запускать неограниченное число раз — нужно для rollback/фикса классификатора). Gate доказуемый: «ВСЕ classifier-protected объекты имеют marker» (повторный проход не находит своего немаркированного), а НЕ недоказуемое «uncovered не существует вообще». Opportunistic reconcile-backfill допустим как ДОПОЛНЕНИЕ, но НЕ как gate. Rollout Audit→Deny: admission поставляется с Helm-value deleteGuard.enforcement=Audit|Deny (default Audit); переключение на Deny — пользовательское rollout-действие ПОСЛЕ достижения доказуемого gate; admission с ПЕРВОГО дня проверяет ТОЛЬКО marker (никакого derived-fallback по эвристикам в guard — до готовности backfill работает в Audit, а не читает старые сигналы). Enforcement-режимы контракта — Audit|Deny (Warn возможен как продуктовая rollout-политика, не архитектурный инвариант). Marker authority: steady-state — первую запись marker делает ТОЛЬКО authoritative write-path (P9); ЕДИНСТВЕННОЕ исключение — versioned migration backfill для legacy-объектов (не нарушение контракта); migration — legacy ownerRef/dataRef/followObjectRef/finalizer используются ТОЛЬКО для backfill-классификации, admission их НИКОГДА не читает. Терминология: delete-protected — authoritative protection state (authority/immutable/write-path-owned), а НЕ служебная метка; delete protection — часть snapshot protocol (защищаем корректность дерева, а не «важность» объекта — потому ObjectKeeper/VSC защищены, root нет). Marker lifecycle (P10): marker НЕ снимается в штатном жизненном цикле — легальный teardown/GC/reclaim удаляет объект как EXEMPT-актор при СОХРАНЁННОМ marker'е (пути «снять marker → удалить» нет; новый штатный удаляющий актор → в exempt, а не снятие marker). Break-glass в rev.3 — PERSISTENT/REVERSIBLE (НЕ одноразовый): allow-delete — сохраняемое явное разрешение, действует пока пользователь не снимет или объект не удалён; до начала DELETE полностью обратима. Одноразовость нереализуема без отдельного механизма (admission рассматривает DELETE, а не предварительный UPDATE; ни VAP, ни пользователь не снимут аннотацию «в той же операции»); токен/expiring-approval/delete-request CR — future hardening, вне scope. Формулировка для docs/операторов: «Persistent break-glass is accepted for rev.3. Operators should set it immediately before DELETE and remove it if DELETE is abandoned. Expiring or single-use authorization is a future hardening item.» Fail-fast по deletionTimestamp (сохранено): Terminating-объект обречён → наши CR self-report'ят Ready=False/Deleting при собственном Terminating, fold lost_children трактует deletionTimestamp!=nil на ребёнке как удалённого (Deleted при Ready-контенте / Lost иначе); каскад не деградирует ложно (гейт на живого owner'а). Семантика сознательного удаления НЕ меняется (ChildSnapshotDeleted/ChildSnapshotLost). ADR overview — правка в рабочем дереве БЕЗ коммита; spec — в том же коммите, что код. Prerequisite P1 — верификация уже сделанной DomainCaptureStatus-миграции (базовая линия SDK), НЕ workstream миграции. Деплой admission/редеплой и прогон e2e/переключение Audit→Deny на кластере — вне DoD, делает пользователь."
 todos:
   - id: p1-verify-sdk-baseline
@@ -41,6 +41,12 @@ isProject: false
 ---
 
 # Единый план: unified-snapshot delete protection (marker-модель rev.2)
+
+> **Актуализация решения, 2026-07-27.** Guard всегда использует strict `Deny`; настройки
+> `deleteGuard.enforcement` в ModuleConfig нет. Исключительное прямое удаление выполняется через
+> `deckhouse.io/allow-delete="true"`. Это решение заменяет прежние rollout-формулировки `Audit→Deny`
+> в историческом frontmatter/todo описании выше. Backfill покрывает legacy-объекты marker'ом, но admission
+> всегда принимает решение только по marker и не выводит membership из эвристик.
 
 ## Контекст (инцидент и диагноз)
 
@@ -114,8 +120,8 @@ marker (P2) ставится на том же write-пути.
    идёт от нового актора — его добавляют в exempt, а не учат контроллер снимать marker.
 6. **Backfill** — единый cluster-wide list-and-patch; **идемпотентен по контракту** (можно запускать
    сколько угодно раз); gate доказуемый (см. ниже).
-7. **Rollout** — enforcement `Audit|Deny` (default Audit); `Audit→Deny` — пользовательское действие после
-   достижения backfill-gate.
+7. **Enforcement** — всегда strict `Deny`; пользовательской настройки режима нет. Исключения оформляются
+   только через явный break-glass.
 
 **Membership ≠ delete-protection:** marker — только политика удаления; идентичность дерева держат
 логические рёбра. **Marker authority:** steady-state — только authoritative write-path; legacy-сигналы
@@ -151,18 +157,17 @@ snapshot-протокола. Единственное требование эт�
 Без VS/VSC marker защита не закрывает инцидентный путь, а VS/VSC-код в **storage-foundation**. Поэтому
 в план входит **минимальная** storage-foundation-часть (`p2b`): marker на VS-адопции и VSC-создании +
 необходимый bump версии SDK/константы + сборка/тесты + отдельный коммит. Полный переезд прочих
-SDK-consumer'ов — вне scope. `Deny` не включать до готовности P2b (иначе часть пути не покрыта).
+SDK-consumer'ов — вне scope. P2b обязан быть готов для полного write-path покрытия; strict guard защищает
+все уже маркированные объекты.
 
-## Rollout Audit → Deny
+## Enforcement и backfill
 
-- **Фаза 1:** admission установлен с `deleteGuard.enforcement=Audit` (default); marker write-path работает;
-  backfill выполняется (можно перезапускать — идемпотентен).
-- **Фаза 2:** повторный проход не находит ни одного своего объекта без marker (доказуемый gate — «все
-  classifier-protected имеют marker», НЕ недоказуемое «uncovered не существует вообще») → пользователь
-  переключает `enforcement=Deny`.
+- Admission всегда блокирует запрещённые операции над маркированными объектами.
+- Пользовательского `Audit`-режима нет; исключительное прямое удаление требует break-glass-аннотацию.
+- Backfill можно перезапускать: повторный проход без своих немаркированных объектов доказывает полноту
+  покрытия legacy-набора. До покрытия немаркированный legacy-объект guard не защищает.
 
-Смена `Audit→Deny` — **пользовательское rollout-действие**, не часть кода. Манифест по умолчанию — `Audit`,
-чтобы поставка модуля ничего не ломала.
+Strict enforcement не добавляет derived-fallback: admission по-прежнему читает только marker.
 
 ## Принятые решения (зафиксированы с пользователем)
 
@@ -174,7 +179,7 @@ SDK-consumer'ов — вне scope. `Deny` не включать до готов
 6. Семантика сознательного удаления НЕ меняется.
 7. ADR — правка в дереве без коммита; spec — в коммите с кодом.
 8. Cross-repo VS/VSC — Вариант A (минимум в scope).
-9. Backfill — единый list-and-patch; enforcement Audit default.
+9. Backfill — единый list-and-patch; guard всегда strict, исключение — только break-glass.
 
 ## Прогресс
 
@@ -184,7 +189,7 @@ SDK-consumer'ов — вне scope. `Deny` не включать до готов
 - [ ] `p2a-marker-writepath-core` — marker на write-пути в core.
 - [ ] `p2b-marker-writepath-storagefoundation` — marker VS/VSC (cross-repo, VSC — в CREATE-payload) + bump SDK.
 - [ ] `p3-marker-backfill` — единый list-and-patch backfill (идемпотентен) + доказуемый gate «все classifier-protected имеют marker».
-- [ ] `p4-delete-guard-admission` — DELETE-deny + UPDATE-защита marker; enforcement Audit|Deny; spec.
+- [ ] `p4-delete-guard-admission` — always-on DELETE-deny + UPDATE-защита marker; break-glass; spec.
 - [ ] `p5-deleting-failfast` — fold Terminating-детей + self-report Deleting + юнит/envtest + spec.
 - [ ] `p6-e2e` — deny/allow/каскад/Terminating/VSC-window + marker-immutability + адаптация существующих.
 - [ ] `p7-review` — deep review до «НАХОДОК НЕТ».
@@ -211,7 +216,7 @@ SDK-consumer'ов — вне scope. `Deny` не включать до готов
 - **storage-foundation** (`p2b`): свои правила репо (gofmt/lint/build); отдельный коммит; версия SDK.
 - **Воркспейс/CLAUDE.md:** ADR-репо — правки в дереве, коммит только по явному запросу; UI-слой — отдельный
   план; d8 CLI не трогаем.
-- Выкладка admission, переключение `Audit→Deny` и прогон e2e — ПОЛЬЗОВАТЕЛЬ.
+- Выкладка admission и прогон e2e — ПОЛЬЗОВАТЕЛЬ.
 
 ## Что изменилось (rev.2 → полировка контракта)
 
@@ -220,8 +225,9 @@ SDK-consumer'ов — вне scope. `Deny` не включать до готов
 - **Единый marker** вместо дизъюнкции per-Kind предикатов; **root не помечается** (спец-исключение убрано).
 - **Добавлен UPDATE-инвариант** (защита marker от снятия/изменения) — иначе защита обходится тривиально.
 - **VSC marker** — в исходном CREATE-payload у storage-foundation (объект в API уже защищён).
-- **Backfill — единый list-and-patch**; **derived-fallback в guard убран** (до backfill — Audit).
-- **Rollout Audit→Deny** через Helm-value (default Audit); переключение — пользовательское действие.
+- **Backfill — единый list-and-patch**; **derived-fallback в guard убран** (до backfill legacy-объект без
+  marker остаётся незащищённым).
+- **Always strict guard** без ModuleConfig-опции; исключения — только через break-glass.
 - **Cross-repo — Вариант A**: минимальная storage-foundation-часть в scope.
 - **WS1 → Prerequisite P1** (verification gate). **Файл/`name` переименованы** в `unified-snapshot-delete-protection`.
 
@@ -254,5 +260,5 @@ SDK-consumer'ов — вне scope. `Deny` не включать до готов
 
 Выполняет `start-plan` по завершении: (1) все `todos` → `status: completed` + зеркало `- [x]`;
 (2) `completed: <YYYY-MM-DD>`; (3) файл → `plans/done/` (slug и дата-префикс не менять). Вне DoD: push,
-merge SDK в main и релиз версии, выкладка модуля/admission, переключение `Audit→Deny`, прогон e2e на
+merge SDK в main и релиз версии, выкладка модуля/admission, прогон e2e на
 кластере, коммит ADR — по явному запросу пользователя.

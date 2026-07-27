@@ -45,12 +45,12 @@ removable until the DELETE starts. Removing the marker is never a supported bypa
 request, not merely a ServiceAccount in a Deployment). `system:masters` is **not** exempt. The exact list
 lives in the delete-guard template and the design contract referenced above.
 
-**Enforcement / rollout.** Helm value `deleteGuard.enforcement` (enum `Audit|Deny`, default `Audit`) drives
-`validationActions`; the module ships in `Audit` so installation breaks nothing. Switching to `Deny` is a
-user rollout action taken only after the backfill gate is proven — the one-shot, idempotent, cluster-wide
-list-and-patch backfill reports that **every classifier-protected object already carries the marker**. The
-migration classifier is the only place legacy provenance signals (ownerRef/finalizer/followObjectRef/name)
-are read; admission never reads them.
+**Enforcement.** The binding always uses `validationActions: [Deny]`; there is no ModuleConfig option that
+disables or weakens enforcement. Exceptional direct deletion uses the break-glass annotation above. The
+one-shot, idempotent, cluster-wide list-and-patch backfill remains responsible for marking legacy objects;
+until it covers an unmarked legacy object, admission does not protect that object. The migration classifier
+is the only place legacy provenance signals (ownerRef/finalizer/followObjectRef/name) are read; admission
+never reads them.
 
 **Fail-fast (orthogonal).** A protected node with `deletionTimestamp != nil` is treated as already lost;
 degradation semantics (`ChildSnapshotDeleted` / `ChildSnapshotLost`) are unchanged by delete protection.

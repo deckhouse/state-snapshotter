@@ -206,8 +206,8 @@ admission delete-guard. This closes an incident class where deleting a child obj
 - **Force-delete (break-glass).** To delete a protected object directly, set the annotation
   `deckhouse.io/allow-delete: "true"` on it, then delete. The marker itself cannot be removed or changed by
   regular users; the annotation is the only supported override and is reversible until the delete happens.
-- **Rollout mode.** The guard ships in `Audit` mode (`settings.deleteGuard.enforcement: Audit`) — it observes
-  and warns but does not block. An administrator switches it to `Deny` to enforce.
+- **Always enforced.** There is no module setting that disables or weakens the guard. Use the break-glass
+  annotation above for an exceptional direct deletion.
 
 Normative contract: `state-snapshotter-rework/design/delete-protection-contract.md`.
 

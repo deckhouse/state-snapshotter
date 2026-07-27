@@ -974,7 +974,7 @@ func sweepOrphanedLeafSnapshotContents(ctx context.Context, leafNames []string) 
 		mcp, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "manifestCheckpointName")
 		GinkgoWriter.Printf("sweeping orphaned SnapshotContent %s (MCP %q)\n", contentName, mcp)
 		// SnapshotContent / ManifestCheckpoint are delete-protected: annotate break-glass before delete so
-		// the sweep works under admission enforcement=Deny (a no-op annotation under Audit).
+		// the sweep can proceed while the guard remains enforced.
 		if derr := deleteWithAllowDelete(ctx, snapshotContentGVR, "", contentName); derr != nil {
 			return fmt.Errorf("delete orphaned SnapshotContent %s: %w", contentName, derr)
 		}

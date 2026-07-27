@@ -500,23 +500,13 @@ func cleanupNestedTestCluster() {
 // the standard <MODULE>_MODULE_PULL_OVERRIDE convention (default "main"), matching what the
 // cluster_config path would apply. It only enables; the WaitForModuleReady calls below do the waiting.
 func ensureModulesEnabled(ctx context.Context) error {
-	var stateSnapshotterSettings map[string]interface{}
-	if envBool(os.Getenv(envDeleteGuard)) {
-		stateSnapshotterSettings = map[string]interface{}{
-			"deleteGuard": map[string]interface{}{
-				"enforcement": "Deny",
-			},
-		}
-	}
-
 	// The full module set the suite needs, with the dependency graph copied verbatim from
 	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
 	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
-	// dependency '...' is disabled"). The state-snapshotter settings enable Deny only for the
-	// opt-in delete-guard specs; other modules use their defaults. Each ModulePullOverride comes from
-	// <MODULE>_MODULE_PULL_OVERRIDE (defaulting to "main"), matching the alwaysCreateNew path.
+	// dependency '...' is disabled"). Each ModulePullOverride comes from <MODULE>_MODULE_PULL_OVERRIDE
+	// (defaulting to "main"), matching the alwaysCreateNew path.
 	specs := []storagekube.ModuleSpec{
-		{Name: moduleName, Version: 1, Enabled: true, Settings: stateSnapshotterSettings, ModulePullOverride: moduleTagFromEnv(moduleName)},
+		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
 		// storage-foundation requires state-snapshotter (module.yaml).
 		{Name: storageFoundationModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(storageFoundationModuleName), Dependencies: []string{moduleName}},
 		// The PoC module (demo controller + demo CRDs + demo CSDs) depends on state-snapshotter: its

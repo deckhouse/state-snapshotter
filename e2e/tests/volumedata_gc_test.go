@@ -446,8 +446,8 @@ func volumeDataGcSpecs() {
 			}).WithContext(ctx).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 
 			By("Deleting the root ObjectKeeper " + tree.okName)
-			// ObjectKeeper is delete-protected: break-glass before the deliberate deletion so the reclaim
-			// trigger works under admission enforcement=Deny (harmless annotation under Audit).
+			// ObjectKeeper is delete-protected: use break-glass before the deliberate deletion so the reclaim
+			// trigger can proceed while the guard remains enforced.
 			Expect(deleteWithAllowDelete(ctx, objectKeeperGVR, "", tree.okName)).To(Succeed())
 
 			// Generous teardown budget: OK deletion -> per-node ownerRef cascade (each node self-finalizes) ->

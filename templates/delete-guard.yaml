@@ -12,12 +12,10 @@ followObjectRef and never branches on Kind. Two invariants:
      EXCEPT by an exempt actor. Adding the break-glass annotation is allowed (it does not touch the marker);
      the marker STAYS and DELETE is permitted because of the annotation.
 
-Rollout: `deleteGuard.enforcement` (default Audit) drives validationActions. Switching to Deny is a USER
-rollout action taken only AFTER the backfill gate is proven (every classifier-protected object is marked).
-The module ships in Audit so installation breaks nothing.
+The guard always enforces these invariants. There is no module setting that weakens enforcement; operators
+use the explicit break-glass annotation for exceptional direct deletion. Backfill converges legacy objects
+into the marker-protected set, while admission continues to decide solely from the marker.
 */ -}}
-{{- $dg := .Values.stateSnapshotter.deleteGuard | default dict -}}
-{{- $enforcement := $dg.enforcement | default "Audit" -}}
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -122,12 +120,5 @@ metadata:
     module: "{{ .Chart.Name }}"
 spec:
   policyName: d8-{{ .Chart.Name }}-delete-guard
-  # Rollout gate: Audit (default) observes/annotates without blocking; Deny enforces. Switching to Deny is a
-  # user action performed only after the backfill gate is proven (see plan P3/P4).
   validationActions:
-{{- if eq $enforcement "Deny" }}
     - Deny
-{{- else }}
-    - Audit
-    - Warn
-{{- end }}

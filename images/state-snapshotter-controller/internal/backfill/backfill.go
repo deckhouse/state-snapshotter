@@ -73,8 +73,8 @@ type Report struct {
 	Kinds []KindReport
 }
 
-// OursUnmarkedTotal is the gate metric: the number of classifier-protected objects still lacking the
-// marker. The rollout gate to Deny is OursUnmarkedTotal == 0 on a verify pass.
+// OursUnmarkedTotal is the legacy coverage metric: the number of classifier-protected objects still
+// lacking the marker. Coverage is complete when it is zero on a verify pass.
 func (r Report) OursUnmarkedTotal() int {
 	var n int
 	for _, k := range r.Kinds {
@@ -99,7 +99,7 @@ func Apply(ctx context.Context, cl client.Client, targets []Target) (Report, err
 }
 
 // Verify runs one read-only pass (no writes) and reports how many classifier-protected objects still lack
-// the marker. Report.OursUnmarkedTotal() == 0 is the provable rollout gate for strict Deny.
+// the marker. Report.OursUnmarkedTotal() == 0 proves complete legacy marker coverage.
 func Verify(ctx context.Context, cl client.Client, targets []Target) (Report, error) {
 	return pass(ctx, cl, targets, false)
 }

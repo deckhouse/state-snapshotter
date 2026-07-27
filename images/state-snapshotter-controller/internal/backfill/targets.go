@@ -47,7 +47,7 @@ const (
 	// VolumeSnapshotContent AFTER the SnapshotContent ownership handoff (EnsureVolumeSnapshotContentsOwnedByContent
 	// re-parents the VSC, REPLACING the ObjectKeeper controller-owner with a SnapshotContent one). A retained
 	// durable VSC therefore ends up owned by SnapshotContent, not ObjectKeeper, so the classifier MUST match
-	// both — otherwise every already-handed-off legacy VSC is missed and the provable Deny gate lies.
+	// both — otherwise every already-handed-off legacy VSC is missed and legacy marker coverage is incomplete.
 	kindSnapshotContent = "SnapshotContent"
 )
 

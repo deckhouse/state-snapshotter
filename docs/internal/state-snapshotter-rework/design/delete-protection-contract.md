@@ -204,21 +204,22 @@ delete-protected  — политика удаления (один лейбл)
 
   - **Почему CREATE, а не post-create patch.** Между `Create(VSC)` и последующим `PATCH` нет гарантированного ordering, поэтому объект мог бы кратко существовать в API без защиты. `storage-foundation` **включает `delete-protected=true` в `metadata.labels` исходного create payload**; успешный `Create` — **атомарная точка появления уже защищённого VSC**, что устраняет окно между появлением VSC в API и применением delete-protection. Формулировка «ранний patch при создании» отвергнута как формально не закрывающая окно.
   - **Границы:** это изменение **не** меняет lifecycle, retry, terminal-семантику VCR, CSI operation ownership и восстановление утраченного VSC — они вне этого документа (см. отдельный VCR-план / `volume-capture-request-contract.md`). Здесь VSC рассматривается **только** как защищаемый durable-узел дерева.
-  - **До готовности backfill/write-path** непокрытые VSC защищаются не «точечным derived-fallback в guard», а тем, что admission работает в режиме **Audit** (см. §6.3); guard эвристик не читает.
+  - Непокрытые legacy-VSC не получают «точечный derived-fallback в guard»: до backfill они остаются вне marker-protection; guard эвристик не читает (см. §6.3).
 
 ### 6.3. Миграция (backfill)
 
-Объекты, созданные до введения protection state, его не имеют — особенно durable-слой (`SnapshotContent`, `ObjectKeeper`, MCP/чанки, retained VSC), переживающий namespace. Значит **строгий deny нельзя включать раньше**, чем protection state гарантирован на всех живых защищаемых узлах. Backfill — **единый cluster-wide list-and-patch** (List каждого защищаемого Kind → строгая legacy-классификация «наш объект» → patch protection state → повторный полный проход). legacy-сигналы (ownerRef/finalizer/followObjectRef/dataRef) читаются **только этим классификатором** и **никогда** admission'ом.
+Объекты, созданные до введения protection state, его не имеют — особенно durable-слой (`SnapshotContent`, `ObjectKeeper`, MCP/чанки, retained VSC), переживающий namespace. Backfill — **единый cluster-wide list-and-patch** (List каждого защищаемого Kind → строгая legacy-классификация «наш объект» → patch protection state → повторный полный проход). Legacy-сигналы (ownerRef/finalizer/followObjectRef/dataRef) читаются **только этим классификатором** и **никогда** admission'ом. Guard всегда работает в strict deny для маркированных объектов; немаркированный legacy-объект остаётся вне защиты до обработки backfill.
 
 - **Идемпотентность — часть контракта, не только реализации:** backfill **допускается запускать неограниченное число раз** (повторный запуск не меняет уже помеченные узлы и не трогает непринадлежащие). Это обязательное свойство, потому что backfill почти всегда придётся перезапускать после rollback, частичного обновления или исправления бага классификатора.
 - **Gate формулируется доказуемо.** Нельзя строго доказать «uncovered-объектов не существует вообще». Доказуемое (и только оно является gate'ом):
 
   > Все объекты, которые классификатор считает protected, имеют protection state.
 
-  Повторный проход, при котором классификатор не находит ни одного своего объекта без protection state, и есть критерий готовности к `Deny`.
-- До достижения этого критерия admission работает в режиме **Audit** (не strict deny и **не** derived-fallback по эвристикам). Opportunistic reconcile-backfill допустим как дополнение, но не как rollout-gate.
+  Повторный проход, при котором классификатор не находит ни одного своего объекта без protection state, доказывает полноту покрытия legacy-набора. Это критерий завершения backfill, а не переключатель enforcement.
+- До завершения backfill немаркированные legacy-объекты не защищены guard'ом. Admission не компенсирует это derived-fallback'ом по эвристикам. Opportunistic reconcile-backfill допустим как дополнение, но не заменяет cluster-wide backfill.
 
-> **Enforcement-режимы.** Контракт фиксирует два: **`Audit`** (наблюдение, rollout-фаза) и **`Deny`** (strict). `Warn` возможен как дополнительный первый режим, но это продуктовая политика rollout, а не архитектурный инвариант; по умолчанию оперируем `Audit|Deny`.
+> **Enforcement.** Guard всегда работает в strict `Deny`. Пользовательской настройки `Audit|Deny` нет:
+> исключительное прямое удаление выполняется через явную break-glass-аннотацию.
 
 ### 6.4. Снятие marker ≠ поддерживаемый break-glass
 
@@ -292,7 +293,7 @@ Root `Snapshot` (§3), legacy-VS virtualization, standalone-объекты marke
 - **P3. Marker устанавливается до публикации объекта в дерево** (для VS — patch в ветке `managed=true` до первой публикации; для создаваемых нами узлов, включая VSC, — **в исходном CREATE-payload**, §6.1–6.2).
 - **P4. Guard не вычисляет защиту** из ownerRef / finalizer / followObjectRef и не знает про Kind'ы; derived-fallback в guard отсутствует.
 - **P5. Отсутствие marker означает, что guard не блокирует `DELETE`** (чужие/standalone/root/vetoed — свободны).
-- **P6. Backfill (единый идемпотентный list-and-patch) завершается до включения strict deny**; gate доказуемый — «все classifier-protected имеют marker» (не «uncovered не существует»); до этого admission — в режиме `Audit`.
+- **P6. Backfill — единый идемпотентный list-and-patch для legacy-объектов**; его доказуемый критерий завершения — «все classifier-protected имеют marker» (не «uncovered не существует»). Guard всегда применяет strict deny к маркированным объектам; до покрытия конкретный немаркированный legacy-объект не защищён.
 - **P7. Protection state защищён от `UPDATE`:** при `delete-protected=="true"` снять/изменить label может только exempt-актор; break-glass (`allow-delete`) оставляет его на месте.
 - **P8. Обязательность до графа:** после публикации объекта в snapshot graph (edges/status/readiness) `delete-protected` уже обязан существовать. Для VSC это усилено: создание managed VSC считается незавершённым, пока protection state не записан (§6.2).
 - **P9. Право первой записи:** в **steady state** впервые установить protection state имеет право **только** authoritative write-path — владелец узла. **Единственное исключение — versioned migration backfill** для legacy-объектов (§6.3): он ставит marker существующим узлам один раз в миграции и потому не является нарушением контракта. Никакой другой контроллер не устанавливает marker «за компанию».
@@ -322,7 +323,7 @@ Root Snapshot
 - Сложность **переносится в контроллеры/SDK на write-путь** (проставить marker) — туда, где принадлежность и статус узла действительно известны.
 - Ложное срабатывание на чужой legacy-VS исключено по построению: чужому marker никто не ставит.
 
-Если marker где-то недостижим в срок — модель не рушится и **не** возвращает эвристики в guard: до достижения доказуемого gate admission работает в режиме `Audit`, а strict `Deny` включается только после того, как единый backfill гарантированно покрыл весь classifier-protected набор.
+Если marker legacy-объекта где-то недостижим в срок — модель не рушится и **не** возвращает эвристики в guard: объект остаётся незащищённым до исправления write-path/backfill. Strict `Deny` продолжает защищать все уже маркированные объекты.
 
 ### 10.1. Fail-fast: `deletionTimestamp != nil` на защищённом узле = уже удалён
 
@@ -344,7 +345,7 @@ Delete-protection закрывает **прямое** пользовательс
 - `followObjectRef` — механизмом retention/TTL;
 - финализаторы — teardown, а не delete-deny;
 - shared-kinds нельзя защищать по одному лишь Kind;
-- backfill завершается до строгого включения guard;
+- backfill обеспечивает marker-покрытие legacy-объектов; guard всегда строго защищает уже маркированные;
 - знание о принадлежности переносится на write-path, где оно действительно известно.
 
 ---

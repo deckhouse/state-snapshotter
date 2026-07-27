@@ -611,8 +611,8 @@ func childDegradationSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			childContent, _, _ := unstructured.NestedString(childObj.Object, "status", "boundSnapshotContentName")
 			Expect(childContent).NotTo(BeEmpty())
-			// Child SnapshotContent is delete-protected: break-glass before the deliberate deletion so the
-			// degradation trigger works under admission enforcement=Deny (harmless annotation under Audit).
+			// Child SnapshotContent is delete-protected: use break-glass before the deliberate deletion so
+			// the degradation trigger can proceed while the guard remains enforced.
 			Expect(deleteWithAllowDelete(ctx, snapshotContentGVR, "", childContent)).To(Succeed())
 
 			By("Asserting the root degrades to Ready=False (children leg) but the latch stays True")

@@ -29,10 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// envDeleteGuard gates the delete-guard e2e. It is opt-in because the ValidatingAdmissionPolicy must be
-// installed AND switched to enforcement=Deny on the cluster (the module ships in Audit; switching to Deny
-// is a deliberate operator rollout action after the backfill gate is proven — plan P4). Under Audit these
-// deny-expecting specs would fail, so the suite only runs them when the operator has enabled enforcement.
+// envDeleteGuard gates destructive delete-guard assertions. The policy itself always enforces protection;
+// the environment variable is only an explicit request to run cases that intentionally delete or mutate
+// protected snapshot-tree objects.
 const envDeleteGuard = "E2E_DELETE_GUARD"
 
 // A non-exempt identity for the marker-immutability / direct-delete cases. Group system:masters bypasses
@@ -56,8 +55,8 @@ func deleteGuardSpecs() {
 	Context("Delete guard (unified snapshot delete protection)", func() {
 		if !envBool(os.Getenv(envDeleteGuard)) {
 			// Register a single skipped spec so the suite documents why the block did not run.
-			It("is skipped unless "+envDeleteGuard+"=true (needs admission enforcement=Deny)", func() {
-				Skip(envDeleteGuard + " not set: the delete-guard VAP must be installed and switched to enforcement=Deny")
+			It("is skipped unless "+envDeleteGuard+"=true (runs destructive guard assertions)", func() {
+				Skip(envDeleteGuard + " not set: explicitly opt in to destructive delete-guard assertions")
 			})
 			return
 		}

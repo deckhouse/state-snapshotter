@@ -94,7 +94,7 @@ func init() {
 	flag.BoolVar(&runBackfillMode, "backfill", false,
 		"Run the one-shot cluster-wide delete-protection marker backfill (list-and-patch) and exit")
 	flag.BoolVar(&backfillVerifyOnly, "backfill-verify-only", false,
-		"With -backfill: only verify the rollout gate (read-only, no writes); exit non-zero if any classifier-protected object lacks the marker")
+		"With -backfill: only verify legacy marker coverage (read-only, no writes); exit non-zero if any classifier-protected object lacks the marker")
 }
 
 // buildTimeFromVersion extracts the UTC build timestamp embedded as the trailing
@@ -179,8 +179,8 @@ func main() {
 	}
 	log.Info("[main] kubernetes config has been successfully created.")
 
-	// One-shot backfill mode: stamp the delete-protection marker onto legacy nodes (or just verify the
-	// rollout gate) and exit. This never starts the controller manager.
+	// One-shot backfill mode: stamp the delete-protection marker onto legacy nodes (or just verify marker
+	// coverage) and exit. This never starts the controller manager.
 	if runBackfillMode {
 		cancel()
 		os.Exit(runBackfill(context.Background(), log, kConfig, backfillVerifyOnly))
@@ -535,9 +535,9 @@ func main() {
 
 // runBackfill executes the one-shot delete-protection marker backfill and returns the process exit code:
 //
-//	0 — success and the rollout gate is met (no classifier-protected object lacks the marker);
+//	0 — success and legacy marker coverage is complete;
 //	1 — a hard failure (client/list/patch error);
-//	2 — the gate is NOT met (classifier-protected objects still lack the marker) — do NOT enable Deny.
+//	2 — coverage is incomplete (classifier-protected objects still lack the marker).
 //
 // With verifyOnly it performs a read-only verify pass; otherwise it applies markers and then verifies.
 func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, verifyOnly bool) int {
@@ -585,10 +585,10 @@ func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, 
 
 	if remaining := verified.OursUnmarkedTotal(); remaining > 0 {
 		log.Error(fmt.Errorf("%d classifier-protected object(s) still lack the marker", remaining),
-			"[backfill] rollout gate NOT met — do not enable enforcement=Deny yet")
+			"[backfill] incomplete — unmarked legacy objects remain outside delete-guard protection")
 		return 2
 	}
-	log.Info("[backfill] rollout gate met: every classifier-protected object carries the delete-protected marker")
+	log.Info("[backfill] complete: every classifier-protected object carries the delete-protected marker")
 	return 0
 }
 
