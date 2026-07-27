@@ -30,7 +30,6 @@ import (
 
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 const (
@@ -305,16 +304,8 @@ func volumeDataGcSpecs() {
 			Expect(storagekube.WaitForModuleReady(ctx, suiteRestCfg, moduleName, suiteCfg.moduleReadyTO)).To(Succeed())
 			Expect(waitControllerSnapshotRootOkTTLRolledOut(ctx, &ttl, suiteCfg.moduleReadyTO)).To(Succeed())
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + sc + ")")
-			_, err = testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 
 			By("Hard local-CSI guard: the StorageClass provisioner MUST be sds-local-volume (llvs exist only there)")
 			scObj, err := suiteClientset.StorageV1().StorageClasses().Get(ctx, sc, metav1.GetOptions{})

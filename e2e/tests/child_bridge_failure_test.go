@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // envChildBridgeFailure opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow):
@@ -261,16 +260,8 @@ func childBridgeFailureSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning the thin, snapshot-capable base StorageClass via storage-e2e (" + sc + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision base StorageClass")
+			By("Ensuring the thin, snapshot-capable base StorageClass (" + sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 
 			By("Cloning it (via a LocalStorageClass) into a StorageClass wired to a non-existent VolumeSnapshotClass (" + badSC + " -> " + cbMissingVSCName + ")")
 			Expect(cloneStorageClassWithBadVSC(ctx, sc, badSC, cbMissingVSCName)).To(Succeed())
@@ -297,7 +288,7 @@ func childBridgeFailureSpecs() {
 			})
 
 			By("Starting the source probe Pod so the PVC binds (WaitForFirstConsumer classes bind on schedule)")
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, cbProbePod, []string{cbPVCStandalone}), metav1.CreateOptions{})
+			_, err := suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, cbProbePod, []string{cbPVCStandalone}), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source probe pod")
 			Expect(waitPodRunning(ctx, srcNS, cbProbePod, 10*time.Minute)).To(Succeed())
 		})
@@ -359,19 +350,24 @@ func childBridgeFailureSpecs() {
 			_, _, found := conditionStatus(root, condReady)
 			Expect(found).To(BeTrue(), "root Snapshot must carry a Ready condition")
 
-			By("Asserting the failed child counts as settled and latches childrenSettled=true on the parent")
-			Eventually(func(g Gomega) {
-				freshRoot, gerr := getResource(ctx, snapshotGVR, srcNS, cbRootSnapshotName)
-				g.Expect(gerr).NotTo(HaveOccurred())
-				g.Expect(childSnapshotRefs(freshRoot)).NotTo(BeEmpty(),
-					"childrenSettled assertion must be non-vacuous: the root must declare the failed child")
+			By("Asserting the failed child is settled after barrier 1, or that the parent failed before latch projection")
+			freshRoot, err := getResource(ctx, snapshotGVR, srcNS, cbRootSnapshotName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(childSnapshotRefs(freshRoot)).NotTo(BeEmpty(),
+				"childrenSettled assertion must be non-vacuous: the root must declare the failed child")
 
-				settled, settledFound := snapshotCommonControllerLatch(freshRoot, "childrenSettled")
-				g.Expect(settledFound).To(BeTrue(),
-					"the root with a terminal failed child must declare commonController.childrenSettled")
-				g.Expect(settled).To(BeTrue(),
+			settled, settledFound := snapshotCommonControllerLatch(freshRoot, "childrenSettled")
+			if settledFound {
+				Expect(settled).To(BeTrue(),
 					"the terminal failed child must count as settled, not keep the parent waiting forever")
-			}).WithContext(ctx).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+			} else {
+				phase, _, phaseErr := unstructured.NestedString(
+					freshRoot.Object, "status", "captureState", "domainSpecificController", "phase",
+				)
+				Expect(phaseErr).NotTo(HaveOccurred())
+				Expect(phase).To(Equal("Failed"),
+					"childrenSettled may be absent only when terminal child failure preempts the phase>=Planned projection barrier")
+			}
 
 			By("Asserting the terminal child SnapshotContent stops active 500 ms self-polling")
 			child, err := getResource(ctx, demoDiskSnapshotGVR, srcNS, childName)

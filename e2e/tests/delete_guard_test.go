@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -301,25 +302,53 @@ func deleteGuardSpecs() {
 			By("A managed (marked) VolumeSnapshotContent rejects direct DELETE")
 			vscName, found, err := firstProtectedName(ctx, volumeSnapshotContentGVR, "")
 			Expect(err).NotTo(HaveOccurred())
-			if !found {
-				Skip("no managed VolumeSnapshotContent present in this cluster state")
-			}
+			Expect(found).To(BeTrue(), "volume-data capture must produce a managed, delete-protected VolumeSnapshotContent")
 			expectDeleteForbidden(ctx, volumeSnapshotContentGVR, "", vscName)
 
 			By("A foreign/standalone VolumeSnapshot without the marker is freely deletable (no false positive)")
 			foreignNS := uniqueNS("dg-foreign")
 			Expect(ensureNamespace(ctx, foreignNS)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), foreignNS) })
+			foreignPVC := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "PersistentVolumeClaim",
+				"metadata": map[string]interface{}{
+					"name":      "dg-foreign-pvc",
+					"namespace": foreignNS,
+					"labels":    map[string]interface{}{storagev1alpha1.ExcludeLabelKey: "true"},
+				},
+				"spec": map[string]interface{}{
+					"accessModes":      []interface{}{"ReadWriteOnce"},
+					"storageClassName": suiteCfg.storageClass,
+					"resources": map[string]interface{}{
+						"requests": map[string]interface{}{"storage": "16Mi"},
+					},
+				},
+			}}
+			_, err = suiteDyn.Resource(schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}).
+				Namespace(foreignNS).Create(ctx, foreignPVC, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
 			foreignVS := &unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": "snapshot.storage.k8s.io/v1",
 				"kind":       "VolumeSnapshot",
 				"metadata":   map[string]interface{}{"name": "dg-foreign-vs", "namespace": foreignNS},
 				"spec": map[string]interface{}{
-					"source": map[string]interface{}{"persistentVolumeClaimName": "does-not-exist"},
+					"source": map[string]interface{}{"persistentVolumeClaimName": "dg-foreign-pvc"},
 				},
 			}}
 			_, err = suiteDyn.Resource(volumeSnapshotGVR).Namespace(foreignNS).Create(ctx, foreignVS, metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred())
+
+			By("Waiting for storage-foundation to latch the exclude-vetoed VolumeSnapshot as foreign")
+			Eventually(func(g Gomega) {
+				current, getErr := suiteDyn.Resource(volumeSnapshotGVR).Namespace(foreignNS).
+					Get(ctx, "dg-foreign-vs", metav1.GetOptions{})
+				g.Expect(getErr).NotTo(HaveOccurred())
+				g.Expect(current.GetLabels()).To(HaveKeyWithValue(storagev1alpha1.APIGroup+"/managed", "false"))
+				g.Expect(current.GetLabels()).NotTo(HaveKey(deleteProtectedLabel))
+			}).WithContext(ctx).WithTimeout(30 * time.Second).WithPolling(pollInterval).Should(Succeed())
+
 			Expect(suiteDyn.Resource(volumeSnapshotGVR).Namespace(foreignNS).Delete(ctx, "dg-foreign-vs", metav1.DeleteOptions{})).
 				To(Succeed(), "an unmarked foreign VolumeSnapshot must be freely deletable")
 		})

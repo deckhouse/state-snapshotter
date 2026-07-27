@@ -65,6 +65,34 @@ const (
 	vdMarkerFile = "marker"
 )
 
+// ensureSnapshotStorageClass reuses an explicitly selected existing StorageClass without mutating
+// ModuleConfig/global. Commander-managed clusters forbid that mutation, and these tests set
+// storageClassName on every PVC explicitly, so making the class globally default is unnecessary.
+// Fresh nested clusters still use storage-e2e to provision the requested class when it does not exist.
+func ensureSnapshotStorageClass(ctx context.Context, name string) error {
+	_, err := suiteClientset.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		GinkgoWriter.Printf("StorageClass %s already exists; reusing it without changing the global default\n", name)
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get StorageClass %s: %w", name, err)
+	}
+
+	_, err = testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
+		StorageClassName:     name,
+		LVMType:              "Thin",
+		ThinPoolName:         "thinpool",
+		BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
+		VMNamespace:          suiteCfg.vmNamespace,
+		BaseStorageClassName: suiteCfg.baseStorageClass,
+	})
+	if err != nil {
+		return fmt.Errorf("provision StorageClass %s: %w", name, err)
+	}
+	return nil
+}
+
 // volBinding maps a captured source PVC to the durable VolumeSnapshotContent artifact backing its data,
 // plus the captured volume mode (the VRR requires it; no implicit default).
 type volBinding struct {
@@ -515,16 +543,8 @@ func volumeDataSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + sc + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver")
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, sc)).To(Succeed())
@@ -540,7 +560,7 @@ func volumeDataSpecs() {
 			})
 
 			By("Starting the source probe Pod and waiting for it to run (binds all three PVCs)")
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}), metav1.CreateOptions{})
+			_, err := suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source probe pod")
 			Expect(waitPodRunning(ctx, srcNS, vdProbePod, 10*time.Minute)).To(Succeed())
 

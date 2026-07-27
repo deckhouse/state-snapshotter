@@ -30,8 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // --- DataImport publish:true (external ingress upload) spec (E2E_PUBLISH) --------------------------
@@ -138,18 +136,10 @@ func publishDataImportSpecs() {
 			rootSnap = publishDIImportRoot + "-source"
 			masterIP = publishMasterIP(ctx)
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + suiteCfg.storageClass + ")")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + suiteCfg.storageClass + ")")
 			// Idempotent: phases 3-5 provision the same SC under E2E_VOLUME_DATA, but the publish gate is
 			// independent, so provision it here too rather than depend on another phase having run.
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     suiteCfg.storageClass,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			Expect(ensureSnapshotStorageClass(ctx, suiteCfg.storageClass)).To(Succeed())
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver (capture needs it)")
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, suiteCfg.storageClass)).To(Succeed())
@@ -203,7 +193,7 @@ func publishDataImportSpecs() {
 			// The block-writer pod is the first consumer that binds the WaitForFirstConsumer PVC; it writes
 			// arbitrary bytes so the captured VolumeSnapshot is real. Its data is irrelevant (the imported
 			// bytes come from the external file), so its checksum is discarded.
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, blockWriterPodSpec(srcNS, publishDISrcWriter, publishDISrcPVC), metav1.CreateOptions{})
+			_, err := suiteClientset.CoreV1().Pods(srcNS).Create(ctx, blockWriterPodSpec(srcNS, publishDISrcWriter, publishDISrcPVC), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source block writer pod")
 			Expect(waitPodRunning(ctx, srcNS, publishDISrcWriter, 10*time.Minute)).To(Succeed())
 			_, werr := writeBlockAndChecksum(ctx, srcNS, publishDISrcWriter, publishDISrcPVC)

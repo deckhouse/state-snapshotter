@@ -30,7 +30,6 @@ import (
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // envFreezeDeadline opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow): the
@@ -112,7 +111,7 @@ func buildFreezeDeadlineSource(ns, thickSC string) []*unstructured.Unstructured 
 			"accessModes":      []interface{}{"ReadWriteOnce"},
 			"storageClassName": thickSC,
 			"resources": map[string]interface{}{
-				"requests": map[string]interface{}{"storage": "500Mi"},
+				"requests": map[string]interface{}{"storage": "64Mi"},
 			},
 		},
 	}}
@@ -135,7 +134,7 @@ func buildFreezeDeadlineSource(ns, thickSC string) []*unstructured.Unstructured 
 		// size + storageClassName satisfy the scratch-provisioning guards; the disk adopts the pre-created PVC.
 		"spec": map[string]interface{}{
 			"persistentVolumeClaimName": fdPVCName,
-			"size":                      "500Mi",
+			"size":                      "64Mi",
 			"storageClassName":          thickSC,
 		},
 	}}
@@ -342,16 +341,8 @@ func freezeDeadlineSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning the thin, snapshot-capable base StorageClass via storage-e2e (" + baseSC + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     baseSC,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision base StorageClass")
+			By("Ensuring the thin, snapshot-capable base StorageClass (" + baseSC + ")")
+			Expect(ensureSnapshotStorageClass(ctx, baseSC)).To(Succeed())
 
 			By("Resolving a driver-matching VolumeSnapshotClass for the local CSI driver")
 			vscName, err := resolveLocalVolumeSnapshotClass(ctx)

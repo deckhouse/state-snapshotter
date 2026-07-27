@@ -28,8 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // envManifestCheckpointLoss opts this spec OUT. It runs by default (as part of the phase-3 volume-data flow)
@@ -214,16 +212,8 @@ func manifestCheckpointLossSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning a thin, snapshot-capable StorageClass via storage-e2e (" + sc + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision StorageClass")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver")
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, sc)).To(Succeed())
