@@ -94,6 +94,9 @@ spec:
         variables.exempt ||
         variables.breakGlass ||
         !variables.oldProtected
+      # Surface a denial as HTTP 403 Forbidden. Without an explicit reason a VAP validation failure is
+      # reported as 422 Invalid, which is misleading for an authorization-style block.
+      reason: Forbidden
       message: >-
         This object is an internal element of a unified snapshot and must not be deleted directly.
         Delete the root Snapshot to tear down the whole tree, or set annotation
@@ -104,6 +107,7 @@ spec:
         variables.exempt ||
         !variables.oldProtected ||
         variables.markerPreserved
+      reason: Forbidden
       message: >-
         The delete-protection marker state-snapshotter.deckhouse.io/delete-protected is immutable and cannot
         be removed or changed. To delete this object set annotation deckhouse.io/allow-delete="true" instead
