@@ -209,12 +209,16 @@ func deleteGuardSpecs() {
 			DeferCleanup(func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), time.Minute)
 				defer ccancel()
+				dyn, derr := impersonatedDyn(exemptControllerUser, mastersGroup...)
+				if derr != nil {
+					return
+				}
 				obj, gerr := suiteDyn.Resource(gvr).Namespace(ns).Get(cctx, childNode.name, metav1.GetOptions{})
 				if gerr != nil {
 					return
 				}
 				obj.SetFinalizers(nil)
-				_, _ = suiteDyn.Resource(gvr).Namespace(ns).Update(cctx, obj, metav1.UpdateOptions{})
+				_, _ = dyn.Resource(gvr).Namespace(ns).Update(cctx, obj, metav1.UpdateOptions{})
 			})
 
 			By("Annotating break-glass and issuing DELETE (admitted by the annotation)")
@@ -277,8 +281,11 @@ func deleteGuardSpecs() {
 			// Release the hold finalizer left by the break-glass spec so the cascade can complete.
 			if gvr, ok := gvrForSnapshotKind(childNode.kind); ok {
 				if obj, gerr := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, childNode.name, metav1.GetOptions{}); gerr == nil {
+					dyn, derr := impersonatedDyn(exemptControllerUser, mastersGroup...)
+					Expect(derr).NotTo(HaveOccurred())
 					obj.SetFinalizers(nil)
-					_, _ = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+					_, err = dyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+					Expect(err).NotTo(HaveOccurred(), "exempt controller must release the e2e hold finalizer")
 				}
 			}
 			Expect(suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(ctx, rootSnap, metav1.DeleteOptions{})).To(Succeed())

@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -59,6 +60,7 @@ const (
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
 	envKeepClusterOnFailure = "E2E_KEEP_CLUSTER_ON_FAILURE"
 	envKeepCluster          = "E2E_KEEP_CLUSTER"
+	envDirectKubeconfig     = "E2E_KUBECONFIG"
 )
 
 const (
@@ -303,6 +305,7 @@ var (
 	suiteClientset        *clientgokube.Clientset
 	suiteDyn              dynamic.Interface
 	suiteClusterResources *cluster.TestClusterResources
+	suiteDirectCluster    bool
 )
 
 func loadConfig() e2eConfig {
@@ -439,6 +442,23 @@ func randToken(n int) string {
 // --- cluster lifecycle (mirror sds-elastic) --------------------------------
 
 func ensureNestedTestCluster() {
+	if kubeconfigPath := strings.TrimSpace(os.Getenv(envDirectKubeconfig)); kubeconfigPath != "" {
+		if suiteClusterResources != nil {
+			return
+		}
+		cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		Expect(err).NotTo(HaveOccurred(), "build direct e2e kubeconfig %q", kubeconfigPath)
+		// A user-maintained tunnel can reconnect while an old HTTP connection remains half-open.
+		// Bound each API request so retrying Gomega assertions recover instead of hanging forever.
+		cfg.Timeout = 30 * time.Second
+		suiteClusterResources = &cluster.TestClusterResources{
+			Kubeconfig:     cfg,
+			KubeconfigPath: kubeconfigPath,
+		}
+		suiteDirectCluster = true
+		GinkgoWriter.Printf("Using direct cluster kubeconfig %s (no SSH/VM lifecycle)\n", kubeconfigPath)
+		return
+	}
 	if strings.TrimSpace(os.Getenv("TEST_CLUSTER_CREATE_MODE")) == "" {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
@@ -453,6 +473,12 @@ func ensureNestedTestCluster() {
 
 func cleanupNestedTestCluster() {
 	if suiteClusterResources == nil {
+		return
+	}
+	if suiteDirectCluster {
+		// A direct-kubeconfig run owns neither the cluster nor its user-maintained tunnel.
+		suiteClusterResources = nil
+		suiteDirectCluster = false
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -474,14 +500,23 @@ func cleanupNestedTestCluster() {
 // the standard <MODULE>_MODULE_PULL_OVERRIDE convention (default "main"), matching what the
 // cluster_config path would apply. It only enables; the WaitForModuleReady calls below do the waiting.
 func ensureModulesEnabled(ctx context.Context) error {
+	var stateSnapshotterSettings map[string]interface{}
+	if envBool(os.Getenv(envDeleteGuard)) {
+		stateSnapshotterSettings = map[string]interface{}{
+			"deleteGuard": map[string]interface{}{
+				"enforcement": "Deny",
+			},
+		}
+	}
+
 	// The full module set the suite needs, with the dependency graph copied verbatim from
 	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
 	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
-	// dependency '...' is disabled"). None of these modules carry ModuleConfig settings (config is via
-	// CRDs / defaults), so no Settings are passed. Each ModulePullOverride comes from
+	// dependency '...' is disabled"). The state-snapshotter settings enable Deny only for the
+	// opt-in delete-guard specs; other modules use their defaults. Each ModulePullOverride comes from
 	// <MODULE>_MODULE_PULL_OVERRIDE (defaulting to "main"), matching the alwaysCreateNew path.
 	specs := []storagekube.ModuleSpec{
-		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
+		{Name: moduleName, Version: 1, Enabled: true, Settings: stateSnapshotterSettings, ModulePullOverride: moduleTagFromEnv(moduleName)},
 		// storage-foundation requires state-snapshotter (module.yaml).
 		{Name: storageFoundationModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(storageFoundationModuleName), Dependencies: []string{moduleName}},
 		// The PoC module (demo controller + demo CRDs + demo CSDs) depends on state-snapshotter: its
