@@ -66,12 +66,13 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 //     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
 //     FULL child set (domain + orphan) is enumerated before the content is created/frozen.
-//  4. MarkPlanned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent with the full
-//     frozen child set.
+//  4. DomainCaptureStatus Planned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent
+//     with the full frozen child set.
 //  5. Wait for the binder to bind the content; then maintain the RBAC latch.
 //  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
-//  8. ConfirmConsistent (barrier 2) once the manifest leg is captured (CoreCaptureOutcome==Captured).
+//  8. DomainCaptureStatus Finished (barrier 2) once the manifest leg is captured
+//     (CoreCaptureOutcome==Captured).
 //
 // PIT freeze (ADR "Late Planned" → "once a node is Planned, the plan is frozen and the set is not recomputed"):
 // steps 1-5 (plan + enumerate + freeze the declared child set) run ONLY before barrier 1
@@ -93,7 +94,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 
 	// Steps 1-5 plan and freeze the child set: run them only before barrier 1. Past Planned the set is
 	// frozen (PIT cycle) and re-planning is skipped — see the method doc. On the first pass the node is
-	// still pre-Planned, so this block runs, ends at MarkPlanned, and falls through to the post-bind legs
+	// still pre-Planned, so this block runs, ends at DomainCaptureStatus Planned, and falls through to the post-bind legs
 	// below in the same reconcile.
 	if namespaceDomainPrePlanned(nsSnap) {
 		// 1. Publish the captured live source (the Namespace) into status.sourceRef.
@@ -114,7 +115,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
 		if err != nil {
 			// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
-			// The binder is still gated on phase>=Planned here (MarkPlanned not reached), so it does not touch
+			// The binder is still gated on phase>=Planned here (Planned not reached), so it does not touch
 			// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
 			// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
 			if perr := r.patchSnapshotNotReadyLocal(ctx, key, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
@@ -123,14 +124,18 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			return ctrl.Result{}, err
 		}
 		if plan.outcome == namespaceChildrenTerminal {
-			// Terminal child-graph failure: route it through sdk.Fail (phase=Failed, the terminal SINK), not a
+			// Terminal child-graph failure: route it through DomainCaptureStatus Failed (terminal SINK), not a
 			// bare Ready patch. The root content is created + bound EAGERLY (pre-Planned, genericbinder §9), so
 			// the content->Snapshot Ready mirror is already live for the root; a Ready-only write would
 			// ping-pong with the mirror's non-terminal content view (mirror overwrites, this gate re-asserts).
 			// With phase=Failed the mirror bubbles the SAME reason/message (ownerDomainCaptureFailed), so both
 			// writers agree and the terminal is stable at any timing. The local Ready patch below only
 			// fast-surfaces the value the mirror converges to in the same pass.
-			if ferr := sdk.Fail(ctx, adapter, snapshotsdk.Reason(plan.reason), stderrors.New(plan.message)); ferr != nil {
+			if ferr := sdk.DomainCaptureStatus(adapter).
+				Phase(snapshotsdk.PhaseFailed).
+				Reason(snapshotsdk.Reason(plan.reason)).
+				Message(plan.message).
+				Apply(ctx); ferr != nil {
 				return ctrl.Result{}, ferr
 			}
 			if perr := r.patchSnapshotNotReadyLocal(ctx, key, plan.reason, plan.message); perr != nil {
@@ -159,7 +164,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		//    §11.2/§11.3): its content shell is created + bound by the generic binder and ALL its content status
 		//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
 		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
-		//    enumeration before MarkPlanned means the FULL child set (domain children + orphan VolumeSnapshots)
+		//    enumeration before Planned means the FULL child set (domain children + orphan VolumeSnapshots)
 		//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
 		if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
 			return ctrl.Result{}, err
@@ -173,7 +178,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 
 		// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
 		//    with the full, frozen child set.
-		if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+		if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -229,19 +234,20 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	//    terminal capture failure the core latches produced (mirrors the demo VM aggregator switch).
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeFailed:
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(outcome.Reason),
-			Message: outcome.Message,
-		})
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhaseFailed).
+			Reason(snapshotsdk.Reason(outcome.Reason)).
+			Message(outcome.Message).
+			Apply(ctx)
 	case snapshotsdk.CaptureOutcomeCaptured:
-		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 	default:
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
 }
 
 // ensureOrphanVolumeSnapshotsPrePlanned runs the root residual/orphan PVC volume wave BEFORE barrier 1
-// (MarkPlanned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
+// (Planned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
 // VolumeSnapshots for uncovered PVCs and declares them as REGULAR domain children (via the SDK
 // EnsureChildren), so the full child set is enumerated before the binder creates + freezes the root
 // content ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here on: it is
@@ -269,7 +275,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 	// so a PVC a domain child subtree covers is never momentarily mis-classified as orphan. That set is
 	// derived only from the COVERAGE-PROVIDING domain children — NOT from the orphan wave's own CSI
 	// VolumeSnapshot output (each orphan VS covers only its own already-residual PVC and is re-adopted
-	// idempotently). Gating on the orphan VS children too would (a) needlessly serialize MarkPlanned behind
+	// idempotently). Gating on the orphan VS children too would (a) needlessly serialize Planned behind
 	// every orphan becoming fully Ready and (b) let a single stuck orphan VS wedge the whole root capture
 	// pre-Planned. So exclude CSI VolumeSnapshot refs from the readiness gate (they are still enumerated into
 	// coverage by CollectSubtreeCoveredPVCUIDs, which self-heals via re-adoption).
@@ -455,7 +461,7 @@ const unreadableNamespacePlanMessagePrefix = "namespace manifest plan is incompl
 // two channels that sit OUTSIDE that discipline:
 //
 //   - the DOMAIN-owned status field captureState.domainSpecificController.message (via the SDK
-//     ReportProgress path, which preserves the phase), so the stuck reason is visible in
+//     DomainCaptureStatus same-phase Planned path, which preserves the phase), so the stuck reason is visible in
 //     `kubectl get snapshot -o yaml` and survives across reconciles;
 //   - a Warning Event (reason NamespacePlanUnreadable) on the root Snapshot.
 //
@@ -483,7 +489,12 @@ func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
 	// fails the reconcile errors out with the message still unpublished, so the retry re-enters this path
 	// and re-attempts the patch — but no premature Event was emitted. Once the message is durable the
 	// unchanged-message gate above suppresses any re-emission on subsequent reconciles.
-	if err := sdk.ReportProgress(ctx, adapter, message); err != nil {
+	// Manifest-leg diagnostic runs after barrier 1: keep phase=Planned and only refresh the message
+	// (same-phase DomainCaptureStatus Apply; never regress to Planning).
+	if err := sdk.DomainCaptureStatus(adapter).
+		Phase(snapshotsdk.PhasePlanned).
+		Message(message).
+		Apply(ctx); err != nil {
 		return err
 	}
 	if r.Recorder != nil {
@@ -496,8 +507,8 @@ func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
 // unreadable-plan diagnostic (matched by the sentinel prefix). It runs on the readable path so a recovered
 // plan (the previously-unreadable types became readable) does not leave a stale "incomplete" message in
 // captureState.domainSpecificController.message while capture actively progresses. It is a no-op when the
-// message is empty or was authored by something else, and is idempotent (ReportProgress does not write an
-// already-empty message).
+// message is empty or was authored by something else, and is idempotent (DomainCaptureStatus does not
+// write when the triple is unchanged).
 func (r *SnapshotReconciler) clearUnreadableNamespacePlanDiagnostic(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -511,7 +522,10 @@ func (r *SnapshotReconciler) clearUnreadableNamespacePlanDiagnostic(
 	if !strings.HasPrefix(cs.DomainSpecificController.Message, unreadableNamespacePlanMessagePrefix) {
 		return nil
 	}
-	return sdk.ReportProgress(ctx, adapter, "")
+	return sdk.DomainCaptureStatus(adapter).
+		Phase(snapshotsdk.PhasePlanned).
+		Message("").
+		Apply(ctx)
 }
 
 // formatUnreadableNamespacePlan renders the unreadable resource types into a stable, capped human message

@@ -17,3 +17,22 @@ properties:
       Recycle-bin retention window: how long a snapshot's durable data is kept after the Snapshot is deleted,
       during which it remains recoverable. Go duration, e.g. "24h", "168h".
       Empty = omit env; controller uses the built-in default of 30 days (720h).
+  deleteGuard:
+    type: object
+    default: {}
+    description: |
+      Admission delete-guard for the unified snapshot tree. Protects internal nodes (children,
+      SnapshotContent, ManifestCheckpoint/chunks, ObjectKeeper, managed CSI VolumeSnapshot/Content)
+      from direct deletion via the authoritative marker state-snapshotter.deckhouse.io/delete-protected.
+    properties:
+      enforcement:
+        type: string
+        enum:
+          - Audit
+          - Deny
+        default: Audit
+        description: |
+          Rollout mode of the delete-guard ValidatingAdmissionPolicy.
+          Audit (default) — observe and annotate/warn only; deletions are NOT blocked.
+          Deny — enforce; direct deletion of a protected object is rejected.
+          Switch to Deny only AFTER the marker backfill gate is proven (every protected object is marked).

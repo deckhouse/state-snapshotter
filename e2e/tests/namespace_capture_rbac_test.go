@@ -611,7 +611,9 @@ func childDegradationSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			childContent, _, _ := unstructured.NestedString(childObj.Object, "status", "boundSnapshotContentName")
 			Expect(childContent).NotTo(BeEmpty())
-			Expect(suiteDyn.Resource(snapshotContentGVR).Delete(ctx, childContent, metav1.DeleteOptions{})).To(Succeed())
+			// Child SnapshotContent is delete-protected: break-glass before the deliberate deletion so the
+			// degradation trigger works under admission enforcement=Deny (harmless annotation under Audit).
+			Expect(deleteWithAllowDelete(ctx, snapshotContentGVR, "", childContent)).To(Succeed())
 
 			By("Asserting the root degrades to Ready=False (children leg) but the latch stays True")
 			Expect(waitObjectCondition(ctx, snapshotGVR, ns, "e3-snap", condReady, "False", suiteCfg.captureReadyTO)).To(Succeed())

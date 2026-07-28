@@ -14,16 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package snapshotsdk is the capture-side protocol facade for domain snapshot controllers.
+// Package snapshotsdk is the capture-side protocol for domain snapshot controllers.
 //
 // A domain snapshot controller (for example DemoVirtualDiskSnapshot / DemoVirtualMachineSnapshot)
 // owns three domain decisions and nothing more: what its source is, what child snapshots it implies,
 // and which PVCs make up its data leg. Everything else — talking to ManifestCaptureRequest, the
 // storage-foundation VolumeCaptureRequest, owner references, optimistic-locked status patches, and the
 // lifecycle phase (status.captureState.domainSpecificController.phase) — is Kubernetes transport that
-// this SDK hides behind a small set of intent verbs. The SDK never writes the Ready condition: the core
-// always derives Ready (on every snapshot object) and the domain reads it back as its failure channel
-// via CoreCaptureOutcome.
+// this SDK hides behind planning verbs and DomainCaptureStatus (the single public writer for
+// phase/reason/message). The SDK never writes the Ready condition: the core always derives Ready
+// (on every snapshot object) and the domain reads it back as its failure channel via CoreCaptureOutcome.
 //
 // # Model
 //
@@ -42,7 +42,7 @@ limitations under the License.
 // Failed) EnsureChildren rejects any attempt to GROW it (or change the excluded set) with
 // ErrChildrenSetFrozen — fail-closed, before any child CR is created. The declared membership is the
 // snapshot's point-in-time composition and mirrors the immutable SnapshotContent.childrenSnapshotContentRefs;
-// the recommended domain reaction to the error is sdk.Fail(GraphPlanningFailed).
+// the recommended domain reaction is DomainCaptureStatus with phase=Failed and reason GraphPlanningFailed.
 //
 // # Exclude veto
 //
@@ -60,19 +60,26 @@ limitations under the License.
 //
 // A typical domain Reconcile resolves its source, then drives the three planning legs, publishes the
 // source, marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
-// (barrier 2 = Finished) or fail:
+// (barrier 2 = Finished). All phase/reason/message writes go through DomainCaptureStatus:
 //
-//	if !valid { return sdk.Reject(ctx, t, FailSpec{Reason: "InvalidSourceRef"}) }
+//	status := sdk.DomainCaptureStatus(t)
+//	if !valid {
+//	    return status.Phase(PhaseFailed).Reason("InvalidSourceRef").Message("...").Apply(ctx)
+//	}
 //	kept, dropped := PartitionExcluded(sourceObjs) // honor the state-snapshotter.deckhouse.io/exclude veto
 //	children, excludedRefs := buildFrom(kept), refsOf(dropped)
-//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil { return sdk.Fail(ctx, t, "GraphPlanningFailed", err) } // a post-Planned set growth returns ErrChildrenSetFrozen
+//	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil {
+//	    return status.Phase(PhaseFailed).Reason("GraphPlanningFailed").Message(err.Error()).Apply(ctx)
+//	}
 //	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
 //	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
 //	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})
-//	if err := sdk.MarkPlanned(ctx, t); err != nil { return err }
+//	if err := status.Phase(PhasePlanned).Apply(ctx); err != nil { return err }
 //	switch o := CoreCaptureOutcome(t); o.Outcome {
-//	case CaptureOutcomeCaptured: return sdk.ConfirmConsistent(ctx, t) // after any consistency action (e.g. fs unfreeze)
-//	case CaptureOutcomeFailed:   return sdk.Fail(ctx, t, Reason(o.Reason), errors.New(o.Message))
+//	case CaptureOutcomeCaptured:
+//	    return status.Phase(PhaseFinished).Apply(ctx) // after any consistency action (e.g. fs unfreeze)
+//	case CaptureOutcomeFailed:
+//	    return nil // core owns the terminal Ready; domain typically stops
 //	default: // CaptureOutcomeCapturing: wait
 //	}
 //

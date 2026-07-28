@@ -973,11 +973,13 @@ func sweepOrphanedLeafSnapshotContents(ctx context.Context, leafNames []string) 
 		}
 		mcp, _, _ := unstructured.NestedString(list.Items[i].Object, "status", "manifestCheckpointName")
 		GinkgoWriter.Printf("sweeping orphaned SnapshotContent %s (MCP %q)\n", contentName, mcp)
-		if derr := suiteDyn.Resource(snapshotContentGVR).Delete(ctx, contentName, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+		// SnapshotContent / ManifestCheckpoint are delete-protected: annotate break-glass before delete so
+		// the sweep works under admission enforcement=Deny (a no-op annotation under Audit).
+		if derr := deleteWithAllowDelete(ctx, snapshotContentGVR, "", contentName); derr != nil {
 			return fmt.Errorf("delete orphaned SnapshotContent %s: %w", contentName, derr)
 		}
 		if mcp != "" {
-			if derr := suiteDyn.Resource(manifestCheckpointGVR).Delete(ctx, mcp, metav1.DeleteOptions{}); derr != nil && !apierrors.IsNotFound(derr) {
+			if derr := deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcp); derr != nil {
 				return fmt.Errorf("delete orphaned ManifestCheckpoint %s: %w", mcp, derr)
 			}
 		}

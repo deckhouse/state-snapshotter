@@ -118,6 +118,34 @@ func TestCheckConsistencyAndSetReady_DoesNotOverwriteReadyWhenContentPresent(t *
 	}
 }
 
+// Fail-fast self-report (P5): a Terminating snapshot CR (held by a finalizer) must honestly report
+// Ready=False/Deleting instead of lingering at a stale Ready=True. This asserts the exact write Step 0 of
+// the reconcile performs for a snapshot carrying its own deletionTimestamp.
+func TestSelfReportDeletingOnTerminatingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	snapObj := newBoundSnapshotUnstructured("child-snap", "some-content")
+	snapObj.SetFinalizers([]string{"test.state-snapshotter.deckhouse.io/hold"})
+	now := metav1.Now()
+	snapObj.SetDeletionTimestamp(&now)
+	r := newMirrorTestController(t, snapObj)
+
+	snapLike, err := snapshot.ExtractSnapshotLike(snapObj)
+	if err != nil {
+		t.Fatalf("extract snapshot like: %v", err)
+	}
+	if err := r.patchSnapshotNotReadyFromContent(ctx, snapObj, snapLike, snapshot.ReasonDeleting, "this snapshot is being deleted"); err != nil {
+		t.Fatalf("self-report Deleting: %v", err)
+	}
+
+	got := freshSnapshotReady(t, r.Client, "child-snap")
+	if got == nil {
+		t.Fatalf("terminating snapshot has no Ready condition after self-report")
+	}
+	if got.Status != metav1.ConditionFalse || got.Reason != snapshot.ReasonDeleting {
+		t.Fatalf("want Ready=False/Deleting, got %s/%s", got.Status, got.Reason)
+	}
+}
+
 func freshSnapshotReady(t *testing.T, cl client.Client, name string) *metav1.Condition {
 	t.Helper()
 	snapGVK := storagev1alpha1.SchemeGroupVersion.WithKind("Snapshot")

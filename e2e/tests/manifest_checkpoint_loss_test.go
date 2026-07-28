@@ -287,7 +287,9 @@ func manifestCheckpointLossSpecs() {
 			mcpName, err := nodeManifestCheckpointName(ctx, snapshotGVR, ns, mcpLossRootSnapshotName)
 			Expect(err).NotTo(HaveOccurred())
 			GinkgoWriter.Printf("  deleting root MCP: %s\n", mcpName)
-			Expect(suiteDyn.Resource(manifestCheckpointGVR).Delete(ctx, mcpName, metav1.DeleteOptions{})).To(Succeed())
+			// ManifestCheckpoint is delete-protected: break-glass before this deliberate deletion so the
+			// loss trigger works under enforcement=Deny (a harmless no-op annotation under Audit).
+			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the root Snapshot fails closed on its OWN manifest leg (Ready=False/ManifestCheckpointFailed)")
 			Expect(waitNodeReadyFalseReason(ctx, snapshotGVR, ns, mcpLossRootSnapshotName, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
@@ -308,7 +310,9 @@ func manifestCheckpointLossSpecs() {
 			mcpName, err := nodeManifestCheckpointName(ctx, demoVMSnapshotGVR, ns, vmSnap)
 			Expect(err).NotTo(HaveOccurred())
 			GinkgoWriter.Printf("  deleting child VM MCP: %s (node %s)\n", mcpName, vmSnap)
-			Expect(suiteDyn.Resource(manifestCheckpointGVR).Delete(ctx, mcpName, metav1.DeleteOptions{})).To(Succeed())
+			// ManifestCheckpoint is delete-protected: break-glass before this deliberate deletion so the
+			// loss trigger works under enforcement=Deny (a harmless no-op annotation under Audit).
+			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the child DemoVirtualMachineSnapshot fails closed (Ready=False/ManifestCheckpointFailed)")
 			Expect(waitNodeReadyFalseReason(ctx, demoVMSnapshotGVR, ns, vmSnap, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
@@ -333,7 +337,9 @@ func manifestCheckpointLossSpecs() {
 			mcpName, err := nodeManifestCheckpointName(ctx, demoDiskSnapshotGVR, ns, diskSnap)
 			Expect(err).NotTo(HaveOccurred())
 			GinkgoWriter.Printf("  deleting grandchild disk MCP: %s (node %s)\n", mcpName, diskSnap)
-			Expect(suiteDyn.Resource(manifestCheckpointGVR).Delete(ctx, mcpName, metav1.DeleteOptions{})).To(Succeed())
+			// ManifestCheckpoint is delete-protected: break-glass before this deliberate deletion so the
+			// loss trigger works under enforcement=Deny (a harmless no-op annotation under Audit).
+			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the grandchild DemoVirtualDiskSnapshot fails closed (Ready=False/ManifestCheckpointFailed)")
 			Expect(waitNodeReadyFalseReason(ctx, demoDiskSnapshotGVR, ns, diskSnap, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
@@ -360,7 +366,9 @@ func manifestCheckpointLossSpecs() {
 			chunkName, err := firstManifestCheckpointChunkName(ctx, mcpName)
 			Expect(err).NotTo(HaveOccurred())
 			GinkgoWriter.Printf("  deleting chunk %s of MCP %s (node %s)\n", chunkName, mcpName, diskSnap)
-			Expect(suiteDyn.Resource(manifestCheckpointContentChunkGVR).Delete(ctx, chunkName, metav1.DeleteOptions{})).To(Succeed())
+			// ManifestCheckpointContentChunk is delete-protected: break-glass before this deliberate
+			// deletion so the loss trigger works under enforcement=Deny (harmless no-op under Audit).
+			Expect(deleteWithAllowDelete(ctx, manifestCheckpointContentChunkGVR, "", chunkName)).To(Succeed())
 			Expect(bumpManifestCheckpoint(ctx, mcpName)).To(Succeed())
 
 			By("Asserting the grandchild fails closed on the missing chunk (Ready=False/ManifestCheckpointFailed)")

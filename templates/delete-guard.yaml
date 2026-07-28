@@ -1,0 +1,129 @@
+{{- /*
+Unified-snapshot delete guard (marker-model rev.2 — design/delete-protection-contract.md).
+
+An apiserver-enforced ValidatingAdmissionPolicy (cluster is v1.34, VAP is GA) that protects the unified
+snapshot tree from direct removal. It checks ONLY the authoritative marker
+`state-snapshotter.deckhouse.io/delete-protected: "true"`; it never reads ownerReferences / finalizers /
+followObjectRef and never branches on Kind. Two invariants:
+
+  1. DELETE-deny: a protected object cannot be deleted directly, EXCEPT by an exempt actor (controllers /
+     GC / namespace teardown) or via the break-glass annotation `deckhouse.io/allow-delete: "true"`.
+  2. UPDATE marker immutability: once `delete-protected == "true"`, the label cannot be removed or changed,
+     EXCEPT by an exempt actor. Adding the break-glass annotation is allowed (it does not touch the marker);
+     the marker STAYS and DELETE is permitted because of the annotation.
+
+Rollout: `deleteGuard.enforcement` (default Audit) drives validationActions. Switching to Deny is a USER
+rollout action taken only AFTER the backfill gate is proven (every classifier-protected object is marked).
+The module ships in Audit so installation breaks nothing.
+*/ -}}
+{{- $dg := .Values.stateSnapshotter.deleteGuard | default dict -}}
+{{- $enforcement := $dg.enforcement | default "Audit" -}}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: d8-{{ .Chart.Name }}-delete-guard
+  labels:
+    heritage: deckhouse
+    module: "{{ .Chart.Name }}"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # CSI snapshot objects that our tree adopts/owns (managed VS / managed VSC).
+      - apiGroups: ["snapshot.storage.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE", "UPDATE"]
+        resources: ["volumesnapshots", "volumesnapshotcontents"]
+      # Core unified-snapshot CRDs.
+      - apiGroups: ["state-snapshotter.deckhouse.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE", "UPDATE"]
+        resources: ["snapshots", "snapshotcontents", "manifestcheckpoints", "manifestcheckpointcontentchunks"]
+      # Domain snapshot CRs (demo / sds-unified-snapshots-poc). Kind-agnostic on purpose: the guard only
+      # acts on the marker, so matching every resource in these dedicated domain groups is safe and
+      # future-proof (unmarked objects are never blocked; groups absent on a cluster simply never match).
+      - apiGroups: ["demo.state-snapshotter.deckhouse.io", "sds-unified-snapshots-poc.deckhouse.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE", "UPDATE"]
+        resources: ["*"]
+      # Our durable keeper (shared deckhouse.io group; only marked keepers are protected).
+      - apiGroups: ["deckhouse.io"]
+        apiVersions: ["*"]
+        operations: ["DELETE", "UPDATE"]
+        resources: ["objectkeepers"]
+  variables:
+    # Exempt actors: legitimate teardown/GC/reclaim initiators. system:masters is intentionally NOT exempt.
+    # The criterion is the verified INITIATOR of each routine delete (audit/admission request), not merely a
+    # ServiceAccount found in a Deployment (plan P4 / contract §8).
+    - name: exempt
+      expression: >-
+        request.userInfo.username in [
+          "system:serviceaccount:kube-system:generic-garbage-collector",
+          "system:serviceaccount:kube-system:namespace-controller",
+          "system:serviceaccount:d8-system:deckhouse",
+          "system:serviceaccount:d8-state-snapshotter:controller",
+          "system:serviceaccount:d8-storage-foundation:controller",
+          "system:serviceaccount:d8-storage-foundation:snapshot-controller"
+        ]
+    # oldProtected: the object being deleted/updated already carries delete-protected=="true".
+    - name: oldProtected
+      expression: >-
+        oldObject != null &&
+        has(oldObject.metadata.labels) &&
+        "state-snapshotter.deckhouse.io/delete-protected" in oldObject.metadata.labels &&
+        oldObject.metadata.labels["state-snapshotter.deckhouse.io/delete-protected"] == "true"
+    # breakGlass: persistent/reversible operator override on the object being deleted.
+    - name: breakGlass
+      expression: >-
+        oldObject != null &&
+        has(oldObject.metadata.annotations) &&
+        "deckhouse.io/allow-delete" in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations["deckhouse.io/allow-delete"] == "true"
+    # markerPreserved: after an UPDATE the new object still carries delete-protected=="true".
+    - name: markerPreserved
+      expression: >-
+        object != null &&
+        has(object.metadata.labels) &&
+        "state-snapshotter.deckhouse.io/delete-protected" in object.metadata.labels &&
+        object.metadata.labels["state-snapshotter.deckhouse.io/delete-protected"] == "true"
+  validations:
+    # Invariant 1 — DELETE-deny. Allow unless: DELETE && protected && !exempt && !breakGlass.
+    - expression: >-
+        request.operation != "DELETE" ||
+        variables.exempt ||
+        variables.breakGlass ||
+        !variables.oldProtected
+      message: >-
+        This object is an internal element of a unified snapshot and must not be deleted directly.
+        Delete the root Snapshot to tear down the whole tree, or set annotation
+        deckhouse.io/allow-delete="true" on this object to force-delete it.
+    # Invariant 2 — UPDATE marker immutability. Allow unless: UPDATE && wasProtected && !exempt && markerDropped/changed.
+    - expression: >-
+        request.operation != "UPDATE" ||
+        variables.exempt ||
+        !variables.oldProtected ||
+        variables.markerPreserved
+      message: >-
+        The delete-protection marker state-snapshotter.deckhouse.io/delete-protected is immutable and cannot
+        be removed or changed. To delete this object set annotation deckhouse.io/allow-delete="true" instead
+        (the marker stays; deletion is permitted by the annotation).
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: d8-{{ .Chart.Name }}-delete-guard
+  labels:
+    heritage: deckhouse
+    module: "{{ .Chart.Name }}"
+spec:
+  policyName: d8-{{ .Chart.Name }}-delete-guard
+  # Rollout gate: Audit (default) observes/annotates without blocking; Deny enforces. Switching to Deny is a
+  # user action performed only after the backfill gate is proven (see plan P3/P4).
+  validationActions:
+{{- if eq $enforcement "Deny" }}
+    - Deny
+{{- else }}
+    - Audit
+    - Warn
+{{- end }}

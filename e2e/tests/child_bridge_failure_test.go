@@ -343,7 +343,7 @@ func childBridgeFailureSpecs() {
 			// there both root paths converge on the same reason:
 			//   - child failure lands while the root is still planning: the weight-layer gate
 			//     (weightLayerCaptureReady -> snapshotChildTerminalFailure) catches the child terminal and the
-			//     planner fails the root via sdk.Fail(ChildrenFailed) — phase=Failed is a terminal sink and the
+			//     planner fails the root via DomainCaptureStatus Failed/ChildrenFailed — phase=Failed is a terminal sink and the
 			//     content->Snapshot mirror bubbles the same reason, so the two writers agree (no flap);
 			//   - child failure lands after the root is Planned: the content aggregation propagates the child
 			//     content terminal up the tree as ChildrenFailed and the mirror reflects it onto the root.
