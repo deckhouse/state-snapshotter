@@ -30,11 +30,14 @@ restart-safe жизненный цикл. SDK никогда не пишет у�
    - какие объекты-источники **исключены** (exclude-veto).
 4. Контроллер передаёт это в SDK, который создаёт capture-запросы, публикует refs и захваченный source и
    проставляет доменную фазу жизненного цикла.
-5. Контроллер объявляет **барьер 1** (`MarkPlanned`, `phase=Planned`).
-6. Core-контроллер захватывает ноги, материализует `SnapshotContent`, переключает per-leg latch-и и пишет
-   `Ready`.
-7. Контроллер переключается по `CoreCaptureOutcome` и, когда все ноги захвачены, объявляет **барьер 2**
-   (`ConfirmConsistent`, `phase=Finished`) после любых consistency-действий.
+5. Как только появился domain claim, generic binder может заранее создать и забайндить shell
+   `SnapshotContent`; это не зависит от барьера 1.
+6. Контроллер объявляет **барьер 1** (`DomainCaptureStatus` → `phase=Planned`), фиксируя
+   child/excluded membership и разрешая core-side capture projection.
+7. Core-контроллер захватывает ноги, проецирует edges/status в забайндированный content, переключает per-leg
+   latch-и и пишет steady-state `Ready`.
+8. Контроллер переключается по `CoreCaptureOutcome` и, когда все ноги захвачены, объявляет **барьер 2**
+   (`DomainCaptureStatus` → `phase=Finished`) после любых consistency-действий.
 
 ```
 User
@@ -55,20 +58,31 @@ Snapshot SDK
   |-- EnsureVolumeCapture
   |-- EnsureManifestCapture
   |
-  v
-Barrier 1: phase = Planned      (MarkPlanned)
+  |     Generic binder может заранее создать + забайндить shell SnapshotContent
   |
   v
-Core snapshot controller  --->  захватывает ноги, материализует SnapshotContent,
+Barrier 1: phase = Planned      (DomainCaptureStatus)
+  |
+  v
+Core snapshot controller  --->  проецирует legs/edges/status в SnapshotContent,
   |                              переключает commonController latch-и, пишет Ready
   v
 CoreCaptureOutcome
-  |-- Captured  -> ConfirmConsistent -> phase = Finished   (Barrier 2)
+  |-- Captured  -> DomainCaptureStatus -> phase = Finished   (Barrier 2)
   |-- Failed    -> stop (терминальный Ready принадлежит core)
   |-- Capturing -> wait / requeue
 ```
 
 Это весь поток. Дальше в гайде — детали каждого шага.
+
+**Текущее compatibility-исключение для агрегаторов.** Агрегатор с subtree-gate, чей собственный
+manifest-scope пересекается с потомками (встроенный пример — namespace root), не может вычислить
+полный exclude-набор до персистирования манифестов потомков. Поэтому он фиксирует и публикует
+child/excluded membership в `Planned`, ждёт
+`ChildSubtreesManifestsPersisted`/`SubtreeManifestIdentities` и только после этого создаёт и
+публикует собственный MCR. Такой late-own-MCR порядок специфичен для текущего
+persisted-subtree протокола; обычный domain controller не должен его копировать и публикует
+MCR/VCR до `Planned`.
 
 ## Что такое snapshot SDK и зачем он нужен
 
@@ -145,24 +159,28 @@ SDK введён, чтобы:
 
 | Фаза | Смысл | Кто ставит |
 |---|---|---|
-| `Planning` | домен создаёт объекты/refs (дети, MCR/VCR) | начальная |
-| `Planned` | **барьер 1**: всё создано и опубликовано | `MarkPlanned` |
-| `Finished` | **барьер 2**: домен закончил свою сторону (в т.ч. consistency-действия) | `ConfirmConsistent` |
-| `Failed` | терминал: домен наткнулся на неустранимую ошибку | `Fail` / `Reject` |
+| `Planning` | домен создаёт объекты/refs (дети, MCR/VCR) или ждёт recoverable-зависимость | `DomainCaptureStatus` |
+| `Planned` | **барьер 1**: child/excluded membership зафиксирован и core projection разрешён; обычный домен уже опубликовал MCR/VCR | `DomainCaptureStatus` |
+| `Finished` | **барьер 2**: домен закончил свою сторону (в т.ч. consistency-действия) | `DomainCaptureStatus` |
+| `Failed` | терминал: домен наткнулся на неустранимую ошибку | `DomainCaptureStatus` |
 
 Важны два свойства:
 
-- **Прямая цепочка не регрессирует**, а `Failed` — **терминальный sink**. Домены зовут `MarkPlanned` на
-  каждом reconcile перед переключением по outcome; монотонный guard гарантирует, что дошедший до `Finished`
+- **Прямая цепочка не регрессирует**, а `Failed` — **терминальный sink**. Домены публикуют
+  `PhasePlanned` на каждом reconcile перед переключением по outcome; монотонный guard гарантирует, что дошедший до `Finished`
   снапшот не откатится в `Planned`, а попавший в `Failed` там и останется. Нетерминальное состояние
-  «жду X» **не должно** использовать `Fail`/`Reject` — оно остаётся в текущей фазе и сообщает причину через
-  `ReportProgress` (только message), как Pod остаётся `Pending` с диагностикой.
+  «жду X» **не должно** использовать `PhaseFailed` — оно остаётся в `Planning` (или текущей фазе) и
+  сообщает диагностику через `DomainCaptureStatus` (см. ниже), как Pod остаётся
+  `Pending` с сообщением.
 - **SDK никогда не пишет conditions.** Единственное условие на снапшоте — core-owned `Ready`. Core зеркалит
   `phase=Failed` в `Ready=False` и является единственным писателем терминального `Ready` и на `SnapshotContent`,
   и на владеющем снапшоте. Домен **читает** `Ready` обратно (через адаптер и `CoreCaptureOutcome`) как канал
-  ошибок.
+  ошибок. До binding generic binder может публиковать локальную деградацию, пока владеет переходом
+  claim→content; после того как owner усыновил забайндированный content, SnapshotContent controller владеет
+  steady-state зеркалом `Ready`. Домен не пишет ни один из этих каналов.
 
-`phase>=Planned` — это handoff: core-контроллер ждёт барьер 1, прежде чем забрать `SnapshotContent`.
+`phase>=Planned` — это projection handoff: content shell уже может существовать и быть забайндированным,
+но core ждёт барьер 1 перед проекцией capture legs, иммутабельных child edges и steady-state status.
 
 ## Где лежит контракт (карта интерфейсов)
 
@@ -170,10 +188,10 @@ SDK введён, чтобы:
 
 | Файл | Тип | Кто реализует |
 |---|---|---|
-| `capture.go` | `CaptureSDK` (= `Planning` + `CaptureBarrier` + `CaptureFault` + `CaptureProgress` + `SourcePublisher` + `ManifestExclude` + `CaptureInspection`) | **SDK** (ты вызываешь) |
+| `capture.go` / `domain_capture_status.go` | `CaptureSDK` (= `Planning` + `SourcePublisher` + `ManifestExclude` + `CaptureInspection` + `DomainCaptureStatus`) | **SDK** (ты вызываешь) |
 | `adapter.go` | `SnapshotAdapter` | **ты** (по одному на свой snapshot-тип) |
 | `volumecapture.go` | `VolumeCaptureProvider` | SDK по умолчанию (`NewStorageFoundationProvider`) |
-| `types.go` | `ChildSpec`, `VolumeCaptureSpec`, `ManifestCaptureSpec`, `SourceRef`, `SnapshotSource`, `DomainCaptureState`, `FailSpec`, `CaptureOutcomeResult`, `ExcludedObjectRef` | DTO, передаёшь в глаголы / читаешь из них |
+| `types.go` | `ChildSpec`, `VolumeCaptureSpec`, `ManifestCaptureSpec`, `SourceRef`, `SnapshotSource`, `DomainCaptureState`, `CaptureOutcomeResult`, `ExcludedObjectRef` | DTO, передаёшь в глаголы / читаешь из них |
 
 Интерфейсы объявлены **на стороне потребителя (consumer side)** — на *boundary*, то есть на **шве интеграции
 (integration seam)** между доменным контроллером и доменно-нейтральным SDK, — а не свалены в один
@@ -197,10 +215,11 @@ SDK введён, чтобы:
    узла. Manifest- и data-ноги — **независимые декларации**: если домен также снимает данные PVC и хочет
    сохранить YAML этого PVC, он **явно** перечисляет PVC в manifest-таргетах. SDK никогда не выводит
    manifest-таргеты из data-ноги.
-4. **Барьер 1** (`MarkPlanned`) — «всё спланировано»; core ждёт именно его, прежде чем забрать
-   `SnapshotContent`.
-5. **Барьер 2** (`ConfirmConsistent`) — объявляется, когда `CoreCaptureOutcome` сообщает, что все ноги
-   захвачены, после любого consistency-действия (например fs unfreeze).
+4. **Барьер 1** (`DomainCaptureStatus` → `PhasePlanned`) — child/excluded membership зафиксирован и core
+   projection может начаться. Обычный домен к этому моменту опубликовал MCR/VCR; текущее исключение для
+   subtree-gated агрегатора описано выше.
+5. **Барьер 2** (`DomainCaptureStatus` → `PhaseFinished`) — объявляется, когда `CoreCaptureOutcome`
+   сообщает, что все ноги захвачены, после любого consistency-действия (например fs unfreeze).
 
 ---
 
@@ -266,8 +285,8 @@ core-owned `captureState.commonController` — только читает их (`
   обращения к кластеру делает SDK.
 - `Object()` возвращает **тот же указатель**, что читают/пишут остальные методы (то самое `s`).
 - Это **единственное место**, где `client.Object` пересекает границу домен↔SDK. В теле `Reconcile` ты эти
-  методы-маппинги напрямую **не зовёшь** — только глаголы намерения (`Ensure*` / `MarkPlanned` /
-  `ConfirmConsistent` / `Fail` / `Reject` / `ReportProgress` / `PublishSnapshotSource`).
+  методы-маппинги напрямую **не зовёшь** — только глаголы намерения (`Ensure*` /
+  `DomainCaptureStatus` / `PublishSnapshotSource`).
 
 Образец 1:1 — `internal/controllers/demo/snapshot_adapter.go`.
 
@@ -319,13 +338,20 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	sdk := r.capture()
 
 	// 1. Валидация источника — твоя логика.
-	//    Невалидный sourceRef → ТЕРМИНАЛ (Reject/Fail).
+	//    Невалидный sourceRef → ТЕРМИНАЛ (PhaseFailed).
 	if /* sourceRef invalid */ {
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{Reason: "InvalidSourceRef", Message: "..."})
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhaseFailed).
+			Reason("InvalidSourceRef").
+			Message("...").
+			Apply(ctx)
 	}
-	//    Источник не найден → RECOVERABLE: сообщи прогресс и requeue (может ещё появиться).
+	//    Источник не найден → RECOVERABLE: публикуй Planning + message и requeue (может ещё появиться).
 	if /* source not found */ {
-		if err := sdk.ReportProgress(ctx, adapter, "waiting for <source> to exist"); err != nil {
+		if err := sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhasePlanning).
+			Message("waiting for <source> to exist").
+			Apply(ctx); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: retry}, nil
@@ -339,12 +365,16 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// 3. Дети (лист без детей → nil, nil). Соблюдай exclude-veto (PartitionExcluded).
 	if err := sdk.EnsureChildren(ctx, adapter, childSpecs, excludedRefs); err != nil {
 		if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) { // рост набора после Planned
-			return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+			return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+				Phase(snapshotsdk.PhaseFailed).
+				Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+				Message(err.Error()).
+				Apply(ctx)
 		}
 		return ctrl.Result{}, err
 	}
 
-	// 4. Захват данных (нет PVC → DataRef: nil = no-op; PVC ещё нет → ReportProgress + requeue).
+	// 4. Захват данных (нет PVC → DataRef: nil = no-op; PVC ещё нет → DomainCaptureStatus + requeue).
 	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{DataRef: dataRef}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -354,15 +384,15 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 6. Барьер 1 — всё спланировано/опубликовано.
-	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+	// 6. Барьер 1 — опубликован план обычного домена, включая MCR/VCR.
+	if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// 7. Барьер 2 — переключаемся по core-derived capture outcome.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeCaptured:
-		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter) // после любого consistency-действия (напр. fs unfreeze)
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx) // после любого consistency-действия (напр. fs unfreeze)
 	case snapshotsdk.CaptureOutcomeFailed:
 		return ctrl.Result{}, nil // терминальный Ready принадлежит core; домену нечего re-drive-ить
 	default: // CaptureOutcomeCapturing: ждём
@@ -375,7 +405,7 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 могут идти между собой в любом порядке. Каждый глагол зависит только от своего spec и никогда не читает
 результат другой ноги, поэтому создаваемые запросы идентичны при любом порядке вызова — в частности,
 `EnsureManifestCapture` строит MCR исключительно из своих объявленных `Targets` и не обращается к data-ноге
-VCR. Барьер 1 (`MarkPlanned`) — после всех трёх планирующих вызовов; переключение по outcome барьера 2 — в
+VCR. Барьер 1 (`DomainCaptureStatus` → `PhasePlanned`) — после всех трёх планирующих вызовов; переключение по outcome барьера 2 — в
 конце. На ошибку из любого `Ensure*` — просто `return err`, reconcile повторится.
 
 ### Import-режим: короткое замыкание
@@ -423,7 +453,8 @@ SDK не решает за домен, какие манифесты прина�
 быть **непустым**: SDK **не подставляет** сам снапшотируемый ресурс за тебя и **не** подмешивает PVC из
 data-ноги. Пустой `Targets` возвращает `snapshotsdk.ErrEmptyManifest` **до** любой мутации кластера (MCR CRD
 enforce-ит тот же инвариант через CEL как вторую линию защиты). Пустой набор — это баг планирования в домене,
-а не временное состояние; рекомендуемая реакция — `sdk.Fail(GraphPlanningFailed)`. Suppression-защёлка
+а не временное состояние; рекомендуемая реакция — `DomainCaptureStatus` с `PhaseFailed` и reason
+`GraphPlanningFailed`. Suppression-защёлка
 сильнее этого guard'а: как только ядро зафиксировало manifest-ногу captured, вызов — no-op (`nil`) при любом
 входе — поздний пост-capture пересчёт, давший пустой набор, не должен провалить уже снятый снапшот.
 
@@ -435,8 +466,10 @@ enforce-ит тот же инвариант через CEL как вторую �
 патчит) и только ПОСЛЕ этого, если данный reconcile объявляет **другой** набор (сравнение **множеств** по
 `(apiVersion, kind, name)`; порядок и дубликаты не важны), **сигнализирует** `snapshotsdk.ErrManifestTargetsDrift`.
 Drift — это **сигнал, а не решение**: имя уже опубликовано, значит нога установлена в любом случае, а что делать
-дальше — решает **вызывающий**. Домен обычно реагирует `sdk.Fail(GraphPlanningFailed)`; namespace-root-агрегатор
+дальше — решает **вызывающий**. Домен обычно реагирует `DomainCaptureStatus` → `PhaseFailed` /
+`GraphPlanningFailed`; namespace-root-агрегатор
 его **игнорирует** (он пересчитывает подвижный набор по живому namespace, и побеждает первый план).
+Это compatibility-правило текущего late-own-MCR namespace flow, а не рекомендация для обычных доменов.
 Иммутабельность `spec.targets` обеспечивает apiserver: CEL-правило перехода в CRD `ManifestCaptureRequest`
 (`self.targets == oldSelf.targets`) отклоняет любое изменение — сам SDK таргеты никогда не патчит. Идентичная
 повторная декларация — no-op.
@@ -444,7 +477,11 @@ Drift — это **сигнал, а не решение**: имя уже опу�
 ```go
 if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: manifestTargets}); err != nil {
 	if errors.Is(err, snapshotsdk.ErrManifestTargetsDrift) {
-		_ = sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+		_ = sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhaseFailed).
+			Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+			Message(err.Error()).
+			Apply(ctx)
 	}
 	return ctrl.Result{}, err
 }
@@ -529,11 +566,15 @@ for _, o := range excluded {
   что отклонённый вызов не имеет сайд-эффектов. Идемпотентная перепубликация того же набора (desired ⊆ published,
   excluded не изменился) остаётся no-op при любой фазе. Заморозка зеркалит иммутабельный
   `SnapshotContent.status.childrenSnapshotContentRefs`; поздно добавленное ребро навсегда заклинило бы узел,
-  поэтому рекомендуемая реакция — `sdk.Fail(GraphPlanningFailed)`:
+  поэтому рекомендуемая реакция — `DomainCaptureStatus` → `PhaseFailed` / `GraphPlanningFailed`:
   ```go
   if err := sdk.EnsureChildren(ctx, adapter, childSpecs, excludedRefs); err != nil {
   	if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) {
-  		return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+  		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+  			Phase(snapshotsdk.PhaseFailed).
+  			Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+  			Message(err.Error()).
+  			Apply(ctx)
   	}
   	// Recoverable (конфликт усыновления / транзиентная API-ошибка): requeue с backoff, фаза остаётся до Planned.
   	return ctrl.Result{}, err
@@ -584,9 +625,9 @@ type Target struct {
 ```
 
 Домен сам находит свой PVC и сам принимает решения о готовности. **Отсутствующий PVC — recoverable, не
-терминал**: домен сообщает об этом через `ReportProgress` (только message, фаза сохраняется) и делает requeue
-через `ctrl.Result` — он **не должен** входить в терминальный `Failed`-sink, иначе появившийся позже PVC
-никогда не был бы захвачен. Из `DataRef` SDK создаёт storage-foundation `VolumeCaptureRequest` (VCR) и публикует
+терминал**: домен сообщает об этом через `DomainCaptureStatus` (`PhasePlanning` + message, опционально
+`Reason`) и делает requeue через `ctrl.Result` — он **не должен** входить в терминальный
+`Failed`-sink, иначе появившийся позже PVC никогда не был бы захвачен. Из `DataRef` SDK создаёт storage-foundation `VolumeCaptureRequest` (VCR) и публикует
 его имя в `status.captureState.domainSpecificController.volumeCaptureRequestName`. Это только data-нога — она
 **не** питает manifest-ногу; если YAML этого PVC тоже нужно сохранить, домен перечисляет его в manifest
 `Targets`.
@@ -641,7 +682,7 @@ pvc := &corev1.PersistentVolumeClaim{}
 if err := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); err != nil {
 	if apierrors.IsNotFound(err) {
 		// RECOVERABLE: PVC может появиться позже → верни «pending»-сообщение; вызывающий сообщит его через
-		// ReportProgress и сделает requeue (НЕ Fail/Reject, НЕ ошибка).
+		// DomainCaptureStatus (PhasePlanning + Message) и сделает requeue (НЕ PhaseFailed, НЕ ошибка).
 		return nil, fmt.Sprintf("waiting for PersistentVolumeClaim %q to exist", pvcName), nil
 	}
 	return nil, "", err
@@ -691,7 +732,7 @@ if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
 switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 case snapshotsdk.CaptureOutcomeCaptured:
 	// Все объявленные ноги захвачены и Ready не терминальный → подтверждаем consistency (барьер 2).
-	return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 case snapshotsdk.CaptureOutcomeFailed:
 	// Core выставил терминальный Ready-reason (своя manifest/volume-нога или всплывший child-fail).
 	// Домен НЕ re-drive-ит это в phase=Failed — превращение core-owned отказа ноги в терминал — работа core
@@ -732,7 +773,7 @@ case snapshotsdk.CaptureOutcomeCaptured:
 	if err := r.thawIfFrozen(ctx, adapter); err != nil { // consistency-действие
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 default: // CaptureOutcomeCapturing
 	return ctrl.Result{RequeueAfter: retry}, nil
 }
@@ -763,6 +804,10 @@ child-refs и возвращает для каждого его `Ready` status/r
 exclude никогда не возвращается. Узел без детей возвращает пустой набор. Лист/родитель, не агрегирующий
 перекрывающиеся манифесты, в этом вообще не нуждается.
 
+Для matching и de-duplication используется
+`(apiVersion, kind, namespace, name)`. Опциональный UID — только диагностическая metadata и не входит в
+ключ manifest-плана: пересозданный объект с тем же именем занимает тот же capture slot.
+
 **Встроенный pre-gate.** Перед обращением к сабресурсу метод сверяется с полем
 `CoreCaptureState().ChildSubtreesManifestsPersisted` **своего** узла — core-computed латчем «поддеревья ВСЕХ
 объявленных прямых детей полностью персистированы» (children-only: манифесты самого узла в него НЕ входят,
@@ -771,25 +816,106 @@ exclude никогда не возвращается. Узел без детей
 пока потомки ещё захватываются. `nil` (адаптер не мапит поле или оно ещё не вычислено) выключает pre-gate и
 сохраняет прежнее поведение; корректность в любом случае держит fail-closed 409 сабресурса.
 
+Этот persistence-gate объясняет текущий late-own-MCR порядок агрегатора:
+
+1. опубликовать и зафиксировать полный child/excluded membership через
+   `DomainCaptureStatus(...).Phase(PhasePlanned).Apply(ctx)`;
+2. дождаться, пока `SubtreeManifestIdentities` вернёт полный персистированный набор потомков;
+3. вычислить `base − exclude` и вызвать `EnsureManifestCapture`.
+
+Обычные домены этим исключением не пользуются: они вызывают `EnsureManifestCapture` до публикации
+`PhasePlanned`.
+
 ---
 
-## Failure и progress-пути
+## Domain capture status — единственный публичный status API
 
-- `Fail(ctx, adapter, reason, cause)` — быстрая терминальная форма: ставит `phase=Failed` с
-  machine-readable `reason` и message из cause. Используй для нарушения доменного контракта: `ErrChildrenSetFrozen`
-  / `ErrManifestTargetsDrift` / `ErrEmptyManifest` (рекомендуемый reason `GraphPlanningFailed`).
-- `Reject(ctx, adapter, FailSpec{Reason, Message, Cause, Requeue})` — структурная терминальная форма (например
-  невалидный `sourceRef`). Тот же эффект: `phase=Failed`.
-- `ReportProgress(ctx, adapter, message)` — **нетерминальная**, только-message диагностика, записываемая в
-  `status.captureState.domainSpecificController.message`. Она сохраняет фазу и reason и никогда не трогает
-  `Ready`. Используй для recoverable-ожидания («жду PVC X») и продолжай requeue-ить; она идемпотентна, а пустой
-  message очищает прежнюю диагностику. Она отказывается перезаписывать терминальный (`Failed`) объект.
+`DomainCaptureStatus` — **единственный публичный API** для записи domain capture status
+(`phase` / `reason` / `message`) в `status.captureState.domainSpecificController`.
+Используй его для каждой lifecycle-записи: recoverable-ожидания, барьера 1, барьера 2 и терминального
+отказа домена.
 
-Ключевое различие: `Fail`/`Reject` — **терминальны** (SDK никогда не покидает `Failed`), поэтому применяй их
-только к действительно неустранимым ошибкам. Всё, что может разрешиться позже (ещё не появившийся source или
-PVC), использует `ReportProgress` + requeue — Pod-модель: остаться `Pending` с диагностикой. Отказы core-owned
-ног выставляет **core** на `Ready`; домен наблюдает их через `CoreCaptureOutcome=Failed` и просто
-останавливается, он не re-drive-ит их в `phase=Failed`.
+State machine (монотонная; не регрессирует):
+
+```
+Planning  -->  Planned  -->  Finished
+     |              |
+     +--------------+---->  Failed  (terminal sink)
+```
+
+| Фаза | Когда | Типичный вызов |
+|---|---|---|
+| `Planning` | создание refs или ожидание recoverable-зависимости | `.Phase(PhasePlanning).Reason(...).Message(...).Apply(ctx)` |
+| `Planned` | **барьер 1** — child/excluded membership зафиксирован; MCR/VCR обычного домена опубликован; core projection разрешён | `.Phase(PhasePlanned).Apply(ctx)` |
+| `Finished` | **барьер 2** — домен закончил свою сторону (в т.ч. consistency) | `.Phase(PhaseFinished).Apply(ctx)` |
+| `Failed` | терминальный отказ домена (невалидный spec, нарушение контракта планирования) | `.Phase(PhaseFailed).Reason(...).Message(...).Apply(ctx)` |
+
+**Свойства:**
+
+- **Вход в `Phase(Planned)` / `Phase(Finished)` принудительно очищает `reason` и `message`** на wire.
+  Same-phase re-apply может обновить message (например post-barrier diagnostic), не откатывая phase.
+- **`Failed` — терминальный sink** — после установки SDK его не покидает. Recoverable-ожидание должно
+  оставаться в `Planning` (с message и опциональным reason), а не в `Failed` — Pod-модель: остаться
+  `Pending` с диагностикой.
+- **Прямая цепочка не регрессирует** — дошедший до `Finished` снапшот не откатывается в `Planned`.
+- **Core-owned отказы ног домен не пишет как `phase=Failed`.** Core выставляет их на `Ready`; домен
+  наблюдает `CoreCaptureOutcome=Failed` и останавливается.
+
+### Ожидание, барьеры и отказ (один API)
+
+Recoverable-ожидание (source или PVC ещё не готов):
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhasePlanning).
+    Message("waiting for PersistentVolumeClaim \"data\" to exist").
+    Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+return ctrl.Result{RequeueAfter: retry}, nil
+```
+
+Ожидание с machine-readable progress reason:
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhasePlanning).
+    Reason("Snapshotting").
+    Message(fmt.Sprintf("Waiting for the snapshot of virtual disk %q to be ready to use.", name)).
+    Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+return ctrl.Result{RequeueAfter: retry}, nil
+```
+
+Барьер 1 (после всех планирующих `Ensure*`):
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+```
+
+Барьер 2 (после `CoreCaptureOutcome=Captured` и любого consistency-действия):
+
+```go
+return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
+```
+
+Терминальный отказ домена (невалидный `sourceRef`, `ErrChildrenSetFrozen`, `ErrManifestTargetsDrift`,
+`ErrEmptyManifest`):
+
+```go
+return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhaseFailed).
+    Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+    Message(err.Error()).
+    Apply(ctx)
+```
+
+`Apply` идёт через SDK status-write path (adapter + optimistic patch, монотонные переходы, Failed sink).
+Он никогда не пишет `status.conditions`. Перед каждым `Apply` предпочитай свежий writer (или полную
+перезапись Phase/Reason/Message), чтобы stale reason/message не протекали между ветками reconcile.
 
 ## Гарантии, на которые можно полагаться
 

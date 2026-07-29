@@ -83,6 +83,10 @@ func ensureChild(ctx context.Context, c client.Client, desired client.Object, ow
 		if oErr := ownerref.Ensure(child, owner); oErr != nil {
 			return oErr
 		}
+		// Stamp the authoritative delete-protection state into the CREATE payload so the child appears in
+		// the API already protected (delete-protection-contract.md §6.1). A child node is introduced into
+		// the tree here; it must never exist unprotected, and a post-create patch would leave a race.
+		storagev1alpha1.StampDeleteProtected(child)
 		return c.Create(ctx, child)
 	}
 	if err != nil {

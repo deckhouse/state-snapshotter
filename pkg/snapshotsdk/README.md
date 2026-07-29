@@ -32,11 +32,14 @@ domain reads it back as its failure channel.
    - which candidate source objects are **excluded** (the exclude veto).
 4. The controller hands this to the SDK, which creates the capture requests, publishes the refs
    and the captured source, and stamps the domain lifecycle phase.
-5. The controller declares **barrier 1** (`MarkPlanned`, `phase=Planned`).
-6. The core controller captures the legs, materializes the `SnapshotContent`, flips the per-leg
-   latches, and writes `Ready`.
-7. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
-   **barrier 2** (`ConfirmConsistent`, `phase=Finished`) after any consistency action.
+5. Once the domain claim exists, the generic binder may eagerly create and bind the
+   `SnapshotContent` shell; this is independent of barrier 1.
+6. The controller declares **barrier 1** (`DomainCaptureStatus` → `phase=Planned`), freezing the
+   child/excluded membership and enabling core-side capture projection.
+7. The core controller captures the legs, projects edges/status into the bound content, flips the
+   per-leg latches, and writes steady-state `Ready`.
+8. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
+   **barrier 2** (`DomainCaptureStatus` → `phase=Finished`) after any consistency action.
 
 ```
 User
@@ -57,20 +60,31 @@ Snapshot SDK
   |-- EnsureVolumeCapture
   |-- EnsureManifestCapture
   |
-  v
-Barrier 1: phase = Planned      (MarkPlanned)
+  |     Generic binder may eagerly create + bind the SnapshotContent shell
   |
   v
-Core snapshot controller  --->  captures legs, materializes SnapshotContent,
+Barrier 1: phase = Planned      (DomainCaptureStatus)
+  |
+  v
+Core snapshot controller  --->  projects legs/edges/status into SnapshotContent,
   |                              flips commonController latches, writes Ready
   v
 CoreCaptureOutcome
-  |-- Captured  -> ConfirmConsistent -> phase = Finished   (Barrier 2)
+  |-- Captured  -> DomainCaptureStatus -> phase = Finished   (Barrier 2)
   |-- Failed    -> stop (core owns the terminal Ready)
   |-- Capturing -> wait / requeue
 ```
 
 That is the whole flow. The rest of this guide covers each step in detail.
+
+**Current aggregator compatibility exception.** A subtree-gated aggregator whose own manifest
+scope overlaps its descendants (the namespace root is the built-in example) cannot compute a
+complete exclusion set until descendant manifests are persisted. It therefore freezes and
+publishes its child/excluded membership at `Planned`, waits for
+`ChildSubtreesManifestsPersisted`/`SubtreeManifestIdentities`, and only then creates and publishes
+its own MCR. This late-own-MCR ordering is specific to the current persisted-subtree protocol; it
+must not be copied into an ordinary domain controller, which publishes its MCR/VCR before
+`Planned`.
 
 ## What the snapshot SDK is and why it exists
 
@@ -148,26 +162,30 @@ It takes four values:
 
 | Phase | Meaning | Set by |
 |---|---|---|
-| `Planning` | the domain is creating objects/refs (children, MCR/VCR) | initial |
-| `Planned` | **barrier 1**: everything created and published | `MarkPlanned` |
-| `Finished` | **barrier 2**: the domain finished its side (incl. consistency actions) | `ConfirmConsistent` |
-| `Failed` | terminal: the domain hit an unrecoverable error | `Fail` / `Reject` |
+| `Planning` | the domain is creating objects/refs (children, MCR/VCR), or waiting on a recoverable dependency | `DomainCaptureStatus` |
+| `Planned` | **barrier 1**: child/excluded membership frozen and core projection enabled; regular domains have already published MCR/VCR | `DomainCaptureStatus` |
+| `Finished` | **barrier 2**: the domain finished its side (incl. consistency actions) | `DomainCaptureStatus` |
+| `Failed` | terminal: the domain hit an unrecoverable error | `DomainCaptureStatus` |
 
 Two properties matter:
 
-- **The forward chain never regresses** and `Failed` is a **terminal sink**. Domains call
-  `MarkPlanned` on every reconcile before switching on the outcome; the monotonic guard means a
+- **The forward chain never regresses** and `Failed` is a **terminal sink**. Domains publish
+  `PhasePlanned` on every reconcile before switching on the outcome; the monotonic guard means a
   snapshot that already reached `Finished` is never dragged back to `Planned`, and once it is
-  `Failed` it stays `Failed`. A non-terminal "waiting for X" state must **not** use `Fail`/`Reject`
-  — it stays in its current phase and surfaces the reason via `ReportProgress` (message-only), the
-  way a Pod stays `Pending` with a diagnostic.
+  `Failed` it stays `Failed`. A non-terminal "waiting for X" state must **not** use `PhaseFailed`
+  — it stays in `Planning` (or the current phase) and surfaces a diagnostic via `DomainCaptureStatus`
+  (see below), the way a Pod stays `Pending` with a message.
 - **The SDK never writes conditions.** The only condition on a snapshot is the core-owned `Ready`.
   The core mirrors `phase=Failed` into `Ready=False`, and it is the sole writer of the terminal
   `Ready` on both the `SnapshotContent` and its owning snapshot. The domain **reads** `Ready` back
-  (via the adapter and `CoreCaptureOutcome`) as its failure channel.
+  (via the adapter and `CoreCaptureOutcome`) as its failure channel. Before binding, the generic
+  binder may publish local degradation while it owns the claim-to-content transition; once the
+  owner adopts the bound content, the SnapshotContent controller owns the steady-state Ready
+  mirror. The domain never writes either channel.
 
-`phase>=Planned` is the handoff: the core controller waits for barrier 1 before it takes over the
-`SnapshotContent`.
+`phase>=Planned` is the projection handoff: the content shell may already exist and be bound, but
+the core waits for barrier 1 before it projects capture legs, immutable child edges, and
+steady-state status into it.
 
 ## Where the contract lives (interface map)
 
@@ -175,10 +193,10 @@ The entire public contract is in the `pkg/snapshotsdk` module:
 
 | File | Type | Implemented by |
 |---|---|---|
-| `capture.go` | `CaptureSDK` (= `Planning` + `CaptureBarrier` + `CaptureFault` + `CaptureProgress` + `SourcePublisher` + `ManifestExclude` + `CaptureInspection`) | **SDK** (you call it) |
+| `capture.go` / `domain_capture_status.go` | `CaptureSDK` (= `Planning` + `SourcePublisher` + `ManifestExclude` + `CaptureInspection` + `DomainCaptureStatus`) | **SDK** (you call it) |
 | `adapter.go` | `SnapshotAdapter` | **you** (one per snapshot type) |
 | `volumecapture.go` | `VolumeCaptureProvider` | SDK by default (`NewStorageFoundationProvider`) |
-| `types.go` | `ChildSpec`, `VolumeCaptureSpec`, `ManifestCaptureSpec`, `SourceRef`, `SnapshotSource`, `DomainCaptureState`, `FailSpec`, `CaptureOutcomeResult`, `ExcludedObjectRef` | DTOs you pass to / read from the verbs |
+| `types.go` | `ChildSpec`, `VolumeCaptureSpec`, `ManifestCaptureSpec`, `SourceRef`, `SnapshotSource`, `DomainCaptureState`, `CaptureOutcomeResult`, `ExcludedObjectRef` | DTOs you pass to / read from the verbs |
 
 The interfaces are declared on the **consumer side** — at the *boundary*, i.e. on the
 **integration seam** between the domain controller and the domain-neutral SDK — rather than
@@ -204,10 +222,11 @@ outcome to declare barrier 2 (or stop):
    declares for this node. The manifest and data legs are **independent declarations**: if the
    domain also captures a PVC's data and wants that PVC's YAML, it lists the PVC in the manifest
    targets explicitly. The SDK never derives manifest targets from the data leg.
-4. **Barrier 1** (`MarkPlanned`) — "everything is planned"; the core waits for exactly this before
-   it takes over the `SnapshotContent`.
-5. **Barrier 2** (`ConfirmConsistent`) — declared once `CoreCaptureOutcome` reports every leg
-   captured, after any consistency action (e.g. fs unfreeze).
+4. **Barrier 1** (`DomainCaptureStatus` → `PhasePlanned`) — child/excluded membership is frozen and
+   core projection may start. A regular domain has published its MCR/VCR by this point; the current
+   subtree-gated aggregator exception is described above.
+5. **Barrier 2** (`DomainCaptureStatus` → `PhaseFinished`) — declared once `CoreCaptureOutcome`
+   reports every leg captured, after any consistency action (e.g. fs unfreeze).
 
 ---
 
@@ -277,8 +296,7 @@ Contract rules:
 - `Object()` returns the **same pointer** that the other methods read/write (the same `s`).
 - This is the **only place** where `client.Object` crosses the domain↔SDK boundary. In the body of
   `Reconcile` you do **not** call these mapping methods directly — only the intent verbs
-  (`Ensure*` / `MarkPlanned` / `ConfirmConsistent` / `Fail` / `Reject` / `ReportProgress` /
-  `PublishSnapshotSource`).
+  (`Ensure*` / `DomainCaptureStatus` / `PublishSnapshotSource`).
 
 A 1:1 template — `internal/controllers/demo/snapshot_adapter.go`.
 
@@ -331,13 +349,20 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	sdk := r.capture()
 
 	// 1. Source validation — your logic.
-	//    Invalid sourceRef → TERMINAL (Reject/Fail).
+	//    Invalid sourceRef → TERMINAL (PhaseFailed).
 	if /* sourceRef invalid */ {
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{Reason: "InvalidSourceRef", Message: "..."})
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhaseFailed).
+			Reason("InvalidSourceRef").
+			Message("...").
+			Apply(ctx)
 	}
-	//    Source not found → RECOVERABLE: report progress and requeue (it may still appear).
+	//    Source not found → RECOVERABLE: publish Planning + message and requeue (it may still appear).
 	if /* source not found */ {
-		if err := sdk.ReportProgress(ctx, adapter, "waiting for <source> to exist"); err != nil {
+		if err := sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhasePlanning).
+			Message("waiting for <source> to exist").
+			Apply(ctx); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: retry}, nil
@@ -351,12 +376,16 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// 3. Children (a leaf with no children → nil, nil). Honor the exclude veto (PartitionExcluded).
 	if err := sdk.EnsureChildren(ctx, adapter, childSpecs, excludedRefs); err != nil {
 		if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) { // a post-Planned set growth
-			return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+			return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+				Phase(snapshotsdk.PhaseFailed).
+				Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+				Message(err.Error()).
+				Apply(ctx)
 		}
 		return ctrl.Result{}, err
 	}
 
-	// 4. Data capture (no PVC → DataRef: nil = no-op; PVC not there yet → ReportProgress + requeue).
+	// 4. Data capture (no PVC → DataRef: nil = no-op; PVC not there yet → DomainCaptureStatus + requeue).
 	if err := sdk.EnsureVolumeCapture(ctx, adapter, snapshotsdk.VolumeCaptureSpec{DataRef: dataRef}); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -366,15 +395,15 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 6. Barrier 1 — everything planned/published.
-	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+	// 6. Barrier 1 — regular-domain plan published, including MCR/VCR.
+	if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// 7. Barrier 2 — switch on the core-derived capture outcome.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeCaptured:
-		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter) // after any consistency action (e.g. fs unfreeze)
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx) // after any consistency action (e.g. fs unfreeze)
 	case snapshotsdk.CaptureOutcomeFailed:
 		return ctrl.Result{}, nil // the core owns the terminal Ready; nothing for the domain to re-drive
 	default: // CaptureOutcomeCapturing: wait
@@ -387,7 +416,7 @@ Order: the planning calls (`EnsureChildren` / `EnsureVolumeCapture` / `EnsureMan
 **independent** and may run in any order relative to each other. Each verb depends only on its own
 spec and never reads another leg's result, so the requests they produce are identical regardless of
 call order — in particular `EnsureManifestCapture` builds the MCR solely from its declared `Targets`
-and does not consult the data-leg VCR. Barrier 1 (`MarkPlanned`) comes after all three planning
+and does not consult the data-leg VCR. Barrier 1 (`DomainCaptureStatus` → `PhasePlanned`) comes after all three planning
 calls; the barrier-2 outcome switch comes last. On an error from any `Ensure*`, just `return err`
 and the reconcile retries.
 
@@ -439,7 +468,7 @@ Every snapshot captures at least its own source object's manifest. The declared 
 inject a PVC from the data leg. An empty `Targets` returns `snapshotsdk.ErrEmptyManifest` **before**
 any cluster mutation (the MCR CRD enforces the same invariant via CEL as a second line of defense).
 An empty set is a domain planning bug, not a transient state — recommended reaction
-`sdk.Fail(GraphPlanningFailed)`. The captured-latch suppression wins over this guard: once the core
+`DomainCaptureStatus` with `PhaseFailed` and reason `GraphPlanningFailed`. The captured-latch suppression wins over this guard: once the core
 has stamped the manifest leg captured, the call is a no-op (`nil`) regardless of input — a late
 post-capture recomputation that came up empty must not fail an already-captured snapshot.
 
@@ -452,16 +481,23 @@ into status, never patching `spec.targets` — and only THEN, if this reconcile 
 **different** set (compared as **sets** by `(apiVersion, kind, name)`; order and duplicates do not
 matter), it **signals** `snapshotsdk.ErrManifestTargetsDrift`. Drift is a **signal, not a
 decision**: the name is already published, so the leg is established regardless — the **caller**
-decides what to do. A domain typically reacts with `sdk.Fail(GraphPlanningFailed)`; the
+decides what to do. A domain typically reacts with `DomainCaptureStatus` → `PhaseFailed` /
+`GraphPlanningFailed`; the
 namespace-root aggregator **ignores** it (it recomputes a shifting set over a live namespace, and
-the first plan wins). Immutability of `spec.targets` is the apiserver's job: the MCR CRD's CEL
+the first plan wins). This is a compatibility rule for the current late-own-MCR namespace flow,
+not reusable guidance for ordinary domains. Immutability of `spec.targets` is the apiserver's job:
+the MCR CRD's CEL
 transition rule (`self.targets == oldSelf.targets`) rejects any change — the SDK itself never
 patches the targets. An identical re-declaration is a no-op.
 
 ```go
 if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: manifestTargets}); err != nil {
 	if errors.Is(err, snapshotsdk.ErrManifestTargetsDrift) {
-		_ = sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+		_ = sdk.DomainCaptureStatus(adapter).
+			Phase(snapshotsdk.PhaseFailed).
+			Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+			Message(err.Error()).
+			Apply(ctx)
 	}
 	return ctrl.Result{}, err
 }
@@ -549,11 +585,15 @@ for _, o := range excluded {
   idempotent re-publish of the same set (desired ⊆ published, excluded unchanged) stays a no-op at
   any phase. The freeze mirrors the immutable `SnapshotContent.status.childrenSnapshotContentRefs`;
   a late-added edge would wedge the node forever, so the recommended reaction is
-  `sdk.Fail(GraphPlanningFailed)`:
+  `DomainCaptureStatus` → `PhaseFailed` / `GraphPlanningFailed`:
   ```go
   if err := sdk.EnsureChildren(ctx, adapter, childSpecs, excludedRefs); err != nil {
   	if errors.Is(err, snapshotsdk.ErrChildrenSetFrozen) {
-  		return ctrl.Result{}, sdk.Fail(ctx, adapter, snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed), err)
+  		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+  			Phase(snapshotsdk.PhaseFailed).
+  			Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+  			Message(err.Error()).
+  			Apply(ctx)
   	}
   	// Recoverable (adoption conflict / transient API error): requeue with backoff, phase stays pre-Planned.
   	return ctrl.Result{}, err
@@ -606,9 +646,9 @@ type Target struct {
 ```
 
 The domain finds its own PVC and makes its own readiness decisions. A **missing PVC is recoverable,
-not terminal**: the domain surfaces it via `ReportProgress` (message-only, phase preserved) and
-requeues via `ctrl.Result` — it must **not** enter the terminal `Failed` sink, or a PVC that shows
-up later could never be captured. From the `DataRef` the SDK creates a storage-foundation
+not terminal**: the domain surfaces it via `DomainCaptureStatus` (`PhasePlanning` + message, optionally
+`Reason`) and requeues via `ctrl.Result` — it must **not** enter the terminal `Failed`
+sink, or a PVC that shows up later could never be captured. From the `DataRef` the SDK creates a storage-foundation
 `VolumeCaptureRequest` (VCR) and publishes its name in
 `status.captureState.domainSpecificController.volumeCaptureRequestName`. This is the data leg only —
 it does **not** feed the manifest leg; if the PVC's YAML must also be captured, the domain lists it
@@ -666,7 +706,7 @@ pvc := &corev1.PersistentVolumeClaim{}
 if err := reader.Get(ctx, types.NamespacedName{Namespace: s.Namespace, Name: pvcName}, pvc); err != nil {
 	if apierrors.IsNotFound(err) {
 		// RECOVERABLE: the PVC may appear later → return a "pending" message; the caller surfaces it
-		// via ReportProgress and requeues (NOT Fail/Reject, NOT an error).
+		// via DomainCaptureStatus (PhasePlanning + Message) and requeues (NOT PhaseFailed, NOT an error).
 		return nil, fmt.Sprintf("waiting for PersistentVolumeClaim %q to exist", pvcName), nil
 	}
 	return nil, "", err
@@ -718,7 +758,7 @@ terminal `Ready` reason:
 switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 case snapshotsdk.CaptureOutcomeCaptured:
 	// Every declared leg is captured and Ready is not terminal → confirm consistency (barrier 2).
-	return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 case snapshotsdk.CaptureOutcomeFailed:
 	// The core surfaced a terminal Ready reason (own manifest/volume leg, or a bubbled child failure).
 	// The domain does NOT re-drive it into phase=Failed — turning a core-owned leg failure into a
@@ -760,7 +800,7 @@ case snapshotsdk.CaptureOutcomeCaptured:
 	if err := r.thawIfFrozen(ctx, adapter); err != nil { // consistency action
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 default: // CaptureOutcomeCapturing
 	return ctrl.Result{RequeueAfter: retry}, nil
 }
@@ -794,6 +834,10 @@ if any subtree is not fully persisted or a child has not bound its content yet, 
 returned. A node with no children returns an empty set. A leaf/parent that does not aggregate
 overlapping manifests does not need this at all.
 
+Identity matching and de-duplication use
+`(apiVersion, kind, namespace, name)`. The optional UID is diagnostic metadata and is not part of
+the manifest-plan key: a recreated object with the same name occupies the same capture slot.
+
 **Built-in pre-gate.** Before touching the subresource the method consults **its own** node's
 `CoreCaptureState().ChildSubtreesManifestsPersisted` — the core-computed latch "the subtrees of ALL
 declared direct children are fully persisted" (children-only: this node's own manifests are NOT
@@ -803,27 +847,107 @@ round-trips and 409-requeue cycles while descendants are still capturing. `nil` 
 map the field, or it is not computed yet) disables the pre-gate and preserves the prior behavior;
 correctness is still held by the subresource's fail-closed 409.
 
+This persistence gate explains the current late-own-MCR ordering for aggregators:
+
+1. publish and freeze the complete child/excluded membership with
+   `DomainCaptureStatus(...).Phase(PhasePlanned).Apply(ctx)`;
+2. wait until `SubtreeManifestIdentities` returns the complete persisted descendant set;
+3. compute `base − exclude` and call `EnsureManifestCapture`.
+
+Ordinary domains do not use this exception: they call `EnsureManifestCapture` before publishing
+`PhasePlanned`.
+
 ---
 
-## Failure and progress paths
+## Domain capture status — the single public status API
 
-- `Fail(ctx, adapter, reason, cause)` — the quick terminal form: sets `phase=Failed` with a
-  machine-readable `reason` and the cause's message. Use it for a domain contract violation such as
-  `ErrChildrenSetFrozen` / `ErrManifestTargetsDrift` / `ErrEmptyManifest` (recommended reason
-  `GraphPlanningFailed`).
-- `Reject(ctx, adapter, FailSpec{Reason, Message, Cause, Requeue})` — the structured terminal form
-  (e.g. an invalid `sourceRef`). Same effect: `phase=Failed`.
-- `ReportProgress(ctx, adapter, message)` — a **non-terminal**, message-only diagnostic written into
-  `status.captureState.domainSpecificController.message`. It preserves the phase and reason and never
-  touches `Ready`. Use it for a recoverable wait ("waiting for PVC X to exist") and keep requeuing;
-  it is idempotent, and an empty message clears a prior diagnostic. It refuses to overwrite a
-  terminal (`Failed`) object.
+`DomainCaptureStatus` is the **single public API** for writing domain capture status
+(`phase` / `reason` / `message`) into `status.captureState.domainSpecificController`.
+Use it for every lifecycle write: recoverable waiting, barrier 1, barrier 2, and terminal domain failure.
 
-The key distinction: `Fail`/`Reject` are **terminal** (the SDK never leaves `Failed`), so they must
-only be used for genuinely unrecoverable errors. Anything that may resolve later (a source or PVC
-that has not appeared yet) uses `ReportProgress` + requeue — the Pod model of staying `Pending` with
-a diagnostic. Core-owned leg failures are surfaced by the **core** on `Ready`; the domain observes
-them via `CoreCaptureOutcome=Failed` and simply stops, it does not re-drive them into `phase=Failed`.
+State machine (monotonic; never regresses):
+
+```
+Planning  -->  Planned  -->  Finished
+     |              |
+     +--------------+---->  Failed  (terminal sink)
+```
+
+| Phase | When | Typical call |
+|---|---|---|
+| `Planning` | creating refs, or waiting on a recoverable dependency | `.Phase(PhasePlanning).Reason(...).Message(...).Apply(ctx)` |
+| `Planned` | **barrier 1** — child/excluded membership frozen; regular-domain MCR/VCR published; core projection enabled | `.Phase(PhasePlanned).Apply(ctx)` |
+| `Finished` | **barrier 2** — domain side done (incl. consistency actions) | `.Phase(PhaseFinished).Apply(ctx)` |
+| `Failed` | terminal domain failure (invalid spec, planning contract violation) | `.Phase(PhaseFailed).Reason(...).Message(...).Apply(ctx)` |
+
+**Properties:**
+
+- **Entering `Phase(Planned)` / `Phase(Finished)` force-clears `reason` and `message`** on the wire.
+  A same-phase re-apply may update the message (e.g. a post-barrier diagnostic) without regressing phase.
+- **`Failed` is a terminal sink** — once set, the SDK never leaves it. Recoverable waiting must stay
+  in `Planning` (with a message and optional reason), not `Failed` — the Pod model of staying
+  `Pending` with a diagnostic.
+- **The forward chain never regresses** — a snapshot that reached `Finished` is never dragged back to
+  `Planned`.
+- **Core-owned leg failures are not written as `phase=Failed` by the domain.** The core surfaces them
+  on `Ready`; the domain observes `CoreCaptureOutcome=Failed` and stops.
+
+### Waiting, barriers, and failure (one API)
+
+Recoverable wait (source or PVC not ready yet):
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhasePlanning).
+    Message("waiting for PersistentVolumeClaim \"data\" to exist").
+    Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+return ctrl.Result{RequeueAfter: retry}, nil
+```
+
+Wait with a machine-readable progress reason:
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhasePlanning).
+    Reason("Snapshotting").
+    Message(fmt.Sprintf("Waiting for the snapshot of virtual disk %q to be ready to use.", name)).
+    Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+return ctrl.Result{RequeueAfter: retry}, nil
+```
+
+Barrier 1 (after all `Ensure*` planning calls):
+
+```go
+if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
+    return ctrl.Result{}, err
+}
+```
+
+Barrier 2 (after `CoreCaptureOutcome=Captured` and any consistency action):
+
+```go
+return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
+```
+
+Terminal domain failure (invalid `sourceRef`, `ErrChildrenSetFrozen`, `ErrManifestTargetsDrift`,
+`ErrEmptyManifest`):
+
+```go
+return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
+    Phase(snapshotsdk.PhaseFailed).
+    Reason(snapshotsdk.Reason(storagev1alpha1.ReasonGraphPlanningFailed)).
+    Message(err.Error()).
+    Apply(ctx)
+```
+
+`Apply` goes through the SDK status-write path (adapter + optimistic patch, monotonic transitions,
+Failed sink). It never writes `status.conditions`. Prefer a fresh writer (or a full
+Phase/Reason/Message rewrite) before each `Apply` so stale reason/message cannot leak across reconcile
+branches.
 
 ## Guarantees you can rely on
 

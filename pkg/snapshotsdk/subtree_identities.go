@@ -41,11 +41,13 @@ const subtreeManifestIdentitiesBasePath = "/apis/subresources.state-snapshotter.
 var ErrSubtreeIdentitiesPending = errors.New("snapshotsdk: subtree manifest identities pending (subtree not fully persisted)")
 
 // SubtreeManifestIdentity is one object identity captured somewhere in a snapshot subtree, as returned by
-// the snapshotcontents/<name>/subtree-manifest-identities service subresource. It carries only identity
-// (no manifest body): apiVersion/kind/namespace/name plus uid (to distinguish a recreated object of the
-// same name). It is the wire contract SHARED by the service handler (server side) and
+// the snapshotcontents/<name>/subtree-manifest-identities service subresource. It carries identity metadata
+// only (no manifest body): apiVersion/kind/namespace/name plus an optional diagnostic UID. UID is not part
+// of matching, exclusion, or de-duplication: a recreated object with the same
+// apiVersion/kind/namespace/name occupies the same manifest-plan slot. It is the wire contract SHARED by
+// the service handler (server side) and
 // SubtreeManifestIdentities (client side) so both marshal/unmarshal one definition. The matching key for
-// exclude computation is apiVersion|kind|namespace|name (uid disambiguates a recreated object).
+// exclude computation is apiVersion|kind|namespace|name.
 type SubtreeManifestIdentity struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`

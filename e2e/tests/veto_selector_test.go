@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // The exclude-veto (state-snapshotter.deckhouse.io/exclude) is honored unconditionally at EVERY level of a
@@ -582,16 +581,9 @@ func vetoSelectorVolumeDataSpecs() {
 			defer cancel()
 
 			By("Ensuring the thin, snapshot-capable StorageClass + VolumeSnapshotClass wiring (idempotent)")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "ensure StorageClass")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, sc)).To(Succeed())
+			var err error
 			vscClass, err = resolveLocalVolumeSnapshotClass(ctx)
 			Expect(err).NotTo(HaveOccurred(), "resolve VolumeSnapshotClass")
 

@@ -41,6 +41,7 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 	if [ -n "$$ns" ]; then \
 		for n in $$ns; do \
 			echo "  namespace $$n:"; \
+			kubectl -n "$$n" annotate snapshots.state-snapshotter.deckhouse.io --all deckhouse.io/allow-delete=true --overwrite || true; \
 			kubectl -n "$$n" delete snapshots.state-snapshotter.deckhouse.io --all --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) || true; \
 		done; \
 	else echo "  none found"; fi
@@ -55,6 +56,7 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.followObjectRef.namespace}{"\n"}{end}' \
 		| awk -F'\t' '$$2 ~ /^snap-e2e/ {print $$1}' || true); \
 	if [ -n "$$oks" ]; then \
+		echo "$$oks" | xargs -r -n1 -I{} kubectl annotate objectkeepers.deckhouse.io {} deckhouse.io/allow-delete=true --overwrite || true; \
 		echo "$$oks" | xargs kubectl delete objectkeepers.deckhouse.io --wait=true --timeout=$(CLEAN_WAIT_TIMEOUT) \
 			|| echo "  WARNING: ObjectKeeper deletion timed out or failed (re-run clean-env)"; \
 	else echo "  none found"; fi

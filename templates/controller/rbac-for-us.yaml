@@ -153,8 +153,8 @@ rules:
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
 # binder (C5) binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
 # (unifiedbootstrap.BuiltInVolumeSnapshotPair) — this static grant is its RBAC source of truth and does NOT
-# depend on any CustomSnapshotDefinition / the dynamic domain-RBAC hook (which grants the out-of-process
-# storage-foundation domain SA, not this controller SA).
+# depend on any CustomSnapshotDefinition or the dynamic domain-RBAC hook. The hook grants core-side access
+# for CSD-registered GVRs; it does not grant permissions to the out-of-process storage-foundation domain SA.
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots"]
   verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -180,11 +180,11 @@ rules:
   verbs: ["get"]
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
-# Per rbac-source-of-truth: the controller SA static RBAC stays domain-agnostic; domain rights are
-# granted externally by the Deckhouse RBAC controller/hook and signalled through the CSD
-# condition AccessGranted=True. See docs/state-snapshotter-rework/operations/project-status.md for the
-# rollout dependency (live-demo requires the external demo-domain RBAC to be provisioned out-of-band
-# until the AccessGranted hook lands).
+# Per rbac-source-of-truth, the controller SA's static RBAC stays domain-agnostic. The
+# 030-domain-rbac hook grants the core controller SA and DataExport SA access to CSD-registered GVRs and
+# signals that core-side grant through CustomSnapshotDefinition.status.conditions[AccessGranted=True].
+# It does not own the out-of-process domain controller's permissions; each domain module declares those
+# statically in its own Helm templates.
 
 ---
 # Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with

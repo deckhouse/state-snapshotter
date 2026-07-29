@@ -41,8 +41,14 @@ func TestManifestCheckpointContentChunkRBACIsInternalOnly(t *testing.T) {
 		t.Fatal("controller chunks RBAC must not grant list/watch")
 	}
 
+	// The delete-guard ValidatingAdmissionPolicy legitimately NAMES the chunk resource in its
+	// matchConstraints (it protects chunks from direct deletion). Naming a resource in an admission policy
+	// is not "granting direct access" — it is the opposite (it restricts DELETE/UPDATE), so this admission
+	// template is exempt from the internal-only RBAC scan.
+	deleteGuardTemplate := filepath.Join(templatesDir, "delete-guard.yaml")
+
 	for _, path := range templateYAMLFiles(t, templatesDir) {
-		if path == controllerTemplate {
+		if path == controllerTemplate || path == deleteGuardTemplate {
 			continue
 		}
 		content := readTemplate(t, path)
