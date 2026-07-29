@@ -67,10 +67,13 @@ const (
 	defaultNSPrefix   = "snap-e2e"
 	defaultSnapshotTO = 10 * time.Minute
 	// defaultCaptureTO bounds snapshot *creation* (capture): manifests and LVM volume snapshots are both
-	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
-	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
-	// where DataImport actually streams bytes back.
-	defaultCaptureTO = 30 * time.Second
+	// fast to create (copy-on-write, no data movement), but a namespace root publishes its own MCR only
+	// after every child subtree is persisted and then performs one discovery-wide namespace LIST sweep.
+	// Under a full-suite controller/API-server load that final late-MCR pass can legitimately start near
+	// the former 30s deadline even though it is still making progress. One minute remains a fail-fast
+	// capture bound while avoiding a scheduler/load race; snapshotReadyTO stays reserved for the
+	// restore/data-upload path, where DataImport actually streams bytes back.
+	defaultCaptureTO = time.Minute
 	// defaultDataTransferTO bounds each data-plane wait shared by phase-4 DataExport (Ready = snapshot
 	// resolved + download URL served) and phase-5 DataImport (Ready = PVC created + upload URL served,
 	// Completed = bytes streamed + durable artifact produced). A stuck transfer (e.g. a DataImport wedged
@@ -116,6 +119,15 @@ const (
 var demoCRDNames = []string{
 	"demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io",
 	"demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
+}
+
+// captureLatchSchemaCRDNames are the concrete snapshot CRDs on which the main controller writes the
+// children-only persisted-subtree latch. Established=True is insufficient during an in-place Helm/MPO
+// update: it remains True while the old OpenAPI schema still prunes the new status field.
+var captureLatchSchemaCRDNames = []string{
+	"snapshots.state-snapshotter.deckhouse.io",
 	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
 	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
 }
@@ -558,7 +570,7 @@ func moduleTagFromEnv(moduleName string) string {
 }
 
 // waitModuleAndCSDReady blocks until the required modules are Ready, the demo CSDs have reached
-// AccessGranted=True (030-domain-rbac), and the PoC demo CRDs are Established (discoverable for apply).
+// AccessGranted=True (030-domain-rbac), and the concrete CRDs are both Established and schema-current.
 func waitModuleAndCSDReady(ctx context.Context) error {
 	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
 	// The suite does not otherwise enable modules — it relies on storage-e2e applying
@@ -573,8 +585,8 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// sds-local-volume StorageClass the specs provision against.
 	//
 	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
-	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. The Established
-	// wait below closes that race for the demo API surface the specs apply first.
+	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. Established=True also
+	// remains latched during an in-place CRD update; the schema-field wait below closes both races.
 	for _, m := range requiredModulesInReadyOrder {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
@@ -590,7 +602,46 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 			return fmt.Errorf("demo CRD %s not Established: %w", crd, err)
 		}
 	}
+	for _, crd := range captureLatchSchemaCRDNames {
+		if err := waitCRDForChildSubtreesManifestLatch(ctx, crd, suiteCfg.moduleReadyTO); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func waitCRDForChildSubtreesManifestLatch(ctx context.Context, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		crd, err := suiteDyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			versions, _, nestedErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
+			if nestedErr != nil {
+				return fmt.Errorf("read CRD %s versions: %w", name, nestedErr)
+			}
+			for _, raw := range versions {
+				version, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				served, _, _ := unstructured.NestedBool(version, "served")
+				_, found, _ := unstructured.NestedFieldNoCopy(version,
+					"schema", "openAPIV3Schema", "properties", "status", "properties", "captureState",
+					"properties", "commonController", "properties", "childSubtreesManifestsPersisted")
+				if served && found {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("CRD %s did not publish status.captureState.commonController.childSubtreesManifestsPersisted within %s", name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // --- namespaces ------------------------------------------------------------
