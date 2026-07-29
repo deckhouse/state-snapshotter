@@ -35,6 +35,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -59,16 +60,20 @@ const (
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
 	envKeepClusterOnFailure = "E2E_KEEP_CLUSTER_ON_FAILURE"
 	envKeepCluster          = "E2E_KEEP_CLUSTER"
+	envDirectKubeconfig     = "E2E_KUBECONFIG"
 )
 
 const (
 	defaultNSPrefix   = "snap-e2e"
 	defaultSnapshotTO = 10 * time.Minute
 	// defaultCaptureTO bounds snapshot *creation* (capture): manifests and LVM volume snapshots are both
-	// fast to create (copy-on-write, no data movement), so a short deadline fails fast instead of dragging
-	// on the generous snapshotReadyTO. snapshotReadyTO stays reserved for the restore/data-upload path,
-	// where DataImport actually streams bytes back.
-	defaultCaptureTO = 30 * time.Second
+	// fast to create (copy-on-write, no data movement), but a namespace root publishes its own MCR only
+	// after every child subtree is persisted and then performs one discovery-wide namespace LIST sweep.
+	// Under a full-suite controller/API-server load that final late-MCR pass can legitimately start near
+	// the former 30s deadline even though it is still making progress. One minute remains a fail-fast
+	// capture bound while avoiding a scheduler/load race; snapshotReadyTO stays reserved for the
+	// restore/data-upload path, where DataImport actually streams bytes back.
+	defaultCaptureTO = time.Minute
 	// defaultDataTransferTO bounds each data-plane wait shared by phase-4 DataExport (Ready = snapshot
 	// resolved + download URL served) and phase-5 DataImport (Ready = PVC created + upload URL served,
 	// Completed = bytes streamed + durable artifact produced). A stuck transfer (e.g. a DataImport wedged
@@ -114,6 +119,15 @@ const (
 var demoCRDNames = []string{
 	"demovirtualmachines.sds-unified-snapshots-poc.deckhouse.io",
 	"demovirtualdisks.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
+	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
+}
+
+// captureLatchSchemaCRDNames are the concrete snapshot CRDs on which the main controller writes the
+// children-only persisted-subtree latch. Established=True is insufficient during an in-place Helm/MPO
+// update: it remains True while the old OpenAPI schema still prunes the new status field.
+var captureLatchSchemaCRDNames = []string{
+	"snapshots.state-snapshotter.deckhouse.io",
 	"demovirtualmachinesnapshots.sds-unified-snapshots-poc.deckhouse.io",
 	"demovirtualdisksnapshots.sds-unified-snapshots-poc.deckhouse.io",
 }
@@ -303,6 +317,7 @@ var (
 	suiteClientset        *clientgokube.Clientset
 	suiteDyn              dynamic.Interface
 	suiteClusterResources *cluster.TestClusterResources
+	suiteDirectCluster    bool
 )
 
 func loadConfig() e2eConfig {
@@ -439,6 +454,23 @@ func randToken(n int) string {
 // --- cluster lifecycle (mirror sds-elastic) --------------------------------
 
 func ensureNestedTestCluster() {
+	if kubeconfigPath := strings.TrimSpace(os.Getenv(envDirectKubeconfig)); kubeconfigPath != "" {
+		if suiteClusterResources != nil {
+			return
+		}
+		cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		Expect(err).NotTo(HaveOccurred(), "build direct e2e kubeconfig %q", kubeconfigPath)
+		// A user-maintained tunnel can reconnect while an old HTTP connection remains half-open.
+		// Bound each API request so retrying Gomega assertions recover instead of hanging forever.
+		cfg.Timeout = 30 * time.Second
+		suiteClusterResources = &cluster.TestClusterResources{
+			Kubeconfig:     cfg,
+			KubeconfigPath: kubeconfigPath,
+		}
+		suiteDirectCluster = true
+		GinkgoWriter.Printf("Using direct cluster kubeconfig %s (no SSH/VM lifecycle)\n", kubeconfigPath)
+		return
+	}
 	if strings.TrimSpace(os.Getenv("TEST_CLUSTER_CREATE_MODE")) == "" {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
@@ -453,6 +485,12 @@ func ensureNestedTestCluster() {
 
 func cleanupNestedTestCluster() {
 	if suiteClusterResources == nil {
+		return
+	}
+	if suiteDirectCluster {
+		// A direct-kubeconfig run owns neither the cluster nor its user-maintained tunnel.
+		suiteClusterResources = nil
+		suiteDirectCluster = false
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
@@ -477,9 +515,8 @@ func ensureModulesEnabled(ctx context.Context) error {
 	// The full module set the suite needs, with the dependency graph copied verbatim from
 	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
 	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
-	// dependency '...' is disabled"). None of these modules carry ModuleConfig settings (config is via
-	// CRDs / defaults), so no Settings are passed. Each ModulePullOverride comes from
-	// <MODULE>_MODULE_PULL_OVERRIDE (defaulting to "main"), matching the alwaysCreateNew path.
+	// dependency '...' is disabled"). Each ModulePullOverride comes from <MODULE>_MODULE_PULL_OVERRIDE
+	// (defaulting to "main"), matching the alwaysCreateNew path.
 	specs := []storagekube.ModuleSpec{
 		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
 		// storage-foundation requires state-snapshotter (module.yaml).
@@ -533,7 +570,7 @@ func moduleTagFromEnv(moduleName string) string {
 }
 
 // waitModuleAndCSDReady blocks until the required modules are Ready, the demo CSDs have reached
-// AccessGranted=True (030-domain-rbac), and the PoC demo CRDs are Established (discoverable for apply).
+// AccessGranted=True (030-domain-rbac), and the concrete CRDs are both Established and schema-current.
 func waitModuleAndCSDReady(ctx context.Context) error {
 	// Ensure the modules this suite needs are enabled at their configured versions before waiting.
 	// The suite does not otherwise enable modules — it relies on storage-e2e applying
@@ -548,8 +585,8 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// sds-local-volume StorageClass the specs provision against.
 	//
 	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
-	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. The Established
-	// wait below closes that race for the demo API surface the specs apply first.
+	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. Established=True also
+	// remains latched during an in-place CRD update; the schema-field wait below closes both races.
 	for _, m := range requiredModulesInReadyOrder {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
@@ -565,7 +602,46 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 			return fmt.Errorf("demo CRD %s not Established: %w", crd, err)
 		}
 	}
+	for _, crd := range captureLatchSchemaCRDNames {
+		if err := waitCRDForChildSubtreesManifestLatch(ctx, crd, suiteCfg.moduleReadyTO); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func waitCRDForChildSubtreesManifestLatch(ctx context.Context, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		crd, err := suiteDyn.Resource(crdGVR).Get(ctx, name, metav1.GetOptions{})
+		if err == nil {
+			versions, _, nestedErr := unstructured.NestedSlice(crd.Object, "spec", "versions")
+			if nestedErr != nil {
+				return fmt.Errorf("read CRD %s versions: %w", name, nestedErr)
+			}
+			for _, raw := range versions {
+				version, ok := raw.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				served, _, _ := unstructured.NestedBool(version, "served")
+				_, found, _ := unstructured.NestedFieldNoCopy(version,
+					"schema", "openAPIV3Schema", "properties", "status", "properties", "captureState",
+					"properties", "commonController", "properties", "childSubtreesManifestsPersisted")
+				if served && found {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("CRD %s did not publish status.captureState.commonController.childSubtreesManifestsPersisted within %s", name, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // --- namespaces ------------------------------------------------------------
@@ -1264,6 +1340,99 @@ func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, 
 		}
 	}
 	return wait, w.Stop, nil
+}
+
+// --- delete-protection helpers (delete-guard e2e + adapted deliberate deletions) ------------------
+
+const (
+	// breakGlassAnnotation is the persistent/reversible override that lets an operator delete a
+	// delete-protected object directly (design/delete-protection-contract.md §6.4). It matches the
+	// deckhouse-controller literal/polarity.
+	breakGlassAnnotation = "deckhouse.io/allow-delete"
+	// deleteProtectedLabel is the authoritative delete-protection marker (api/storage/v1alpha1).
+	deleteProtectedLabel = storagev1alpha1.LabelDeleteProtected
+	// holdFinalizer keeps a Terminating object around long enough to inspect it after an allowed DELETE
+	// (proving the marker persisted / the object degrades before it disappears). It is e2e-only.
+	holdFinalizer = "e2e.state-snapshotter.deckhouse.io/hold"
+)
+
+// annotateAllowDelete stamps the break-glass annotation deckhouse.io/allow-delete="true" on a (possibly
+// cluster-scoped) object so a subsequent DELETE of a delete-protected object is admitted by the guard. It
+// is the supported way for the suite to delete protected nodes it created; reused by every deliberate
+// deletion of a protected kind (adapted specs) and by the delete-guard spec's break-glass cases.
+func annotateAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) error {
+	obj, err := getResource(ctx, gvr, ns, name)
+	if err != nil {
+		return err
+	}
+	ann := obj.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
+	}
+	ann[breakGlassAnnotation] = "true"
+	obj.SetAnnotations(ann)
+	if ns == "" {
+		_, err = suiteDyn.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
+	} else {
+		_, err = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+	}
+	return err
+}
+
+// deleteWithAllowDelete annotates a protected object with the break-glass annotation and then deletes it —
+// the supported teardown path for a delete-protected node the suite created. A NotFound on either step is
+// tolerated (the object may already be gone / unprotected). The ns parameter mirrors annotateAllowDelete
+// and handles both cluster-scoped ("") kinds (MCP / chunk) and namespaced kinds (domain snapshot CRs).
+func deleteWithAllowDelete(ctx context.Context, gvr schema.GroupVersionResource, ns, name string) error {
+	if err := annotateAllowDelete(ctx, gvr, ns, name); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	var err error
+	if ns == "" {
+		err = suiteDyn.Resource(gvr).Delete(ctx, name, metav1.DeleteOptions{})
+	} else {
+		err = suiteDyn.Resource(gvr).Namespace(ns).Delete(ctx, name, metav1.DeleteOptions{})
+	}
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// impersonatedDyn returns a dynamic client that impersonates the given username (and optional groups). The
+// delete-guard admission policy keys exemption on request.userInfo.username, so the suite drives it by
+// impersonating either a NON-exempt identity (in group system:masters, which bypasses RBAC authorization
+// so the request reaches admission) or an exempt controller ServiceAccount.
+func impersonatedDyn(username string, groups ...string) (dynamic.Interface, error) {
+	cfg := rest.CopyConfig(suiteRestCfg)
+	cfg.Impersonate = rest.ImpersonationConfig{UserName: username, Groups: groups}
+	return dynamic.NewForConfig(cfg)
+}
+
+// isProtected reports whether an object carries the delete-protected marker.
+func isProtected(obj *unstructured.Unstructured) bool {
+	return obj.GetLabels()[deleteProtectedLabel] == "true"
+}
+
+// firstProtectedName lists a (possibly namespaced) resource and returns the name of the first object that
+// carries the delete-protected marker, for the delete-guard spec to target.
+func firstProtectedName(ctx context.Context, gvr schema.GroupVersionResource, ns string) (string, bool, error) {
+	var list *unstructured.UnstructuredList
+	var err error
+	if ns == "" {
+		list, err = suiteDyn.Resource(gvr).List(ctx, metav1.ListOptions{})
+	} else {
+		list, err = suiteDyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
+	}
+	if err != nil {
+		return "", false, err
+	}
+	for i := range list.Items {
+		if isProtected(&list.Items[i]) {
+			return list.Items[i].GetName(), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // assertResourceGone blocks until the (possibly cluster-scoped) resource is NotFound, failing the spec

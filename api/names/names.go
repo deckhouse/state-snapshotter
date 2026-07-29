@@ -42,6 +42,21 @@ const (
 	h16Len = 16
 )
 
+// Name prefixes for the wave4C object-name scheme. They are the single source of truth reused by both the
+// generators below and by recognizers (e.g. the delete-protection backfill classifier, which — as a
+// migration-only mechanism — may key on the fact that a legacy object carries one of our deterministic
+// names). Admission never parses names; these are for provenance classification only.
+const (
+	PrefixChildSnapshot   = "nss-snap-"
+	PrefixContent         = "nss-content-"
+	PrefixManifestCapture = "nss-mcr-"
+	PrefixManifestCP      = "nss-mcp-"
+	PrefixOrphanVS        = "nss-vs-"
+	PrefixVolumeCapture   = "nss-vcr-"
+	PrefixObjectKeeper    = "nss-ok-"
+	PrefixImportKeeper    = "nss-import-ok-"
+)
+
 // h8 returns the first 8 hex chars of sha256(s). Used for the parent/root discriminator segment, where a
 // shorter hash suffices to disambiguate the (few) parents a source can sit under.
 func h8(s string) string {
@@ -64,44 +79,44 @@ func hashHex(s string, n int) string {
 // primary identity. childSnapshotGVK is intentionally NOT part of the key — it is derived from the source
 // GVK via the CustomSnapshotDefinition.
 func ChildSnapshotName(parentSnapshotUID, sourceUID types.UID) string {
-	return "nss-snap-" + h8(string(parentSnapshotUID)) + "-" + h16(string(sourceUID))
+	return PrefixChildSnapshot + h8(string(parentSnapshotUID)) + "-" + h16(string(sourceUID))
 }
 
 // ContentName is the name of the SnapshotContent bound to a snapshot object: nss-content-<h16(snapshotUID)>.
 // One SnapshotContent per owning snapshot object (1:1), keyed by that owner's UID.
 func ContentName(snapshotUID types.UID) string {
-	return "nss-content-" + h16(string(snapshotUID))
+	return PrefixContent + h16(string(snapshotUID))
 }
 
 // ManifestCaptureRequestName is the MCR name: nss-mcr-<h16(snapshotUID)>. For an orphan per-PVC MCR the
 // caller passes the orphan VolumeSnapshot's UID (so each orphan PVC gets its own MCR name, no collision).
 func ManifestCaptureRequestName(snapshotUID types.UID) string {
-	return "nss-mcr-" + h16(string(snapshotUID))
+	return PrefixManifestCapture + h16(string(snapshotUID))
 }
 
 // ManifestCheckpointName is the MCP name: nss-mcp-<h16(mcrUID)>.
 func ManifestCheckpointName(mcrUID types.UID) string {
-	return "nss-mcp-" + h16(string(mcrUID))
+	return PrefixManifestCP + h16(string(mcrUID))
 }
 
 // ChunkName is the manifest chunk name: nss-mcp-<h16(mcpUID)>-<index>.
 func ChunkName(mcpUID types.UID, index int) string {
-	return "nss-mcp-" + h16(string(mcpUID)) + "-" + strconv.Itoa(index)
+	return PrefixManifestCP + h16(string(mcpUID)) + "-" + strconv.Itoa(index)
 }
 
 // OrphanVolumeSnapshotName is the orphan/residual-PVC VolumeSnapshot name:
 // nss-vs-<h8(rootUID)>-<h16(pvcUID)>.
 func OrphanVolumeSnapshotName(rootUID, pvcUID types.UID) string {
-	return "nss-vs-" + h8(string(rootUID)) + "-" + h16(string(pvcUID))
+	return PrefixOrphanVS + h8(string(rootUID)) + "-" + h16(string(pvcUID))
 }
 
 // VolumeCaptureRequestName is the VCR name: nss-vcr-<h16(snapshotUID)>.
 func VolumeCaptureRequestName(snapshotUID types.UID) string {
-	return "nss-vcr-" + h16(string(snapshotUID))
+	return PrefixVolumeCapture + h16(string(snapshotUID))
 }
 
 // ObjectKeeperName is the ObjectKeeper name for the tracked object (Snapshot/MCR/VCR):
 // nss-ok-<h16(objUID)>.
 func ObjectKeeperName(objUID types.UID) string {
-	return "nss-ok-" + h16(string(objUID))
+	return PrefixObjectKeeper + h16(string(objUID))
 }

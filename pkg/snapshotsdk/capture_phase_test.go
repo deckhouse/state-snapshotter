@@ -28,14 +28,14 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// The domain controllers call MarkPlanned on every reconcile before switching on the capture outcome
-// (see demo virtualmachine/virtualdisk controllers). Without a guard this causes two phase write storms,
-// both of which flap the mirrored Ready and starve the core binder's optimistic-lock Ready mirror:
+// Domains re-assert phase=Planned on every reconcile before switching on the capture outcome.
+// Without a guard this causes two phase write storms, both of which flap the mirrored Ready and starve
+// the core binder's optimistic-lock Ready mirror:
 //
-//   - Finished<->Planned: once a leaf reaches Finished, an unguarded MarkPlanned regresses it to Planned,
-//     then ConfirmConsistent re-Finishes it — killed by the forward-chain no-regress rule.
-//   - Failed<->Planned: once a leaf Fails, an unguarded MarkPlanned resurrects it to Planned, then the
-//     terminal outcome re-Fails it — killed by making Failed a TERMINAL SINK (it never resurrects).
+//   - Finished<->Planned: once a leaf reaches Finished, an unguarded Planned re-assert regresses it to
+//     Planned, then Finished re-Finishes it — killed by the forward-chain no-regress rule.
+//   - Failed<->Planned: once a leaf Fails, an unguarded Planned re-assert resurrects it to Planned, then
+//     the terminal outcome re-Fails it — killed by making Failed a TERMINAL SINK (it never resurrects).
 //
 // Because the domain watches its own object, either pair re-triggers the reconcile forever. These tests
 // pin both rules of phaseCanAdvance.
@@ -75,7 +75,7 @@ func TestPhaseCanAdvance(t *testing.T) {
 	}
 }
 
-func TestSetPhase_MarkPlannedDoesNotRegressFinished(t *testing.T) {
+func TestSetPhase_PlannedDoesNotRegressFinished(t *testing.T) {
 	ctx := context.Background()
 	scheme := newRefreshTestScheme(t)
 
@@ -93,28 +93,28 @@ func TestSetPhase_MarkPlannedDoesNotRegressFinished(t *testing.T) {
 	s := New(cl, &countingReader{}, &fakeVolumeProvider{name: "vcr-p"})
 	adapter := &refreshTestAdapter{obj: snap}
 
-	if err := s.MarkPlanned(ctx, adapter); err != nil {
-		t.Fatalf("MarkPlanned: %v", err)
+	if err := s.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+		t.Fatalf("Planned: %v", err)
 	}
 	if got := adapter.domain.Phase; got != storagev1alpha1.SnapshotCapturePhasePlanned {
-		t.Fatalf("after MarkPlanned: phase = %q, want Planned", got)
+		t.Fatalf("after Planned: phase = %q, want Planned", got)
 	}
 
-	if err := s.ConfirmConsistent(ctx, adapter); err != nil {
-		t.Fatalf("ConfirmConsistent: %v", err)
+	if err := s.DomainCaptureStatus(adapter).Phase(PhaseFinished).Apply(ctx); err != nil {
+		t.Fatalf("Finished: %v", err)
 	}
 	if got := adapter.domain.Phase; got != storagev1alpha1.SnapshotCapturePhaseFinished {
-		t.Fatalf("after ConfirmConsistent: phase = %q, want Finished", got)
+		t.Fatalf("after Finished: phase = %q, want Finished", got)
 	}
 
-	// The domain controller unconditionally re-runs MarkPlanned on the next reconcile — it must be a no-op
+	// The domain controller unconditionally re-asserts Planned on the next reconcile — it must be a no-op
 	// once Finished, otherwise the phase flaps Planned<->Finished forever.
 	for i := 0; i < 5; i++ {
-		if err := s.MarkPlanned(ctx, adapter); err != nil {
-			t.Fatalf("re-MarkPlanned[%d]: %v", i, err)
+		if err := s.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+			t.Fatalf("re-Planned[%d]: %v", i, err)
 		}
 		if got := adapter.domain.Phase; got != storagev1alpha1.SnapshotCapturePhaseFinished {
-			t.Fatalf("re-MarkPlanned[%d]: phase regressed to %q, want Finished", i, got)
+			t.Fatalf("re-Planned[%d]: phase regressed to %q, want Finished", i, got)
 		}
 	}
 }
@@ -196,10 +196,11 @@ func (r *phaseCountingReader) Get(
 	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
-// EnsureChildren and MarkPlanned are consecutive status commits. If MarkPlanned bases its patch on an
-// informer copy that predates EnsureChildren, the non-omitempty excludedRefs field is serialized as [] and
-// silently replaces the veto set just published by EnsureChildren. The next reconcile then sees Planned
-// with an empty frozen set and fails with ErrChildrenSetFrozen.
+// EnsureChildren and the Planned barrier (DomainCaptureStatus Phase(Planned).Apply) are consecutive status
+// commits. If the Planned write bases its patch on an informer copy that predates EnsureChildren, the
+// non-omitempty excludedRefs field is serialized as [] and silently replaces the veto set just published by
+// EnsureChildren. The next reconcile then sees Planned with an empty frozen set and fails with
+// ErrChildrenSetFrozen.
 func TestMarkPlannedPreservesExcludedRefsAcrossCacheLag(t *testing.T) {
 	ctx := context.Background()
 	scheme := newRefreshTestScheme(t)
@@ -231,8 +232,8 @@ func TestMarkPlannedPreservesExcludedRefsAcrossCacheLag(t *testing.T) {
 	if err := sdk.EnsureChildren(ctx, adapter, nil, excluded); err != nil {
 		t.Fatalf("EnsureChildren: %v", err)
 	}
-	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
-		t.Fatalf("MarkPlanned: %v", err)
+	if err := sdk.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+		t.Fatalf("Planned: %v", err)
 	}
 
 	got := &storagev1alpha1.Snapshot{}
@@ -252,11 +253,11 @@ func TestMarkPlannedPreservesExcludedRefsAcrossCacheLag(t *testing.T) {
 
 	getsAfterTransition := apiReader.gets
 	for i := 0; i < 3; i++ {
-		if err := sdk.MarkPlanned(ctx, adapter); err != nil {
-			t.Fatalf("idempotent MarkPlanned[%d]: %v", i, err)
+		if err := sdk.DomainCaptureStatus(adapter).Phase(PhasePlanned).Apply(ctx); err != nil {
+			t.Fatalf("idempotent Planned[%d]: %v", i, err)
 		}
 	}
 	if apiReader.gets != getsAfterTransition {
-		t.Fatalf("idempotent MarkPlanned used %d additional APIReader GETs, want zero", apiReader.gets-getsAfterTransition)
+		t.Fatalf("idempotent Planned re-apply used %d additional APIReader GETs, want zero", apiReader.gets-getsAfterTransition)
 	}
 }

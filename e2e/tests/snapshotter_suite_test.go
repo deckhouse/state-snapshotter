@@ -130,6 +130,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
+	deleteGuardSpecs()               // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
 })
 
 func prepareSuite() {
@@ -186,7 +187,7 @@ func prepareSuite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 
-	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC), demo CSDs AccessGranted, and demo CRDs Established")
+	By("Enabling and waiting for required modules, demo CSD access, and schema-current snapshot CRDs")
 	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD/CRD readiness")
 }
 

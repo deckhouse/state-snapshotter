@@ -410,6 +410,9 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				},
 			},
 		}
+		// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
+		// (delete-protection-contract.md §6.1, §8.3).
+		snapstorage.StampDeleteProtected(objectKeeper)
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
 			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
@@ -484,6 +487,8 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		Spec:   storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{},
 	}
+	// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+	snapstorage.StampDeleteProtected(checkpoint)
 
 	if err := r.Create(ctx, checkpoint); err != nil {
 		if !errors.IsAlreadyExists(err) {
@@ -882,6 +887,8 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				Checksum:       r.calculateChunkChecksum(compressed),
 			},
 		}
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		snapstorage.StampDeleteProtected(chunk)
 
 		if err := r.Create(ctx, chunk); err != nil && !errors.IsAlreadyExists(err) {
 			// Transient apiserver/network errors are requeued (plain error); only genuine shape/size
@@ -1064,6 +1071,8 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				Checksum:       checksum,
 			},
 		}
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		snapstorage.StampDeleteProtected(chunk)
 
 		// Create chunk (fail-fast semantics - consistent with MCR lifecycle)
 		r.Logger.Info("Creating chunk",

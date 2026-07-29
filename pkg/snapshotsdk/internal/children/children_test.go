@@ -70,6 +70,32 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	}
 }
 
+// TestReconcileStampsDeleteProtectedInCreatePayload asserts the child snapshot node is born already
+// carrying the authoritative delete-protection label — it must be in the CREATE payload, not a follow-up
+// patch (delete-protection-contract.md §6.1). It also asserts the caller's template is left untouched.
+func TestReconcileStampsDeleteProtectedInCreatePayload(t *testing.T) {
+	scheme := testScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	template := childCM()
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{template}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	got := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, got); err != nil {
+		t.Fatalf("expected child created: %v", err)
+	}
+	if !storagev1alpha1.IsDeleteProtected(got) {
+		t.Fatalf("expected created child to carry %s=%s, got labels %#v",
+			storagev1alpha1.LabelDeleteProtected, storagev1alpha1.LabelDeleteProtectedValue, got.GetLabels())
+	}
+	// The label is stamped on a deep copy; the caller-owned template must not be mutated.
+	if _, ok := template.GetLabels()[storagev1alpha1.LabelDeleteProtected]; ok {
+		t.Fatalf("caller template must not be mutated with the protection label, got %#v", template.GetLabels())
+	}
+}
+
 func TestReconcileIsDeleteFreeAndDetachesOldChildren(t *testing.T) {
 	scheme := testScheme(t)
 	// 'old' was a previously created child; the new desired set no longer references it.

@@ -32,8 +32,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // getLoadRootSnapshot is the base name of the root Snapshot for the GET-load run. Each iteration appends its
@@ -329,16 +327,8 @@ func getLoadSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + sc + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, sc)).To(Succeed())
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver")
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, sc)).To(Succeed())
@@ -354,7 +344,7 @@ func getLoadSpecs() {
 			})
 
 			By("Starting the source probe Pod and waiting for it to run (binds all three PVCs)")
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}), metav1.CreateOptions{})
+			_, err := suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, vdProbePod, []string{vdPVCRoot, vdPVCDisk, vdPVCStandalone}), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source probe pod")
 			Expect(waitPodRunning(ctx, srcNS, vdProbePod, 10*time.Minute)).To(Succeed())
 		})

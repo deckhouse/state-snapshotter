@@ -36,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // Phase-4 backup-download source object names (Block volume variant).
@@ -905,16 +904,8 @@ func backupDownloadSpecs() {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 			defer cancel()
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + backup.sc + ")")
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     backup.sc,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + backup.sc + ")")
+			Expect(ensureSnapshotStorageClass(ctx, backup.sc)).To(Succeed())
 
 			By("Wiring the StorageClass to a VolumeSnapshotClass for the local CSI driver")
 			Expect(ensureStorageClassVolumeSnapshotClass(ctx, backup.sc)).To(Succeed())

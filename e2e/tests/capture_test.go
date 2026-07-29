@@ -294,6 +294,60 @@ func captureSpecs() {
 			By("Asserting every demo child snapshot is Ready=True")
 			Expect(waitChildrenReady(ctx, captured.namespace, nodes, suiteCfg.captureReadyTO)).To(Succeed())
 		})
+
+		It("stamps the delete-protected marker on system-created children and every SnapshotContent, but never on the user-created root", func() {
+			// Delete-protection write-path (design/delete-protection-contract.md, spec/system-spec.md):
+			// the authoritative marker state-snapshotter.deckhouse.io/delete-protected="true" must be present
+			// on every object the system creates as part of the tree (child domain snapshots + all bound
+			// SnapshotContents), and MUST be absent on the user-created root Snapshot so the operator can
+			// delete it normally to cascade-tear-down the whole tree. This is the positive counterpart to the
+			// delete-guard specs (which assert the guard's DELETE/UPDATE reaction to the marker).
+			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
+			defer cancel()
+			Expect(captured.rootContent).NotTo(BeEmpty(), "the capture spec must run first and record the root content")
+
+			ns := captured.namespace
+
+			By("The user-created root Snapshot must NOT carry the marker (deleted normally, cascades the tree)")
+			root, err := getResource(ctx, snapshotGVR, ns, captured.rootSnap)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isProtected(root)).To(BeFalse(), "root Snapshot %s/%s must be unmarked", ns, captured.rootSnap)
+
+			By("The root SnapshotContent must carry the marker")
+			rootContent, err := getResource(ctx, snapshotContentGVR, "", captured.rootContent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isProtected(rootContent)).To(BeTrue(), "root SnapshotContent %s must be delete-protected", captured.rootContent)
+
+			By("Every system-created child snapshot node AND its bound SnapshotContent must carry the marker")
+			var nodes []childRef
+			Eventually(func(g Gomega) {
+				descendants, werr := walkSnapshotTree(ctx, ns, captured.rootSnap)
+				g.Expect(werr).NotTo(HaveOccurred())
+				g.Expect(descendants).NotTo(BeEmpty(), "root Snapshot should have system-created child snapshots")
+				nodes = descendants
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+
+			childContents := 0
+			for _, node := range nodes {
+				if node.kind == "VolumeSnapshot" {
+					continue // CSI visibility leaf: not one of our marked domain kinds and has no backing content
+				}
+				gvr, ok := gvrForSnapshotKind(node.kind)
+				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+
+				childSnap, err := getResource(ctx, gvr, ns, node.name)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(isProtected(childSnap)).To(BeTrue(), "system-created child %s/%s must be delete-protected", node.kind, node.name)
+
+				contentName, _, _ := unstructured.NestedString(childSnap.Object, "status", "boundSnapshotContentName")
+				Expect(contentName).NotTo(BeEmpty(), "child %s/%s must be bound to a content", node.kind, node.name)
+				childContent, err := getResource(ctx, snapshotContentGVR, "", contentName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(isProtected(childContent)).To(BeTrue(), "child SnapshotContent %s must be delete-protected", contentName)
+				childContents++
+			}
+			Expect(childContents).To(BeNumerically(">=", 1), "expected at least one system-created child snapshot node")
+		})
 	})
 }
 

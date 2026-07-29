@@ -277,10 +277,16 @@ spec:
                           owned by the domain node while own-scope capture runs.
                         type: string
                       message:
-                        description: Message is a human-readable detail for Phase=Failed.
+                        description: |-
+                          Message is a human-readable detail for the current Phase (progress while Planning, failure detail
+                          when Failed). Cleared on Planned/Finished.
                         type: string
                       phase:
-                        description: Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        description: |-
+                          Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed). Planned freezes
+                          child/excluded membership and enables core-side capture projection. A regular domain publishes its
+                          MCR/VCR before Planned; the current subtree-gated aggregator flow may publish its own MCR afterwards,
+                          once descendant manifests are persisted and the complete exclusion set is available.
                         enum:
                         - Planning
                         - Planned
@@ -288,8 +294,10 @@ spec:
                         - Failed
                         type: string
                       reason:
-                        description: Reason is a short, machine-readable reason for
-                          Phase=Failed (free-form domain string).
+                        description: |-
+                          Reason is a short, machine-readable detail for the current Phase (free-form domain string):
+                          progress codes while Planning (e.g. Snapshotting), failure reason when Failed. Cleared on
+                          Planned/Finished.
                         type: string
                       volumeCaptureRequestName:
                         description: VolumeCaptureRequestName is the temporary VCR

@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
-	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
 
 // --- DataExport publish:true (ingress + tokens) spec (E2E_PUBLISH) ---------------------------------
@@ -135,18 +134,10 @@ func publishDataExportSpecs() {
 			}
 			masterIP = publishMasterIP(ctx)
 
-			By("Provisioning a thin, snapshot-capable default StorageClass via storage-e2e (" + suiteCfg.storageClass + ")")
+			By("Ensuring a thin, snapshot-capable StorageClass (" + suiteCfg.storageClass + ")")
 			// Idempotent: phases 3-5 provision the same SC under E2E_VOLUME_DATA, but the publish gate is
 			// independent, so provision it here too rather than depend on another phase having run.
-			_, err := testkit.EnsureDefaultStorageClass(ctx, suiteRestCfg, testkit.DefaultStorageClassConfig{
-				StorageClassName:     suiteCfg.storageClass,
-				LVMType:              "Thin",
-				ThinPoolName:         "thinpool",
-				BaseKubeconfig:       suiteClusterResources.BaseKubeconfig,
-				VMNamespace:          suiteCfg.vmNamespace,
-				BaseStorageClassName: suiteCfg.baseStorageClass,
-			})
-			Expect(err).NotTo(HaveOccurred(), "provision default StorageClass")
+			Expect(ensureSnapshotStorageClass(ctx, suiteCfg.storageClass)).To(Succeed())
 
 			By("Creating the source namespace " + srcNS)
 			Expect(ensureNamespace(ctx, srcNS)).To(Succeed())
@@ -172,7 +163,7 @@ func publishDataExportSpecs() {
 			By("Writing the source files (root / subdir / deep subsubdir + a 200Mi random file) and recording checksums")
 			// The probe pod is the first consumer that binds the WaitForFirstConsumer PVC; waitPodRunning
 			// blocks until the bind completes.
-			_, err = suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, publishDEWriterPod, []string{publishDEPVC}), metav1.CreateOptions{})
+			_, err := suiteClientset.CoreV1().Pods(srcNS).Create(ctx, probePodSpec(srcNS, publishDEWriterPod, []string{publishDEPVC}), metav1.CreateOptions{})
 			Expect(err).NotTo(HaveOccurred(), "create source writer pod")
 			Expect(waitPodRunning(ctx, srcNS, publishDEWriterPod, 10*time.Minute)).To(Succeed())
 			sums, werr := writeFsSourceAndChecksums(ctx, srcNS, publishDEWriterPod, publishDEPVC, srcText)
