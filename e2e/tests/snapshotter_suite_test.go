@@ -187,7 +187,7 @@ func prepareSuite() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 
-	By("Enabling and waiting for the required modules (state-snapshotter, storage-foundation, sds-node-configurator, sds-local-volume, PoC), demo CSDs AccessGranted, and demo CRDs Established")
+	By("Enabling and waiting for required modules, demo CSD access, and schema-current snapshot CRDs")
 	Expect(waitModuleAndCSDReady(ctx)).To(Succeed(), "module + demo CSD/CRD readiness")
 }
 

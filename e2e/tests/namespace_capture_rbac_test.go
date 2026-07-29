@@ -602,6 +602,13 @@ func childDegradationSpecs() {
 			Expect(waitSnapshotContentReady(ctx, rootContent, suiteCfg.captureReadyTO)).To(Succeed())
 			Expect(waitRootArchived(ctx, ns, "e3-snap", suiteCfg.captureReadyTO)).To(Succeed())
 
+			// ManifestsArchived/manifestCaptured is the signal that makes hook 040 remove the transient
+			// RoleBinding, but the hook converges asynchronously. Establish the released-RBAC baseline
+			// before inducing child loss; otherwise a busy full-suite hook queue can leave the original
+			// binding present when the final Consistently starts, falsely reporting it as "re-created".
+			By("Waiting for the archived root's capture RoleBinding to be released")
+			assertResourceGone(ctx, roleBindingGVR, ns, captureRoleBindingName, suiteCfg.captureReadyTO)
+
 			By("Degrading the tree by deleting a child snapshot's bound SnapshotContent")
 			nodes, err := walkSnapshotTree(ctx, ns, "e3-snap")
 			Expect(err).NotTo(HaveOccurred())
@@ -617,19 +624,41 @@ func childDegradationSpecs() {
 
 			By("Asserting the root degrades to Ready=False (children leg) but the latch stays True")
 			Expect(waitObjectCondition(ctx, snapshotGVR, ns, "e3-snap", condReady, "False", suiteCfg.captureReadyTO)).To(Succeed())
-			Consistently(func(g Gomega) {
+			successfulLatchReads := 0
+			Consistently(func() bool {
 				root, err := getResource(ctx, snapshotGVR, ns, "e3-snap")
-				g.Expect(err).NotTo(HaveOccurred())
+				if err != nil {
+					// A direct-cluster run reaches the API through an SSH tunnel. A transient transport
+					// error is not evidence that the monotonic latch regressed; require successful samples
+					// below so a fully unavailable API still fails the test.
+					return true
+				}
+				successfulLatchReads++
 				captured, found := rootManifestCaptured(root)
-				g.Expect(found).To(BeTrue())
-				g.Expect(captured).To(BeTrue(), "manifestCaptured must remain latched true through degradation")
-			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
+				return found && captured
+			}).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+				"manifestCaptured must remain latched true through degradation")
+			Expect(successfulLatchReads).To(BeNumerically(">=", 3),
+				"must observe the latched root successfully despite transient API/tunnel failures")
 
 			By("Asserting the capture RoleBinding is NOT re-created (RBAC keyed on the latch, not Ready)")
+			successfulRBACReads := 0
 			Consistently(func() bool {
 				_, err := getResource(ctx, roleBindingGVR, ns, captureRoleBindingName)
-				return apierrors.IsNotFound(err)
+				switch {
+				case apierrors.IsNotFound(err):
+					successfulRBACReads++
+					return true
+				case err != nil:
+					// Same transport tolerance as the latch probe above. An existing binding still
+					// returns nil and fails immediately.
+					return true
+				default:
+					return false
+				}
 			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(BeTrue())
+			Expect(successfulRBACReads).To(BeNumerically(">=", 3),
+				"must confirm RoleBinding absence successfully despite transient API/tunnel failures")
 		})
 	})
 }
