@@ -65,10 +65,11 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  2. planNamespaceChildren -> EnsureChildren (create/adopt + ADDITIVE publish of childrenSnapshotRefs).
 //  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 //     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
-//     FULL child set (domain + orphan) is enumerated before the content is created/frozen.
-//  4. DomainCaptureStatus Planned (barrier 1) — unblocks the binder to create/bind the root SnapshotContent
-//     with the full frozen child set.
-//  5. Wait for the binder to bind the content; then maintain the RBAC latch.
+//     FULL child set (domain + orphan) is enumerated before its membership is frozen.
+//  4. DomainCaptureStatus Planned (barrier 1) — freezes that full child set and enables main-side
+//     leg/edge/status projection. The claim-gated binder may already have created and bound the eager
+//     SnapshotContent shell while the planning waves were running.
+//  5. Resolve the eagerly owned content (requeue if binding has not landed yet).
 //  6. Orphan child-content linking (post-bind): materialize + link each orphan PVC's child volume node.
 //  7. Manifest-exclude leg: EnsureManifestCapture(base namespace allowlist − subtree already captured).
 //  8. DomainCaptureStatus Finished (barrier 2) once the manifest leg is captured
@@ -115,9 +116,10 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
 		if err != nil {
 			// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
-			// The binder is still gated on phase>=Planned here (Planned not reached), so it does not touch
-			// Ready — no dual-writer. (A source-list Forbidden is not an error here: planNamespaceChildren folds
-			// it into the non-terminal Forbidden outcome, handled below via the not-AllPlanned requeue.)
+			// The eager binder may already have created/bound the SnapshotContent shell, but status projection
+			// and steady-state Ready remain gated on phase>=Planned here — no dual-writer. (A source-list
+			// Forbidden is not an error here: planNamespaceChildren folds it into the non-terminal Forbidden
+			// outcome, handled below via the not-AllPlanned requeue.)
 			if perr := r.patchSnapshotNotReadyLocal(ctx, key, snapshotpkg.ReasonGraphPlanningFailed, err.Error()); perr != nil {
 				return ctrl.Result{}, perr
 			}
@@ -165,7 +167,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
 		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
 		//    enumeration before Planned means the FULL child set (domain children + orphan VolumeSnapshots)
-		//    is present when the binder freezes the root SnapshotContent, so no orphan child is missed.
+		//    is present when main projects the root's immutable child-edge set, so no orphan child is missed.
 		if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
 			return ctrl.Result{}, err
 		} else if res.Requeue || res.RequeueAfter > 0 {
@@ -176,8 +178,8 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 			return ctrl.Result{}, err
 		}
 
-		// 5. Barrier 1 (phase=Planned): unblocks the generic binder to create + bind the root SnapshotContent
-		//    with the full, frozen child set.
+		// 5. Barrier 1 (phase=Planned): freezes the full child set and enables main-side leg/edge/status
+		//    projection into the root SnapshotContent shell, which may already be created and bound.
 		if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -191,8 +193,8 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		return ctrl.Result{}, nil
 	}
 
-	// 6. The binder owns the SnapshotContent now: wait for it to create + bind before the linking/manifest
-	//    legs, which read the bound content.
+	// 6. Resolve the generic binder's eagerly owned SnapshotContent shell; if create/bind has not been
+	//    observed yet, wait before the linking/manifest legs that read it.
 	if nsSnap.Status.BoundSnapshotContentName == "" {
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
 	}
@@ -247,13 +249,14 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 }
 
 // ensureOrphanVolumeSnapshotsPrePlanned runs the root residual/orphan PVC volume wave BEFORE barrier 1
-// (Planned), CONTENT-FREE of the root SnapshotContent (which does not exist yet). It creates the CSI
-// VolumeSnapshots for uncovered PVCs and declares them as REGULAR domain children (via the SDK
-// EnsureChildren), so the full child set is enumerated before the binder creates + freezes the root
-// content ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here on: it is
-// adopted + planned by the storage-foundation VolumeSnapshot domain controller, its content is created +
-// bound by the generic binder, and its content status is projected by the aggregator (content-single-
-// writer design §11.6) — the namespace domain writes no SnapshotContent.
+// (Planned), without writing the root SnapshotContent. The claim-gated generic binder may already have
+// eagerly created and bound the root content shell, but capture legs and the immutable child-edge set are
+// not projected until Planned. This wave creates CSI VolumeSnapshots for uncovered PVCs and declares them
+// as REGULAR domain children (via the SDK EnsureChildren), so the full child set is enumerated before that
+// projection freezes it ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here
+// on: it is adopted + planned by the storage-foundation VolumeSnapshot domain controller, its content is
+// created + bound by the generic binder, and its content status is projected by the aggregator
+// (content-single-writer design §11.6) — the namespace domain writes no SnapshotContent.
 //
 // The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
 // from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily

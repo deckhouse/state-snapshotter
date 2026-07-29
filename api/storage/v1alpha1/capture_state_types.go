@@ -32,8 +32,11 @@ type SnapshotCapturePhase string
 const (
 	// SnapshotCapturePhasePlanning: the domain controller is creating objects/refs (children, MCR/VCR).
 	SnapshotCapturePhasePlanning SnapshotCapturePhase = "Planning"
-	// SnapshotCapturePhasePlanned: barrier 1 — all objects created and refs published (children + MCR/VCR).
-	// The core planner expands the graph and the binder takes over the content.
+	// SnapshotCapturePhasePlanned: barrier 1 — the child/excluded membership is frozen and core-side
+	// capture projection may start. A regular domain publishes its MCR/VCR before this barrier. The current
+	// subtree-gated aggregator flow is a compatibility exception: it publishes its own MCR after Planned,
+	// once descendant manifests are persisted and the complete exclusion set is available. The generic
+	// binder may create and bind the SnapshotContent shell before this phase.
 	SnapshotCapturePhasePlanned SnapshotCapturePhase = "Planned"
 	// SnapshotCapturePhaseFinished: barrier 2 — the domain finished its side, including consistency
 	// actions (e.g. fs unfreeze). The core finalizes the aggregate Ready.
@@ -152,7 +155,10 @@ type DomainSpecificControllerCaptureState struct {
 	// +optional
 	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
 
-	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed). Planned freezes
+	// child/excluded membership and enables core-side capture projection. A regular domain publishes its
+	// MCR/VCR before Planned; the current subtree-gated aggregator flow may publish its own MCR afterwards,
+	// once descendant manifests are persisted and the complete exclusion set is available.
 	// +optional
 	Phase SnapshotCapturePhase `json:"phase,omitempty"`
 

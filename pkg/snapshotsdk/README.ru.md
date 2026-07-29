@@ -30,10 +30,13 @@ restart-safe жизненный цикл. SDK никогда не пишет у�
    - какие объекты-источники **исключены** (exclude-veto).
 4. Контроллер передаёт это в SDK, который создаёт capture-запросы, публикует refs и захваченный source и
    проставляет доменную фазу жизненного цикла.
-5. Контроллер объявляет **барьер 1** (`DomainCaptureStatus` → `phase=Planned`).
-6. Core-контроллер захватывает ноги, материализует `SnapshotContent`, переключает per-leg latch-и и пишет
-   `Ready`.
-7. Контроллер переключается по `CoreCaptureOutcome` и, когда все ноги захвачены, объявляет **барьер 2**
+5. Как только появился domain claim, generic binder может заранее создать и забайндить shell
+   `SnapshotContent`; это не зависит от барьера 1.
+6. Контроллер объявляет **барьер 1** (`DomainCaptureStatus` → `phase=Planned`), фиксируя
+   child/excluded membership и разрешая core-side capture projection.
+7. Core-контроллер захватывает ноги, проецирует edges/status в забайндированный content, переключает per-leg
+   latch-и и пишет steady-state `Ready`.
+8. Контроллер переключается по `CoreCaptureOutcome` и, когда все ноги захвачены, объявляет **барьер 2**
    (`DomainCaptureStatus` → `phase=Finished`) после любых consistency-действий.
 
 ```
@@ -55,11 +58,13 @@ Snapshot SDK
   |-- EnsureVolumeCapture
   |-- EnsureManifestCapture
   |
+  |     Generic binder может заранее создать + забайндить shell SnapshotContent
+  |
   v
 Barrier 1: phase = Planned      (DomainCaptureStatus)
   |
   v
-Core snapshot controller  --->  захватывает ноги, материализует SnapshotContent,
+Core snapshot controller  --->  проецирует legs/edges/status в SnapshotContent,
   |                              переключает commonController latch-и, пишет Ready
   v
 CoreCaptureOutcome
@@ -69,6 +74,15 @@ CoreCaptureOutcome
 ```
 
 Это весь поток. Дальше в гайде — детали каждого шага.
+
+**Текущее compatibility-исключение для агрегаторов.** Агрегатор с subtree-gate, чей собственный
+manifest-scope пересекается с потомками (встроенный пример — namespace root), не может вычислить
+полный exclude-набор до персистирования манифестов потомков. Поэтому он фиксирует и публикует
+child/excluded membership в `Planned`, ждёт
+`ChildSubtreesManifestsPersisted`/`SubtreeManifestIdentities` и только после этого создаёт и
+публикует собственный MCR. Такой late-own-MCR порядок специфичен для текущего
+persisted-subtree протокола; обычный domain controller не должен его копировать и публикует
+MCR/VCR до `Planned`.
 
 ## Что такое snapshot SDK и зачем он нужен
 
@@ -146,7 +160,7 @@ SDK введён, чтобы:
 | Фаза | Смысл | Кто ставит |
 |---|---|---|
 | `Planning` | домен создаёт объекты/refs (дети, MCR/VCR) или ждёт recoverable-зависимость | `DomainCaptureStatus` |
-| `Planned` | **барьер 1**: всё создано и опубликовано | `DomainCaptureStatus` |
+| `Planned` | **барьер 1**: child/excluded membership зафиксирован и core projection разрешён; обычный домен уже опубликовал MCR/VCR | `DomainCaptureStatus` |
 | `Finished` | **барьер 2**: домен закончил свою сторону (в т.ч. consistency-действия) | `DomainCaptureStatus` |
 | `Failed` | терминал: домен наткнулся на неустранимую ошибку | `DomainCaptureStatus` |
 
@@ -161,9 +175,12 @@ SDK введён, чтобы:
 - **SDK никогда не пишет conditions.** Единственное условие на снапшоте — core-owned `Ready`. Core зеркалит
   `phase=Failed` в `Ready=False` и является единственным писателем терминального `Ready` и на `SnapshotContent`,
   и на владеющем снапшоте. Домен **читает** `Ready` обратно (через адаптер и `CoreCaptureOutcome`) как канал
-  ошибок.
+  ошибок. До binding generic binder может публиковать локальную деградацию, пока владеет переходом
+  claim→content; после того как owner усыновил забайндированный content, SnapshotContent controller владеет
+  steady-state зеркалом `Ready`. Домен не пишет ни один из этих каналов.
 
-`phase>=Planned` — это handoff: core-контроллер ждёт барьер 1, прежде чем забрать `SnapshotContent`.
+`phase>=Planned` — это projection handoff: content shell уже может существовать и быть забайндированным,
+но core ждёт барьер 1 перед проекцией capture legs, иммутабельных child edges и steady-state status.
 
 ## Где лежит контракт (карта интерфейсов)
 
@@ -198,8 +215,9 @@ SDK введён, чтобы:
    узла. Manifest- и data-ноги — **независимые декларации**: если домен также снимает данные PVC и хочет
    сохранить YAML этого PVC, он **явно** перечисляет PVC в manifest-таргетах. SDK никогда не выводит
    manifest-таргеты из data-ноги.
-4. **Барьер 1** (`DomainCaptureStatus` → `PhasePlanned`) — «всё спланировано»; core ждёт именно его,
-   прежде чем забрать `SnapshotContent`.
+4. **Барьер 1** (`DomainCaptureStatus` → `PhasePlanned`) — child/excluded membership зафиксирован и core
+   projection может начаться. Обычный домен к этому моменту опубликовал MCR/VCR; текущее исключение для
+   subtree-gated агрегатора описано выше.
 5. **Барьер 2** (`DomainCaptureStatus` → `PhaseFinished`) — объявляется, когда `CoreCaptureOutcome`
    сообщает, что все ноги захвачены, после любого consistency-действия (например fs unfreeze).
 
@@ -366,7 +384,7 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 6. Барьер 1 — всё спланировано/опубликовано.
+	// 6. Барьер 1 — опубликован план обычного домена, включая MCR/VCR.
 	if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -451,6 +469,7 @@ Drift — это **сигнал, а не решение**: имя уже опу�
 дальше — решает **вызывающий**. Домен обычно реагирует `DomainCaptureStatus` → `PhaseFailed` /
 `GraphPlanningFailed`; namespace-root-агрегатор
 его **игнорирует** (он пересчитывает подвижный набор по живому namespace, и побеждает первый план).
+Это compatibility-правило текущего late-own-MCR namespace flow, а не рекомендация для обычных доменов.
 Иммутабельность `spec.targets` обеспечивает apiserver: CEL-правило перехода в CRD `ManifestCaptureRequest`
 (`self.targets == oldSelf.targets`) отклоняет любое изменение — сам SDK таргеты никогда не патчит. Идентичная
 повторная декларация — no-op.
@@ -785,6 +804,10 @@ child-refs и возвращает для каждого его `Ready` status/r
 exclude никогда не возвращается. Узел без детей возвращает пустой набор. Лист/родитель, не агрегирующий
 перекрывающиеся манифесты, в этом вообще не нуждается.
 
+Для matching и de-duplication используется
+`(apiVersion, kind, namespace, name)`. Опциональный UID — только диагностическая metadata и не входит в
+ключ manifest-плана: пересозданный объект с тем же именем занимает тот же capture slot.
+
 **Встроенный pre-gate.** Перед обращением к сабресурсу метод сверяется с полем
 `CoreCaptureState().ChildSubtreesManifestsPersisted` **своего** узла — core-computed латчем «поддеревья ВСЕХ
 объявленных прямых детей полностью персистированы» (children-only: манифесты самого узла в него НЕ входят,
@@ -792,6 +815,16 @@ exclude никогда не возвращается. Узел без детей
 `ErrSubtreeIdentitiesPending` **без единого REST-вызова** — экономя обращения к эндпоинту и 409-requeue-циклы,
 пока потомки ещё захватываются. `nil` (адаптер не мапит поле или оно ещё не вычислено) выключает pre-gate и
 сохраняет прежнее поведение; корректность в любом случае держит fail-closed 409 сабресурса.
+
+Этот persistence-gate объясняет текущий late-own-MCR порядок агрегатора:
+
+1. опубликовать и зафиксировать полный child/excluded membership через
+   `DomainCaptureStatus(...).Phase(PhasePlanned).Apply(ctx)`;
+2. дождаться, пока `SubtreeManifestIdentities` вернёт полный персистированный набор потомков;
+3. вычислить `base − exclude` и вызвать `EnsureManifestCapture`.
+
+Обычные домены этим исключением не пользуются: они вызывают `EnsureManifestCapture` до публикации
+`PhasePlanned`.
 
 ---
 
@@ -813,7 +846,7 @@ Planning  -->  Planned  -->  Finished
 | Фаза | Когда | Типичный вызов |
 |---|---|---|
 | `Planning` | создание refs или ожидание recoverable-зависимости | `.Phase(PhasePlanning).Reason(...).Message(...).Apply(ctx)` |
-| `Planned` | **барьер 1** — всё спланировано/опубликовано | `.Phase(PhasePlanned).Apply(ctx)` |
+| `Planned` | **барьер 1** — child/excluded membership зафиксирован; MCR/VCR обычного домена опубликован; core projection разрешён | `.Phase(PhasePlanned).Apply(ctx)` |
 | `Finished` | **барьер 2** — домен закончил свою сторону (в т.ч. consistency) | `.Phase(PhaseFinished).Apply(ctx)` |
 | `Failed` | терминальный отказ домена (невалидный spec, нарушение контракта планирования) | `.Phase(PhaseFailed).Reason(...).Message(...).Apply(ctx)` |
 

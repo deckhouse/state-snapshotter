@@ -92,7 +92,10 @@ type DomainCaptureState struct {
 	// children); the SDK/adapter guarantees a non-nil slice on the wire (empty [] = "nothing excluded",
 	// which a leaf always writes). The domain never authors the durable aggregate or the top-level mirror.
 	ExcludedRefs []ExcludedObjectRef
-	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+	// Phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed). Planned freezes
+	// child/excluded membership and enables core projection. Regular domains publish MCR/VCR before it;
+	// the current subtree-gated aggregator flow may publish its own MCR afterwards, once descendant
+	// manifests are persisted and the complete exclusion set is available.
 	Phase Phase
 	// Reason is a machine-readable detail (progress codes while Planning; failure reason when Failed).
 	Reason string

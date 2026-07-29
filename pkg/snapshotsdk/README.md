@@ -32,10 +32,13 @@ domain reads it back as its failure channel.
    - which candidate source objects are **excluded** (the exclude veto).
 4. The controller hands this to the SDK, which creates the capture requests, publishes the refs
    and the captured source, and stamps the domain lifecycle phase.
-5. The controller declares **barrier 1** (`DomainCaptureStatus` → `phase=Planned`).
-6. The core controller captures the legs, materializes the `SnapshotContent`, flips the per-leg
-   latches, and writes `Ready`.
-7. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
+5. Once the domain claim exists, the generic binder may eagerly create and bind the
+   `SnapshotContent` shell; this is independent of barrier 1.
+6. The controller declares **barrier 1** (`DomainCaptureStatus` → `phase=Planned`), freezing the
+   child/excluded membership and enabling core-side capture projection.
+7. The core controller captures the legs, projects edges/status into the bound content, flips the
+   per-leg latches, and writes steady-state `Ready`.
+8. The controller switches on `CoreCaptureOutcome` and, once every leg is captured, declares
    **barrier 2** (`DomainCaptureStatus` → `phase=Finished`) after any consistency action.
 
 ```
@@ -57,11 +60,13 @@ Snapshot SDK
   |-- EnsureVolumeCapture
   |-- EnsureManifestCapture
   |
+  |     Generic binder may eagerly create + bind the SnapshotContent shell
+  |
   v
 Barrier 1: phase = Planned      (DomainCaptureStatus)
   |
   v
-Core snapshot controller  --->  captures legs, materializes SnapshotContent,
+Core snapshot controller  --->  projects legs/edges/status into SnapshotContent,
   |                              flips commonController latches, writes Ready
   v
 CoreCaptureOutcome
@@ -71,6 +76,15 @@ CoreCaptureOutcome
 ```
 
 That is the whole flow. The rest of this guide covers each step in detail.
+
+**Current aggregator compatibility exception.** A subtree-gated aggregator whose own manifest
+scope overlaps its descendants (the namespace root is the built-in example) cannot compute a
+complete exclusion set until descendant manifests are persisted. It therefore freezes and
+publishes its child/excluded membership at `Planned`, waits for
+`ChildSubtreesManifestsPersisted`/`SubtreeManifestIdentities`, and only then creates and publishes
+its own MCR. This late-own-MCR ordering is specific to the current persisted-subtree protocol; it
+must not be copied into an ordinary domain controller, which publishes its MCR/VCR before
+`Planned`.
 
 ## What the snapshot SDK is and why it exists
 
@@ -149,7 +163,7 @@ It takes four values:
 | Phase | Meaning | Set by |
 |---|---|---|
 | `Planning` | the domain is creating objects/refs (children, MCR/VCR), or waiting on a recoverable dependency | `DomainCaptureStatus` |
-| `Planned` | **barrier 1**: everything created and published | `DomainCaptureStatus` |
+| `Planned` | **barrier 1**: child/excluded membership frozen and core projection enabled; regular domains have already published MCR/VCR | `DomainCaptureStatus` |
 | `Finished` | **barrier 2**: the domain finished its side (incl. consistency actions) | `DomainCaptureStatus` |
 | `Failed` | terminal: the domain hit an unrecoverable error | `DomainCaptureStatus` |
 
@@ -164,10 +178,14 @@ Two properties matter:
 - **The SDK never writes conditions.** The only condition on a snapshot is the core-owned `Ready`.
   The core mirrors `phase=Failed` into `Ready=False`, and it is the sole writer of the terminal
   `Ready` on both the `SnapshotContent` and its owning snapshot. The domain **reads** `Ready` back
-  (via the adapter and `CoreCaptureOutcome`) as its failure channel.
+  (via the adapter and `CoreCaptureOutcome`) as its failure channel. Before binding, the generic
+  binder may publish local degradation while it owns the claim-to-content transition; once the
+  owner adopts the bound content, the SnapshotContent controller owns the steady-state Ready
+  mirror. The domain never writes either channel.
 
-`phase>=Planned` is the handoff: the core controller waits for barrier 1 before it takes over the
-`SnapshotContent`.
+`phase>=Planned` is the projection handoff: the content shell may already exist and be bound, but
+the core waits for barrier 1 before it projects capture legs, immutable child edges, and
+steady-state status into it.
 
 ## Where the contract lives (interface map)
 
@@ -204,8 +222,9 @@ outcome to declare barrier 2 (or stop):
    declares for this node. The manifest and data legs are **independent declarations**: if the
    domain also captures a PVC's data and wants that PVC's YAML, it lists the PVC in the manifest
    targets explicitly. The SDK never derives manifest targets from the data leg.
-4. **Barrier 1** (`DomainCaptureStatus` → `PhasePlanned`) — "everything is planned"; the core waits
-   for exactly this before it takes over the `SnapshotContent`.
+4. **Barrier 1** (`DomainCaptureStatus` → `PhasePlanned`) — child/excluded membership is frozen and
+   core projection may start. A regular domain has published its MCR/VCR by this point; the current
+   subtree-gated aggregator exception is described above.
 5. **Barrier 2** (`DomainCaptureStatus` → `PhaseFinished`) — declared once `CoreCaptureOutcome`
    reports every leg captured, after any consistency action (e.g. fs unfreeze).
 
@@ -376,7 +395,7 @@ func (r *MySnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 6. Barrier 1 — everything planned/published.
+	// 6. Barrier 1 — regular-domain plan published, including MCR/VCR.
 	if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -465,7 +484,9 @@ decision**: the name is already published, so the leg is established regardless 
 decides what to do. A domain typically reacts with `DomainCaptureStatus` → `PhaseFailed` /
 `GraphPlanningFailed`; the
 namespace-root aggregator **ignores** it (it recomputes a shifting set over a live namespace, and
-the first plan wins). Immutability of `spec.targets` is the apiserver's job: the MCR CRD's CEL
+the first plan wins). This is a compatibility rule for the current late-own-MCR namespace flow,
+not reusable guidance for ordinary domains. Immutability of `spec.targets` is the apiserver's job:
+the MCR CRD's CEL
 transition rule (`self.targets == oldSelf.targets`) rejects any change — the SDK itself never
 patches the targets. An identical re-declaration is a no-op.
 
@@ -813,6 +834,10 @@ if any subtree is not fully persisted or a child has not bound its content yet, 
 returned. A node with no children returns an empty set. A leaf/parent that does not aggregate
 overlapping manifests does not need this at all.
 
+Identity matching and de-duplication use
+`(apiVersion, kind, namespace, name)`. The optional UID is diagnostic metadata and is not part of
+the manifest-plan key: a recreated object with the same name occupies the same capture slot.
+
 **Built-in pre-gate.** Before touching the subresource the method consults **its own** node's
 `CoreCaptureState().ChildSubtreesManifestsPersisted` — the core-computed latch "the subtrees of ALL
 declared direct children are fully persisted" (children-only: this node's own manifests are NOT
@@ -821,6 +846,16 @@ the method returns `ErrSubtreeIdentitiesPending` **without a single REST call** 
 round-trips and 409-requeue cycles while descendants are still capturing. `nil` (the adapter does not
 map the field, or it is not computed yet) disables the pre-gate and preserves the prior behavior;
 correctness is still held by the subresource's fail-closed 409.
+
+This persistence gate explains the current late-own-MCR ordering for aggregators:
+
+1. publish and freeze the complete child/excluded membership with
+   `DomainCaptureStatus(...).Phase(PhasePlanned).Apply(ctx)`;
+2. wait until `SubtreeManifestIdentities` returns the complete persisted descendant set;
+3. compute `base − exclude` and call `EnsureManifestCapture`.
+
+Ordinary domains do not use this exception: they call `EnsureManifestCapture` before publishing
+`PhasePlanned`.
 
 ---
 
@@ -841,7 +876,7 @@ Planning  -->  Planned  -->  Finished
 | Phase | When | Typical call |
 |---|---|---|
 | `Planning` | creating refs, or waiting on a recoverable dependency | `.Phase(PhasePlanning).Reason(...).Message(...).Apply(ctx)` |
-| `Planned` | **barrier 1** — everything planned/published | `.Phase(PhasePlanned).Apply(ctx)` |
+| `Planned` | **barrier 1** — child/excluded membership frozen; regular-domain MCR/VCR published; core projection enabled | `.Phase(PhasePlanned).Apply(ctx)` |
 | `Finished` | **barrier 2** — domain side done (incl. consistency actions) | `.Phase(PhaseFinished).Apply(ctx)` |
 | `Failed` | terminal domain failure (invalid spec, planning contract violation) | `.Phase(PhaseFailed).Reason(...).Message(...).Apply(ctx)` |
 

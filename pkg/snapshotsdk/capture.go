@@ -103,6 +103,11 @@ type SourcePublisher interface {
 // descendant snapshots already captured. It is optional — only aggregators that own a manifest leg
 // spanning objects their children also capture need it (the namespace-root Snapshot; a VM whose disk
 // children capture part of its objects). It requires a subresource REST client (WithSubresourceREST).
+//
+// Under the current persisted-subtree protocol, a subtree-gated aggregator freezes child/excluded
+// membership at Planned, waits for complete persisted descendant identities, and only then publishes its
+// own MCR. This late-own-MCR order is a compatibility exception for aggregators, not guidance for regular
+// domains: they publish their MCR/VCR before Planned.
 type ManifestExclude interface {
 	// SubtreeManifestIdentities returns the union of object identities captured across this snapshot's
 	// DIRECT children subtrees — the exclude set for the aggregator's own manifest MCR. It resolves each
