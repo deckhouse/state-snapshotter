@@ -37,7 +37,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// CSD condition types (ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md).
+// CSD condition types (ADR: architecture-decision-records: dkp/storage/state-snapshotter/old2/2026-01-23-unified-snapshots-registry.md).
 const (
 	CSDConditionAccepted      = "Accepted"
 	CSDConditionAccessGranted = "AccessGranted"

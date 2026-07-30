@@ -31,10 +31,6 @@ The `state-snapshotter` module is essential for:
 
 See the **[User Guide](USER_GUIDE.md)** for how the `Snapshot` resource works: what it captures, its lifecycle, and how to create, track, read, and restore a snapshot.
 
-### Contributor docs (roadmap & spec)
-
-Internal design roadmap, normative excerpts, test matrix, and high-level status live under **[`docs/internal/state-snapshotter-rework/`](internal/state-snapshotter-rework/)** (same layout as shared Deckhouse Cursor rules). Long-form ADR drafts remain in **`snapshot-rework/`** at the repository root.
-
 ### Why you should NOT disable it
 
 ⚠️ **Important**: The `state-snapshotter` module should **NOT** be disabled because:

@@ -29,7 +29,7 @@ import (
 // +kubebuilder:printcolumn:name="AccessGranted",type=string,JSONPath=`.status.conditions[?(@.type=="AccessGranted")].status`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // CustomSnapshotDefinition registers custom snapshot types for platform modules.
-// See ADR: snapshot-rework/2026-01-23-unified-snapshots-registry.md
+// See the "unified snapshots registry" ADR in the Deckhouse architecture-decision-records repository.
 type CustomSnapshotDefinition struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

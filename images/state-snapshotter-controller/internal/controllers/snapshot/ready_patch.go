@@ -34,7 +34,7 @@ import (
 // patchSnapshotChildSnapshotFailedBridge writes a local (non-mirror) Snapshot.Ready=False/ChildrenFailed
 // for the child-Snapshot terminal capture-failure bridge: a child Snapshot terminally failed capture
 // planning before any child SnapshotContent existed to reflect it, so the content tree cannot represent
-// the failure (snapshot-rework/2026-06-03-snapshot-conditions-model.md §5.2).
+// the failure (architecture-decision-records: dkp/storage/state-snapshotter/old2/2026-06-03-snapshot-conditions-model.md §5.2).
 //
 // Mirror contract (INV-COND2 single aggregator / INV-COND4 mirror-not-recompute): Snapshot.Ready is
 // mirror-only (a verbatim copy of the bound SnapshotContent.Ready status/reason/message) EXCEPT for

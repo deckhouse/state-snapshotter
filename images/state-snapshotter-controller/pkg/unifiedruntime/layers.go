@@ -29,7 +29,7 @@ import (
 )
 
 // LayeredGVKState is the explicit desired → eligible → merged desired → resolved split from
-// docs/state-snapshotter-rework/design/r2-phase-2b-r3-runtime-registry.md. It does not include
+// design/r2-phase-2b-r3-runtime-registry.md in the internal docs repo. It does not include
 // controller-runtime wiring; "active" watches are tracked separately on the Syncer.
 type LayeredGVKState struct {
 	// BootstrapDesired is a copy of the static bootstrap list passed into the syncer.

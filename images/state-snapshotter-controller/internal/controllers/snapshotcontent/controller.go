@@ -1158,7 +1158,7 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 
 // terminalChildContentFailureReasons lists child SnapshotContent Ready=False reasons treated as a
 // terminal failure that must propagate up the ancestor chain as ChildrenFailed (INV-FAIL1,
-// snapshot-rework/2026-06-03-snapshot-conditions-model.md §5). Any other Ready=False (e.g.
+// architecture-decision-records: dkp/storage/state-snapshotter/old2/2026-06-03-snapshot-conditions-model.md §5). Any other Ready=False (e.g.
 // ArtifactNotReady, ManifestCapturePending, ChildrenPending, or no Ready condition yet) is
 // non-terminal and propagates as ChildrenPending so a transient child does not fail the tree.
 var terminalChildContentFailureReasons = map[string]struct{}{

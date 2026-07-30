@@ -53,7 +53,6 @@ weight: 20
 
 > Специального правила «исключать объекты, управляемые Deckhouse» нет. Deckhouse-managed объекты отсекаются теми же общими сигналами (controller-owned, control-plane noise или машинерия модуля). Всё остальное в namespace — в том числе ресурсы, которые вы лишь *настроили* поверх модулей, — считается desired-state и попадает в снимок.
 
-Полные нормативные правила — в design-доке [`state-snapshotter-rework/design/snapshot-controller.md` §4.5](state-snapshotter-rework/design/snapshot-controller.md).
 
 ## Сужение захвата через label selector
 
@@ -173,7 +172,6 @@ d8 k get --raw \
 - **Манифесты** — прочитать захваченные объекты через endpoint `/manifests` выше и применить их в целевой namespace.
 - **Состояние с данными** — чтобы восстановить объекты вместе с их персистентными данными, модуль предоставляет data-restoration read-path на снимке. Материализацию данных в целевой namespace модуль выполняет внутри себя; результат вы получаете через агрегированный API, а не создавая объекты переноса данных самостоятельно.
 
-Полный сквозной сценарий восстановления — в runbook [`state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md`](state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md).
 
 ## Режимы снимка
 
@@ -208,7 +206,6 @@ d8 k get --raw \
 - **Защита включена всегда.** Настройки модуля для отключения или ослабления guard нет. Для исключительного
   прямого удаления используйте break-glass-аннотацию выше.
 
-Нормативный контракт: `state-snapshotter-rework/design/delete-protection-contract.md`.
 
 ## Замечания и ограничения
 

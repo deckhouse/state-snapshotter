@@ -22,7 +22,6 @@ tools
 werf*.yaml
 e2e
 pkg
-snapshot-rework
 .git
 .github
 .claude

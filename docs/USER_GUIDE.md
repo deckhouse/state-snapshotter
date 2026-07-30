@@ -53,7 +53,6 @@ The model is **default-include**: every namespaced object in the target namespac
 
 > There is no special "exclude objects managed by Deckhouse" rule. Deckhouse-managed objects are filtered out by the same generic signals (controller-owned, control-plane noise, or module machinery). Everything else in the namespace — including resources you merely *configured* on top of modules — is treated as desired-state and captured.
 
-For the full normative rules, see the design doc [`state-snapshotter-rework/design/snapshot-controller.md` §4.5](state-snapshotter-rework/design/snapshot-controller.md).
 
 ## Narrowing the capture with a label selector
 
@@ -173,7 +172,6 @@ A captured namespace is restored through the module's controlled read path — y
 - **Manifests** — read the captured objects via the `/manifests` endpoint above and apply them into the target namespace.
 - **State with data** — to restore objects together with their persistent data, the module exposes a data-restoration read path on the snapshot. The module materializes the data into the target namespace internally; you consume the result through the aggregated API, not by creating data-transfer objects yourself.
 
-For an end-to-end restore walkthrough, see the runbook [`state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md`](state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md).
 
 ## Snapshot modes
 
@@ -209,7 +207,6 @@ admission delete-guard. This closes an incident class where deleting a child obj
 - **Always enforced.** There is no module setting that disables or weakens the guard. Use the break-glass
   annotation above for an exceptional direct deletion.
 
-Normative contract: `state-snapshotter-rework/design/delete-protection-contract.md`.
 
 ## Notes and limitations
 

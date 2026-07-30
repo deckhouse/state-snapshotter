@@ -5,12 +5,13 @@ alwaysApply: true
 
 # Cross-doc consistency
 
-When changing any of:
-- `docs/internal/state-snapshotter-rework/spec/system-spec.md`
-- `docs/internal/state-snapshotter-rework/architecture/overview.md` (or added `system-overview.puml`)
-- `docs/internal/state-snapshotter-rework/design/implementation-plan.md`
-- `docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`
-- `docs/internal/state-snapshotter-rework/operations/project-status.md`
+Paths below are relative to the internal docs repo (`deckhouse/storage/internal-docs/state-snapshotter`,
+tree `state-snapshotter-rework/`) — see docs-ssot-and-structure. When changing any of:
+- `spec/system-spec.md`
+- `architecture/overview.md` (or added `system-overview.puml`)
+- `design/implementation-plan.md`
+- `testing/e2e-testing-strategy.md`
+- `operations/project-status.md`
 
 check consistency (no contradiction) at least on:
 - registry state vs runtime watch activation
@@ -19,6 +20,6 @@ check consistency (no contradiction) at least on:
 - manifest / MCR track vs unified snapshot registry (separate concerns)
 - stage / progress in `project-status.md` vs tables in `implementation-plan.md` and test IDs in `e2e-testing-strategy.md`
 
-Related long-form ADR under `snapshot-rework/` must not disagree with `spec/system-spec.md` without an explicit documented transition.
+Related long-form ADR (ADR repo, `dkp/storage/state-snapshotter/old2/`) must not disagree with `spec/system-spec.md` without an explicit documented transition.
 
 Fix inconsistencies in the same change or document a temporary divergence and follow-up.
