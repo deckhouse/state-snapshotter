@@ -98,27 +98,38 @@ func extractYAMLRuleBlock(content, resource string) string {
 	return content[start : idx+end]
 }
 
-// TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: the controller SA static
-// RBAC (templates/controller/rbac-for-us.yaml) must stay domain-agnostic. Domain/demo rights are granted
-// externally by the Deckhouse RBAC controller/hook and signalled via CSD AccessGranted=True.
+// TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: no static RBAC template may
+// hardcode a domain's resource names. Domain rights are granted dynamically by the 030-domain-rbac hook from
+// the CSD-registered GVRs and signalled via CSD AccessGranted=True:
 //
-// Scope is deliberately the controller SA template only. The admin-kubeconfig template
-// (templates/rbac-for-us.yaml, manual kubectl / demo-e2e read path) and the webhook template
-// (templates/webhooks/rbac-for-us.yaml, MCR target validation inventory) legitimately reference demo
-// resources and are guarded by TestAdminKubeconfigRBACIsManualReadPath /
-// TestWebhookRBACDoesNotUseWildcardResourceReads — they are NOT the controller SA production RBAC.
+//   - controller SA        -> d8:state-snapshotter:controller:domain-read
+//   - webhooks SA          -> d8:state-snapshotter:webhooks:domain-read (get on source GVRs, for MCR
+//     target validation — a static allowlist here would only ever cover the domains someone remembered)
+//   - DataExport SA        -> d8:state-snapshotter:data-export:domain-read
+//
+// The admin-kubeconfig template likewise does not enumerate domain groups: a domain module grants access to
+// its own CRs and aggregated subresources in its own templates.
+//
+// delete-guard.yaml is excluded on purpose: it matches whole domain API *groups* (not resource names) so the
+// admission guard stays kind-agnostic, which is the opposite of hardcoding an inventory.
 func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 	repoRoot := filepath.Clean("../../../../..")
-	controllerTemplate := filepath.Join(repoRoot, "templates", "controller", "rbac-for-us.yaml")
+	templates := []string{
+		filepath.Join(repoRoot, "templates", "controller", "rbac-for-us.yaml"),
+		filepath.Join(repoRoot, "templates", "webhooks", "rbac-for-us.yaml"),
+		filepath.Join(repoRoot, "templates", "rbac-for-us.yaml"),
+	}
 
-	content := readTemplate(t, controllerTemplate)
-	for _, forbidden := range []string{
-		"sds-unified-snapshots-poc.deckhouse.io",
-		"demovirtualmachines",
-		"demovirtualdisks",
-	} {
-		if strings.Contains(content, forbidden) {
-			t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it externally via AccessGranted)", controllerTemplate, forbidden)
+	for _, tmpl := range templates {
+		content := readTemplate(t, tmpl)
+		for _, forbidden := range []string{
+			"sds-unified-snapshots-poc.deckhouse.io",
+			"demovirtualmachines",
+			"demovirtualdisks",
+		} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it dynamically via the 030-domain-rbac hook / AccessGranted)", tmpl, forbidden)
+			}
 		}
 	}
 }

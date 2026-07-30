@@ -425,9 +425,20 @@ func findResourceNamespace(ctx context.Context, gv schema.GroupVersion, resource
 		// Resource not found in MCR namespace
 		return "", nil
 	}
+	if errors.IsForbidden(err) {
+		// An RBAC denial is a configuration error, NOT evidence that the target is absent. Collapsing it
+		// into "not found" would reject the MCR with a misleading message ("resource ... not found") and
+		// leave the real cause visible only in these webhook logs, so fail closed with an actionable
+		// diagnostic naming the resource whose access is missing. Core-side read access for a domain type
+		// is granted to this ServiceAccount by the 030-domain-rbac hook once the type's
+		// CustomSnapshotDefinition reports AccessGranted=True.
+		return "", fmt.Errorf("access denied reading %s in group %q version %q: the webhooks ServiceAccount lacks 'get' on this resource: %w",
+			resourceName, gv.Group, gv.Version, err)
+	}
 
-	// If it's not a NotFound error (e.g., API server temporary failure), log and treat as not found
-	// We don't want to reject MCR creation due to temporary API issues
+	// Any other failure (e.g. API server temporary unavailability) is not treated as an authoritative
+	// answer either, but it stays non-fatal here: the caller rejects the MCR and the request can be
+	// retried once the API server recovers.
 	klog.Warningf("Failed to check resource %s/%s in namespace %s (non-NotFound error): %v, treating as not found", resourceName, targetName, mcrNamespace, err)
 	return "", nil
 }

@@ -72,26 +72,13 @@ rules:
   - manifestcheckpoints/manifests
   verbs:
   - get
-# Demo domain aggregated group: a domain snapshot node is exported (manifests-download, a proxy to the
-# cluster-scoped content download), imported (manifests-and-children-refs-upload, the bind-first domain
-# facade that writes childRefs on its own CR and forwards manifests to the cluster-scoped content layer),
-# and restored (manifests-with-data-restoration) through its OWN group, not the core group. The core group
-# serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). These demo
-# subresources belong here (admin-kubeconfig/demo role), NOT in the controller SA production RBAC.
-- apiGroups:
-  - subresources.sds-unified-snapshots-poc.deckhouse.io
-  resources:
-  - demovirtualmachinesnapshots/manifests-download
-  - demovirtualdisksnapshots/manifests-download
-  verbs:
-  - get
-- apiGroups:
-  - subresources.sds-unified-snapshots-poc.deckhouse.io
-  resources:
-  - demovirtualmachinesnapshots/manifests-and-children-refs-upload
-  - demovirtualdisksnapshots/manifests-and-children-refs-upload
-  verbs:
-  - create
+# A domain snapshot node is exported (manifests-download, a proxy to the cluster-scoped content download),
+# imported (manifests-and-children-refs-upload, the bind-first domain facade that writes childRefs on its own
+# CR and forwards manifests to the cluster-scoped content layer), and restored
+# (manifests-with-data-restoration) through its OWN aggregated group, not the core group. The core group
+# serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). Concrete domain
+# groups/resources are NOT enumerated here: they are domain-specific and belong to the domain module that
+# ships them, so a domain module grants access to its own aggregated subresources in its own templates.
 # C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
 # user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
 # import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
@@ -116,21 +103,8 @@ rules:
   - get
   - list
   - watch
-# Demo domain inventory + generated child snapshots (live demo / pre-e2e manual kubectl).
-- apiGroups:
-  - sds-unified-snapshots-poc.deckhouse.io
-  resources:
-  - demovirtualmachines
-  - demovirtualdisks
-  - demovirtualmachinesnapshots
-  - demovirtualdisksnapshots
-  verbs:
-  - get
-  - list
-  - watch
-  - create
-  - update
-  - patch
+# Domain inventory and generated child snapshots are NOT granted here: those resource names are
+# domain-specific, so the module that ships a domain grants access to its own CRs in its own templates.
   - delete
 - apiGroups:
   - state-snapshotter.deckhouse.io

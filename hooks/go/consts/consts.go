@@ -47,7 +47,20 @@ const (
 	// templates/webhooks/rbac-for-us.yaml). The 040-namespace-capture-rbac hook adds it as a second
 	// subject on the transient per-namespace capture RoleBinding so the MCR-validation webhook can resolve
 	// arbitrary (non-allowlisted) namespaced CR targets via a dynamic Get during the capture window.
+	// Independently of that window, DomainWebhookReadClusterRoleName grants it a standing get on the
+	// CSD-registered domain SOURCE GVRs (see below).
 	WebhooksSAName = "webhooks"
+
+	// DomainWebhookReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the WEBHOOKS SA:
+	// get (only) on the dynamic domain SOURCE GVRs. The MCR-validation webhook verifies that each
+	// spec.targets[] entry exists in the MCR namespace with one named dynamic Get per target
+	// (mcrValidator.findResourceNamespace) — no list, no watch. The transient capture RoleBinding from
+	// 040-namespace-capture-rbac covers this only while a namespace is actively capturing, and MCR admission
+	// is not ordered against that RoleBinding, so without a standing grant the Get can be denied. A denied
+	// Get is NOT evidence of absence: the webhook fails closed with an explicit RBAC diagnostic rather than
+	// reporting a misleading "target not found". Like the other domain roles, these resource names come from
+	// CustomSnapshotDefinition, so they cannot live in the static, domain-agnostic webhook RBAC.
+	DomainWebhookReadClusterRoleName = "d8:state-snapshotter:webhooks:domain-read"
 
 	// DomainCoreReadClusterRoleName is the ClusterRole the 030-domain-rbac hook binds to the CORE SA for
 	// the dynamic demo GVRs: read + create + patch + status-write on the snapshot GVRs (the core

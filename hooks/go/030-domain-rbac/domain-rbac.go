@@ -81,11 +81,16 @@ func reconcileDomainRBAC(ctx context.Context, input *pkg.HookInput) error {
 	coreReadRules = append(coreReadRules, buildCoreSourceReadRules(sourceGVRs)...)
 	coreReadRules = append(coreReadRules, domainRestoreSubresourceRules(snapshotGVRs)...)
 
+	// WEBHOOKS SA: get (only) on the demo source GVRs. The MCR-validation admission webhook verifies each
+	// spec.targets[] entry with one named dynamic Get; it never lists or watches sources. This standing grant
+	// is what makes validation work outside the transient capture window opened by 040-namespace-capture-rbac.
+	webhookReadRules := buildWebhookSourceReadRules(sourceGVRs)
+
 	// DataExport (storage-foundation) SA: read-only on the dynamic demo snapshot GVRs so the
 	// DataExport controller can GET the snapshot leaf (status.boundSnapshotContentName) when exporting.
 	dataExportReadRules := buildDataExportReadRules(snapshotGVRs)
 
-	applyErr := applyDomainRBAC(ctx, cl, coreReadRules, dataExportReadRules)
+	applyErr := applyDomainRBAC(ctx, cl, coreReadRules, webhookReadRules, dataExportReadRules)
 
 	for i := range eligible {
 		csd := &eligible[i]
