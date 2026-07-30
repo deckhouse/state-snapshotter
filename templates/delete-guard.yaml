@@ -38,10 +38,10 @@ spec:
         apiVersions: ["*"]
         operations: ["DELETE", "UPDATE"]
         resources: ["snapshots", "snapshotcontents", "manifestcheckpoints", "manifestcheckpointcontentchunks"]
-      # Domain snapshot CRs (demo / sds-unified-snapshots-poc). Kind-agnostic on purpose: the guard only
-      # acts on the marker, so matching every resource in these dedicated domain groups is safe and
-      # future-proof (unmarked objects are never blocked; groups absent on a cluster simply never match).
-      - apiGroups: ["demo.state-snapshotter.deckhouse.io", "sds-unified-snapshots-poc.deckhouse.io"]
+      # Domain snapshot CRs (sds-unified-snapshots-poc). Kind-agnostic on purpose: the guard only
+      # acts on the marker, so matching every resource in this dedicated domain group is safe and
+      # future-proof (unmarked objects are never blocked; a group absent on a cluster simply never matches).
+      - apiGroups: ["sds-unified-snapshots-poc.deckhouse.io"]
         apiVersions: ["*"]
         operations: ["DELETE", "UPDATE"]
         resources: ["*"]

@@ -31,5 +31,3 @@ pkg
 .golangci.yaml
 .dmtlint.yaml
 go-lint.sh
-test-smoke.sh
-test-cleanup.sh

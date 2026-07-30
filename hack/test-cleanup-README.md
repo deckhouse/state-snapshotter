@@ -7,7 +7,7 @@
 ## Использование
 
 ```bash
-./test-cleanup.sh [options]
+./hack/test-cleanup.sh [options]
 ```
 
 ### Опции
@@ -24,19 +24,19 @@
 
 ```bash
 # Очистить конкретный Snapshot
-./test-cleanup.sh --snapshot-name test-smoke-1234567890
+./hack/test-cleanup.sh --snapshot-name test-smoke-1234567890
 
 # Очистить все test-smoke-* ресурсы в namespace
-./test-cleanup.sh --all --namespace default
+./hack/test-cleanup.sh --all --namespace default
 
 # Принудительная очистка (удаление finalizers)
-./test-cleanup.sh --snapshot-name test-smoke-1234567890 --force
+./hack/test-cleanup.sh --snapshot-name test-smoke-1234567890 --force
 
 # Dry-run (показать что будет удалено)
-./test-cleanup.sh --all --dry-run
+./hack/test-cleanup.sh --all --dry-run
 
 # Очистить Snapshot
-./test-cleanup.sh --snapshot-name test-smoke-1234567890 --snapshot-kind Snapshot
+./hack/test-cleanup.sh --snapshot-name test-smoke-1234567890 --snapshot-kind Snapshot
 ```
 
 ## Что очищает скрипт
@@ -62,17 +62,17 @@
 
 1. **После каждого теста**: Запускайте cleanup для удаления тестовых ресурсов
    ```bash
-   ./test-cleanup.sh --snapshot-name <snapshot-name> --force
+   ./hack/test-cleanup.sh --snapshot-name <snapshot-name> --force
    ```
 
 2. **Периодическая очистка**: Используйте `--all` для очистки всех тестовых ресурсов
    ```bash
-   ./test-cleanup.sh --all --namespace default --force
+   ./hack/test-cleanup.sh --all --namespace default --force
    ```
 
 3. **Перед удалением**: Используйте `--dry-run` для проверки
    ```bash
-   ./test-cleanup.sh --all --dry-run
+   ./hack/test-cleanup.sh --all --dry-run
    ```
 
 4. **При проблемах**: Используйте `--force` для принудительной очистки застрявших ресурсов

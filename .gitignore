@@ -38,10 +38,6 @@ __pycache__/
 *$py.class
 .pytest_cache/
 
-# CSI backup and vendor folders
-images/csi/_old-csi/
-images/csi/_new-csi/
-
 # demo-e2e run artifacts (hack/demo-e2e.sh)
 artifacts/
 
