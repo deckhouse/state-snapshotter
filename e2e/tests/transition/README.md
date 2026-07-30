@@ -30,7 +30,7 @@ already enabled — the opposite of what this scenario needs. All module lifecyc
 - **Out of scope (tested by the runtime team, covered by canary channel rollout):** Deckhouse
   `requirements.deckhouse`/`requirements.modules` gating, `ModuleRelease` Pending→activation,
   bundle auto-enable. This suite runs on a **dev** Deckhouse build, which does not enforce
-  requirements — so `>= 1.76` and `storage-foundation >= 1.0.0` gates are intentionally NOT
+  requirements — so `>= 1.76.8` and `storage-foundation >= 1.0.0` gates are intentionally NOT
   exercised here.
 
 ## Running
