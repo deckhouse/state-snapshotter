@@ -62,6 +62,7 @@ const (
 	envKeepClusterOnFailure = "E2E_KEEP_CLUSTER_ON_FAILURE"
 	envKeepCluster          = "E2E_KEEP_CLUSTER"
 	envDirectKubeconfig     = "E2E_KUBECONFIG"
+	envAllowModuleRepin     = "E2E_ALLOW_MODULE_REPIN"
 )
 
 const (
@@ -212,6 +213,9 @@ var (
 	}
 	moduleConfigGVR = schema.GroupVersionResource{
 		Group: "deckhouse.io", Version: "v1alpha1", Resource: "moduleconfigs",
+	}
+	modulePullOverrideGVR = schema.GroupVersionResource{
+		Group: "deckhouse.io", Version: "v1alpha2", Resource: "modulepulloverrides",
 	}
 	configMapGVR = schema.GroupVersionResource{
 		Group: "", Version: "v1", Resource: "configmaps",
@@ -537,10 +541,57 @@ func ensureModulesEnabled(ctx context.Context) error {
 		// and storage-foundation (module.yaml) — both must be listed or SLV stays "turned off".
 		{Name: sdsLocalVolumeModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(sdsLocalVolumeModuleName), Dependencies: []string{sdsNodeConfiguratorModuleName, storageFoundationModuleName}},
 	}
+	if err := refuseSilentModuleRepin(ctx, specs); err != nil {
+		return err
+	}
 	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
 		return fmt.Errorf("ensure required modules enabled: %w", err)
 	}
 	return nil
+}
+
+// refuseSilentModuleRepin fails the run when it would move a module off the image tag the cluster is
+// already pinned to.
+//
+// Enabling a module here rewrites its ModulePullOverride, and an unset <MODULE>_MODULE_PULL_OVERRIDE
+// resolves to the literal "main" — so a run that forgets the variable does not test the build under
+// review, it replaces it. That is not only an image swap: Deckhouse re-downloads the module and runs
+// ModuleEnsureCRDs from the new copy, so the CRDs revert too. The specs then assert against a schema
+// that silently prunes the status fields the controller writes (the API server answers with a warning,
+// not an error), and the failure surfaces as an empty field far from its cause.
+//
+// A tag the cluster does not pin yet is not a downgrade, so a fresh cluster still converges untouched.
+func refuseSilentModuleRepin(ctx context.Context, specs []storagekube.ModuleSpec) error {
+	var conflicts []string
+	for _, spec := range specs {
+		live, err := getResource(ctx, modulePullOverrideGVR, "", spec.Name)
+		if apierrors.IsNotFound(err) {
+			continue // not pinned: nothing to lose
+		}
+		if err != nil {
+			return fmt.Errorf("read ModulePullOverride %s: %w", spec.Name, err)
+		}
+		pinned, _, err := unstructured.NestedString(live.Object, "spec", "imageTag")
+		if err != nil || pinned == "" || pinned == spec.ModulePullOverride {
+			continue
+		}
+		conflicts = append(conflicts, fmt.Sprintf(
+			"%s is pinned to %q but this run would re-pin it to %q (set %s=%s to test the pinned build)",
+			spec.Name, pinned, spec.ModulePullOverride, moduleTagEnvKey(spec.Name), pinned))
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	if envBool(os.Getenv(envAllowModuleRepin)) {
+		for _, c := range conflicts {
+			GinkgoWriter.Printf("  %s=true: %s\n", envAllowModuleRepin, c)
+		}
+		return nil
+	}
+	return fmt.Errorf("refusing to re-pin modules the cluster already pins: %s; "+
+		"re-pinning also re-applies that build's CRDs, so the specs would run against a different schema. "+
+		"Set %s=true to re-pin deliberately",
+		strings.Join(conflicts, "; "), envAllowModuleRepin)
 }
 
 // requiredModulesInReadyOrder lists every module the suite depends on, ordered so a module never appears
@@ -559,7 +610,16 @@ var requiredModulesInReadyOrder = []string{
 // Mirrors storage-e2e's per-module override convention so a runtime enable pins the same tag the
 // alwaysCreateNew cluster_config path would.
 func moduleTagFromEnv(moduleName string) string {
-	key := strings.Map(func(r rune) rune {
+	if v := strings.TrimSpace(os.Getenv(moduleTagEnvKey(moduleName))); v != "" {
+		return v
+	}
+	return "main"
+}
+
+// moduleTagEnvKey is the env var name for a module's image tag. Shared with the re-pin guard so the
+// variable it tells the operator to set is the one actually read.
+func moduleTagEnvKey(moduleName string) string {
+	return strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z':
 			return r - ('a' - 'A')
@@ -569,10 +629,6 @@ func moduleTagFromEnv(moduleName string) string {
 			return '_'
 		}
 	}, moduleName) + "_MODULE_PULL_OVERRIDE"
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return "main"
 }
 
 // waitModuleAndCSDReady blocks until the required modules are Ready, the demo CSDs have reached
