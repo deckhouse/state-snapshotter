@@ -170,6 +170,16 @@ pseudo-version. `state-snapshotter/api` is always consumed via
   by `testkit.EnsureDefaultStorageClass` from the release channel and carry **no**
   `modulePullOverride`, so they are not pinned by these vars.
 
+  Because unset means `main`, forgetting one of these variables against a cluster
+  that already pins a `prN` build does not test that build — it replaces it, CRDs
+  included (Deckhouse re-runs `ModuleEnsureCRDs` from the new copy), and the specs
+  then run against a schema that silently prunes status fields. `BeforeSuite`
+  therefore refuses to start when a run would move a module off the tag the cluster
+  pins, naming the variable to set. A tag the cluster does not pin yet is not a
+  downgrade, so a fresh cluster is unaffected.
+- `E2E_ALLOW_MODULE_REPIN`: set to `true` to re-pin deliberately (e.g. moving the
+  cluster from one PR build to another) instead of being stopped by that check.
+
 ### state-snapshotter suite knobs
 
 - `E2E_SNAPSHOTTER_NS_PREFIX`: prefix for the source/restore namespaces the suite

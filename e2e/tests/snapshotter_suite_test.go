@@ -128,6 +128,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4; default on; opt-out: E2E_VOLUME_DATA=false)
 	importVariantsSpecs()            // backup_restore_test.go: import any tree node — 4 parallel variants (phase 5; default on; opt-out: E2E_VOLUME_DATA=false)
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
+	dataExportRecoverySpecs()        // dataexport_recovery_test.go: a running DataExport loses its export claim / Deployment — barrier, controller restart, volume returned; plus a claim the export did not create (default on; opt-out: E2E_DATAEXPORT_RECOVERY=false)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
 	deleteGuardSpecs()               // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
