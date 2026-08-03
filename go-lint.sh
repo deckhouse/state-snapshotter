@@ -34,11 +34,18 @@ section_end() {
     fi
 }
 
-linter_version="v1.64.5"
-# golangci-lint must be built with a Go toolchain >= the modules' `go` directive
-# (go.mod targets 1.26.x); otherwise it refuses to load with "the Go language
-# version used to build golangci-lint is lower than the targeted Go version".
-linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-go1.26.4}"
+# The version CI installs (deckhouse/modules-actions/go_linter). Running a different major version
+# locally does not give a differently worded report, it gives no report at all: the configuration
+# file of one major version is rejected outright by the other.
+linter_version="v2.9.0"
+
+# The linter type-checks the sources it lints, so it must be built with a toolchain no older than the
+# newest `go` directive among the modules — otherwise it does not refuse politely, it panics inside
+# the type checker on files it cannot parse. The `go` pin in .golangci.yaml does not help with that:
+# it only silences the check that would have reported the mismatch before the panic. Deriving the
+# version from the modules leaves no second place to bump.
+default_toolchain="go$(grep -h '^go ' $(find images -type f -name go.mod) | awk '{print $2}' | sort -V | tail -1)"
+linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-$default_toolchain}"
 linter_cache_root="${GOLANGCI_LINT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/state-snapshotter/golangci-lint}"
 linter_bin_dir="$linter_cache_root/$linter_toolchain/$linter_version"
 linter_bin="$linter_bin_dir/golangci-lint"
@@ -46,7 +53,7 @@ linter_bin="$linter_bin_dir/golangci-lint"
 section_start "install_linter" "Installing golangci-lint@$linter_version with $linter_toolchain"
 if [ ! -x "$linter_bin" ]; then
     mkdir -p "$linter_bin_dir"
-    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/cmd/golangci-lint@$linter_version"; then
+    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version"; then
         section_end "install_linter"
         exit 1
     fi
