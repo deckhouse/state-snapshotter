@@ -55,6 +55,7 @@ const (
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envGetLoad              = "E2E_GET_LOAD"
 	envPublish              = "E2E_PUBLISH"
+	envDataExportRecovery   = "E2E_DATAEXPORT_RECOVERY"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -299,12 +300,16 @@ type e2eConfig struct {
 	// publish opts into the publish (ingress + tokens) specs. It is a BeforeSuite sanity-check gate
 	// (mirrors volumeData): the infra is provisioned by the storage-e2e bootstrap, so this flag only
 	// asserts it is present and records the discovered ingress facts in suitePublishInfra.
-	publish           bool
-	storageClass      string
-	probeImage        string
-	backupClientImage string
-	keepOnFailure     bool
-	keepAlways        bool
+	publish bool
+	// dataExportRecovery opts into the DataExport recovery specs. They disturb a running export on
+	// purpose (deleting its claim, pinning its pod with a finalizer, restarting the controller), so an
+	// environment that cannot afford that turns them off.
+	dataExportRecovery bool
+	storageClass       string
+	probeImage         string
+	backupClientImage  string
+	keepOnFailure      bool
+	keepAlways         bool
 
 	// vmNamespace / baseStorageClass drive the phase-3 runtime VirtualDisk attach on the base cluster.
 	vmNamespace      string
@@ -322,18 +327,19 @@ var (
 
 func loadConfig() e2eConfig {
 	cfg := e2eConfig{
-		nsPrefix:          strings.TrimSpace(os.Getenv(envNSPrefix)),
-		gcTTL:             strings.TrimSpace(os.Getenv(envGCTTL)),
-		storageClass:      strings.TrimSpace(os.Getenv(envStorageClass)),
-		probeImage:        strings.TrimSpace(os.Getenv(envProbeImage)),
-		backupClientImage: strings.TrimSpace(os.Getenv(envBackupClientImage)),
-		volumeData:        envEnabledByDefault(os.Getenv(envVolumeData)),
-		getLoad:           envEnabledByDefault(os.Getenv(envGetLoad)),
-		publish:           envEnabledByDefault(os.Getenv(envPublish)),
-		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
-		keepAlways:        envBool(os.Getenv(envKeepCluster)),
-		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
-		baseStorageClass:  strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
+		nsPrefix:           strings.TrimSpace(os.Getenv(envNSPrefix)),
+		gcTTL:              strings.TrimSpace(os.Getenv(envGCTTL)),
+		storageClass:       strings.TrimSpace(os.Getenv(envStorageClass)),
+		probeImage:         strings.TrimSpace(os.Getenv(envProbeImage)),
+		backupClientImage:  strings.TrimSpace(os.Getenv(envBackupClientImage)),
+		volumeData:         envEnabledByDefault(os.Getenv(envVolumeData)),
+		getLoad:            envEnabledByDefault(os.Getenv(envGetLoad)),
+		publish:            envEnabledByDefault(os.Getenv(envPublish)),
+		dataExportRecovery: envEnabledByDefault(os.Getenv(envDataExportRecovery)),
+		keepOnFailure:      envBool(os.Getenv(envKeepClusterOnFailure)),
+		keepAlways:         envBool(os.Getenv(envKeepCluster)),
+		vmNamespace:        strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
+		baseStorageClass:   strings.TrimSpace(os.Getenv("TEST_CLUSTER_STORAGE_CLASS")),
 	}
 	if cfg.nsPrefix == "" {
 		cfg.nsPrefix = defaultNSPrefix
