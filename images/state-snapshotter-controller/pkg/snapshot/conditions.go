@@ -43,6 +43,10 @@ const (
 	// canonically in api/storage; see there for the full recoverable-vs-lost semantics.
 	ReasonChildSnapshotDeleted = storagev1alpha1.ReasonChildSnapshotDeleted
 	ReasonChildSnapshotLost    = storagev1alpha1.ReasonChildSnapshotLost
+
+	// ReasonDataCaptureStalled (NON-terminal) replaces DataCapturePending on the data leg while the
+	// storage layer reports no observable progress. Defined canonically in api/storage.
+	ReasonDataCaptureStalled = storagev1alpha1.ReasonDataCaptureStalled
 )
 
 // IsReasonTerminal reports whether a Ready=False reason is terminal. Re-exported from api/storage so

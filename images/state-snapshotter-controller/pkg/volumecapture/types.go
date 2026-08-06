@@ -28,8 +28,12 @@ var VolumeCaptureRequestGVK = schema.GroupVersionKind{
 }
 
 const (
-	VolumeCaptureModeSnapshot     = "Snapshot"
-	ConditionTypeReady            = "Ready"
+	VolumeCaptureModeSnapshot = "Snapshot"
+	ConditionTypeReady        = "Ready"
+	// ConditionTypeStalled is the foundation's non-terminal diagnostic axis: it reports that the
+	// capture shows no observable progress while Ready deliberately stays False/TargetsPending. It is
+	// a separate condition precisely so that reading a stall never looks like a finished request.
+	ConditionTypeStalled          = "Stalled"
 	ConditionReasonCompleted      = "Completed"
 	ConditionReasonTargetsPending = "TargetsPending"
 )
