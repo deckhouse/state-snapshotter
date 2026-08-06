@@ -211,6 +211,20 @@ setting the flag to a falsey value (`false`/`0`/`no`/`off`).
   (a cluster-wide `FREEZE_DEADLINE` env change, restored on cleanup). Set
   `E2E_FREEZE_DEADLINE=false` (or `E2E_VOLUME_DATA=false`) to disable. Tune the injected
   deadline with `E2E_FREEZE_DEADLINE_VALUE` (a Go duration).
+- `E2E_CAPTURE_STALL`: **opt-in, and NEVER RUN YET** — the case-B stall-diagnostics spec: a data
+  leg whose CSI driver runs WITHOUT the external-snapshotter sidecar must report
+  `Stalled=True/SnapshotExecutionUnobservable` on the `VolumeCaptureRequest`, surface
+  `DataCaptureStalled` on the domain snapshot, keep `Ready=False/TargetsPending`, and survive
+  garbage collection. It is opt-in because the suite cannot provision a snapshotter-less driver
+  itself — point `E2E_CAPTURE_STALL_STORAGE_CLASS` at a StorageClass that has one
+  (default `ceph-rbd-sc`). Exact command:
+
+  ```bash
+  KUBECONFIG=... E2E_CAPTURE_STALL=true E2E_CAPTURE_STALL_STORAGE_CLASS=ceph-rbd-sc \
+    go test ./tests -count=1 -timeout=240m -v -ginkgo.v \
+    -ginkgo.focus='Capture stall diagnostics'
+  ```
+
 - `E2E_MANIFEST_CHECKPOINT_LOSS`: **on by default** (as part of the volume-data flow) —
   deletes a `ManifestCheckpoint` (or one of its chunks) at the root / child / grandchild
   level AFTER capture and asserts the affected node flips to
