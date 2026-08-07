@@ -211,13 +211,25 @@ setting the flag to a falsey value (`false`/`0`/`no`/`off`).
   (a cluster-wide `FREEZE_DEADLINE` env change, restored on cleanup). Set
   `E2E_FREEZE_DEADLINE=false` (or `E2E_VOLUME_DATA=false`) to disable. Tune the injected
   deadline with `E2E_FREEZE_DEADLINE_VALUE` (a Go duration).
-- `E2E_CAPTURE_STALL`: **opt-in, and NEVER RUN YET** — the case-B stall-diagnostics spec: a data
-  leg whose CSI driver runs WITHOUT the external-snapshotter sidecar must report
+- `E2E_CAPTURE_STALL`: **opt-in, and NEVER RUN AS A SUITE SPEC YET** (its flow has been verified
+  by hand on a dev cluster) — the case-B stall-diagnostics spec: a data leg whose CSI driver runs
+  WITHOUT the external-snapshotter sidecar must report
   `Stalled=True/SnapshotExecutionUnobservable` on the `VolumeCaptureRequest`, surface
   `DataCaptureStalled` on the domain snapshot, keep `Ready=False/TargetsPending`, and survive
-  garbage collection. It is opt-in because the suite cannot provision a snapshotter-less driver
-  itself — point `E2E_CAPTURE_STALL_STORAGE_CLASS` at a StorageClass that has one
-  (default `ceph-rbd-sc`). Exact command:
+  garbage collection. It also asserts the negative: **nothing** is diagnosed while the
+  `VolumeSnapshotContent` is younger than the no-pickup grace (the content watch classifies it
+  about a second after creation, before the cluster snapshot-controller adds its finalizer, and
+  blaming the snapshot stack there is a false alarm on every healthy capture).
+
+  It is opt-in because the suite cannot deploy a snapshotter-less driver itself — point
+  `E2E_CAPTURE_STALL_STORAGE_CLASS` at a StorageClass that has one (default `ceph-rbd-sc`).
+  The volume is provisioned **statically** (a `Retain` PV with a synthetic CSI handle plus a
+  pre-bound PVC, no probe Pod): the external-provisioner usually shares a Deployment with the
+  external-snapshotter, so where case B exists dynamic provisioning cannot build the fixture, and
+  this spec ends before any CSI RPC anyway. Cleanup residue to expect in such an environment: the
+  produced `VolumeSnapshotContent` holds the snapshot-controller finalizer with no sidecar to
+  release it, so it can stay `Terminating` — clearing it is a separate manual procedure, not
+  something the spec does. Exact command:
 
   ```bash
   KUBECONFIG=... E2E_CAPTURE_STALL=true E2E_CAPTURE_STALL_STORAGE_CLASS=ceph-rbd-sc \
