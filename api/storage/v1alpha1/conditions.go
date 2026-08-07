@@ -64,6 +64,15 @@ const (
 	// TerminalReadyReasons.
 	ReasonChildSnapshotDeleted = "ChildSnapshotDeleted"
 
+	// ReasonDataCaptureStalled: Ready=False (NON-terminal) — volume capture is still running, but the
+	// storage layer reports no observable progress (the VolumeCaptureRequest published a Stalled
+	// condition). It is a diagnosis, never a verdict: a CSI CreateSnapshot call may still be in flight,
+	// so the capture is neither failed nor abandoned, and a later success completes it normally. The
+	// storage-specific cause (which CSI driver, which VolumeSnapshotContent, what exactly is not moving)
+	// stays in the message on purpose — deliberately NOT in TerminalReadyReasons, and not a degradation
+	// either: nothing has completed yet, so there is no captured data to preserve.
+	ReasonDataCaptureStalled = "DataCaptureStalled"
+
 	// ReasonChildSnapshotLost: TERMINAL Ready=False — a declared child snapshot is unrecoverably gone. Its
 	// child SnapshotContent is absent (content names are UID-derived, so a recreated child can never relink
 	// into the immutable frozen childrenSnapshotContentRefs edge set), OR its CR vanished after the node

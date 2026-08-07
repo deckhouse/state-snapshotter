@@ -123,6 +123,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (default on; opt-out: E2E_CHILD_BRIDGE_FAILURE=false)
 	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (default on; opt-out: E2E_MANIFEST_CHECKPOINT_LOSS=false)
 	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (default on; opt-out: E2E_FREEZE_DEADLINE=false)
+	captureStallSpecs()              // capture_stall_test.go: data leg on a snapshotter-less CSI driver -> VCR Stalled=True/SnapshotExecutionUnobservable, DataCaptureStalled upward, Ready stays TargetsPending, request not collected (opt-in E2E_CAPTURE_STALL; NEVER RUN YET)
 	readyFlapSpecs()                 // ready_flap_test.go: Ready True->False->True flap detector on mixed orphan+domain tree (default on; opt-out: E2E_VOLUME_DATA=false)
 	getLoadSpecs()                   // get_load_test.go: REST GET-load delta across the capture wave via /metrics (default on; opt-out: E2E_GET_LOAD=false)
 	backupDownloadSpecs()            // backup_download_test.go: backup-system HTTP download (phase 4; default on; opt-out: E2E_VOLUME_DATA=false)

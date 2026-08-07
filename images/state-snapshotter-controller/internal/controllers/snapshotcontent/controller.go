@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -626,6 +627,14 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		plan.volumeReason = snapshot.ReasonDataCapturePending
 		plan.volumeMessage = "waiting for the data leg to be published and the volume snapshot artifact to be ready"
 		plan.volumeFailed = false
+		// A pending leg whose VolumeCaptureRequest reports a stall is still pending — but "waiting"
+		// and "waiting with nothing happening" are different answers to an operator's question, and
+		// only the second one is actionable. Stall outranks plain pending for exactly that reason
+		// (still below any terminal outcome, which is applied after this block).
+		if stallReason, stallMessage := r.observeDataLegStall(ctx, owner); stallReason != "" {
+			plan.volumeReason = snapshot.ReasonDataCaptureStalled
+			plan.volumeMessage = buildDataCaptureStalledMessage(stallReason, stallMessage)
+		}
 		deriveReadyStatus(&plan)
 	}
 
@@ -1197,6 +1206,7 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 	total := 0
 	readyCount := 0
 	var pendingNames []string
+	var stalled []stalledChild
 	linked := make(map[string]struct{}, len(rawRefs))
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
@@ -1238,6 +1248,21 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 				buildChildrenFailedMessage(name, leaf, leafReason, leafMessage), nil
 		}
 		pendingNames = append(pendingNames, name)
+		// A stalled child is pending, not failed — but it is the one pending child an operator can act
+		// on, and a bare "waiting for child snapshot contents" would bury it. Collect it so the parent
+		// reports the diagnosis instead of the progress count.
+		if readyCond != nil && readyCond.Status == metav1.ConditionFalse && isStalledChildContent(readyCond.Reason) {
+			leaf, leafMessage := childStalledLeafInfo(name, readyCond)
+			stalled = append(stalled, stalledChild{directChild: name, leaf: leaf, message: leafMessage})
+		}
+	}
+	if len(stalled) > 0 {
+		// Deterministic order: an unsorted pick would make the message flap between reconciles and
+		// rewrite the condition forever.
+		sort.Slice(stalled, func(i, j int) bool { return stalled[i].directChild < stalled[j].directChild })
+		first := stalled[0]
+		return false, snapshot.ReasonDataCaptureStalled,
+			buildChildrenStalledMessage(first.directChild, first.leaf, first.message, len(stalled), readyCount, total), nil
 	}
 	if len(pendingNames) > 0 {
 		return false, snapshot.ReasonChildrenPending,
@@ -1574,6 +1599,31 @@ func snapshotChildRefsFromRaw(rawRefs []interface{}) []storagev1alpha1.SnapshotC
 		refs = append(refs, ref)
 	}
 	return refs
+}
+
+// stalledChild is a pending child whose subtree reports a stall, kept together with the original
+// stalled leaf so the diagnosis survives the climb up the ancestor chain.
+type stalledChild struct {
+	directChild string
+	leaf        string
+	message     string
+}
+
+// isStalledChildContent reports whether a child's non-terminal Ready=False reason is a stall.
+// Exactly one reason qualifies: the storage-level vocabulary stops at the data leg (see
+// buildDataCaptureStalledMessage), so every level above speaks the single reason DataCaptureStalled.
+func isStalledChildContent(reason string) bool {
+	return reason == snapshot.ReasonDataCaptureStalled
+}
+
+// childStalledLeafInfo distills a stalled child's Ready condition into the original stalled leaf. An
+// intermediate node already carries the canonical form, so the leaf is parsed from it rather than
+// nested again; a leaf child is its own stalled leaf.
+func childStalledLeafInfo(childName string, readyCond *metav1.Condition) (leaf, message string) {
+	if l, m, ok := parseChildrenStalledLeaf(readyCond.Message); ok {
+		return l, m
+	}
+	return childName, readyCond.Message
 }
 
 // childTerminalLeafInfo distills a terminal child's Ready condition into the original failed leaf's
