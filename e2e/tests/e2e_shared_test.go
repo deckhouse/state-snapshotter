@@ -1506,3 +1506,146 @@ func waitImportedLeafStorageClass(ctx context.Context, ns, kind, leafName, want 
 		}
 	}
 }
+
+// setSnapshotContentStorageClass rewrites SnapshotContent.status.data.storageClassName under a bounded
+// read-modify-write retry (the aggregator writes the same status). It exists only for the mirror probe
+// below; nothing in production writes this field from outside the aggregator.
+func setSnapshotContentStorageClass(ctx context.Context, contentName, class string) error {
+	var last error
+	for i := 0; i < 5; i++ {
+		content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+		if err != nil {
+			return fmt.Errorf("get SnapshotContent %s: %w", contentName, err)
+		}
+		if _, found, _ := unstructured.NestedMap(content.Object, "status", "data"); !found {
+			return fmt.Errorf("SnapshotContent %s has no status.data to rewrite", contentName)
+		}
+		if err := unstructured.SetNestedField(content.Object, class, "status", "data", "storageClassName"); err != nil {
+			return fmt.Errorf("set status.data.storageClassName on %s: %w", contentName, err)
+		}
+		_, uErr := suiteDyn.Resource(snapshotContentGVR).UpdateStatus(ctx, content, metav1.UpdateOptions{})
+		if uErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(uErr) {
+			return fmt.Errorf("update SnapshotContent %s status: %w", contentName, uErr)
+		}
+		last = uErr
+	}
+	return fmt.Errorf("update SnapshotContent %s status: %w", contentName, last)
+}
+
+// assertImportedLeafMirrorsAfterDataImportGone pins the steady state of a FINISHED import: the DataImport
+// is reaped by its own idle TTL, and from then on the leaf's status.data — the descriptor d8 reads on
+// export — must keep tracking its SnapshotContent. The binder used to read "no DataImport" as "the import
+// has not started yet" and return a 5s requeue before the mirror, freezing the leaf forever.
+//
+// The probe drives a CHANGE through on purpose. Asserting "the leaf is still Ready" or "its class did not
+// disappear" would pass without the fix too (Ready is written by the aggregator, and the mirror had already
+// run while the DataImport was alive), so it would prove nothing. Rewriting the class on the content and
+// waiting for it on the leaf is red before the fix and green after. The probe survives: once the aggregator
+// sees no DataImport, its import projection returns before publishing and leaves the latched status.data
+// alone.
+//
+// The real class is put back (and re-observed on the leaf) before returning, so the rest of the round trip
+// — restore, export, re-import — sees the truth.
+//
+// The probe is (re)asserted from inside the wait loop, not written once up front: the DataImport is
+// confirmed gone by a LIVE read, while the aggregator resolves it through its informer cache, and the
+// content event from the probe write can reach the aggregator before the DataImport delete event does
+// (separate watch streams order nothing between resources). Seeing a stale di != nil it would find the
+// latch mismatched on the class and re-publish realSC over the probe. A one-shot probe would then never
+// be re-written and the wait would hang to its full timeout instead of failing with a reason.
+func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName, realSC string, timeout time.Duration) error {
+	gvr, ok := gvrForSnapshotKind(kind)
+	if !ok {
+		return fmt.Errorf("assertImportedLeafMirrorsAfterDataImportGone: unknown snapshot kind %q (%s)", kind, leafName)
+	}
+	leaf, err := getResource(ctx, gvr, ns, leafName)
+	if err != nil {
+		return fmt.Errorf("get %s/%s: %w", kind, leafName, err)
+	}
+	contentName, _, _ := unstructured.NestedString(leaf.Object, "status", "boundSnapshotContentName")
+	if contentName == "" {
+		return fmt.Errorf("%s/%s has no status.boundSnapshotContentName", kind, leafName)
+	}
+
+	deleteDataImport(ctx, ns, dataImportName)
+	deadline := time.Now().Add(timeout)
+	for {
+		_, gErr := getResource(ctx, dataImportGVR, ns, dataImportName)
+		if apierrors.IsNotFound(gErr) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DataImport %s/%s to go away (last: %v)", ns, dataImportName, gErr)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+
+	probeSC := realSC + "-mirror-probe"
+	if err := waitImportedLeafMirrorsProbeClass(ctx, gvr, ns, kind, leafName, contentName, probeSC, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s stopped mirroring its SnapshotContent after the DataImport was gone: %w", kind, leafName, err)
+	}
+	// Putting the real class back needs no re-assertion: by now the aggregator has observed the delete
+	// (it stopped overwriting the probe), and even a late re-publish would write exactly realSC.
+	if err := setSnapshotContentStorageClass(ctx, contentName, realSC); err != nil {
+		return fmt.Errorf("restore the real StorageClass on %s: %w", contentName, err)
+	}
+	if err := waitImportedLeafStorageClass(ctx, ns, kind, leafName, realSC, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s did not converge back to its real StorageClass: %w", kind, leafName, err)
+	}
+	return nil
+}
+
+// waitImportedLeafMirrorsProbeClass drives probeSC through the leaf's SnapshotContent and waits for it to
+// arrive on the leaf, re-asserting the probe on every poll instead of trusting a single write.
+//
+// It converges on its own because the two ways the probe can be lost are both transient and both re-probed
+// here: the aggregator may still hold a stale cached DataImport (it then re-publishes the real class over
+// the probe — the loop writes the probe again on the next poll), and a write may lose a conflict race.
+// Once the DataImport delete lands in the aggregator's cache its import projection returns before
+// publishing, so the probe sticks and the binder's mirror carries it to the leaf. A leaf that genuinely
+// stopped mirroring fails on the deadline with the last observed content/leaf pair, not with a bare hang.
+func waitImportedLeafMirrorsProbeClass(ctx context.Context, gvr schema.GroupVersionResource, ns, kind, leafName, contentName, probeSC string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	rewrites := 0
+	var last string
+	for {
+		content, cErr := getResource(ctx, snapshotContentGVR, "", contentName)
+		switch {
+		case cErr != nil:
+			last = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+		default:
+			contentSC, _, _ := unstructured.NestedString(content.Object, "status", "data", "storageClassName")
+			if contentSC != probeSC {
+				if sErr := setSnapshotContentStorageClass(ctx, contentName, probeSC); sErr != nil {
+					return sErr
+				}
+				rewrites++
+				last = fmt.Sprintf("SnapshotContent %s carried storageClassName=%q; probe (re)asserted (%d write(s) so far)",
+					contentName, contentSC, rewrites)
+				break
+			}
+			leaf, lErr := getResource(ctx, gvr, ns, leafName)
+			if lErr != nil {
+				last = fmt.Sprintf("get %s/%s: %v", kind, leafName, lErr)
+				break
+			}
+			leafSC, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "storageClassName")
+			if leafSC == probeSC {
+				return nil
+			}
+			last = fmt.Sprintf("SnapshotContent %s carries the probe but %s/%s status.data.storageClassName=%q, want %q",
+				contentName, kind, leafName, leafSC, probeSC)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for the probe StorageClass %q to reach the leaf; last: %s", probeSC, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}

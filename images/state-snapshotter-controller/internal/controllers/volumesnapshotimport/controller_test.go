@@ -20,14 +20,18 @@ import (
 	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
@@ -197,5 +201,200 @@ func TestMirrorDataToImportVolumeSnapshot_CopiesBindingVerbatim(t *testing.T) {
 	}
 	if uid, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "sourceRef", "uid"); uid != "pvc-uid-123" {
 		t.Fatalf("status.data.sourceRef.uid = %q, want pvc-uid-123", uid)
+	}
+}
+
+// A DataImport lives only as long as the import needs it: storage-foundation reaps it on its own idle TTL.
+// For an already-bound import VolumeSnapshot "no DataImport" is therefore the PERMANENT end state, not a
+// pre-creation window, and the two are told apart by what the leaf already has: a bound VSC plus a content
+// carrying its published data leg. Treating the end state as pending kept the leaf at ~12 reconciles/min
+// forever (each listing DataImports) with the status.data export mirror — the only thing that carries a
+// later content-side correction onto the VS that d8 reads — never running again.
+//
+// The readiness surface of this controller is the one-shot legacy CSI readyToUse written at bind time; it is
+// deliberately not asserted below as an output of these paths.
+
+const (
+	vsImportNS          = "team-a"
+	vsImportName        = "imported-vs"
+	vsImportUID         = "imported-vs-uid"
+	vsImportParentSnap  = "root-snap"
+	vsImportParentUID   = "root-snap-uid"
+	vsImportParentCont  = "parent-content"
+	vsImportParentCUID  = "parent-content-uid"
+	vsImportContentName = "leaf-content"
+	vsImportContentUID  = "leaf-content-uid"
+	vsImportVSCName     = "snapcontent-abc"
+	vsImportScratchSC   = "sc-import"
+)
+
+// vsImportScheme registers the extended VolumeSnapshot (unstructured) plus the SVDM DataImport/DataImportList
+// the reverse-lookup lists, so the fake client can serve every read Reconcile performs.
+func vsImportScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
+	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add state-snapshotter scheme: %v", err)
+	}
+	scheme.AddKnownTypeWithName(csiVolumeSnapshotGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(csiVolumeSnapshotGVK.GroupVersion().WithKind(csiVolumeSnapshotGVK.Kind+"List"), &unstructured.UnstructuredList{})
+	diGVK := schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
+	scheme.AddKnownTypeWithName(diGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(diGVK.GroupVersion().WithKind("DataImportList"), &unstructured.UnstructuredList{})
+	return scheme
+}
+
+// vsImportLeaf builds an import-mode extended VolumeSnapshot already bound to its SnapshotContent, with a
+// child->parent ownerRef. boundVSCName != "" marks the leaf whose data leg the DataImport already produced.
+func vsImportLeaf(t *testing.T, boundVSCName string) *unstructured.Unstructured {
+	t.Helper()
+	vs := &unstructured.Unstructured{Object: map[string]interface{}{}}
+	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	vs.SetNamespace(vsImportNS)
+	vs.SetName(vsImportName)
+	vs.SetUID(types.UID(vsImportUID))
+	vs.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "Snapshot",
+		Name:       vsImportParentSnap,
+		UID:        types.UID(vsImportParentUID),
+	}})
+	if err := unstructured.SetNestedField(vs.Object, string(storagev1alpha1.SnapshotModeImport), "spec", "mode"); err != nil {
+		t.Fatalf("set spec.mode Import: %v", err)
+	}
+	if err := unstructured.SetNestedField(vs.Object, vsImportContentName, "status", "boundSnapshotContentName"); err != nil {
+		t.Fatalf("set boundSnapshotContentName: %v", err)
+	}
+	if boundVSCName != "" {
+		if err := unstructured.SetNestedField(vs.Object, boundVSCName, "status", "boundVolumeSnapshotContentName"); err != nil {
+			t.Fatalf("set boundVolumeSnapshotContentName: %v", err)
+		}
+	}
+	return vs
+}
+
+// vsImportLeafContent is the leaf's SnapshotContent, already owned by the parent content so that the
+// EnsureLifecycleOwnerRef step is a no-op. data == nil models a content the aggregator has not published yet.
+func vsImportLeafContent(data *storagev1alpha1.SnapshotDataBinding) *storagev1alpha1.SnapshotContent {
+	controller := true
+	c := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: vsImportContentName,
+			UID:  types.UID(vsImportContentUID),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "SnapshotContent",
+				Name:       vsImportParentCont,
+				UID:        types.UID(vsImportParentCUID),
+				Controller: &controller,
+			}},
+		},
+	}
+	c.Status.Data = data
+	return c
+}
+
+// vsImportPublishedData is the descriptor the aggregator publishes for an imported orphan-PVC leaf.
+func vsImportPublishedData() *storagev1alpha1.SnapshotDataBinding {
+	return &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: corePVCAPIVersion, Kind: kindPersistentVolumeClaim,
+			Name: "bk-pvc", Namespace: vsImportNS, UID: types.UID("pvc-uid-123"),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshotContent, Name: vsImportVSCName,
+		},
+		StorageClassName: vsImportScratchSC,
+		Size:             "10Gi",
+	}
+}
+
+// vsImportReconcile assembles the parent chain + reconstructed checkpoint every import reconcile walks
+// through and runs one Reconcile against it. No DataImport object is ever created: these tests are about
+// the leaf that outlived its own.
+func vsImportReconcile(t *testing.T, vs *unstructured.Unstructured, content *storagev1alpha1.SnapshotContent) (ctrl.Result, client.Client, error) {
+	t.Helper()
+	scheme := vsImportScheme(t)
+	parent := &storagev1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Namespace: vsImportNS, Name: vsImportParentSnap, UID: types.UID(vsImportParentUID)},
+	}
+	parent.Status.BoundSnapshotContentName = vsImportParentCont
+	parentContent := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: vsImportParentCont, UID: types.UID(vsImportParentCUID)},
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: usecase.ReconstructedManifestCheckpointName(types.UID(vsImportUID), "")},
+	}
+
+	statusStub := &unstructured.Unstructured{}
+	statusStub.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(statusStub, &storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).
+		WithObjects(vs, parent, parentContent, content, mcp).
+		Build()
+	r := &Controller{Client: cl, APIReader: cl}
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: vsImportNS, Name: vsImportName}})
+	return res, cl, err
+}
+
+// Steady state of a finished import: the DataImport is gone, the VSC is bound and the content carries its
+// data leg. Reconcile must stop polling and still refresh the status.data export mirror.
+func TestReconcile_SteadyStateWithoutDataImportMirrorsAndStopsPolling(t *testing.T) {
+	res, cl, err := vsImportReconcile(t, vsImportLeaf(t, vsImportVSCName), vsImportLeafContent(vsImportPublishedData()))
+	if err != nil {
+		t.Fatalf("Reconcile must not fail in the DataImport-less steady state: %v", err)
+	}
+	if res.RequeueAfter != 0 || res.Requeue {
+		t.Fatalf("a finished import must stop polling, got %+v", res)
+	}
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if gErr := cl.Get(context.Background(), client.ObjectKey{Namespace: vsImportNS, Name: vsImportName}, fresh); gErr != nil {
+		t.Fatalf("get VolumeSnapshot: %v", gErr)
+	}
+	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != vsImportScratchSC {
+		t.Fatalf("status.data.storageClassName = %q, want %q (the export mirror did not run)", sc, vsImportScratchSC)
+	}
+	if art, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "artifactRef", "name"); art != vsImportVSCName {
+		t.Fatalf("status.data.artifactRef.name = %q, want %q", art, vsImportVSCName)
+	}
+}
+
+// Genuinely pending import: no DataImport and the VSC is not bound yet, so the data leg is still ahead of
+// this leaf. Nothing wakes the controller (no DataImport watch), so the poll must survive. Regression guard.
+func TestReconcile_PendingWithoutDataImportKeepsPolling(t *testing.T) {
+	res, cl, err := vsImportReconcile(t, vsImportLeaf(t, ""), vsImportLeafContent(nil))
+	if err != nil {
+		t.Fatalf("Reconcile on a pending import must not fail: %v", err)
+	}
+	if res.RequeueAfter != importPollInterval {
+		t.Fatalf("a pending import must keep polling, got RequeueAfter=%v want %v", res.RequeueAfter, importPollInterval)
+	}
+
+	fresh := &unstructured.Unstructured{}
+	fresh.SetGroupVersionKind(csiVolumeSnapshotGVK)
+	if gErr := cl.Get(context.Background(), client.ObjectKey{Namespace: vsImportNS, Name: vsImportName}, fresh); gErr != nil {
+		t.Fatalf("get VolumeSnapshot: %v", gErr)
+	}
+	if _, found, _ := unstructured.NestedMap(fresh.Object, "status", "data"); found {
+		t.Fatalf("status.data must not be written while the content has published none")
+	}
+}
+
+// A bound VSC alone does NOT make the steady state: a leaf whose VSC binding raced ahead of the aggregator's
+// publish is still converging, and the aggregator's write produces no event for this controller, so the poll
+// must survive until the content actually carries its data leg.
+func TestReconcile_BoundVSCWithoutPublishedContentDataKeepsPolling(t *testing.T) {
+	res, _, err := vsImportReconcile(t, vsImportLeaf(t, vsImportVSCName), vsImportLeafContent(nil))
+	if err != nil {
+		t.Fatalf("Reconcile must not fail while the content is unpublished: %v", err)
+	}
+	if res.RequeueAfter != importPollInterval {
+		t.Fatalf("an unpublished content must keep polling, got RequeueAfter=%v want %v", res.RequeueAfter, importPollInterval)
 	}
 }

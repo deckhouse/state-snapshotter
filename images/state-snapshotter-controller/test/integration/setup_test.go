@@ -83,6 +83,24 @@ func ptrInt64(v int64) *int64 {
 	return &v
 }
 
+// snapshotLeafStatusDataSchema is the LEAF-side status.data schema: the whole SnapshotDataBinding wire
+// shape the binder mirrors verbatim off the bound SnapshotContent (the descriptor d8 reads on export), not
+// just the two refs a content node is asserted on. Every optional volume-metadata field must be listed or
+// the apiserver prunes it on the status patch and a mirror assertion silently passes against nothing —
+// storageClassName in particular, which is the whole point of the import mapping.
+func snapshotLeafStatusDataSchema() apiextensionsv1.JSONSchemaProps {
+	data := snapshotContentDataRefSchema()
+	data.Properties["volumeMode"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["fsType"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["storageClassName"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["size"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["accessModes"] = apiextensionsv1.JSONSchemaProps{
+		Type:  "array",
+		Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{Type: "string"}},
+	}
+	return data
+}
+
 // snapshotContentDataRefSchema is the Variant A singular status.data schema (cardinality ≤1): a
 // SnapshotContent carries at most one data binding as an object, not a list. wave5 renamed the binding
 // (status.dataRef->data), moved the source PVC under data.sourceRef, and dropped the standalone targetUID
@@ -350,6 +368,8 @@ var _ = BeforeSuite(func() {
 										"captureState":             snapshotStatusCaptureStateSchema(),
 										"sourceRef":                snapshotSourceStatusSchema(),
 										"boundSnapshotContentName": {Type: "string"},
+										// The export descriptor the binder mirrors off the bound content.
+										"data": snapshotLeafStatusDataSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{

@@ -27,6 +27,11 @@ limitations under the License.
 // and the legacy CSI status.boundVolumeSnapshotContentName/readyToUse (so the VS reads as a bound, ready
 // snapshot pointing at the imported VSC). SnapshotContentController owns Ready; the parent aggregates this
 // leaf through its childrenSnapshotContentRefs.
+//
+// A finished import outlives its DataImport (reaped by its own idle TTL), so the absence of a DataImport on
+// an already-bound leaf is this controller's expected STEADY STATE, not a pending import: it stops polling
+// and keeps only the status.data export mirror. Its readiness surface stays the one-shot legacy CSI
+// readyToUse written at bind time — this controller never had, and does not gain, a steady-state Ready.
 package volumesnapshotimport
 
 import (
@@ -58,8 +63,9 @@ import (
 )
 
 const (
-	// importPollInterval is the polling fallback while the import is converging (upload not yet present,
+	// importPollInterval is the polling fallback while the import is CONVERGING (upload not yet present,
 	// DataImport artifact not yet produced). No DataImport/MCP watch is taken; this poll drives progress.
+	// A finished import stops polling even though its DataImport is gone — see Reconcile's di == nil branch.
 	importPollInterval = 5 * time.Second
 	// vscRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot is deleted.
 	vscRetainPolicy = "Retain"
@@ -231,7 +237,21 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 	if di == nil {
-		return ctrl.Result{RequeueAfter: importPollInterval}, nil
+		// "No DataImport" has two opposite meanings and only one of them is "wait". Before the import
+		// completes d8 may not have created it yet. But a DataImport is reaped by its own idle TTL once it
+		// is done, so "no DataImport, content already carrying its data leg" is the PERMANENT end state of
+		// an imported leaf. Returning a requeue here unconditionally (as this branch used to) made that end
+		// state cost ~12 reconciles/min per leaf forever, each listing DataImports, while the export mirror
+		// — the only thing that carries a later content-side correction onto the VS that d8 reads — never
+		// ran again. Which of the two states we are in is decided by the content alone, so hand over to the
+		// mirror: it polls while the content has published nothing and settles once it has.
+		//
+		// Everything skipped in between needs the DataImport only to resolve and bind the VSC. Once the
+		// content carries the data leg that binding is done and durable: the VSC Retain policy and its
+		// volumeSnapshotRef back-ref are spec fields written at bind time (and the aggregator keeps up the
+		// Retain/ownerRef handoff), and status.sourceRef must have been published too, since the aggregator
+		// cannot have built content.status.data without it.
+		return r.mirrorPublishedContentData(ctx, req.NamespacedName, contentName)
 	}
 
 	// Data leg: resolve the DataImport's produced VolumeSnapshotContent and bind it.
@@ -304,21 +324,30 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, sErr
 	}
 
-	// Export mirror: mirror the aggregator-published content.status.data onto the extended VS top-level
-	// status.data for d8 export/consumption (byte-identical wire shape to the domain data-leaf mirror
-	// genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's captured-volume descriptor (source
-	// + artifact + volume metadata) from the namespaced VolumeSnapshot alone, without touching the
-	// cluster-scoped SnapshotContent. It is a no-op until the aggregator publishes (snapshotSource + bound
-	// just propagated), so poll until it does. The copy is verbatim: the aggregator publishes the whole
-	// descriptor including storageClassName (which it takes from DataImport.spec.storageParams.storageClassName
-	// on import), so this controller adds nothing of its own.
+	return r.mirrorPublishedContentData(ctx, req.NamespacedName, contentName)
+}
+
+// mirrorPublishedContentData re-reads the bound SnapshotContent and mirrors its aggregator-published
+// status.data onto the extended VS top-level status.data for d8 export/consumption (byte-identical wire
+// shape to the domain data-leaf mirror genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's
+// captured-volume descriptor (source + artifact + volume metadata) from the namespaced VolumeSnapshot
+// alone, without touching the cluster-scoped SnapshotContent. The copy is verbatim: the aggregator
+// publishes the whole descriptor including storageClassName (which it takes from
+// DataImport.spec.storageParams.storageClassName on import), so this controller adds nothing of its own.
+//
+// It is the single exit of Reconcile for BOTH the just-bound leg and the DataImport-less steady state of a
+// finished import, so the two cannot drift apart. A content that has not published its data leg yet is the
+// normal converging case: poll, since neither DataImport nor SnapshotContent is watched here.
+func (r *Controller) mirrorPublishedContentData(ctx context.Context, key client.ObjectKey, contentName string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return ctrl.Result{}, cErr
 	}
 	if content.Status.Data == nil {
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
-	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data); mErr != nil {
+	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, key, *content.Status.Data); mErr != nil {
 		// The content was already confirmed present above, so mirrorDataToImportVolumeSnapshot's own
 		// NotFound can only be the reconciled VolumeSnapshot itself vanishing mid-reconcile: swallow it
 		// (standard "object gone, nothing to do"), don't error-requeue. Any other failure (real Patch/
@@ -327,7 +356,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
 			return ctrl.Result{}, mErr
 		}
-		logger.V(1).Info("Import VolumeSnapshot not found while mirroring data; skipping", "volumeSnapshot", req.NamespacedName)
+		logger.V(1).Info("Import VolumeSnapshot not found while mirroring data; skipping", "volumeSnapshot", key)
 	}
 	return ctrl.Result{}, nil
 }

@@ -877,6 +877,13 @@ func runImportVariant(ctx context.Context, label, importNS string, rootManifests
 			return err
 		}
 		logf("imported leaf %s/%s carries storageClassName=%q on both the leaf and its content", leaf.kind, leaf.name, wantSC)
+		// A finished import outlives its DataImport (idle-TTL reaped), and that must NOT freeze the leaf:
+		// the DataImport is deleted here to reach the steady state deterministically instead of waiting out
+		// the TTL, and the leaf is then required to still track its SnapshotContent.
+		if err := assertImportedLeafMirrorsAfterDataImportGone(ctx, importNS, leaf.kind, leaf.name, leaf.name, wantSC, suiteCfg.snapshotReadyTO); err != nil {
+			return err
+		}
+		logf("imported leaf %s/%s still mirrors its SnapshotContent with no DataImport in the namespace", leaf.kind, leaf.name)
 	}
 	restorePath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsRestore)
 	body, err := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})
