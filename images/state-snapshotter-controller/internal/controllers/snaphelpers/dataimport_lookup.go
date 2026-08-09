@@ -101,3 +101,36 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 			count, leafKind, leaf.GetNamespace(), leafName), nil
 	}
 }
+
+// ImportStorageClassName returns a PopulateData DataImport's scratch StorageClass —
+// spec.storageParams.storageClassName — which is the authoritative StorageClass mapping for an imported
+// leaf: it is the class the imported bytes were actually staged into before being captured into the
+// durable VolumeSnapshotContent. This function is the SINGLE place in the codebase that knows the path;
+// the aggregator publishes the value into SnapshotContent.status.data and the leaf mirrors copy the
+// content verbatim.
+//
+// There is NO top-level spec.storageClassName on DataImport — neither in the storage-foundation Go types
+// nor in its CRD (which prunes unknown fields), and no mutating webhook lifts the nested value up.
+// Reading that non-existent path is exactly the defect this helper replaces: it silently yielded "", so
+// every imported leaf published an empty status.data.storageClassName and the
+// import -> d8 snapshot download -> d8 snapshot import round-trip broke on archive validation.
+//
+// The read is gated on spec.mode and yields "" for anything other than PopulateData (an empty mode is the
+// CRD default CreatePVC, so it yields "" too). A CreatePVC DataImport cannot reach a snapshot leaf — it
+// carries no spec.snapshotRef, so FindDataImportForLeaf can never return one — and its
+// spec.pvcTemplate.spec.storageClassName describes a PVC the import CREATES AND KEEPS, not a captured
+// snapshot's volume: it must not be read here. Gating on the CRD's own discriminator keeps this
+// fail-closed on our side instead of resting on a CEL rule owned by another repository.
+//
+// nil-safe: an unresolved DataImport (nil) yields "".
+func ImportStorageClassName(di *unstructured.Unstructured) string {
+	if di == nil {
+		return ""
+	}
+	mode, _, _ := unstructured.NestedString(di.Object, "spec", "mode")
+	if mode != snapshot.DataImportModePopulateData {
+		return ""
+	}
+	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageParams", "storageClassName")
+	return storageClassName
+}

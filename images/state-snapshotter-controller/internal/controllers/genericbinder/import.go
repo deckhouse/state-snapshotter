@@ -214,11 +214,10 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		}
 		// Mirror the aggregator-published content.status.data onto the leaf for d8 export. It is a no-op
 		// until the aggregator publishes; the !Ready poll below drives convergence (a Ready content always
-		// has its data leg published, so a Ready leaf is always mirrored first). storageClassName is absent
-		// from the content data by design, so take it from DataImport.spec.storageClassName;
-		// source/artifact/size/volumeMode come from content.status.data.
-		scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
+		// has its data leg published, so a Ready leaf is always mirrored first). The copy is verbatim: the
+		// aggregator publishes the whole descriptor including storageClassName (which it takes from
+		// DataImport.spec.storageParams.storageClassName on import), so the binder adds nothing of its own.
+		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName); mErr != nil {
 			// NotFound = the bound content is gone: do NOT error-requeue (that would wedge the leaf);
 			// the Ready mirror below drives the degradation. A real Get/Patch/schema failure on an
 			// existing content still requeues so wire-shape drift fails loud.

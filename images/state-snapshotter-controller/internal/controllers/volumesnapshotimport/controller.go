@@ -309,16 +309,16 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's captured-volume descriptor (source
 	// + artifact + volume metadata) from the namespaced VolumeSnapshot alone, without touching the
 	// cluster-scoped SnapshotContent. It is a no-op until the aggregator publishes (snapshotSource + bound
-	// just propagated), so poll until it does. StorageClass is overridden from DataImport.spec.storageClassName
-	// (the authoritative import mapping), matching the domain import path.
+	// just propagated), so poll until it does. The copy is verbatim: the aggregator publishes the whole
+	// descriptor including storageClassName (which it takes from DataImport.spec.storageParams.storageClassName
+	// on import), so this controller adds nothing of its own.
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return ctrl.Result{}, cErr
 	}
 	if content.Status.Data == nil {
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
-	scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data, scOverride); mErr != nil {
+	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data); mErr != nil {
 		// The content was already confirmed present above, so mirrorDataToImportVolumeSnapshot's own
 		// NotFound can only be the reconciled VolumeSnapshot itself vanishing mid-reconcile: swallow it
 		// (standard "object gone, nothing to do"), don't error-requeue. Any other failure (real Patch/
@@ -360,14 +360,12 @@ func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (v
 // It mirrors the SAME binding just published onto the backing SnapshotContent, via the shared
 // snapshotcontent.SnapshotDataBindingToUnstructuredMap, so the wire shape is byte-identical to the domain
 // data-leaf mirror (genericbinder.mirrorDataToLeaf); d8 then resolves the imported leaf's captured-volume
-// descriptor from the namespaced VolumeSnapshot alone. scOverride, when non-empty, replaces the binding's
-// StorageClassName with DataImport.spec.storageClassName (the authoritative import StorageClass mapping),
-// matching the domain import path. The forked snapshot-controller skips import VS, so status.data is ours to
-// own. Idempotent: re-reads and short-circuits when status.data already equals the desired block.
-func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding, scOverride string) error {
-	if scOverride != "" {
-		binding.StorageClassName = scOverride
-	}
+// descriptor from the namespaced VolumeSnapshot alone. The binding is copied verbatim — including
+// storageClassName, which the aggregator (the single writer of content.status.data) fills from
+// DataImport.spec.storageParams.storageClassName on the import leg, matching the domain import path. The
+// forked snapshot-controller skips import VS, so status.data is ours to own. Idempotent: re-reads and
+// short-circuits when status.data already equals the desired block.
+func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding) error {
 	desired := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&binding)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}

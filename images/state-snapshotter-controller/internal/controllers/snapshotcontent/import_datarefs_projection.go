@@ -83,19 +83,28 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 		return !r.contentHasData(ctx, contentName), "", "", nil
 	}
 
+	// The StorageClass the imported bytes were staged into is carried only by the DataImport; the aggregator
+	// is the single writer that projects it into the content (the leaf mirrors then copy the content
+	// verbatim). See controllercommon.ImportStorageClassName for the path and its mode gate.
+	importStorageClassName := controllercommon.ImportStorageClassName(di)
+
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches both the
-	// artifact and the (source-derived) volumeMode (matches the binder's former fast-path so a content bound
-	// before volumeMode propagation existed still self-heals).
+	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the
+	// artifact, the (source-derived) volumeMode AND the import StorageClass (matches the binder's former
+	// fast-path so a content bound before volumeMode propagation — or before the StorageClass was projected
+	// at all — still self-heals). No sentinel is needed for the class: this function only runs for an import
+	// owner that already passed the CSD requiresDataArtifact gate and reaches this point only with di != nil,
+	// so the comparison is meaningful even when both sides are empty.
 	if content.Status.Data != nil &&
 		content.Status.Data.ArtifactRef == binding.ArtifactRef &&
-		content.Status.Data.VolumeMode == binding.VolumeMode {
+		content.Status.Data.VolumeMode == binding.VolumeMode &&
+		content.Status.Data.StorageClassName == importStorageClassName {
 		return false, "", "", nil
 	}
-	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding})
+	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding}, importStorageClassName)
 	return requeue, "", "", err
 }
 
@@ -130,8 +139,14 @@ func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 	// cannot recover here: the binding targets the leaf snapshot, not a live PVC, so the PVC-based enricher
 	// only fills Size. DataImport republishes the original captured volumeMode into status.volumeMode (it
 	// reads capacity/storageClass/volumeMode from the uploaded manifest to provision its scratch PVC), so it
-	// is the authoritative source on the import side. storageClassName/accessModes/fsType are not exposed by
-	// DataImport and are resolved downstream from the disk spec / defaults.
+	// is the authoritative source on the import side.
+	//
+	// storageClassName is NOT set here: it comes from the DataImport SPEC
+	// (spec.storageParams.storageClassName), not from its status, and this function is also called by the
+	// import binder purely to test for a terminal artifact fault. The caller
+	// (projectContentDataLegFromDataImport) reads it via controllercommon.ImportStorageClassName and passes
+	// it to publishDataBindings, which stamps it after enrichment. accessModes/fsType stay empty on import —
+	// DataImport carries neither — and are resolved downstream from the disk spec / defaults.
 	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
 	return &storagev1alpha1.SnapshotDataBinding{
 		// The imported leaf has no live source PVC; use the leaf identity as the binding source so the

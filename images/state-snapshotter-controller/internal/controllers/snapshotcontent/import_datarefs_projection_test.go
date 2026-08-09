@@ -37,35 +37,89 @@ const (
 	importLeafAPIVer   = importLeafGroup + "/v1alpha1"
 	importLeafObjName  = "disk-snap"
 	importDataImportNS = projTestNS
+	// importScratchStorageClass is the class a PopulateData DataImport stages the imported bytes into
+	// (spec.storageParams.storageClassName) — the authoritative import StorageClass mapping. It differs from
+	// the capture fixture's PVC class ("sc-a") so a test cannot pass by picking up the wrong source.
+	importScratchStorageClass = "sc-import"
 )
 
 var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
 
-// importOwnerLeaf builds an import-mode (spec.mode: Import) generic domain leaf owner of the given kind.
-func importOwnerLeaf(kind string) *unstructured.Unstructured {
+// importOwnerLeaf builds the import-mode (spec.mode: Import) generic domain leaf owner. Whether its data
+// leg runs is decided by the GVKRegistry (requiresDataArtifact), not by the kind, so one kind covers both
+// the data-bearing and the structural cases.
+func importOwnerLeaf() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": importLeafAPIVer,
-		"kind":       kind,
+		"kind":       importLeafKind,
 		"metadata":   map[string]interface{}{"namespace": projTestNS, "name": importLeafObjName, "uid": "leaf-uid-1"},
 		"spec":       map[string]interface{}{"mode": string(storagev1alpha1.SnapshotModeImport)},
 	}}
 }
 
-// importDataImportForLeaf builds a DataImport whose spec.snapshotRef targets the leaf and whose
-// status.data.artifactRef points at the produced VolumeSnapshotContent.
+// importDataImportForLeaf builds a PopulateData DataImport whose spec.snapshotRef targets the leaf, whose
+// spec.storageParams carry the authoritative scratch StorageClass, and whose status.data.artifactRef points
+// at the produced VolumeSnapshotContent.
 func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 	di := &unstructured.Unstructured{}
 	di.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"})
 	di.SetNamespace(importDataImportNS)
 	di.SetName("di-1")
+	_ = unstructured.SetNestedField(di.Object, snapshot.DataImportModePopulateData, "spec", "mode")
 	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
 		"apiVersion": importLeafAPIVer, "kind": importLeafKind, "name": importLeafObjName,
 	}, "spec", "snapshotRef")
+	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
+		"storageClassName": importScratchStorageClass, "size": "10Gi", "volumeMode": string(corev1.PersistentVolumeFilesystem),
+	}, "spec", "storageParams")
 	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": vscName,
 	}, "status", "data", "artifactRef")
 	_ = unstructured.SetNestedField(di.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode")
 	return di
+}
+
+// importContentStorageClassName returns the SnapshotContent's published status.data.storageClassName.
+func importContentStorageClassName(t *testing.T, cl client.Client) string {
+	t.Helper()
+	got := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: projTestContent}, got); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	if got.Status.Data == nil {
+		t.Fatalf("expected status.data to be published")
+	}
+	return got.Status.Data.StorageClassName
+}
+
+// importContentResourceVersion returns the SnapshotContent's resourceVersion, so a test can prove a pass
+// wrote nothing at all (a latched pass must not re-patch status.data).
+func importContentResourceVersion(t *testing.T, cl client.Client) string {
+	t.Helper()
+	got := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: projTestContent}, got); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	return got.GetResourceVersion()
+}
+
+// newImportProjectionFixture wires an aggregator over a data-bearing import leaf: the DataImport list GVK is
+// registered (the reverse-lookup lists it cross-group), the produced VSC carries restoreSize, and the leaf
+// kind is marked requiresDataArtifact so the data leg runs.
+func newImportProjectionFixture(t *testing.T, content *storagev1alpha1.SnapshotContent, extra ...client.Object) (*SnapshotContentController, client.Client) {
+	t.Helper()
+	scheme := projScheme(t)
+	scheme.AddKnownTypeWithName(dataImportListGVK, &unstructured.UnstructuredList{})
+
+	objs := append([]client.Object{content, projVSCWithRestoreSize(), importDataImportForLeaf(projTestVSCName)}, extra...)
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
+		WithObjects(objs...).
+		Build()
+	reg := snapshot.NewGVKRegistry()
+	reg.MarkRequiresDataArtifact(importLeafKind, true)
+	return &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}, cl
 }
 
 func importLeafObject() *unstructured.Unstructured {
@@ -193,7 +247,7 @@ func TestReconcileDataLegProjection_GenericImportStructuralNodeSkips(t *testing.
 	// GVKRegistry with the leaf kind NOT marked as data-bearing (default reads false).
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -234,7 +288,7 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	reg.MarkRequiresDataArtifact(importLeafKind, true)
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(importLeafKind), projTestNS, true)
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -262,6 +316,9 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
 		t.Fatalf("volumeMode must be projected from DataImport.status.volumeMode, got %q", d.VolumeMode)
 	}
+	if d.StorageClassName != importScratchStorageClass {
+		t.Fatalf("storageClassName must be projected from DataImport.spec.storageParams.storageClassName, got %q", d.StorageClassName)
+	}
 
 	// The produced VSC is handed off to the content (forced Retain + content ownerRef) exactly like capture.
 	vsc := &unstructured.Unstructured{}
@@ -280,5 +337,78 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	}
 	if !owned {
 		t.Fatalf("VSC not re-owned by content: %#v", vsc.GetOwnerReferences())
+	}
+}
+
+// The published import StorageClass latches: once status.data carries the class from the DataImport, the
+// next pass short-circuits without requeueing and without touching the object. Idempotence is asserted on
+// the resourceVersion, so a re-publish that happens to write the same bytes would still be caught.
+func TestReconcileDataLegProjection_GenericImportStorageClassLatches(t *testing.T) {
+	ctx := context.Background()
+	r, cl := newImportProjectionFixture(t, projContentTyped())
+	owner := importOwnerLeaf()
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
+	}
+	if termReason != "" || !requeue {
+		t.Fatalf("a fresh import publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if sc := importContentStorageClassName(t, cl); sc != importScratchStorageClass {
+		t.Fatalf("published storageClassName = %q, want %q", sc, importScratchStorageClass)
+	}
+	rv := importContentResourceVersion(t, cl)
+
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
+	}
+	if termReason != "" || requeue {
+		t.Fatalf("the second pass must latch (no requeue, not terminal), got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if got := importContentResourceVersion(t, cl); got != rv {
+		t.Fatalf("a latched pass must not write the content: resourceVersion %q -> %q", rv, got)
+	}
+	if sc := importContentStorageClassName(t, cl); sc != importScratchStorageClass {
+		t.Fatalf("latched storageClassName = %q, want %q", sc, importScratchStorageClass)
+	}
+}
+
+// Self-heal (mandatory part of the fix): a content published BEFORE the aggregator projected the import
+// StorageClass already matches the artifactRef and the volumeMode, so a latch keyed on those two alone would
+// short-circuit it forever and it would keep an empty storageClassName for the rest of its life — the class
+// is unrecoverable once the DataImport is reaped by its idle TTL. The latch must therefore also compare the
+// class and let the stale content catch up.
+func TestReconcileDataLegProjection_GenericImportBackfillsStorageClassOnStaleContent(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	// Exactly what the pre-fix code published: source + artifact + volumeMode + size, no storageClassName.
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: importLeafAPIVer, Kind: importLeafKind,
+			Namespace: projTestNS, Name: importLeafObjName, UID: types.UID("leaf-uid-1"),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		VolumeMode: string(corev1.PersistentVolumeFilesystem),
+		Size:       "500Mi",
+	}
+	r, cl := newImportProjectionFixture(t, content)
+	owner := importOwnerLeaf()
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a self-heal publish must not be terminal, got %q", termReason)
+	}
+	if !requeue {
+		t.Fatalf("a content published without storageClassName must NOT latch; it has to be re-published")
+	}
+	if sc := importContentStorageClassName(t, cl); sc != importScratchStorageClass {
+		t.Fatalf("stale content did not self-heal: storageClassName = %q, want %q", sc, importScratchStorageClass)
 	}
 }

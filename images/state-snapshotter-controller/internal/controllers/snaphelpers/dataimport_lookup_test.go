@@ -194,6 +194,128 @@ func TestFindDataImportForLeaf(t *testing.T) {
 	}
 }
 
+// realisticDataImport builds a DataImport with the FULL spec storage-foundation actually serves (ttl,
+// waitForFirstConsumer, mode, snapshotRef, storageParams), not just the field under test. The defect this
+// helper replaces was reading a path that does not exist on the object at all, so the fixture must be a
+// realistic object rather than a map shaped around the assertion — otherwise a wrong path could still pass
+// by accident. A nil storageParams omits the whole block; extra sets additional top-level spec fields.
+func realisticDataImport(mode string, storageParams, extra map[string]interface{}) *unstructured.Unstructured {
+	spec := map[string]interface{}{
+		"ttl":                  "24h",
+		"waitForFirstConsumer": false,
+		"publish":              false,
+		"snapshotRef": map[string]interface{}{
+			"apiVersion": "virtualization.deckhouse.io/v1alpha2",
+			"kind":       "VirtualDiskSnapshot",
+			"name":       "vd-snap-1",
+		},
+	}
+	if mode != "" {
+		spec["mode"] = mode
+	}
+	if storageParams != nil {
+		spec["storageParams"] = storageParams
+	}
+	for k, v := range extra {
+		spec[k] = v
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind":       "DataImport",
+		"metadata":   map[string]interface{}{"name": "di-1", "namespace": "team-a"},
+		"spec":       spec,
+	}}
+}
+
+// scratchStorageParams is a complete PopulateData spec.storageParams block.
+func scratchStorageParams(storageClassName string) map[string]interface{} {
+	params := map[string]interface{}{"size": "10Gi", "volumeMode": "Filesystem"}
+	if storageClassName != "" {
+		params["storageClassName"] = storageClassName
+	}
+	return params
+}
+
+// ImportStorageClassName must read the class from spec.storageParams.storageClassName — and from nowhere
+// else. Two regressions are pinned here: (1) the original bug, where the top-level spec.storageClassName was
+// read and always yielded "" because the field does not exist on the CRD; (2) the mode gate, which keeps the
+// read fail-closed on this CRD's own discriminator instead of resting on a CEL rule owned by another
+// repository.
+func TestImportStorageClassName(t *testing.T) {
+	tests := []struct {
+		name string
+		di   *unstructured.Unstructured
+		want string
+	}{
+		{
+			name: "nil DataImport (not resolved) yields empty",
+			di:   nil,
+		},
+		{
+			name: "PopulateData with storageParams.storageClassName",
+			di:   realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil),
+			want: "sc-import",
+		},
+		{
+			name: "PopulateData whose storageParams carry no storageClassName",
+			di:   realisticDataImport("PopulateData", scratchStorageParams(""), nil),
+		},
+		{
+			name: "PopulateData with no storageParams block at all",
+			di:   realisticDataImport("PopulateData", nil, nil),
+		},
+		{
+			// The original defect: spec.storageClassName is not a field of this CRD. Even if some producer
+			// wrote it, the helper must not read it — the scratch class is the authoritative one.
+			name: "top-level spec.storageClassName is NOT the path",
+			di:   realisticDataImport("PopulateData", nil, map[string]interface{}{"storageClassName": "sc-top-level"}),
+		},
+		{
+			// CEL forbids storageParams in CreatePVC, so this object cannot exist in a real cluster; the gate
+			// exists precisely so the helper does not depend on that guarantee holding in another repository.
+			name: "CreatePVC ignores storageParams (fail-closed mode gate)",
+			di:   realisticDataImport("CreatePVC", scratchStorageParams("sc-scratch"), nil),
+		},
+		{
+			name: "empty mode defaults to CreatePVC and is ignored",
+			di:   realisticDataImport("", scratchStorageParams("sc-scratch"), nil),
+		},
+		{
+			name: "an unknown future mode is ignored",
+			di:   realisticDataImport("SomeFutureMode", scratchStorageParams("sc-scratch"), nil),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImportStorageClassName(tt.di); got != tt.want {
+				t.Fatalf("ImportStorageClassName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A DataImport the reverse-lookup actually returned must feed the class helper end to end: the two are
+// always used as a pair (find the leaf's DataImport, then read its scratch class), so the pairing is
+// covered rather than only each half in isolation.
+func TestFindDataImportForLeaf_FeedsImportStorageClassName(t *testing.T) {
+	leaf := leafObject("virtualization.deckhouse.io", "v1alpha2", "VirtualDiskSnapshot", "vd-snap-1", "team-a")
+	di := realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil)
+	cl := fake.NewClientBuilder().WithScheme(lookupScheme()).WithObjects(di).Build()
+
+	got, reason, _, err := FindDataImportForLeaf(context.Background(), cl, leaf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "" || got == nil {
+		t.Fatalf("expected exactly one match, got di=%v reason=%q", got, reason)
+	}
+	if sc := ImportStorageClassName(got); sc != "sc-import" {
+		t.Fatalf("ImportStorageClassName on the looked-up DataImport = %q, want sc-import", sc)
+	}
+}
+
 // TestFindDataImportForLeaf_NamespaceScoped verifies the reverse-lookup only considers DataImports in the
 // leaf's own namespace (snapshotRef namespace is implicit = leaf namespace), so a same-identity DataImport
 // in another namespace must not match.

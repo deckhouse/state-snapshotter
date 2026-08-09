@@ -38,15 +38,15 @@ import (
 // mirrorLeafDataFromContent mirrors the bound SnapshotContent's self-contained data binding
 // (SnapshotContent.status.data: source + artifact + volume metadata) verbatim onto the namespaced data
 // leaf's top-level status.data, so d8 can read the captured-volume descriptor namespaced without touching
-// the cluster-scoped SnapshotContent. On import the content data carries no storageClassName (it is not
-// derived from a live PVC), so the caller passes scOverride from DataImport.spec.storageClassName; on
-// capture scOverride is empty and the live content storageClassName is used. No-op until the content has
-// a published data binding.
+// the cluster-scoped SnapshotContent. The copy is verbatim for BOTH capture and import: the aggregator is
+// the single writer of content.status.data (INV-CONTENT-WRITER-1) and fills storageClassName on either
+// leg — from the source PVC on capture, from DataImport.spec.storageParams.storageClassName on import — so
+// the mirror has nothing to add and must not invent anything. No-op until the content has a published data
+// binding.
 func (r *GenericSnapshotBinderController) mirrorLeafDataFromContent(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
 	contentName string,
-	scOverride string,
 ) error {
 	content := &storagev1alpha1.SnapshotContent{}
 	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
@@ -56,9 +56,6 @@ func (r *GenericSnapshotBinderController) mirrorLeafDataFromContent(
 		return nil
 	}
 	data := *content.Status.Data
-	if scOverride != "" {
-		data.StorageClassName = scOverride
-	}
 	return r.mirrorDataToLeaf(ctx, obj, &data)
 }
 

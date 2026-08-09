@@ -1450,3 +1450,59 @@ func assertResourceGone(ctx context.Context, gvr schema.GroupVersionResource, ns
 		return err
 	}).WithContext(ctx).WithTimeout(timeout).WithPolling(5*time.Second).Should(Succeed(), "%s %s should be GC'd", gvr.Resource, name)
 }
+
+// waitImportedLeafStorageClass waits until the StorageClass the imported bytes were staged into
+// (DataImport.spec.storageParams.storageClassName) is visible on BOTH halves of the imported leaf: the
+// aggregator-owned SnapshotContent.status.data.storageClassName and the leaf's own mirrored
+// status.data.storageClassName.
+//
+// It pins the import round-trip contract d8 depends on: `d8 snapshot download` copies the LEAF's
+// status.data into snapshot.yaml verbatim, and reading that archive back fails closed on an empty
+// storageClassName — so an empty field here silently breaks import -> download -> import (and the class is
+// unrecoverable once the DataImport is reaped by its idle TTL). The content half is asserted too because it
+// is the durable copy; the leaf is only its mirror.
+func waitImportedLeafStorageClass(ctx context.Context, ns, kind, leafName, want string, timeout time.Duration) error {
+	if want == "" {
+		return fmt.Errorf("waitImportedLeafStorageClass: expected storageClassName is empty; the assertion would be vacuous")
+	}
+	gvr, ok := gvrForSnapshotKind(kind)
+	if !ok {
+		return fmt.Errorf("waitImportedLeafStorageClass: unknown snapshot kind %q (%s)", kind, leafName)
+	}
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		leaf, err := getResource(ctx, gvr, ns, leafName)
+		if err != nil {
+			last = fmt.Sprintf("get %s/%s: %v", kind, leafName, err)
+		} else {
+			leafSC, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "storageClassName")
+			contentName, _, _ := unstructured.NestedString(leaf.Object, "status", "boundSnapshotContentName")
+			contentSC := ""
+			contentErr := ""
+			if contentName == "" {
+				contentErr = "leaf has no status.boundSnapshotContentName"
+			} else if content, cErr := getResource(ctx, snapshotContentGVR, "", contentName); cErr != nil {
+				contentErr = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+			} else {
+				contentSC, _, _ = unstructured.NestedString(content.Object, "status", "data", "storageClassName")
+			}
+			if contentErr == "" && leafSC == want && contentSC == want {
+				return nil
+			}
+			last = fmt.Sprintf("%s/%s leaf status.data.storageClassName=%q, content %s status.data.storageClassName=%q, want %q%s",
+				kind, leafName, leafSC, contentName, contentSC, want, func() string {
+					if contentErr == "" {
+						return ""
+					}
+					return " (" + contentErr + ")"
+				}())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for the imported StorageClass to reach the leaf and its content; last: %s", last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}

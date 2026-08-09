@@ -450,6 +450,12 @@ func publishDataImportSpecs() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(waitChildrenReady(ctx, importNS, nodes, suiteCfg.snapshotReadyTO)).To(Succeed())
 
+			By("Asserting the scratch StorageClass reached the imported leaf and its SnapshotContent")
+			// The class the externally-uploaded bytes were staged into is carried only by the DataImport
+			// spec; the aggregator publishes it into the content and the leaf mirrors it. d8 reads the LEAF,
+			// so an empty field here breaks the download/import round-trip for published imports too.
+			Expect(waitImportedLeafStorageClass(ctx, importNS, "VolumeSnapshot", publishDIVSLeaf, scName, suiteCfg.snapshotReadyTO)).To(Succeed())
+
 			By("Restoring the imported tree and field-comparing the manifests to the live source objects")
 			restorePath := coreSnapshotSubPath(importNS, publishDIImportRoot, subManifestsRestore)
 			body, gerr := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})

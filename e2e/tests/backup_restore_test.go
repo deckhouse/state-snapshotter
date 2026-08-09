@@ -864,6 +864,20 @@ func runImportVariant(ctx context.Context, label, importNS string, rootManifests
 		return fmt.Errorf("import children Ready: %w", err)
 	}
 	logf("import-root Snapshot + bound content %s Ready; all %d tree node(s) Ready", content, len(nodes))
+	// The StorageClass the bytes were staged into must be durable on the imported tree: the aggregator
+	// publishes it into the leaf's SnapshotContent and the leaf mirrors it. Without it `d8 snapshot download`
+	// writes storageClassName: "" into snapshot.yaml and every later read of that archive (resumed download,
+	// localscan, re-import) fails validation.
+	for _, leaf := range leaves {
+		wantSC, _, _, perr := sourcePVCScratchParams(ctx, backup.srcNS, leaf.pvcName)
+		if perr != nil {
+			return fmt.Errorf("read expected storageClassName for %s: %w", leaf.name, perr)
+		}
+		if err := waitImportedLeafStorageClass(ctx, importNS, leaf.kind, leaf.name, wantSC, suiteCfg.snapshotReadyTO); err != nil {
+			return err
+		}
+		logf("imported leaf %s/%s carries storageClassName=%q on both the leaf and its content", leaf.kind, leaf.name, wantSC)
+	}
 	restorePath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsRestore)
 	body, err := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})
 	if err != nil {

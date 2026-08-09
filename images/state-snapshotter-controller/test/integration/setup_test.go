@@ -336,6 +336,13 @@ var _ = BeforeSuite(func() {
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
 									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										// The structural discriminator every snapshot kind carries
+										// (spec.mode: Capture|Import). Without it declared here the
+										// apiserver PRUNES the field and an import fixture silently
+										// reads back as a capture snapshot.
+										"mode": {Type: "string"},
+									},
 								},
 								"status": {
 									Type: "object",

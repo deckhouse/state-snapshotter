@@ -139,7 +139,7 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, ""); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 
@@ -176,17 +176,23 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	}
 }
 
-// On import the content data carries no storageClassName; the caller passes it from
-// DataImport.spec.storageClassName as scOverride, which must land in the mirrored status.data.
-func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
+// On import the aggregator — the single writer of content.status.data — publishes the StorageClass it read
+// from DataImport.spec.storageParams.storageClassName. The binder's mirror must carry it onto the leaf
+// VERBATIM: the former scOverride parameter (which re-read the class from a DataImport path that does not
+// exist, spec.storageClassName) is gone, so a class that reached the content must reach the leaf with no
+// binder-side logic at all. The leaf is what d8 reads on export.
+func TestMirrorLeafDataFromContent_CopiesImportStorageClassNameVerbatim(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
 	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
-		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
-		Size:        "5Gi",
+		// Import shape: the binding source is the LEAF identity (an imported leaf has no live source PVC),
+		// so nothing on the binder side could re-derive the class from a PVC even if it wanted to.
+		SourceRef:        storagev1alpha1.SnapshotSubjectRef{APIVersion: domainSnapshotGVK.GroupVersion().String(), Kind: domainSnapshotGVK.Kind, Name: domainTestSnap, Namespace: domainTestNS, UID: types.UID(domainTestSnapUID)},
+		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
+		StorageClassName: "sc-import",
+		Size:             "5Gi",
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -194,7 +200,7 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 		WithObjects(content, domainObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, "sc-import"); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 	fresh := &unstructured.Unstructured{}
@@ -203,7 +209,13 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 		t.Fatalf("get domain snapshot: %v", err)
 	}
 	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != "sc-import" {
-		t.Fatalf("scOverride not applied: status.data.storageClassName = %q, want sc-import", sc)
+		t.Fatalf("import storageClassName not mirrored verbatim: status.data.storageClassName = %q, want sc-import", sc)
+	}
+	if size, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "size"); size != "5Gi" {
+		t.Fatalf("status.data.size = %q, want 5Gi", size)
+	}
+	if src, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "sourceRef", "kind"); src != domainSnapshotGVK.Kind {
+		t.Fatalf("status.data.sourceRef.kind = %q, want %q", src, domainSnapshotGVK.Kind)
 	}
 }
 
@@ -356,7 +368,7 @@ func TestMirrorLeafDataFromContent_NoOpWithoutContentData(t *testing.T) {
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, ""); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("no-op without content.data must return nil, got %v", err)
 	}
 	fresh := &unstructured.Unstructured{}
