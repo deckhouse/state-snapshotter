@@ -277,12 +277,25 @@ var _ = Describe("Integration: native-CSI import data leg publishes the DataImpo
 			g.Expect(d.VolumeMode).To(Equal(importedVolumeMode), "volumeMode must come from the DataImport, not from the live namesake PVC")
 			g.Expect(d.FsType).To(BeEmpty(), "a Block import has no filesystem; none may be invented for it")
 			g.Expect(d.StorageClassName).To(Equal(importScratchClass), "the class must come from the DataImport, not from the live namesake PVC")
-			g.Expect(d.AccessModes).To(BeEmpty(), "the live namesake's access modes must not be published either")
 			g.Expect(d.Size).NotTo(BeEmpty(), "the durable restore size must be enriched from the artifact")
 		}
 
 		By("waiting until the aggregator publishes the import volume metadata")
 		Eventually(expectImportMetadata, 60*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		By("checking the published leg carries no accessModes key at all")
+		// The live namesake PVC created above declares ReadWriteMany, so this is the shape a published leg has
+		// on the one path where a stranger's access modes were reachable. Read unstructured, because a typed
+		// read cannot show a key the Go type no longer has. This is the end-to-end statement; what makes a
+		// re-added field fail is the served-schema check in the SnapshotContent data CRD validation spec and
+		// the pinned serializer key set in TestSnapshotDataBindingToMap.
+		rawLeg := &unstructured.Unstructured{}
+		rawLeg.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("SnapshotContent"))
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, rawLeg)).To(Succeed())
+		publishedData, found, err := unstructured.NestedMap(rawLeg.Object, "status", "data")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "status.data must be published on the import leg")
+		Expect(publishedData).NotTo(HaveKey("accessModes"), "the published data leg must carry no accessModes key")
 
 		By("rewinding status.data to its pre-fix shape: the live namesake's metadata")
 		// This is what the previous code published for such a leaf — whatever the enricher read off the PVC

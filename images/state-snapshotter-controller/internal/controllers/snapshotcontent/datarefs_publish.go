@@ -34,7 +34,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// EnrichDataBindingsWithVolumeMetadata fills volumeMode/fsType/accessModes/storageClassName on each
+// EnrichDataBindingsWithVolumeMetadata fills volumeMode/fsType/storageClassName on each
 // PVC-targeted binding by reading the live source PVC (and its bound PV). CSI snapshots are
 // mode-agnostic, so this metadata MUST be captured now to faithfully restore the volume on export
 // (VolumeRestoreRequest builds CSI VolumeCapabilities from it) and to recreate the PVC on import.
@@ -104,13 +104,6 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 			b.VolumeMode = string(*pvc.Spec.VolumeMode)
 		} else {
 			b.VolumeMode = string(corev1.PersistentVolumeFilesystem)
-		}
-		if len(pvc.Spec.AccessModes) > 0 {
-			modes := make([]string, 0, len(pvc.Spec.AccessModes))
-			for _, am := range pvc.Spec.AccessModes {
-				modes = append(modes, string(am))
-			}
-			b.AccessModes = modes
 		}
 		if pvc.Spec.StorageClassName != nil {
 			b.StorageClassName = *pvc.Spec.StorageClassName
@@ -216,11 +209,13 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 }
 
 // SnapshotDataBindingToUnstructuredMap renders a SnapshotDataBinding as a JSON-typed unstructured map
-// suitable for unstructured.SetNestedMap (only string / []interface{} / map[string]interface{} values).
-// sourceRef and artifactRef are always present (required); the volume-metadata fields are written only when
-// non-empty. This is the single wire-shape serializer for mirroring a binding onto a namespaced object's
-// top-level status.data — shared by the domain data-leaf mirror (genericbinder.mirrorDataToLeaf) and the
-// extended-VolumeSnapshot import mirror (volumesnapshotimport), so the two stay byte-identical for d8.
+// suitable for unstructured.SetNestedMap, which accepts only string / []interface{} / map[string]interface{}
+// values; every field of the binding is a string, so the rendered map holds nested maps of strings and
+// nothing else. sourceRef and artifactRef are always present (required); the volume-metadata fields are
+// written only when non-empty. This is the single wire-shape serializer for mirroring a binding onto a
+// namespaced object's top-level status.data — shared by the domain data-leaf mirror
+// (genericbinder.mirrorDataToLeaf) and the extended-VolumeSnapshot import mirror (volumesnapshotimport), so
+// the two stay byte-identical for d8.
 func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding) map[string]interface{} {
 	sourceRef := map[string]interface{}{
 		"apiVersion": d.SourceRef.APIVersion,
@@ -250,13 +245,6 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 	}
 	if d.FsType != "" {
 		out["fsType"] = d.FsType
-	}
-	if len(d.AccessModes) > 0 {
-		am := make([]interface{}, len(d.AccessModes))
-		for i, m := range d.AccessModes {
-			am[i] = m
-		}
-		out["accessModes"] = am
 	}
 	if d.StorageClassName != "" {
 		out["storageClassName"] = d.StorageClassName
@@ -365,20 +353,6 @@ func dataBindingEqual(x, y storagev1alpha1.SnapshotDataBinding) bool {
 	if x.ArtifactRef != y.ArtifactRef {
 		return false
 	}
-	if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName || x.Size != y.Size {
-		return false
-	}
-	return stringSlicesEqual(x.AccessModes, y.AccessModes)
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return x.VolumeMode == y.VolumeMode && x.FsType == y.FsType &&
+		x.StorageClassName == y.StorageClassName && x.Size == y.Size
 }

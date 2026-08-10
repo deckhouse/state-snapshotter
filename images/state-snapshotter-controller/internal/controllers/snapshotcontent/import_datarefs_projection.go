@@ -144,8 +144,7 @@ func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 	// import binder purely to test for a terminal artifact fault. The caller
 	// (projectContentDataLegFromDataImport) assembles all three into importVolumeMetadata and passes them to
 	// publishDataBindings, which stamps them after enrichment; the two set here are the same values and let
-	// the caller's latch compare against the binding it is about to publish. accessModes stays empty on
-	// import — DataImport does not carry it — and is resolved downstream from defaults.
+	// the caller's latch compare against the binding it is about to publish.
 	volumeMode := controllercommon.ImportVolumeMode(di)
 	fsType := controllercommon.ImportFsType(di)
 	return &storagev1alpha1.SnapshotDataBinding{

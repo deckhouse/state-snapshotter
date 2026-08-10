@@ -76,7 +76,6 @@ func projSourcePVC() *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Namespace: projTestNS, Name: projTestPVCName, UID: types.UID(projTestPVCUID)},
 		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			StorageClassName: &sc,
 			VolumeMode:       &mode,
 		},
@@ -166,7 +165,7 @@ func projAssertPublishedAndHandedOff(t *testing.T, cl client.Client) {
 	if string(d.SourceRef.UID) != projTestPVCUID || d.ArtifactRef.Name != projTestVSCName {
 		t.Fatalf("unexpected published data binding: %#v", d)
 	}
-	if d.StorageClassName != "sc-a" || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(d.AccessModes) != 1 {
+	if d.StorageClassName != "sc-a" || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
 		t.Fatalf("published dataRef not enriched with volume metadata: %#v", d)
 	}
 
@@ -692,7 +691,6 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedClassAfterDataIm
 			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
 		},
 		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
-		AccessModes:      []string{string(corev1.ReadWriteOnce)},
 		StorageClassName: importScratchStorageClass,
 		Size:             "500Mi",
 	}
@@ -709,7 +707,7 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedClassAfterDataIm
 	}
 	d := projContentData(t, cl)
 	if d.StorageClassName != importScratchStorageClass || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
-		len(d.AccessModes) != 1 || d.Size != "500Mi" {
+		d.Size != "500Mi" {
 		t.Fatalf("durable metadata must survive a reaped DataImport: %#v", d)
 	}
 }
@@ -758,7 +756,7 @@ func TestReconcileDataLegProjection_BoundVSCCaptureSkipsDataImportLookupAndLatch
 
 // Capture regression guard (durability): after the source PVC is deleted the leg must stay latched. A
 // re-publish rebuilds the binding from {sourceRef, artifactRef} only, and the enricher silently skips a gone
-// PVC — so a latch that failed here would wipe volumeMode/accessModes/storageClassName from an already
+// PVC — so a latch that failed here would wipe volumeMode/fsType/storageClassName from an already
 // durable content, and an empty volumeMode fail-closes restore.
 func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDeleted(t *testing.T) {
 	ctx := context.Background()
@@ -770,7 +768,7 @@ func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDe
 		t.Fatalf("first publish: requeue=%v err=%v", requeue, err)
 	}
 	before := projContentData(t, cl)
-	if before.StorageClassName != "sc-a" || before.VolumeMode == "" || len(before.AccessModes) != 1 {
+	if before.StorageClassName != "sc-a" || before.VolumeMode == "" {
 		t.Fatalf("fixture did not enrich the capture binding: %#v", before)
 	}
 	rv := projContentResourceVersion(t, cl)
@@ -790,8 +788,9 @@ func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDe
 		t.Fatalf("nothing must be written after the source PVC is gone: resourceVersion %q -> %q", rv, got)
 	}
 	after := projContentData(t, cl)
-	if after.StorageClassName != before.StorageClassName || after.VolumeMode != before.VolumeMode ||
-		len(after.AccessModes) != len(before.AccessModes) || after.Size != before.Size {
+	// The whole binding is compared, not a chosen few fields: it carries no slice, so == covers every field
+	// there is and a field added later is guarded here without anyone remembering to extend the list.
+	if after != before {
 		t.Fatalf("durable metadata changed after the source PVC was deleted: %#v -> %#v", before, after)
 	}
 }
@@ -904,9 +903,6 @@ func TestReconcileDataLegProjection_BoundVSCImportForeignPVCDoesNotSubstituteVol
 			}
 			if d.StorageClassName != tt.wantClass {
 				t.Fatalf("storageClassName = %q, want %q (the foreign PVC is on %q)", d.StorageClassName, tt.wantClass, "sc-stranger")
-			}
-			if len(d.AccessModes) != 0 {
-				t.Fatalf("accessModes must not be taken from a foreign volume either, got %v", d.AccessModes)
 			}
 		})
 	}
@@ -1109,8 +1105,9 @@ func TestPublishDataBindings_ImportMetadataOverridesEnricher(t *testing.T) {
 				t.Fatalf("published metadata = {class %q, volumeMode %q, fsType %q}, want {%q, %q, %q}",
 					d.StorageClassName, d.VolumeMode, d.FsType, tt.wantClass, tt.wantVolumeMode, tt.wantFsType)
 			}
-			// Fields the import metadata does not carry must survive enrichment untouched either way.
-			if len(d.AccessModes) != 1 || d.Size != "500Mi" {
+			// What the import metadata does NOT carry must survive the stamp either way: the artifact-derived
+			// size (enriched from the VSC, never from a PVC) and the binding's own source identity.
+			if d.Size != "500Mi" || string(d.SourceRef.UID) != projTestPVCUID {
 				t.Fatalf("enrichment damaged by the import metadata stamp: %#v", d)
 			}
 		})

@@ -123,7 +123,6 @@ func captureLegsData() *storagev1alpha1.SnapshotDataBinding {
 		},
 		StorageClassName: "sc-a",
 		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
-		AccessModes:      []string{string(corev1.ReadWriteOnce)},
 	}
 }
 

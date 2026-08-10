@@ -87,17 +87,15 @@ func ptrInt64(v int64) *int64 {
 // shape the binder mirrors verbatim off the bound SnapshotContent (the descriptor d8 reads on export), not
 // just the two refs a content node is asserted on. Every optional volume-metadata field must be listed or
 // the apiserver prunes it on the status patch and a mirror assertion silently passes against nothing —
-// storageClassName in particular, which is the whole point of the import mapping.
+// storageClassName in particular, which is the whole point of the import mapping. It must list EXACTLY the
+// binding's optional fields: an entry for a field the API no longer has would keep a stale key alive on the
+// leaf here and hide that the wire shape has changed.
 func snapshotLeafStatusDataSchema() apiextensionsv1.JSONSchemaProps {
 	data := snapshotContentDataRefSchema()
 	data.Properties["volumeMode"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
 	data.Properties["fsType"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
 	data.Properties["storageClassName"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
 	data.Properties["size"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
-	data.Properties["accessModes"] = apiextensionsv1.JSONSchemaProps{
-		Type:  "array",
-		Items: &apiextensionsv1.JSONSchemaPropsOrArray{Schema: &apiextensionsv1.JSONSchemaProps{Type: "string"}},
-	}
 	return data
 }
 

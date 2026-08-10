@@ -19,6 +19,8 @@ package snapshotcontent
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +79,6 @@ func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 	scheme := enrichScheme(t)
 	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{
 		VolumeMode:       fsMode(),
-		AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce, corev1.ReadOnlyMany},
 		StorageClassName: scPtr("fast"),
 		VolumeName:       "pv-data",
 	})
@@ -100,9 +101,6 @@ func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 	}
 	if b.StorageClassName != "fast" {
 		t.Errorf("storageClassName: want fast, got %q", b.StorageClassName)
-	}
-	if len(b.AccessModes) != 2 || b.AccessModes[0] != "ReadWriteOnce" || b.AccessModes[1] != "ReadOnlyMany" {
-		t.Errorf("accessModes: got %v", b.AccessModes)
 	}
 }
 
@@ -333,39 +331,76 @@ func TestReadArtifactRestoreSize_TransientErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
+// dataBindingEqual is the publish latch's comparison (Variant A: a content holds a single dataRef, so
+// equality is per-binding). A field it forgets is a field the latch cannot see change: the content stays
+// "already equal" and freezes a stale value for the rest of its life, which for volumeMode fail-closes export
+// forever. So EVERY field of SnapshotDataBinding must take part, and the fields are enumerated by REFLECTION
+// rather than by hand — a hand-written list is exactly what lets a newly added field slip through uncompared
+// (this test used to carry an accessModes entry, and dropping that field meant editing the list).
+//
+// Limit of the sweep: it mutates string-kinded leaves, which is every leaf the binding has. A future leaf of
+// any other kind (slice, pointer, number) fails the sweep loudly instead of being skipped in silence.
+func TestDataBindingEqual_EveryFieldParticipates(t *testing.T) {
 	base := storagev1alpha1.SnapshotDataBinding{
-		SourceRef:        storagev1alpha1.SnapshotSubjectRef{UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
-		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1"},
+		SourceRef:        storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", UID: "u1", Kind: "PersistentVolumeClaim", Name: "p", Namespace: "n"},
+		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "vsc", APIVersion: "snapshot.storage.k8s.io/v1", UID: "a1"},
 		VolumeMode:       "Filesystem",
 		FsType:           "ext4",
 		StorageClassName: "sc",
 		Size:             "10Gi",
-		AccessModes:      []string{"ReadWriteOnce"},
 	}
-	mut := func(f func(b *storagev1alpha1.SnapshotDataBinding)) storagev1alpha1.SnapshotDataBinding {
-		c := base
-		c.AccessModes = append([]string(nil), base.AccessModes...)
-		f(&c)
-		return c
+	if !dataBindingEqual(base, base) {
+		t.Fatal("identical bindings must compare equal")
 	}
 
-	// Variant A: a content holds a single dataRef, so equality is per-binding (dataBindingEqual).
-	if !dataBindingEqual(base, mut(func(_ *storagev1alpha1.SnapshotDataBinding) {})) {
-		t.Error("identical bindings must compare equal")
+	paths := stringLeafPaths(t, reflect.TypeOf(base), "")
+	if len(paths) == 0 {
+		t.Fatal("reflection found no leaves to mutate: the sweep would report success without comparing anything")
 	}
-	for name, f := range map[string]func(b *storagev1alpha1.SnapshotDataBinding){
-		"volumeMode":       func(b *storagev1alpha1.SnapshotDataBinding) { b.VolumeMode = "Block" },
-		"fsType":           func(b *storagev1alpha1.SnapshotDataBinding) { b.FsType = "xfs" },
-		"storageClassName": func(b *storagev1alpha1.SnapshotDataBinding) { b.StorageClassName = "other" },
-		"size":             func(b *storagev1alpha1.SnapshotDataBinding) { b.Size = "20Gi" },
-		"accessModes":      func(b *storagev1alpha1.SnapshotDataBinding) { b.AccessModes = []string{"ReadWriteMany"} },
-		"artifactUID":      func(b *storagev1alpha1.SnapshotDataBinding) { b.ArtifactRef.UID = "different-uid" },
-	} {
-		if dataBindingEqual(base, mut(f)) {
-			t.Errorf("bindings differing by %s must compare unequal", name)
+	for _, path := range paths {
+		mutated := base
+		leaf := leafByPath(t, reflect.ValueOf(&mutated).Elem(), path)
+		leaf.SetString(leaf.String() + "-changed")
+		if dataBindingEqual(base, mutated) {
+			t.Errorf("bindings differing by %s compare EQUAL: dataBindingEqual does not look at that field, so the latch cannot see it change", path)
 		}
 	}
+	t.Logf("dataBindingEqual swept %d fields of SnapshotDataBinding: %v", len(paths), paths)
+}
+
+// stringLeafPaths returns the dotted paths of every string-kinded leaf field reachable in t, descending into
+// nested structs. Any other kind is a hard failure: the sweep above would otherwise quietly stop covering it.
+func stringLeafPaths(t *testing.T, typ reflect.Type, prefix string) []string {
+	t.Helper()
+	var paths []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		path := f.Name
+		if prefix != "" {
+			path = prefix + "." + f.Name
+		}
+		switch f.Type.Kind() {
+		case reflect.String:
+			paths = append(paths, path)
+		case reflect.Struct:
+			paths = append(paths, stringLeafPaths(t, f.Type, path)...)
+		default:
+			t.Fatalf("%s is a %s: this sweep only mutates string leaves, so extend it (and dataBindingEqual) for the new kind", path, f.Type.Kind())
+		}
+	}
+	return paths
+}
+
+// leafByPath resolves a dotted path produced by stringLeafPaths against an addressable value.
+func leafByPath(t *testing.T, v reflect.Value, path string) reflect.Value {
+	t.Helper()
+	for _, name := range strings.Split(path, ".") {
+		v = v.FieldByName(name)
+		if !v.IsValid() {
+			t.Fatalf("field %q of path %q not found", name, path)
+		}
+	}
+	return v
 }
 
 // A live PVC that carries the captured source NAME but a different UID is a different volume, and its
@@ -385,7 +420,6 @@ func TestEnrich_SkipsLivePVCWithDifferentUID(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data", UID: types.UID("uid-someone-else")},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			VolumeMode:       blockMode(),
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			StorageClassName: scPtr("foreign-class"),
 		},
 	}
@@ -399,7 +433,7 @@ func TestEnrich_SkipsLivePVCWithDifferentUID(t *testing.T) {
 		t.Fatalf("a same-named foreign PVC must be tolerated, got error: %v", err)
 	}
 	b := out[0]
-	if b.VolumeMode != "" || b.FsType != "" || b.StorageClassName != "" || len(b.AccessModes) != 0 {
+	if b.VolumeMode != "" || b.FsType != "" || b.StorageClassName != "" {
 		t.Fatalf("metadata of a PVC with a different UID must not be published: %#v", b)
 	}
 	if b.Size != "10Gi" {

@@ -542,13 +542,14 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 	if storageClassName, ok := entry["storageClassName"].(string); ok {
 		binding.StorageClassName = storageClassName
 	}
-	if accessModesRaw, ok := entry["accessModes"].([]interface{}); ok {
-		for _, am := range accessModesRaw {
-			if s, ok := am.(string); ok {
-				binding.AccessModes = append(binding.AccessModes, s)
-			}
-		}
-	}
+	// Any key the wire carries but DataBindingRef does not model is ignored, not surfaced: this projection
+	// takes the fields it knows and never fails on the rest. The tolerance is for divergence between schema
+	// and code, NOT for reading history — a v1 CRD prunes unknown keys on READ as well as on write, so a key
+	// dropped from the schema is unreachable through the API while the served schema omits it; the stored value
+	// survives in etcd until the object's next write (and would resurface if the property were re-added to the
+	// schema before then). What must not break the reader: a rolling update where CRD and binary disagree about
+	// the schema, a client that writes more than we model, and decode paths that never prune at all (fixtures,
+	// manifests read off disk, unstructured objects assembled by hand).
 	return []DataBindingRef{binding}
 }
 

@@ -116,6 +116,13 @@ type SnapshotDataArtifactRef struct {
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
 // It is self-contained ({sourceRef, artifactRef, volume metadata}) so the core can mirror it verbatim onto
 // the namespaced snapshot's top-level status.data (see the status-source descriptor).
+//
+// Which volume properties belong here is a deliberate, narrow criterion: a property is carried only if
+// export/import needs it, OR if it is NOT preserved in the captured PVC manifest and is needed for
+// validation. Everything else is read back from the captured manifest on restore and would only be a second,
+// divergable copy. spec.accessModes is the worked example of what does NOT qualify: it round-trips through the
+// manifest untouched, and the transient export volume does not inherit the source modes (the provisioner
+// treats them as optional and defaults to ReadWriteOnce), so it was dropped before this schema was released.
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
 	// SourceRef identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
@@ -138,10 +145,6 @@ type SnapshotDataBinding struct {
 	// FsType records the source filesystem type (Filesystem volumes only).
 	// +optional
 	FsType string `json:"fsType,omitempty"`
-
-	// AccessModes records the source PVC access modes (e.g. ReadWriteOnce, ReadWriteMany).
-	// +optional
-	AccessModes []string `json:"accessModes,omitempty"`
 
 	// StorageClassName records the source StorageClass of the captured volume. Used by the
 	// aggregated /index and by import StorageClass mapping.
