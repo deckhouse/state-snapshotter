@@ -131,6 +131,10 @@ func ParseVolumeCaptureDataRefs(obj *unstructured.Unstructured) ([]vcpkg.DataBin
 }
 
 func parseReadyCondition(obj *unstructured.Unstructured) (status, reason, message string, ok bool) {
+	return parseCondition(obj, vcpkg.ConditionTypeReady)
+}
+
+func parseCondition(obj *unstructured.Unstructured, conditionType string) (status, reason, message string, ok bool) {
 	raw, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
 	if err != nil || !found {
 		return "", "", "", false
@@ -140,7 +144,7 @@ func parseReadyCondition(obj *unstructured.Unstructured) (status, reason, messag
 		if !ok {
 			continue
 		}
-		if nestedString(m, "type") != vcpkg.ConditionTypeReady {
+		if nestedString(m, "type") != conditionType {
 			continue
 		}
 		return nestedString(m, "status"), nestedString(m, "reason"), nestedString(m, "message"), true

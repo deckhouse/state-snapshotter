@@ -163,6 +163,38 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 	return requeue, "", "", err
 }
 
+// observeDataLegStall reads the non-terminal stall diagnosis published by the data-leg
+// VolumeCaptureRequest of a domain owner, if there is one.
+//
+// The diagnosis is read, never recomputed: this side does not look at finalizers, annotations or the
+// VolumeSnapshotContent, and it runs no deadline of its own. The foundation owns the classification,
+// and duplicating it here would produce two sources of truth that disagree under version skew.
+//
+// It is only consulted while the data leg is pending, so it costs one cached read of an object this
+// controller already watches, and nothing at all on the happy path. Owners with no VolumeCaptureRequest
+// (native-CSI VolumeSnapshot, import leaves, manifest-only nodes) resolve to no diagnosis.
+func (r *SnapshotContentController) observeDataLegStall(ctx context.Context, owner *unstructured.Unstructured) (reason, message string) {
+	if owner == nil {
+		return "", ""
+	}
+	vcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
+	if err != nil || vcrName == "" {
+		return "", ""
+	}
+
+	vcr := &unstructured.Unstructured{}
+	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
+	if getErr := r.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: vcrName}, vcr); getErr != nil {
+		// A missing or unreadable request is not a diagnosis: the pending path stays as it was.
+		return "", ""
+	}
+	stalled, stallReason, stallMessage := vcctrl.VolumeCaptureRequestStalled(vcr)
+	if !stalled {
+		return "", ""
+	}
+	return stallReason, stallMessage
+}
+
 // projectContentDataLegFromBoundVSC projects the native-CSI data leg (§11.4): a VolumeSnapshot owner is
 // bound to a VolumeSnapshotContent by the fork's CSI machinery (status.boundVolumeSnapshotContentName), so
 // the aggregator builds the {source PVC, VSC artifact} binding from the owner status and performs the same
