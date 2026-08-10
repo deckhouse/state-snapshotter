@@ -94,11 +94,23 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// it has already returned above when di == nil, keeping the latched status.data untouched.
 	importMeta := importVolumeMetadataFromDataImport(di)
 
-	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the artifact
-	// AND every import-metadata field we know is published as such (a content bound before one of them was
-	// projected therefore self-heals instead of keeping the gap forever).
+	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the artifact,
+	// the durable restore size has been captured, AND every import-metadata field we know is published as such
+	// (a content bound before one of them was projected therefore self-heals instead of keeping the gap
+	// forever).
+	//
+	// Size MUST gate the latch, symmetrically with the bound-VSC branch, and for the same reason: this
+	// projection publishes as soon as the DataImport reports its artifact, which can PRECEDE the driver
+	// publishing VolumeSnapshotContent.status.restoreSize — the only place the durable size comes from (the
+	// imported leaf has no live PVC, and the DataImport records the REQUESTED scratch size in
+	// spec.storageParams, not the size the artifact can be restored to). Latching on the artifact alone freezes
+	// status.data with an empty size for good: every later pass re-evaluates this same condition and closes it
+	// again, so nothing ever backfills the field, and restore/export size the target PVC from it. Re-enriching
+	// until the size lands backfills it on the pass after the driver reports it; PublishSnapshotContentDataRef
+	// is a no-op once the binding is equal, so the waiting passes re-read but do not write.
 	if content.Status.Data != nil &&
 		content.Status.Data.ArtifactRef == binding.ArtifactRef &&
+		content.Status.Data.Size != "" &&
 		importMeta.matchesPublished(content.Status.Data) {
 		return false, "", "", nil
 	}

@@ -127,10 +127,20 @@ func importContentResourceVersion(t *testing.T, cl client.Client) string {
 // kind is marked requiresDataArtifact so the data leg runs.
 func newImportProjectionFixture(t *testing.T, content *storagev1alpha1.SnapshotContent, extra ...client.Object) (*SnapshotContentController, client.Client) {
 	t.Helper()
+	return newImportProjectionFixtureWithArtifact(t, content, projVSCWithRestoreSize(), extra...)
+}
+
+// newImportProjectionFixtureWithArtifact is newImportProjectionFixture with the produced
+// VolumeSnapshotContent supplied by the caller, so a test can start from an artifact that has NOT published
+// status.restoreSize yet. That ordering is not a detail: the size lands only when the CSI driver reports it,
+// which can happen AFTER the leg first publishes, and a fixture whose size is present from the start cannot
+// exercise what the leg does while it is missing.
+func newImportProjectionFixtureWithArtifact(t *testing.T, content *storagev1alpha1.SnapshotContent, vsc *unstructured.Unstructured, extra ...client.Object) (*SnapshotContentController, client.Client) {
+	t.Helper()
 	scheme := projScheme(t)
 	scheme.AddKnownTypeWithName(dataImportListGVK, &unstructured.UnstructuredList{})
 
-	objs := append([]client.Object{content, projVSCWithRestoreSize(), importDataImportForLeaf(projTestVSCName)}, extra...)
+	objs := append([]client.Object{content, vsc, importDataImportForLeaf(projTestVSCName)}, extra...)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
@@ -558,5 +568,109 @@ func TestReconcileDataLegProjection_GenericImportLatchesWhenDataImportAttestsNot
 		got.Status.Data.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
 		got.Status.Data.StorageClassName != importScratchStorageClass {
 		t.Fatalf("a latched pass must leave the published metadata exactly as it was: %#v", got.Status.Data)
+	}
+}
+
+// The durable restore size gates this branch's latch, symmetrically with the bound-VSC one. The leg publishes
+// as soon as the DataImport reports its artifact, and that can PRECEDE the driver publishing
+// VolumeSnapshotContent.status.restoreSize — the only place the durable size comes from (the imported leaf has
+// no live PVC, and the DataImport records the REQUESTED scratch size in spec.storageParams, not the size the
+// artifact can be restored to). Without the size term the latch closes on the artifact match alone and
+// status.data keeps an empty size for good: every later pass re-evaluates this same condition and closes it
+// again, so nothing ever backfills the field, and restore/export size the target PVC from it.
+//
+// The ordering is the test: restoreSize appears only AFTER the leg has already published and been offered a
+// chance to latch. A fixture carrying the size from the start (projVSCWithRestoreSize, which the shared
+// fixture supplies) cannot fail on this defect at all — the hole is temporal, not a missing producer.
+func TestReconcileDataLegProjection_GenericImportLatchWaitsForRestoreSize(t *testing.T) {
+	ctx := context.Background()
+	// projVSCUnowned is the produced artifact BEFORE the driver reports its size: bound and readyToUse, with
+	// no status.restoreSize.
+	r, cl := newImportProjectionFixtureWithArtifact(t, projContentTyped(), projVSCUnowned())
+	owner := importOwnerLeaf()
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("first pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || !requeue {
+		t.Fatalf("a fresh publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if published := projContentData(t, cl); published.Size != "" {
+		t.Fatalf("the artifact reports no restoreSize yet, so the published size must be empty, got %q", published.Size)
+	}
+	rvWaiting := importContentResourceVersion(t, cl)
+
+	// Second pass, size still unreported: the leg must NOT latch. This pass is the only thing that will ever
+	// backfill the size, so latching here is the whole defect.
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("second pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("second pass must not be terminal, got %q", termReason)
+	}
+	if !requeue {
+		t.Fatal("the leg latched with an empty status.data.size; nothing would ever backfill it and restore/export size the volume from that field")
+	}
+	// Waiting is not churn: the re-publish rebuilds the same binding, and the publish helper is a no-op on an
+	// equal one, so no write reaches the object while the size is still missing.
+	if got := importContentResourceVersion(t, cl); got != rvWaiting {
+		t.Fatalf("a pass waiting for the size rewrote status.data (churn): resourceVersion %q -> %q", rvWaiting, got)
+	}
+
+	// The driver reports the size only now.
+	setVSCRestoreSize(t, cl, projTestVSCName, 524288000)
+
+	rvBeforeBackfill := importContentResourceVersion(t, cl)
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("backfill pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || !requeue {
+		t.Fatalf("the backfilling publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	published := projContentData(t, cl)
+	if published.Size != "500Mi" {
+		t.Fatalf("the size must be backfilled from the artifact once the driver reports it, got %q", published.Size)
+	}
+	if published.FsType != importObservedFsType || published.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
+		published.StorageClassName != importScratchStorageClass {
+		t.Fatalf("the backfill must not disturb the import metadata: %#v", published)
+	}
+	rvAfterBackfill := importContentResourceVersion(t, cl)
+	if rvAfterBackfill == rvBeforeBackfill {
+		t.Fatalf("the backfill wrote nothing: resourceVersion stayed %q", rvBeforeBackfill)
+	}
+
+	// Everything is published now, so the latch must close — and a latched pass must write nothing. Judged by
+	// resourceVersion rather than by whether the publish helper was called: it is a no-op on an equal binding,
+	// which would make a forever-open latch look like a latched one.
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("latched pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || requeue {
+		t.Fatalf("a fully published leg must latch, got requeue=%v termReason=%q (the size term must not leave the latch open forever)", requeue, termReason)
+	}
+	if got := importContentResourceVersion(t, cl); got != rvAfterBackfill {
+		t.Fatalf("a latched pass rewrote status.data (churn): resourceVersion %q -> %q", rvAfterBackfill, got)
+	}
+}
+
+// setVSCRestoreSize publishes status.restoreSize on the produced VolumeSnapshotContent, standing in for the
+// CSI driver reporting the durable size after the artifact already exists.
+func setVSCRestoreSize(t *testing.T, cl client.Client, vscName string, bytes int64) {
+	t.Helper()
+	vsc := &unstructured.Unstructured{}
+	vsc.SetGroupVersionKind(projVSCGVK)
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: vscName}, vsc); err != nil {
+		t.Fatalf("get VolumeSnapshotContent %s: %v", vscName, err)
+	}
+	if err := unstructured.SetNestedField(vsc.Object, bytes, "status", "restoreSize"); err != nil {
+		t.Fatalf("set restoreSize on %s: %v", vscName, err)
+	}
+	if err := cl.Update(context.Background(), vsc); err != nil {
+		t.Fatalf("update VolumeSnapshotContent %s: %v", vscName, err)
 	}
 }
