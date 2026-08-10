@@ -886,6 +886,13 @@ func runImportVariant(ctx context.Context, label, importNS string, rootManifests
 			return err
 		}
 		logf("imported leaf %s/%s carries %+v on both the leaf and its content", leaf.kind, leaf.name, wantLeafData)
+		// The three fields above are the ones this flow knows to ask for. The completeness matrix asks for
+		// EVERY field of status.data that this leaf's data-leg path is required to publish, so a field added
+		// later — or one silently dropped on this path — does not depend on somebody remembering to extend the
+		// assertion above.
+		if err := assertLeafSnapshotContentDataComplete(ctx, importNS, leaf.kind, leaf.name); err != nil {
+			return err
+		}
 		// A finished import outlives its DataImport (idle-TTL reaped), and that must NOT freeze the leaf:
 		// the DataImport is deleted here to reach the steady state deterministically instead of waiting out
 		// the TTL, and the leaf is then required to still track its SnapshotContent.

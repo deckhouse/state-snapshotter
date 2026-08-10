@@ -27,6 +27,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	"github.com/deckhouse/state-snapshotter/api/storage/v1alpha1/dataleg"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
@@ -54,6 +55,13 @@ import (
 //   - native-CSI kind VolumeSnapshot (§11.4): the fork binds the VS to a VSC directly, so the aggregator
 //     reads owner.status.boundVolumeSnapshotContentName. Active once the CSD registers the kind (Block 3c).
 //
+// The route is taken through dataleg.Classify, on the two structural discriminators {owner is a CSI
+// VolumeSnapshot, owner declares spec.mode: Import}. Those four combinations ARE the four cells of the
+// status.data completeness matrix (dataleg.Scenarios), and routing through it is what keeps the two from
+// drifting: the matrix cannot describe three paths while the router takes four, and the import cells cannot
+// be merged in the table without merging them here. Note the asymmetry it makes explicit — a native-CSI
+// IMPORT does not take the DataImport branch; it shares the bound-VSC projection with capture.
+//
 // It is latch-idempotent: once status.data covers the source, it is kept even after the VCR is reaped.
 func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, termReason string, termMessage string, err error) {
 	if !ownerFound {
@@ -61,29 +69,49 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 		return false, "", "", nil
 	}
 
-	if owner.GetObjectKind().GroupVersionKind().Kind == snapshot.KindVolumeSnapshot {
+	scenario := dataleg.Classify(
+		owner.GetObjectKind().GroupVersionKind().Kind == snapshot.KindVolumeSnapshot,
+		usecase.IsUnstructuredImportMode(owner),
+	)
+	switch scenario {
+	case dataleg.NativeCapture, dataleg.NativeImport:
 		// Native-CSI data leg (§11.4): the VolumeSnapshot IS the volume capture; project from its bound VSC.
 		// This covers BOTH capture VS (fork binds it) and import VS (the import binder publishes
 		// snapshotSource + boundVolumeSnapshotContentName), so import VS does not take the DataImport branch.
 		return r.projectContentDataLegFromBoundVSC(ctx, contentObj, owner, ownerNamespace)
-	}
 
-	if usecase.IsUnstructuredImportMode(owner) {
+	case dataleg.DomainImport:
 		// Generic import leaf (§10): no live VCR — the volume artifact comes from the reverse-looked-up
 		// DataImport's produced VolumeSnapshotContent. Structural import nodes (root/VM) are not data-bearing
 		// and short-circuit inside.
 		return r.projectContentDataLegFromDataImport(ctx, contentObj, owner)
-	}
 
-	vcrName, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
-	if err != nil {
-		return false, "", "", err
+	case dataleg.DomainCapture:
+		vcrName, nestedErr := domainVolumeCaptureRequestName(owner)
+		if nestedErr != nil {
+			return false, "", "", nestedErr
+		}
+		if vcrName == "" {
+			// Manifest-only leaf (no data leg) or pre-Planned: nothing to project this pass.
+			return false, "", "", nil
+		}
+		return r.projectContentDataLegFromVCR(ctx, contentObj, ownerNamespace, vcrName)
+
+	default:
+		// Unreachable while Classify is total over its two booleans (dataleg.Validate proves the four
+		// combinations cover the axis). Kept as an error rather than a panic or a silent no-op so a future
+		// scenario added to the axis without a route here is loud instead of dropping the data leg.
+		return false, "", "", fmt.Errorf("SnapshotContent %s: no data-leg route for scenario %q (owner %s %s/%s)",
+			contentObj.GetName(), scenario, owner.GetObjectKind().GroupVersionKind().Kind, owner.GetNamespace(), owner.GetName())
 	}
-	if vcrName == "" {
-		// Manifest-only leaf (no data leg) or pre-Planned: nothing to project this pass.
-		return false, "", "", nil
-	}
-	return r.projectContentDataLegFromVCR(ctx, contentObj, ownerNamespace, vcrName)
+}
+
+// domainVolumeCaptureRequestName reads the domain-created VolumeCaptureRequest name off a domain capture
+// owner. Empty (without error) means the domain has not declared a data leg on this pass — a manifest-only
+// leaf, or a node that has not reached Planned yet.
+func domainVolumeCaptureRequestName(owner *unstructured.Unstructured) (string, error) {
+	name, _, err := unstructured.NestedString(owner.Object, "status", "captureState", "domainSpecificController", "volumeCaptureRequestName")
+	return name, err
 }
 
 // projectContentDataLegFromVCR reads the domain-created VolumeCaptureRequest, and once it is Ready and its

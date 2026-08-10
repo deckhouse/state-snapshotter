@@ -63,8 +63,16 @@ func importOwnerLeaf() *unstructured.Unstructured {
 
 // importDataImportForLeaf builds a PopulateData DataImport whose spec.snapshotRef targets the leaf, whose
 // spec.storageParams carry the authoritative scratch StorageClass, and whose status.data.artifactRef points
-// at the produced VolumeSnapshotContent.
+// at the produced VolumeSnapshotContent. It attests the Filesystem volume metadata most specs want.
 func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
+	return importDataImportForLeafWithVolumeData(vscName, string(corev1.PersistentVolumeFilesystem), importObservedFsType)
+}
+
+// importDataImportForLeafWithVolumeData is importDataImportForLeaf with the attested volume metadata under
+// the caller's control (a Block import states its mode and NO filesystem). An empty value is OMITTED rather
+// than written as an empty string: publishing nothing is what storage-foundation does for a Block volume, and
+// an empty field present on the object is a different input to the readers than an absent one.
+func importDataImportForLeafWithVolumeData(vscName, volumeMode, fsType string) *unstructured.Unstructured {
 	di := &unstructured.Unstructured{}
 	di.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"})
 	di.SetNamespace(importDataImportNS)
@@ -79,10 +87,14 @@ func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
 		"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": vscName,
 	}, "status", "data", "artifactRef")
-	_ = unstructured.SetNestedField(di.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode")
+	if volumeMode != "" {
+		_ = unstructured.SetNestedField(di.Object, volumeMode, "status", "volumeMode")
+	}
 	// The filesystem the imported bytes were actually written onto, observed by storage-foundation on the
 	// scratch PersistentVolume before it was destroyed. Nothing else records it.
-	_ = unstructured.SetNestedField(di.Object, importObservedFsType, "status", "data", "fsType")
+	if fsType != "" {
+		_ = unstructured.SetNestedField(di.Object, fsType, "status", "data", "fsType")
+	}
 	return di
 }
 

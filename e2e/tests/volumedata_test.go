@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/state-snapshotter/api/storage/v1alpha1/dataleg"
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 	"github.com/deckhouse/storage-e2e/pkg/testkit"
 )
@@ -660,6 +661,70 @@ func volumeDataSpecs() {
 				// VolumeCaptureRequest data legs that MUST be handed off; the root orphan leaf may add a third.
 				g.Expect(handedOff).To(BeNumerically(">=", 2),
 					"expected at least the two domain-disk data legs to be handed off to their SnapshotContents")
+			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
+		})
+
+		It("publishes a COMPLETE status.data on every data-bearing content of the tree (scenario x field completeness)", func() {
+			// Every field of status.data except sourceRef/artifactRef is +optional and the schema carries no
+			// validation over the object, so the apiserver cannot tell "legitimately empty" from "the controller
+			// lost it". Three fields were found empty that way — storageClassName, then fsType and volumeMode —
+			// each of them by accident, and each unrecoverable afterwards (the source volume is gone, and on the
+			// import side the DataImport that knew the values is reaped by its idle TTL).
+			//
+			// So instead of asserting the fields somebody remembered, this judges every published data leg
+			// against the whole completeness contract for ITS OWN scenario (api .../dataleg): the cell is
+			// resolved from the cluster — the owner's kind and spec.mode, exactly what the controller routes on —
+			// and every field the matrix declares for that cell is checked, in both directions (a required field
+			// that is empty AND a not-applicable field that is set, e.g. an fsType on a raw Block volume, which
+			// could only have come from a different volume).
+			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
+
+			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+3*time.Minute)
+			defer cancel()
+
+			By("Waiting for the domain VolumeCaptureRequest data legs to publish dataRefs")
+			_, err := waitContentDataRefs(ctx, rootContent, []string{vdPVCDisk, vdPVCStandalone}, suiteCfg.captureReadyTO)
+			Expect(err).NotTo(HaveOccurred(), "the domain disk snapshots must publish volume dataRefs before the completeness check")
+
+			By("Judging every published status.data against the completeness matrix of its own scenario")
+			Eventually(func(g Gomega) {
+				judged, expectations := 0, 0
+				queue := []string{rootContent}
+				seen := map[string]bool{}
+				for len(queue) > 0 {
+					name := queue[0]
+					queue = queue[1:]
+					if seen[name] {
+						continue
+					}
+					seen[name] = true
+
+					content, cerr := getResource(ctx, snapshotContentGVR, "", name)
+					g.Expect(cerr).NotTo(HaveOccurred(), "get SnapshotContent %s", name)
+
+					res, hasData, rerr := snapshotContentDataCompleteness(ctx, name)
+					g.Expect(rerr).NotTo(HaveOccurred(), "judge SnapshotContent %s against the completeness matrix", name)
+					if hasData {
+						g.Expect(res.Violations).To(BeEmpty(), "%s", res.Report())
+						g.Expect(res.Skipped).To(BeEmpty(), "a settled data leg must leave no cell undecidable: %s", res.Report())
+						g.Expect(res.Checked).To(BeNumerically(">", 0), "SnapshotContent %s was judged against zero expectations", name)
+						judged++
+						expectations += res.Checked
+						GinkgoWriter.Printf("  %s\n", res.Report())
+					} else {
+						// A manifest-only node publishes no data leg: there is nothing to judge. Printed rather
+						// than hidden, so a run where EVERYTHING was skipped is visible instead of green.
+						GinkgoWriter.Printf("  SnapshotContent %s carries no status.data (manifest-only node): nothing judged\n", name)
+					}
+					queue = append(queue, childContentNames(content)...)
+				}
+				// disk-vm (demo-pvc-disk) and disk-standalone (demo-pvc-standalone) are the two domain data legs
+				// that must exist; the root orphan CSI leaf may add a third (a native capture cell).
+				g.Expect(judged).To(BeNumerically(">=", 2),
+					"expected at least the two domain-disk data legs to be judged, got %d", judged)
+				g.Expect(expectations).To(BeNumerically(">", 0), "no field expectation was inspected at all")
+				GinkgoWriter.Printf("  judged %d data leg(s) against %d field expectation(s) (the matrix declares %d)\n",
+					judged, expectations, dataleg.Cells())
 			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 		})
 
