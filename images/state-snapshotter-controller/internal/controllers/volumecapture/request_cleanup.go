@@ -131,6 +131,18 @@ func VolumeCaptureRequestReady(vcr *unstructured.Unstructured) bool {
 	return ok && status == string(metav1.ConditionTrue) && reason == vcpkg.ConditionReasonCompleted
 }
 
+// VolumeCaptureRequestStalled reports the foundation's non-terminal stall diagnosis: the capture is
+// still running, but nothing observable is happening. The reason and message are passed through as
+// written by the foundation — the storage-specific cause is diagnostic text here, not a snapshot-level
+// contract, and this side never re-derives it from the VolumeSnapshotContent.
+func VolumeCaptureRequestStalled(vcr *unstructured.Unstructured) (bool, string, string) {
+	status, reason, message, ok := parseCondition(vcr, vcpkg.ConditionTypeStalled)
+	if !ok || status != string(metav1.ConditionTrue) {
+		return false, "", ""
+	}
+	return true, reason, message
+}
+
 // VolumeCaptureRequestFailed reports terminal failure (Ready=False, not TargetsPending).
 func VolumeCaptureRequestFailed(vcr *unstructured.Unstructured) (bool, string, string) {
 	status, reason, message, ok := parseReadyCondition(vcr)

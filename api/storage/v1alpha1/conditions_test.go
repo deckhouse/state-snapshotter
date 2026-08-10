@@ -34,6 +34,7 @@ func TestIsReasonDegraded(t *testing.T) {
 
 		// In-progress (non-terminal, non-degraded) reasons are NOT degraded.
 		{name: "in-progress DataCapturePending", reason: "DataCapturePending", want: false},
+		{name: "in-progress DataCaptureStalled", reason: ReasonDataCaptureStalled, want: false},
 		{name: "in-progress ChildrenPending", reason: "ChildrenPending", want: false},
 		{name: "in-progress ImportPending", reason: "ImportPending", want: false},
 
@@ -59,6 +60,18 @@ func TestDegradedReadyReasons_ExactMembership(t *testing.T) {
 	}
 	if _, ok := DegradedReadyReasons[ReasonChildSnapshotDeleted]; !ok {
 		t.Fatalf("DegradedReadyReasons must contain %q", ReasonChildSnapshotDeleted)
+	}
+}
+
+// TestDataCaptureStalledIsNotTerminal guards the whole point of the stall diagnosis: a capture that
+// shows no observable progress is still running. Classifying it as terminal would turn a slow or
+// silent storage backend into a failed snapshot tree, and the capture can still succeed later.
+func TestDataCaptureStalledIsNotTerminal(t *testing.T) {
+	if IsReasonTerminal(ReasonDataCaptureStalled) {
+		t.Fatalf("%q must not be terminal: the CSI call may still be in flight", ReasonDataCaptureStalled)
+	}
+	if IsReasonDegraded(ReasonDataCaptureStalled) {
+		t.Fatalf("%q must not be degraded: nothing has been captured yet", ReasonDataCaptureStalled)
 	}
 }
 

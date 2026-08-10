@@ -61,6 +61,53 @@ func buildChildrenFailedMessage(directChild, leaf, reason, message string) strin
 	return fmt.Sprintf("child SnapshotContent %s failed: leaf=%s reason=%s message=%s", directChild, leaf, reason, message)
 }
 
+// buildDataCaptureStalledMessage renders the data-leg stall message from the diagnosis the
+// VolumeCaptureRequest published.
+//
+// The storage-specific reason (which of the foundation's stall states it is) is carried here, in the
+// text, and never as the snapshot-level reason: promoting it would make the storage vocabulary part of
+// the snapshot API contract. The foundation's message already names the CSI driver and the
+// VolumeSnapshotContent, which is what makes the diagnosis actionable without descending a layer.
+func buildDataCaptureStalledMessage(stallReason, stallMessage string) string {
+	out := "volume capture shows no observable progress"
+	if stallReason != "" {
+		out += " (" + stallReason + ")"
+	}
+	if stallMessage != "" {
+		out += ": " + stallMessage
+	}
+	return out
+}
+
+// childrenStalledMessageRE parses the canonical ChildrenStalled message produced by
+// buildChildrenStalledMessage. Counts come before leaf/message so that message stays the trailing
+// free-form field, exactly as in the ChildrenFailed form.
+var childrenStalledMessageRE = regexp.MustCompile(`^child SnapshotContent \S+ stalled: stalled=\d+ ready=\d+/\d+ leaf=(\S+) message=(.*)$`)
+
+// buildChildrenStalledMessage renders the canonical, parseable stall message a parent content reports
+// when a child subtree is stalled:
+//
+//	child SnapshotContent <direct-child> stalled: stalled=2 ready=1/4 leaf=<stalled-leaf> message=<original-message>
+//
+// Like the ChildrenFailed message it pins the ORIGINAL leaf rather than nesting one message inside
+// another at every level, so the text stays bounded no matter how deep the tree is. When several
+// children are stalled it names the first in sorted order and counts the rest: the caller sorts, so the
+// text does not flap between reconciles and produce endless condition updates.
+func buildChildrenStalledMessage(directChild, leaf, leafMessage string, stalledCount, ready, total int) string {
+	return fmt.Sprintf("child SnapshotContent %s stalled: stalled=%d ready=%d/%d leaf=%s message=%s",
+		directChild, stalledCount, ready, total, leaf, leafMessage)
+}
+
+// parseChildrenStalledLeaf extracts the original leaf/message from a child's ChildrenStalled message.
+// ok is false when the message is not in the canonical form (then the child itself is the stalled leaf).
+func parseChildrenStalledLeaf(message string) (leaf, leafMessage string, ok bool) {
+	m := childrenStalledMessageRE.FindStringSubmatch(message)
+	if m == nil {
+		return "", "", false
+	}
+	return m[1], m[2], true
+}
+
 // parseChildrenFailedLeaf extracts the original leaf/reason/message from a child's ChildrenFailed message.
 // ok is false when the message is not in the canonical form (then the caller treats the child itself as
 // the failed leaf).
