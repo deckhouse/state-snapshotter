@@ -161,7 +161,9 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 		// Zero bindings on a ready+valid VCR: not representable yet, hold pending.
 		return true, "", "", nil
 	}
-	requeue, err = r.publishDataBindings(ctx, contentName, bindings, "")
+	// A domain capture leg attests no import metadata (zero value): everything it publishes beyond the refs is
+	// read off the live source PVC by the enricher.
+	requeue, err = r.publishDataBindings(ctx, contentName, bindings, importVolumeMetadata{})
 	return requeue, "", "", err
 }
 
@@ -202,29 +204,29 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		return true, "", "", nil
 	}
 
-	// Import-only: the StorageClass an imported volume belongs to lives on the DataImport that staged the
-	// bytes (spec.storageParams.storageClassName), not on any live object the enricher can read — the
-	// recovered orphan PVC is a manifest, not a cluster object. importResolved states explicitly whether we
-	// know the expected class; it is a flag rather than "class is empty" so that neither the publish nor the
-	// latch below ever infers a decision from the value of the field it is about to write.
-	var importStorageClassName string
-	importResolved := false
+	// Import-only: the volume metadata of an imported volume lives on the DataImport that staged the bytes,
+	// not on any live object the enricher can read — the recovered source PVC is a checkpoint manifest, not a
+	// cluster object. importMeta says per field whether we know the value; it is deliberately not derived
+	// from the emptiness of the published field, so neither the publish nor the latch below ever infers a
+	// decision from the value it is about to write.
+	var importMeta importVolumeMetadata
+	importDataImportResolved := false
 	if isImport {
 		// A cardinality fault (>=2 DataImports, terminalReason) is deliberately ignored here: the import
 		// binder surfaces it terminally on VolumeSnapshot.status.error, and gating a publish on it in a
-		// branch shared with capture would introduce a new wedge. It simply leaves the class unresolved.
+		// branch shared with capture would introduce a new wedge. It simply leaves the metadata unresolved.
 		di, _, _, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, owner)
 		if lErr != nil {
 			return false, "", "", lErr
 		}
-		importStorageClassName = controllercommon.ImportStorageClassName(di)
-		importResolved = importStorageClassName != ""
-		if !importResolved {
-			// Not created yet, or already reaped by its idle TTL after a completed import. Publish exactly
-			// as before — withholding the data leg until a DataImport shows up would wedge every imported
-			// leaf whose DataImport is already gone. Once one appears the latch stops matching and the class
-			// lands on the next pass.
-			logf.FromContext(ctx).V(1).Info("import VolumeSnapshot has no resolved DataImport; publishing the data leg without a storageClassName",
+		importDataImportResolved = di != nil
+		importMeta = importVolumeMetadataFromDataImport(di)
+		if !importDataImportResolved {
+			// Not created yet, or already reaped by its idle TTL after a completed import. Publish anyway —
+			// withholding the data leg until a DataImport shows up would wedge every imported leaf whose
+			// DataImport is already gone. Once one appears the latch stops matching and the metadata lands
+			// on the next pass.
+			logf.FromContext(ctx).V(1).Info("import VolumeSnapshot has no resolved DataImport; publishing the data leg with whatever it already carries",
 				"content", contentName, "volumeSnapshot", owner.GetNamespace()+"/"+owner.GetName())
 		}
 	}
@@ -233,8 +235,24 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
+	if isImport && !importDataImportResolved {
+		// Nothing attests these fields any more, so what the content already carries becomes the value to
+		// KEEP: it is the only surviving record (the scratch volume was destroyed right after capture) and a
+		// re-publish rebuilds the binding from {sourceRef, artifactRef} alone — so without this, a pass that
+		// re-publishes for an unrelated reason (typically a still-missing size) would blank the fields for
+		// good, and an empty volumeMode fail-closes export.
+		//
+		// It is deliberately NOT applied when the DataImport IS resolved: then its values are the authority,
+		// including the ones it leaves empty (a Block import has no filesystem), so a content carrying a value
+		// the authority does not confirm — a stale one, or one an earlier revision derived from a live PVC that
+		// merely shared the source name — has to give way rather than be preserved.
+		//
+		// Kept out of the capture path on purpose: a capture leg re-derives its metadata from the live source
+		// PVC and must run no import logic at all.
+		importMeta = importVolumeMetadataFromPublished(content.Status.Data)
+	}
 	if content.Status.Data != nil && content.Status.Data.ArtifactRef.Name == vscName && content.Status.Data.Size != "" &&
-		(!importResolved || content.Status.Data.StorageClassName == importStorageClassName) {
+		importMeta.matchesPublished(content.Status.Data) {
 		// Already published, bound to the same VSC, AND the durable restore size captured: latched.
 		// Size MUST gate the latch: unlike the VCR path (whose VCR turns Ready only after the CSI snapshot
 		// completes, so restoreSize is already present at first publish), this native-CSI leg publishes as
@@ -243,34 +261,112 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		// without size forever; re-enriching until size is captured backfills it once the driver publishes
 		// restoreSize (PublishSnapshotContentDataRef is a no-op once equal, so no churn after it lands).
 		//
-		// The storageClassName term is added ONLY when the import class is resolved, so that contents
-		// published before the class was projected self-heal. It must never reach a capture owner or an
-		// import owner with an unresolved DataImport: their expected class is unknown here, the comparison
-		// would fail on every pass, and the leg would re-publish forever — re-publishing rebuilds the
-		// binding from scratch, so once the source PVC is gone the enricher silently skips it and the
-		// durable volumeMode/accessModes/fsType/storageClassName would be wiped (an empty volumeMode
-		// fail-closes restore).
+		// The import-metadata terms exist so that contents published before a field was projected self-heal;
+		// each field contributes a term only while its own value is known (see matchesPublished). For a
+		// capture owner importMeta is the zero value and adds no term at all, leaving this latch exactly what
+		// it was: a value-based comparison there could never match, so every native-CSI capture content would
+		// re-publish forever and, once its source PVC is gone, lose the durable metadata restore needs.
 		return false, "", "", nil
 	}
-	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding}, importStorageClassName)
+	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding}, importMeta)
 	return requeue, "", "", err
+}
+
+// importVolumeMetadata is the volume metadata that exists only on the import side, and only for as long as
+// the DataImport does: the StorageClass the bytes were staged into, the volumeMode of the volume they were
+// staged onto, and the filesystem they were actually written onto. None of the three can be re-derived once
+// the DataImport is reaped by its idle TTL — the scratch volume is destroyed right after capture and the
+// durable VolumeSnapshotContent records none of them — so publishing them onto the content is what makes them
+// durable at all. The paths are owned by snaphelpers (Import* readers), which also gate them on
+// DataImport.spec.mode.
+//
+// Per field, an empty value means "not known here", never "clear the field": see applyTo and matchesPublished.
+// A capture leg attests none of it and uses the zero value — the type is only ever built for an import owner,
+// and only from the structural spec.mode: Import discriminator.
+type importVolumeMetadata struct {
+	StorageClassName string
+	VolumeMode       string
+	FsType           string
+}
+
+// importVolumeMetadataFromDataImport reads all three fields off the DataImport that staged the bytes. A nil
+// DataImport (not created yet, already reaped, or ambiguous) yields the zero value.
+func importVolumeMetadataFromDataImport(di *unstructured.Unstructured) importVolumeMetadata {
+	return importVolumeMetadata{
+		StorageClassName: controllercommon.ImportStorageClassName(di),
+		VolumeMode:       controllercommon.ImportVolumeMode(di),
+		FsType:           controllercommon.ImportFsType(di),
+	}
+}
+
+// importVolumeMetadataFromPublished takes the content's own already-published binding as the metadata to
+// keep. It is for the case where no DataImport attests these fields any more (never created, reaped by its
+// idle TTL, or ambiguous): the published copy is then the only surviving record, and treating it as the value
+// to re-publish is what keeps a re-publish from erasing it. A content with nothing published yields the zero
+// value — there is nothing to preserve and nothing to compare.
+func importVolumeMetadataFromPublished(published *storagev1alpha1.SnapshotDataBinding) importVolumeMetadata {
+	if published == nil {
+		return importVolumeMetadata{}
+	}
+	return importVolumeMetadata{
+		StorageClassName: published.StorageClassName,
+		VolumeMode:       published.VolumeMode,
+		FsType:           published.FsType,
+	}
+}
+
+// applyTo stamps every known field onto each binding. Callers apply it AFTER enrichment: on import these
+// values are authoritative, while the enricher can only see a live PVC that happens to share the source name.
+// An unknown (empty) field is left alone rather than cleared — the caller has nothing to apply there, which is
+// not a request to erase what the enricher or a previous publish produced.
+func (m importVolumeMetadata) applyTo(bindings []storagev1alpha1.SnapshotDataBinding) {
+	for i := range bindings {
+		if m.StorageClassName != "" {
+			bindings[i].StorageClassName = m.StorageClassName
+		}
+		if m.VolumeMode != "" {
+			bindings[i].VolumeMode = m.VolumeMode
+		}
+		if m.FsType != "" {
+			bindings[i].FsType = m.FsType
+		}
+	}
+}
+
+// matchesPublished reports whether every field this metadata knows is already published as such — the
+// import half of a projection's fast-path latch.
+//
+// Each field contributes a term only while its OWN value is known; an unknown field contributes none. That
+// asymmetry is the whole point: demanding equality on a value we cannot compute would never be satisfied, the
+// leg would re-publish on every pass, and the field still would not appear (a wedge). Conversely, a known
+// value that is not published yet keeps the latch open until it is, which is how a content published before
+// the field existed heals. Per-field, because a term borrowed from another field would make one field's latch
+// hinge on whether a different one happens to be resolved.
+func (m importVolumeMetadata) matchesPublished(published *storagev1alpha1.SnapshotDataBinding) bool {
+	if published == nil {
+		return false
+	}
+	if m.StorageClassName != "" && published.StorageClassName != m.StorageClassName {
+		return false
+	}
+	if m.VolumeMode != "" && published.VolumeMode != m.VolumeMode {
+		return false
+	}
+	if m.FsType != "" && published.FsType != m.FsType {
+		return false
+	}
+	return true
 }
 
 // publishDataBindings enriches the bindings with live volume metadata, transfers VolumeSnapshotContent
 // ownership to the content (Retain + ownerRef), and publishes status.data. Handoff is retryable (requeue),
 // enrich/publish errors propagate.
 //
-// importStorageClassName carries the authoritative import StorageClass
-// (DataImport.spec.storageParams.storageClassName, read by controllercommon.ImportStorageClassName). When
-// non-empty it is stamped onto every binding AFTER enrichment, deliberately overwriting whatever the
-// enricher derived: on import the class the bytes were staged into is authoritative, while the enricher can
-// only see a live PVC that happens to share the source name (one may appear after a restore) and would
-// otherwise flap the field between passes.
-//
-// An EMPTY importStorageClassName means "the caller has nothing to apply" — either a capture leg, which
-// never computes this value at all, or an import leg whose DataImport is not resolved (not created yet, or
-// already reaped by its idle TTL). It is NEVER a request to clear the field: the bindings are left exactly
-// as the enricher produced them.
+// importMeta carries the import-authoritative volume metadata (storageClassName / volumeMode / fsType) of an
+// import leg, stamped onto every binding AFTER enrichment so it overrides whatever the enricher derived from a
+// live PVC that happens to share the source name. A capture leg passes the zero value: it computes none of
+// this and keeps exactly what the enricher read off its real source PVC. An unknown field is never a request
+// to clear anything — see importVolumeMetadata.applyTo.
 //
 // On a successful publish it returns requeue=true so the aggregator re-runs and re-reads the content WITH
 // the freshly written dataRefs (status.data is a separate patch, invisible to the same pass). Correctness
@@ -278,16 +374,12 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 // same "leg not durably published+ready" state as dataLegPending, and reconcileCommonSnapshotContentStatus
 // downgrades the (stale-empty) volume leg to DataCapturePending for the pass, so Ready cannot escalate before
 // the bound VolumeSnapshotContent's readyToUse is validated on the next pass.
-func (r *SnapshotContentController) publishDataBindings(ctx context.Context, contentName string, bindings []storagev1alpha1.SnapshotDataBinding, importStorageClassName string) (requeue bool, err error) {
+func (r *SnapshotContentController) publishDataBindings(ctx context.Context, contentName string, bindings []storagev1alpha1.SnapshotDataBinding, importMeta importVolumeMetadata) (requeue bool, err error) {
 	bindings, err = EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
 	if err != nil {
 		return false, err
 	}
-	if importStorageClassName != "" {
-		for i := range bindings {
-			bindings[i].StorageClassName = importStorageClassName
-		}
-	}
+	importMeta.applyTo(bindings)
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr

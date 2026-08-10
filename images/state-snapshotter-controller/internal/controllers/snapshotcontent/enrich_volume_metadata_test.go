@@ -51,24 +51,36 @@ func fsMode() *corev1.PersistentVolumeMode    { m := corev1.PersistentVolumeFile
 func blockMode() *corev1.PersistentVolumeMode { m := corev1.PersistentVolumeBlock; return &m }
 func scPtr(s string) *string                  { return &s }
 
+// pvcTargetBinding is a binding whose source is the PVC named name. Its SourceRef.UID follows the same
+// "uid-<name>" convention as sourcePVC below, because the enricher verifies volume IDENTITY before reading
+// metadata off a live PVC: a name match with a different UID is a different volume and is skipped.
 func pvcTargetBinding(name string) storagev1alpha1.SnapshotDataBinding {
 	return storagev1alpha1.SnapshotDataBinding{
-		SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: types.UID("uid-" + name), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{UID: types.UID(pvcFixtureUID(name)), Kind: "PersistentVolumeClaim", Namespace: "ns1", Name: name},
+	}
+}
+
+// pvcFixtureUID pairs a fixture PVC with the binding that references it. A real PVC always carries a UID, so
+// the fixtures do too — an object without one would make the identity check unverifiable and hide it.
+func pvcFixtureUID(name string) string { return "uid-" + name }
+
+// sourcePVC builds the live source PVC a pvcTargetBinding(name) points at, with the matching UID.
+func sourcePVC(name string, spec corev1.PersistentVolumeClaimSpec) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: name, UID: types.UID(pvcFixtureUID(name))},
+		Spec:       spec,
 	}
 }
 
 func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			VolumeMode:       fsMode(),
-			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce, corev1.ReadOnlyMany},
-			StorageClassName: scPtr("fast"),
-			VolumeName:       "pv-data",
-		},
-	}
+	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{
+		VolumeMode:       fsMode(),
+		AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce, corev1.ReadOnlyMany},
+		StorageClassName: scPtr("fast"),
+		VolumeName:       "pv-data",
+	})
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-data"},
 		Spec:       corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "d", VolumeHandle: "h", FSType: "xfs"}}},
@@ -97,10 +109,7 @@ func TestEnrich_FilesystemPVCWithCSIPV(t *testing.T) {
 func TestEnrich_BlockPVCSkipsPV(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "blk"},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: blockMode(), VolumeName: "pv-blk"},
-	}
+	pvc := sourcePVC("blk", corev1.PersistentVolumeClaimSpec{VolumeMode: blockMode(), VolumeName: "pv-blk"})
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	// The PV is intentionally absent: a Block volume must not read it. If it did, the missing PV would
 	// surface as an error, so a nil error proves the PV read was skipped.
@@ -119,7 +128,7 @@ func TestEnrich_BlockPVCSkipsPV(t *testing.T) {
 func TestEnrich_NilVolumeModeDefaultsFilesystem(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
-	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "nm"}}
+	pvc := sourcePVC("nm", corev1.PersistentVolumeClaimSpec{})
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("nm")})
 	if err != nil {
@@ -147,10 +156,7 @@ func TestEnrich_MissingPVCTolerated(t *testing.T) {
 func TestEnrich_PVReadErrorReturned(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: fsMode(), VolumeName: "pv-data"},
-	}
+	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{VolumeMode: fsMode(), VolumeName: "pv-data"})
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
 	// A direct reader whose PV Get fails (simulates the RBAC/transient failure that must NOT be
 	// silently swallowed): enrichment returns the error so the caller requeues instead of publishing
@@ -214,10 +220,7 @@ func TestEnrich_PopulatesSizeFromVSCRestoreSize(t *testing.T) {
 	ctx := context.Background()
 	scheme := enrichScheme(t)
 	const tenGiB = int64(10) * 1024 * 1024 * 1024
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data"},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: blockMode(), VolumeName: "pv-data"},
-	}
+	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{VolumeMode: blockMode(), VolumeName: "pv-data"})
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(pvc, vscWithRestoreSize("vsc-pvc", tenGiB, false), vscWithRestoreSize("vsc-disk", tenGiB, false)).
 		Build()
@@ -362,5 +365,81 @@ func TestSnapshotDataRefsEqual_VolumeMetadata(t *testing.T) {
 		if dataBindingEqual(base, mut(f)) {
 			t.Errorf("bindings differing by %s must compare unequal", name)
 		}
+	}
+}
+
+// A live PVC that carries the captured source NAME but a different UID is a different volume, and its
+// metadata must not be enriched onto the binding. Two producers hand the enricher a name whose live holder
+// may be a stranger: an imported leaf's sourceRef is rebuilt from the checkpoint manifest, and a restore can
+// recreate a PVC under the captured name. Substituting a stranger's metadata is worse than publishing none —
+// an inverted volumeMode restores a Block source as a filesystem and serves garbage, while a wrong
+// fsType/StorageClass is silently plausible. The artifact-derived Size must still be filled: it does not come
+// from the PVC at all.
+func TestEnrich_SkipsLivePVCWithDifferentUID(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	const tenGiB = int64(10) * 1024 * 1024 * 1024
+	// Same namespace/name as the binding's source, different UID: a Block volume on another class, so every
+	// field the enricher could copy differs from what the real source was.
+	foreign := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "data", UID: types.UID("uid-someone-else")},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeMode:       blockMode(),
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			StorageClassName: scPtr("foreign-class"),
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(foreign, vscWithRestoreSize("vsc-data", tenGiB, false)).Build()
+
+	binding := pvcTargetBinding("data")
+	binding.ArtifactRef = vscArtifact("vsc-data")
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{binding})
+	if err != nil {
+		t.Fatalf("a same-named foreign PVC must be tolerated, got error: %v", err)
+	}
+	b := out[0]
+	if b.VolumeMode != "" || b.FsType != "" || b.StorageClassName != "" || len(b.AccessModes) != 0 {
+		t.Fatalf("metadata of a PVC with a different UID must not be published: %#v", b)
+	}
+	if b.Size != "10Gi" {
+		t.Fatalf("the artifact-derived size must still be enriched, got %q", b.Size)
+	}
+}
+
+// The identity check compares UIDs; it must not turn into "skip whenever a UID is present". A live PVC whose
+// UID matches the source ref is the captured volume and is enriched as usual — this is the capture path.
+func TestEnrich_EnrichesLivePVCWithMatchingUID(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{VolumeMode: fsMode(), StorageClassName: scPtr("fast")})
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{pvcTargetBinding("data")})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if out[0].VolumeMode != "Filesystem" || out[0].StorageClassName != "fast" {
+		t.Fatalf("a UID-matching source PVC must be enriched: %#v", out[0])
+	}
+}
+
+// A binding whose sourceRef carries no UID cannot be verified, so it keeps the pre-existing behavior (enrich
+// by name). Without this, an older producer that publishes no source uid would silently lose all volume
+// metadata instead of keeping today's best effort.
+func TestEnrich_EnrichesWhenSourceRefHasNoUID(t *testing.T) {
+	ctx := context.Background()
+	scheme := enrichScheme(t)
+	pvc := sourcePVC("data", corev1.PersistentVolumeClaimSpec{VolumeMode: fsMode(), StorageClassName: scPtr("fast")})
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+
+	binding := pvcTargetBinding("data")
+	binding.SourceRef.UID = ""
+	out, err := EnrichDataBindingsWithVolumeMetadata(ctx, cl, cl, []storagev1alpha1.SnapshotDataBinding{binding})
+	if err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+	if out[0].VolumeMode != "Filesystem" || out[0].StorageClassName != "fast" {
+		t.Fatalf("an unverifiable (uid-less) source ref must still be enriched by name: %#v", out[0])
 	}
 }

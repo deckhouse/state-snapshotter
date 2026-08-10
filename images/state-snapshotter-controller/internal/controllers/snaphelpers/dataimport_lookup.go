@@ -124,13 +124,65 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 //
 // nil-safe: an unresolved DataImport (nil) yields "".
 func ImportStorageClassName(di *unstructured.Unstructured) string {
-	if di == nil {
-		return ""
-	}
-	mode, _, _ := unstructured.NestedString(di.Object, "spec", "mode")
-	if mode != snapshot.DataImportModePopulateData {
+	if !isPopulateDataImport(di) {
 		return ""
 	}
 	storageClassName, _, _ := unstructured.NestedString(di.Object, "spec", "storageParams", "storageClassName")
 	return storageClassName
+}
+
+// ImportVolumeMode returns the volumeMode of the volume the imported bytes were staged onto —
+// DataImport.status.volumeMode, which storage-foundation republishes from the scratch PVC it provisioned out
+// of the uploaded manifest. It is the authoritative import-side volumeMode: the produced
+// VolumeSnapshotContent records no mode (CSI snapshots are mode-agnostic), and the imported leaf's
+// status.sourceRef names a PVC that exists only in the checkpoint, so there is no live object to read it off.
+//
+// Downstream fails CLOSED on an empty value rather than defaulting to Filesystem (guessing would restore a
+// Block source as a filesystem and serve garbage), so an imported leg that never receives this field never
+// exports.
+//
+// Like ImportStorageClassName, the read is gated on spec.mode: a CreatePVC DataImport also publishes
+// status.volumeMode (from the PVC it creates AND KEEPS — see its own handlePVCImportStatus), and that PVC is
+// not a captured snapshot's volume. Gating on the CRD's own discriminator keeps this fail-closed on our side
+// instead of resting on the reverse-lookup happening to return PopulateData imports only.
+//
+// nil-safe: an unresolved DataImport (nil) yields "".
+func ImportVolumeMode(di *unstructured.Unstructured) string {
+	if !isPopulateDataImport(di) {
+		return ""
+	}
+	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
+	return volumeMode
+}
+
+// ImportFsType returns the filesystem the imported bytes were ACTUALLY written onto —
+// DataImport.status.data.fsType, which storage-foundation observes on the scratch volume's
+// PersistentVolume (spec.csi.fsType) while that volume still exists and destroys right after capture.
+//
+// This is the only surviving record of the value: the durable VolumeSnapshotContent carries no filesystem
+// type, and it must not be re-derived from the target StorageClass parameters, which can be edited or the
+// class recreated after the volume was provisioned. state-snapshotter itself cannot observe it at all — it
+// only joins the import once the artifact exists, by which time the scratch volume is gone.
+//
+// Empty means "not known", never "default": a Block import has no filesystem, and a driver may record none
+// on the PV. Consumers must not substitute a guess.
+//
+// Mode-gated and nil-safe for the same reasons as ImportVolumeMode (status.data is written by PopulateData
+// only, so the gate is a guard rather than a filter).
+func ImportFsType(di *unstructured.Unstructured) string {
+	if !isPopulateDataImport(di) {
+		return ""
+	}
+	fsType, _, _ := unstructured.NestedString(di.Object, "status", "data", "fsType")
+	return fsType
+}
+
+// isPopulateDataImport reports whether the DataImport is the PopulateData one that materializes a snapshot
+// node's data leg. An empty spec.mode is the CRD default CreatePVC, so it is not PopulateData. nil-safe.
+func isPopulateDataImport(di *unstructured.Unstructured) bool {
+	if di == nil {
+		return false
+	}
+	mode, _, _ := unstructured.NestedString(di.Object, "spec", "mode")
+	return mode == snapshot.DataImportModePopulateData
 }

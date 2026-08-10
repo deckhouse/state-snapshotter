@@ -41,6 +41,10 @@ const (
 	// (spec.storageParams.storageClassName) — the authoritative import StorageClass mapping. It differs from
 	// the capture fixture's PVC class ("sc-a") so a test cannot pass by picking up the wrong source.
 	importScratchStorageClass = "sc-import"
+	// importObservedFsType is the filesystem storage-foundation observed on the scratch volume
+	// (DataImport.status.data.fsType). It differs from the capture fixture's PV filesystem so a test cannot
+	// pass by picking up the wrong source.
+	importObservedFsType = "ext4"
 )
 
 var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImportList"}
@@ -76,6 +80,9 @@ func importDataImportForLeaf(vscName string) *unstructured.Unstructured {
 		"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": vscName,
 	}, "status", "data", "artifactRef")
 	_ = unstructured.SetNestedField(di.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode")
+	// The filesystem the imported bytes were actually written onto, observed by storage-foundation on the
+	// scratch PersistentVolume before it was destroyed. Nothing else records it.
+	_ = unstructured.SetNestedField(di.Object, importObservedFsType, "status", "data", "fsType")
 	return di
 }
 
@@ -135,6 +142,9 @@ func importLeafObject() *unstructured.Unstructured {
 	return o
 }
 
+// dataImportWithArtifact builds the PopulateData DataImport that materializes a snapshot leaf's data leg.
+// spec.mode is part of the fixture, not decoration: the readers of its status volume metadata are gated on it,
+// because a CreatePVC import publishes the same status fields for a PVC it creates AND KEEPS.
 func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstructured {
 	di := &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
@@ -143,6 +153,7 @@ func dataImportWithArtifact(apiVersion, kind, name string) *unstructured.Unstruc
 			"name":      "di-1",
 			"namespace": "project-a",
 		},
+		"spec": map[string]interface{}{"mode": snapshot.DataImportModePopulateData},
 	}}
 	if name != "" || kind != "" || apiVersion != "" {
 		ref := map[string]interface{}{}
@@ -168,6 +179,8 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	// carry it because the leaf-targeted dataRef cannot be enriched from a live PVC and downstream restore
 	// fails closed on an empty volumeMode.
 	_ = unstructured.SetNestedField(di.Object, "Block", "status", "volumeMode")
+	// A Block import carries no filesystem, so this fixture leaves status.data.fsType unset — the binding must
+	// then carry no fsType either, rather than a default.
 	// DataImport fills the durable artifact uid best-effort (from the VCR artifact uid); it must flow
 	// through into the published dataRef.artifactRef.uid.
 	_ = unstructured.SetNestedField(di.Object, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", "status", "data", "artifactRef", "uid")
@@ -197,6 +210,29 @@ func TestBuildImportDataBinding_VSCReady(t *testing.T) {
 	}
 	if binding.VolumeMode != "Block" {
 		t.Fatalf("expected volumeMode propagated from DataImport.status.volumeMode, got %q", binding.VolumeMode)
+	}
+	if binding.FsType != "" {
+		t.Fatalf("a Block import has no filesystem; expected no fsType, got %q", binding.FsType)
+	}
+}
+
+// The filesystem the imported bytes were written onto (DataImport.status.data.fsType) must reach the binding:
+// it is observed on the scratch volume before it is destroyed and exists nowhere else afterwards, so a binding
+// that drops it leaves the restored PV with no filesystem type at all.
+func TestBuildImportDataBinding_CarriesObservedFsType(t *testing.T) {
+	di := dataImportWithArtifact("snapshot.storage.k8s.io/v1", "VolumeSnapshotContent", "snapcontent-abc")
+	_ = unstructured.SetNestedField(di.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode")
+	_ = unstructured.SetNestedField(di.Object, importObservedFsType, "status", "data", "fsType")
+
+	binding, ready, reason, _ := BuildImportDataBinding(di, importLeafObject())
+	if reason != "" || !ready || binding == nil {
+		t.Fatalf("expected a ready binding, got ready=%v binding=%v reason=%q", ready, binding, reason)
+	}
+	if binding.FsType != importObservedFsType {
+		t.Fatalf("expected fsType propagated from DataImport.status.data.fsType, got %q", binding.FsType)
+	}
+	if binding.VolumeMode != string(corev1.PersistentVolumeFilesystem) {
+		t.Fatalf("volumeMode regressed while adding fsType, got %q", binding.VolumeMode)
 	}
 }
 
@@ -319,6 +355,9 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	if d.StorageClassName != importScratchStorageClass {
 		t.Fatalf("storageClassName must be projected from DataImport.spec.storageParams.storageClassName, got %q", d.StorageClassName)
 	}
+	if d.FsType != importObservedFsType {
+		t.Fatalf("fsType must be projected from DataImport.status.data.fsType, got %q", d.FsType)
+	}
 
 	// The produced VSC is handed off to the content (forced Retain + content ownerRef) exactly like capture.
 	vsc := &unstructured.Unstructured{}
@@ -410,5 +449,102 @@ func TestReconcileDataLegProjection_GenericImportBackfillsStorageClassOnStaleCon
 	}
 	if sc := importContentStorageClassName(t, cl); sc != importScratchStorageClass {
 		t.Fatalf("stale content did not self-heal: storageClassName = %q, want %q", sc, importScratchStorageClass)
+	}
+}
+
+// Self-heal on the generic import branch: a content published before the filesystem was projected already
+// matches artifactRef, volumeMode and class, so without an fsType term in the latch it would keep the gap for
+// the rest of its life — and the value is unrecoverable once the scratch volume and the DataImport are gone.
+func TestReconcileDataLegProjection_GenericImportBackfillsFsTypeOnStaleContent(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: importLeafAPIVer, Kind: importLeafKind,
+			Namespace: projTestNS, Name: importLeafObjName, UID: types.UID("leaf-uid-1"),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		StorageClassName: importScratchStorageClass,
+		Size:             "500Mi",
+	}
+	r, cl := newImportProjectionFixture(t, content)
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a self-heal publish must not be terminal, got %q", termReason)
+	}
+	if !requeue {
+		t.Fatalf("a content published without fsType must NOT latch; it has to be re-published")
+	}
+	got := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: projTestContent}, got); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	if got.Status.Data == nil || got.Status.Data.FsType != importObservedFsType {
+		t.Fatalf("stale content did not self-heal its fsType: %#v", got.Status.Data)
+	}
+}
+
+// A field the DataImport does not attest must not put the leg into a churn loop: with an unconditional
+// comparison a published value the DataImport cannot confirm would mismatch on every pass, re-publishing the
+// leg forever while the field itself never changes. The leg must latch on what is published instead.
+func TestReconcileDataLegProjection_GenericImportLatchesWhenDataImportAttestsNothingNew(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: importLeafAPIVer, Kind: importLeafKind,
+			Namespace: projTestNS, Name: importLeafObjName, UID: types.UID("leaf-uid-1"),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		FsType:           importObservedFsType,
+		StorageClassName: importScratchStorageClass,
+		Size:             "500Mi",
+	}
+	// A DataImport whose status volume metadata is empty: storage-foundation has not published it (yet), or the
+	// import predates the field.
+	silent := importDataImportForLeaf(projTestVSCName)
+	unstructured.RemoveNestedField(silent.Object, "status", "volumeMode")
+	unstructured.RemoveNestedField(silent.Object, "status", "data", "fsType")
+
+	scheme := projScheme(t)
+	scheme.AddKnownTypeWithName(dataImportListGVK, &unstructured.UnstructuredList{})
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, projVSCWithRestoreSize(), silent).
+		Build()
+	reg := snapshot.NewGVKRegistry()
+	reg.MarkRequiresDataArtifact(importLeafKind, true)
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
+	rv := importContentResourceVersion(t, cl)
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || requeue {
+		t.Fatalf("a silent DataImport must latch on what is already published, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if got := importContentResourceVersion(t, cl); got != rv {
+		t.Fatalf("nothing must be written when the DataImport attests nothing new: resourceVersion %q -> %q", rv, got)
+	}
+	got := &storagev1alpha1.SnapshotContent{}
+	if err := cl.Get(ctx, client.ObjectKey{Name: projTestContent}, got); err != nil {
+		t.Fatalf("get content: %v", err)
+	}
+	if got.Status.Data == nil || got.Status.Data.FsType != importObservedFsType ||
+		got.Status.Data.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
+		got.Status.Data.StorageClassName != importScratchStorageClass {
+		t.Fatalf("a latched pass must leave the published metadata exactly as it was: %#v", got.Status.Data)
 	}
 }

@@ -41,11 +41,17 @@ import (
 )
 
 // The aggregator is the single writer of SnapshotContent.status.data, and on the import leg it is the only
-// component that knows the StorageClass the imported bytes were staged into
-// (DataImport.spec.storageParams.storageClassName). This spec drives that projection against a REAL
-// apiserver: the DataImport is a real served object (so the path is read off a CRD-validated resource, not a
-// hand-built map) and the SnapshotContent is the production CRD (so a class that does not fit its
-// status.data schema is rejected instead of silently accepted, which a fake client cannot catch).
+// component that knows the volume metadata the imported bytes were staged with: the StorageClass
+// (DataImport.spec.storageParams.storageClassName), the volumeMode of the scratch volume
+// (status.volumeMode) and the filesystem it was actually formatted with (status.data.fsType). None of the
+// three survives the import — the scratch volume is destroyed right after capture, the durable
+// VolumeSnapshotContent records neither mode nor filesystem, and the DataImport itself is reaped by its idle
+// TTL — so this projection is what makes them durable.
+//
+// This spec drives that projection against a REAL apiserver: the DataImport is a real served object (so the
+// paths are read off a CRD-validated resource, not a hand-built map — a pruned field yields the empty value
+// exactly as it would in production) and the SnapshotContent is the production CRD (so a value that does not
+// fit its status.data schema is rejected instead of silently accepted, which a fake client cannot catch).
 //
 // Only the CONTENT half runs here. The leaf mirror is a verbatim copy of content.status.data with no logic
 // of its own after this change, and driving the generic binder's import path in envtest would need the whole
@@ -55,11 +61,14 @@ import (
 //
 // Label("isolated"): this spec installs the cluster-scoped VolumeSnapshotContent CRD (the enricher and the
 // Retain/ownerRef handoff read the produced artifact), which the shared !isolated pass deliberately omits.
-var _ = Describe("Integration: import data leg publishes the DataImport StorageClass", Serial, Ordered, Label("isolated"), func() {
+var _ = Describe("Integration: import data leg publishes the DataImport volume metadata", Serial, Ordered, Label("isolated"), func() {
 	const (
 		importSnapshotKind = "TestSnapshot"
 		importSnapshotAPI  = "test.deckhouse.io/v1alpha1"
 		importScratchClass = "sc-import-scratch"
+		// The filesystem storage-foundation observed on the scratch PersistentVolume. It is deliberately not
+		// the cluster default for anything, so a value that appears here can only have come from the DataImport.
+		importObservedFs = "ext4"
 	)
 
 	var (
@@ -88,7 +97,7 @@ var _ = Describe("Integration: import data leg publishes the DataImport StorageC
 		return cc
 	}
 
-	It("projects DataImport.spec.storageParams.storageClassName onto the content, and heals a content published without it", func() {
+	It("projects the DataImport StorageClass, volumeMode and fsType onto the content, and heals a content published without them", func() {
 		ctx := context.Background()
 
 		nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "ss-import-sc-"}}
@@ -198,6 +207,12 @@ var _ = Describe("Integration: import data leg publishes the DataImport StorageC
 			if err := unstructured.SetNestedField(live.Object, string(corev1.PersistentVolumeFilesystem), "status", "volumeMode"); err != nil {
 				return err
 			}
+			// The filesystem observed on the scratch volume while it still existed. state-snapshotter cannot
+			// observe it at all (it joins the import only once the artifact exists, by which time the volume is
+			// gone), so a DataImport that publishes it is the ONLY way it can reach the content.
+			if err := unstructured.SetNestedField(live.Object, importObservedFs, "status", "data", "fsType"); err != nil {
+				return err
+			}
 			return k8sClient.Status().Update(ctx, live)
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
 
@@ -224,43 +239,52 @@ var _ = Describe("Integration: import data leg publishes the DataImport StorageC
 
 		cc := newImportContentController()
 		req := ctrl.Request{NamespacedName: types.NamespacedName{Name: contentName}}
-		contentStorageClass := func(g Gomega) string {
+		contentData := func(g Gomega) storagev1alpha1.SnapshotDataBinding {
 			live := &storagev1alpha1.SnapshotContent{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, live)).To(Succeed())
 			g.Expect(live.Status.Data).NotTo(BeNil(), "the aggregator must publish status.data for an import data leaf")
-			return live.Status.Data.StorageClassName
+			return *live.Status.Data
+		}
+		expectImportMetadata := func(g Gomega) {
+			d := contentData(g)
+			g.Expect(d.StorageClassName).To(Equal(importScratchClass))
+			g.Expect(d.VolumeMode).To(Equal(string(corev1.PersistentVolumeFilesystem)))
+			g.Expect(d.FsType).To(Equal(importObservedFs))
 		}
 
-		By("reconciling until the aggregator publishes the import StorageClass")
+		By("reconciling until the aggregator publishes the import StorageClass, volumeMode and fsType")
 		Eventually(func(g Gomega) {
 			_, err := cc.Reconcile(ctx, req)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(contentStorageClass(g)).To(Equal(importScratchClass))
+			expectImportMetadata(g)
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		By("rewinding status.data to its pre-fix shape (no storageClassName)")
+		By("rewinding status.data to its pre-fix shape (no storageClassName, no fsType)")
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			live := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, client.ObjectKey{Name: contentName}, live); err != nil {
 				return err
 			}
 			live.Status.Data.StorageClassName = ""
+			live.Status.Data.FsType = ""
 			return k8sClient.Status().Update(ctx, live)
 		})).To(Succeed())
 		Eventually(func(g Gomega) {
-			g.Expect(contentStorageClass(g)).To(BeEmpty())
+			d := contentData(g)
+			g.Expect(d.StorageClassName).To(BeEmpty())
+			g.Expect(d.FsType).To(BeEmpty())
 		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		// A content that predates the fix carries a status.data the projection otherwise considers complete
-		// (same artifactRef, same volumeMode) — and its class is unrecoverable once the DataImport is reaped,
-		// so it must catch up rather than stay empty. This asserts the OUTCOME end to end; that the fast-path
-		// latch is what has to yield for it (its storageClassName term) is pinned at unit level, where the
-		// latch can be observed directly.
-		By("reconciling again: a content published without the class must catch up")
+		// (same artifactRef, same volumeMode) — and both the class and the filesystem are unrecoverable once the
+		// DataImport is reaped, so it must catch up rather than stay empty. This asserts the OUTCOME end to end;
+		// that the fast-path latch is what has to yield for it (its per-field terms) is pinned at unit level,
+		// where the latch can be observed directly.
+		By("reconciling again: a content published without the class and filesystem must catch up")
 		Eventually(func(g Gomega) {
 			_, err := cc.Reconcile(ctx, req)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(contentStorageClass(g)).To(Equal(importScratchClass))
+			expectImportMetadata(g)
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 })

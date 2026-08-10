@@ -151,7 +151,7 @@ func integrationEnsureVolumeCaptureRequestCRD(ctx context.Context, restCfg *rest
 // integrationMinimalDataImportCRD is the fallback DataImport CRD used when storage-foundation/crds are not
 // on the envtest CRD path. It mirrors the real schema (crds/dataimports.yaml) for every field
 // state-snapshotter actually reads or a fixture actually writes — spec.mode/snapshotRef/storageParams and
-// status.data.artifactRef/status.volumeMode — including the same `required` sets, so a fixture that is valid
+// status.data.artifactRef/status.data.fsType/status.volumeMode — including the same `required` sets, so a fixture that is valid
 // here is valid against the real CRD too. It deliberately omits the mode-discriminator CEL and the CreatePVC
 // half of the spec: those belong to storage-foundation and nothing on this side is under test for them.
 // It is a real, pruning structural CRD, not a preserve-unknown stub — a stub would let a spec "pass" on a
@@ -221,6 +221,10 @@ func integrationMinimalDataImportCRD() *apiextensionsv1.CustomResourceDefinition
 														"uid":        {Type: "string"},
 													},
 												},
+												// The filesystem storage-foundation observed on the scratch volume before
+												// destroying it. Present in the real CRD; without it here the apiserver
+												// would PRUNE a fixture's fsType and the spec would assert nothing.
+												"fsType": {Type: "string"},
 											},
 										},
 									},

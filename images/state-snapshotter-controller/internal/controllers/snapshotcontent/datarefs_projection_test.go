@@ -46,6 +46,11 @@ const (
 	projTestContent = "demo-content"
 	projTestConUID  = "demo-content-uid"
 	projTestVSName  = "user-vs"
+	// projTestPVName / projTestPVFsType belong to the source PVC's bound PersistentVolume, where the enricher
+	// reads the capture-side fsType (pv.spec.csi.fsType). They differ from every import fixture value so a
+	// test cannot pass by picking up the wrong source.
+	projTestPVName   = "pv-a"
+	projTestPVFsType = "xfs"
 )
 
 var (
@@ -75,6 +80,26 @@ func projSourcePVC() *corev1.PersistentVolumeClaim {
 			StorageClassName: &sc,
 			VolumeMode:       &mode,
 		},
+	}
+}
+
+// projSourcePVCOnPV is projSourcePVC bound to a PersistentVolume, which is what lets the enricher read a
+// capture-side fsType (it only reads the PV when spec.volumeName is set on a Filesystem claim). Same
+// name/namespace/UID as projSourcePVC, so it substitutes for it in the fixtures that need an fsType.
+func projSourcePVCOnPV() *corev1.PersistentVolumeClaim {
+	pvc := projSourcePVC()
+	pvc.Spec.VolumeName = projTestPVName
+	return pvc
+}
+
+// projSourcePV is the CSI PersistentVolume bound to projSourcePVCOnPV, carrying the filesystem the volume was
+// formatted with.
+func projSourcePV() *corev1.PersistentVolume {
+	return &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: projTestPVName},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{
+			CSI: &corev1.CSIPersistentVolumeSource{Driver: "d", VolumeHandle: "h", FSType: projTestPVFsType},
+		}},
 	}
 }
 
@@ -447,6 +472,33 @@ func projDataImportForVS(name string) *unstructured.Unstructured {
 	return di
 }
 
+// projDataImportForVSWithVolumeData is projDataImportForVS whose STATUS also carries the import-side volume
+// metadata storage-foundation publishes: status.volumeMode (the mode of the scratch volume the bytes were
+// staged onto) and status.data.fsType (the filesystem observed on the scratch PersistentVolume before it was
+// destroyed). Both are the only surviving record of those values, so the aggregator has to read them here.
+func projDataImportForVSWithVolumeData(volumeMode, fsType string) *unstructured.Unstructured {
+	di := projDataImportForVS("di-1")
+	if volumeMode != "" {
+		_ = unstructured.SetNestedField(di.Object, volumeMode, "status", "volumeMode")
+	}
+	if fsType != "" {
+		_ = unstructured.SetNestedField(di.Object, fsType, "status", "data", "fsType")
+	}
+	return di
+}
+
+// projForeignPVCOnPV is a live PVC that carries the imported leaf's source NAME but is a different volume
+// (different UID, different class, its own filesystem). An imported leaf's sourceRef is rebuilt from the
+// checkpoint manifest, so any PVC answering to that name in this cluster is a coincidence — typically one
+// recreated by a restore.
+func projForeignPVCOnPV() *corev1.PersistentVolumeClaim {
+	pvc := projSourcePVCOnPV()
+	pvc.UID = types.UID("someone-elses-volume-uid")
+	sc := "sc-stranger"
+	pvc.Spec.StorageClassName = &sc
+	return pvc
+}
+
 // projBoundVSCFixture wires the aggregator over the bound-VSC branch. The DataImport list GVK is ALWAYS
 // registered and dataImports are ALWAYS visible when passed, so a capture test proves the lookup is skipped
 // structurally rather than for lack of a listable type; dataImportLists counts every DataImport List that
@@ -664,13 +716,15 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedClassAfterDataIm
 
 // Capture regression guard (structural gate): a capture VolumeSnapshot must not perform the DataImport
 // reverse-lookup AT ALL — not even to discover there is nothing to apply. A matching DataImport is present in
-// the namespace and the list type is registered, so the only thing keeping it out is spec.mode. The published
-// class therefore stays the live PVC's, and the leg latches on the second pass.
+// the namespace, the list type is registered, and it attests volume metadata that CONTRADICTS the live source
+// PVC in every field, so the only thing keeping it out is spec.mode. Everything published therefore comes from
+// the live PVC and its PV, and the leg latches on the second pass.
 func TestReconcileDataLegProjection_BoundVSCCaptureSkipsDataImportLookupAndLatches(t *testing.T) {
 	ctx := context.Background()
 	var lists int32
 	r, cl := projBoundVSCFixture(t, &lists,
-		projSourcePVC(), projContentTyped(), projVSCWithRestoreSize(), projDataImportForVS("di-1"))
+		projSourcePVCOnPV(), projSourcePV(), projContentTyped(), projVSCWithRestoreSize(),
+		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeBlock), "ext4"))
 	owner := projBoundVSCOwner(false)
 
 	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
@@ -680,8 +734,10 @@ func TestReconcileDataLegProjection_BoundVSCCaptureSkipsDataImportLookupAndLatch
 	if termReason != "" || !requeue {
 		t.Fatalf("a fresh capture publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
 	}
-	if sc := projContentData(t, cl).StorageClassName; sc != "sc-a" {
-		t.Fatalf("capture storageClassName must come from the live PVC, got %q", sc)
+	d := projContentData(t, cl)
+	if d.StorageClassName != "sc-a" || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || d.FsType != projTestPVFsType {
+		t.Fatalf("capture metadata must come from the live PVC and its PV, got {class %q, volumeMode %q, fsType %q}",
+			d.StorageClassName, d.VolumeMode, d.FsType)
 	}
 	rv := projContentResourceVersion(t, cl)
 
@@ -740,17 +796,291 @@ func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDe
 	}
 }
 
-// publishDataBindings applies the import class AFTER enrichment, so it overrides whatever the enricher read
-// off a live PVC (anti-flap: a same-named PVC may reappear after a restore under another class). An empty
-// value means "nothing to apply" and must leave the enriched result untouched — never clear the field.
-func TestPublishDataBindings_ImportStorageClassOverridesEnricher(t *testing.T) {
+// Native-CSI IMPORT (the branch capture and import share): volumeMode and fsType reach the content from the
+// DataImport, and from nowhere else. This leg has no live source PVC to enrich from — the imported leaf's
+// status.sourceRef describes a PVC that only exists in the checkpoint — and neither value survives anywhere
+// after the import: the scratch volume is destroyed right after capture, the durable VolumeSnapshotContent
+// records no mode and no filesystem, and the DataImport itself is reaped by its idle TTL. An empty volumeMode
+// fail-closes export (guessing Filesystem would serve a Block source as a filesystem), and an empty fsType
+// makes the restored PV carry no filesystem type at all.
+func TestReconcileDataLegProjection_BoundVSCImportPublishesVolumeFieldsFromDataImport(t *testing.T) {
 	for _, tt := range []struct {
-		name                   string
-		importStorageClassName string
-		want                   string
+		name       string
+		volumeMode string
+		fsType     string
 	}{
-		{name: "non-empty overrides the live PVC class", importStorageClassName: importScratchStorageClass, want: importScratchStorageClass},
-		{name: "empty keeps the enriched class", importStorageClassName: "", want: "sc-a"},
+		{name: "Filesystem import carries its filesystem", volumeMode: string(corev1.PersistentVolumeFilesystem), fsType: "ext4"},
+		// A Block import has no filesystem at all, so an empty fsType there is the CORRECT value rather than a
+		// missing one — the projection must publish the mode without inventing a filesystem for it.
+		{name: "Block import carries no filesystem", volumeMode: string(corev1.PersistentVolumeBlock), fsType: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			var lists int32
+			// No live PVC of any kind: the DataImport is demonstrably the only source of these values.
+			r, cl := projBoundVSCFixture(t, &lists, projContentTyped(), projVSCWithRestoreSize(),
+				projDataImportForVSWithVolumeData(tt.volumeMode, tt.fsType))
+			owner := projBoundVSCOwner(true)
+
+			requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			if err != nil {
+				t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
+			}
+			if termReason != "" || !requeue {
+				t.Fatalf("a fresh import publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+			}
+			d := projContentData(t, cl)
+			if d.VolumeMode != tt.volumeMode || d.FsType != tt.fsType {
+				t.Fatalf("published {volumeMode %q, fsType %q}, want {%q, %q}", d.VolumeMode, d.FsType, tt.volumeMode, tt.fsType)
+			}
+			if d.StorageClassName != importScratchStorageClass || d.Size != "500Mi" {
+				t.Fatalf("the rest of the import data leg regressed: %#v", d)
+			}
+			rv := projContentResourceVersion(t, cl)
+
+			// The latch must CONVERGE on the fields it just published. A latch term for a field that is never
+			// published (or a published field with no term) leaves the leg re-publishing on every pass forever.
+			requeue, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			if err != nil {
+				t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
+			}
+			if requeue {
+				t.Fatalf("the second pass must latch on the published volume metadata (no requeue)")
+			}
+			if got := projContentResourceVersion(t, cl); got != rv {
+				t.Fatalf("a latched pass must not write the content: resourceVersion %q -> %q", rv, got)
+			}
+			if d2 := projContentData(t, cl); d2.VolumeMode != tt.volumeMode || d2.FsType != tt.fsType {
+				t.Fatalf("latched metadata changed: %#v", d2)
+			}
+		})
+	}
+}
+
+// A live PVC that answers to the imported leaf's source name is NOT the imported volume. This is the more
+// dangerous half of the enricher's name-based read: it does not merely leave the fields empty, it fills them
+// with a stranger's — a Block source published as Filesystem restores as a filesystem and serves garbage.
+// The stranger must lose whether or not the DataImport is around to state the truth.
+func TestReconcileDataLegProjection_BoundVSCImportForeignPVCDoesNotSubstituteVolumeFields(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		dataImports    []client.Object
+		wantVolumeMode string
+		wantClass      string
+	}{
+		{
+			// The DataImport attests Block with no filesystem while the same-named live PVC is a Filesystem
+			// volume on another class with an xfs PV: every field the enricher could copy is wrong here.
+			name:           "resolved DataImport: its values win",
+			dataImports:    []client.Object{projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeBlock), "")},
+			wantVolumeMode: string(corev1.PersistentVolumeBlock),
+			wantClass:      importScratchStorageClass,
+		},
+		{
+			// Nothing attests anything (the DataImport was reaped by its idle TTL): the fields stay EMPTY.
+			// Empty means "not known" and fails closed downstream; the stranger's values would be silently
+			// plausible and wrong, which is strictly worse.
+			name:           "unresolved DataImport: nothing is substituted",
+			wantVolumeMode: "",
+			wantClass:      "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			var lists int32
+			objs := append([]client.Object{projContentTyped(), projVSCWithRestoreSize(), projForeignPVCOnPV(), projSourcePV()}, tt.dataImports...)
+			r, cl := projBoundVSCFixture(t, &lists, objs...)
+
+			if _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true); err != nil {
+				t.Fatalf("reconcileDataLegProjection: %v", err)
+			}
+			d := projContentData(t, cl)
+			if d.VolumeMode != tt.wantVolumeMode {
+				t.Fatalf("volumeMode = %q, want %q (the same-named foreign PVC is %q)",
+					d.VolumeMode, tt.wantVolumeMode, string(corev1.PersistentVolumeFilesystem))
+			}
+			if d.FsType != "" {
+				t.Fatalf("fsType = %q, want empty: the only filesystem in the cluster belongs to a foreign volume", d.FsType)
+			}
+			if d.StorageClassName != tt.wantClass {
+				t.Fatalf("storageClassName = %q, want %q (the foreign PVC is on %q)", d.StorageClassName, tt.wantClass, "sc-stranger")
+			}
+			if len(d.AccessModes) != 0 {
+				t.Fatalf("accessModes must not be taken from a foreign volume either, got %v", d.AccessModes)
+			}
+		})
+	}
+}
+
+// Self-heal on the shared branch: a content published before these two fields were projected already matches
+// artifactRef, size and class, so without their own latch terms it would keep the gap for the rest of its life
+// — and the values are unrecoverable once the DataImport is reaped.
+func TestReconcileDataLegProjection_BoundVSCImportBackfillsVolumeFieldsOnStaleContent(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: projTestPVCName,
+			Namespace: projTestNS, UID: types.UID(projTestPVCUID),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		StorageClassName: importScratchStorageClass,
+		Size:             "500Mi",
+	}
+	var lists int32
+	r, cl := projBoundVSCFixture(t, &lists, content, projVSCWithRestoreSize(),
+		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeFilesystem), "ext4"))
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a self-heal publish must not be terminal, got %q", termReason)
+	}
+	if !requeue {
+		t.Fatalf("a content published without volumeMode/fsType must NOT latch")
+	}
+	d := projContentData(t, cl)
+	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || d.FsType != "ext4" {
+		t.Fatalf("stale import content did not self-heal: {volumeMode %q, fsType %q}", d.VolumeMode, d.FsType)
+	}
+}
+
+// Once no DataImport attests these fields any more, what is already published must never be DESTROYED: it is
+// the only surviving record. A re-publish rebuilds the binding from {sourceRef, artifactRef} alone, and this
+// leg re-publishes on every pass until the driver finally reports restoreSize — so without treating the
+// published copy as the value to keep, a late restoreSize would blank volumeMode/fsType/class permanently, and
+// an empty volumeMode fail-closes export.
+func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedVolumeFieldsAfterDataImportReaped(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	// Published while the DataImport still attested the values, but before the driver reported restoreSize.
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: projTestPVCName,
+			Namespace: projTestNS, UID: types.UID(projTestPVCUID),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		FsType:           "ext4",
+		StorageClassName: importScratchStorageClass,
+	}
+	var lists int32
+	// The DataImport is gone (reaped by its idle TTL after the import finished), and the VSC has no restoreSize
+	// yet — so the size term keeps the latch open and the leg re-publishes on every pass.
+	r, cl := projBoundVSCFixture(t, &lists, content, projVSCUnowned())
+	owner := projBoundVSCOwner(true)
+
+	requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
+	}
+	if !requeue {
+		t.Fatalf("with size still missing the leg must keep re-publishing (that is what makes the wipe possible)")
+	}
+	d := projContentData(t, cl)
+	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || d.FsType != "ext4" || d.StorageClassName != importScratchStorageClass {
+		t.Fatalf("a reaped DataImport blanked durable metadata: %#v", d)
+	}
+
+	// The driver finally publishes restoreSize: size is backfilled, the metadata still stands, and the leg
+	// latches instead of churning forever.
+	liveVSC := &unstructured.Unstructured{}
+	liveVSC.SetGroupVersionKind(projVSCGVK)
+	if err := cl.Get(ctx, client.ObjectKey{Name: projTestVSCName}, liveVSC); err != nil {
+		t.Fatalf("get VSC: %v", err)
+	}
+	if err := unstructured.SetNestedField(liveVSC.Object, int64(524288000), "status", "restoreSize"); err != nil {
+		t.Fatalf("set restoreSize: %v", err)
+	}
+	if err := cl.Update(ctx, liveVSC); err != nil {
+		t.Fatalf("update VSC restoreSize: %v", err)
+	}
+	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
+		t.Fatalf("the size-backfill publish must requeue: requeue=%v err=%v", requeue, err)
+	}
+	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
+		t.Fatalf("once size is captured the leg must latch: requeue=%v err=%v", requeue, err)
+	}
+	d = projContentData(t, cl)
+	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || d.FsType != "ext4" ||
+		d.StorageClassName != importScratchStorageClass || d.Size != "500Mi" {
+		t.Fatalf("durable metadata did not survive the size backfill: %#v", d)
+	}
+}
+
+// The mirror image of the case above: while the DataImport IS resolved, it is the authority — a field it leaves
+// empty is "no such value" (a Block import has no filesystem), so a content carrying one anyway must give way
+// instead of being preserved. Otherwise a value an earlier revision derived from a live PVC that merely shared
+// the source name would stay on the content for good, and a Block volume would advertise a filesystem.
+func TestReconcileDataLegProjection_BoundVSCImportResolvedDataImportClearsUnattestedField(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: projTestPVCName,
+			Namespace: projTestNS, UID: types.UID(projTestPVCUID),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent, Name: projTestVSCName,
+		},
+		// What the pre-fix code published here: the live namesake PVC's filesystem and mode.
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		FsType:           projTestPVFsType,
+		StorageClassName: importScratchStorageClass,
+		Size:             "500Mi",
+	}
+	var lists int32
+	r, cl := projBoundVSCFixture(t, &lists, content, projVSCWithRestoreSize(),
+		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeBlock), ""))
+	owner := projBoundVSCOwner(true)
+
+	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
+		t.Fatalf("a content contradicting the DataImport must be re-published: requeue=%v err=%v", requeue, err)
+	}
+	d := projContentData(t, cl)
+	if d.VolumeMode != string(corev1.PersistentVolumeBlock) {
+		t.Fatalf("volumeMode = %q, want Block from the DataImport", d.VolumeMode)
+	}
+	if d.FsType != "" {
+		t.Fatalf("fsType = %q: the DataImport attests a Block volume, which has no filesystem", d.FsType)
+	}
+	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
+		t.Fatalf("the corrected content must latch on the next pass: requeue=%v err=%v", requeue, err)
+	}
+}
+
+// publishDataBindings applies the import metadata AFTER enrichment, so each field it knows overrides whatever
+// the enricher read off a live PVC (anti-flap: a same-named PVC may reappear after a restore, under another
+// class, mode and filesystem). An unknown (empty) field means "nothing to apply" and must leave the enriched
+// result untouched — never clear it.
+func TestPublishDataBindings_ImportMetadataOverridesEnricher(t *testing.T) {
+	// The import metadata deliberately disagrees with the live PVC in every field it attests: the point is
+	// that a PVC merely sharing the source name is not the imported volume, so the published values must come
+	// from the DataImport verbatim rather than be partly re-derived from what is in the cluster.
+	importMeta := importVolumeMetadata{
+		StorageClassName: importScratchStorageClass,
+		VolumeMode:       string(corev1.PersistentVolumeBlock),
+		FsType:           "ext4",
+	}
+	for _, tt := range []struct {
+		name                                  string
+		meta                                  importVolumeMetadata
+		wantClass, wantVolumeMode, wantFsType string
+	}{
+		{
+			name: "known fields override the enriched ones", meta: importMeta,
+			wantClass: importScratchStorageClass, wantVolumeMode: string(corev1.PersistentVolumeBlock), wantFsType: "ext4",
+		},
+		{
+			name: "the zero value (capture leg) keeps the enriched ones", meta: importVolumeMetadata{},
+			wantClass: "sc-a", wantVolumeMode: string(corev1.PersistentVolumeFilesystem), wantFsType: projTestPVFsType,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -758,7 +1088,7 @@ func TestPublishDataBindings_ImportStorageClassOverridesEnricher(t *testing.T) {
 			cl := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
-				WithObjects(projSourcePVC(), projContentTyped(), projVSCWithRestoreSize()).
+				WithObjects(projSourcePVCOnPV(), projSourcePV(), projContentTyped(), projVSCWithRestoreSize()).
 				Build()
 			r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
@@ -771,16 +1101,17 @@ func TestPublishDataBindings_ImportStorageClassOverridesEnricher(t *testing.T) {
 					APIVersion: volumeSnapshotContentAPIVersion, Kind: kindVolumeSnapshotContent, Name: projTestVSCName,
 				},
 			}
-			if _, err := r.publishDataBindings(ctx, projTestContent, []storagev1alpha1.SnapshotDataBinding{binding}, tt.importStorageClassName); err != nil {
+			if _, err := r.publishDataBindings(ctx, projTestContent, []storagev1alpha1.SnapshotDataBinding{binding}, tt.meta); err != nil {
 				t.Fatalf("publishDataBindings: %v", err)
 			}
 			d := projContentData(t, cl)
-			if d.StorageClassName != tt.want {
-				t.Fatalf("published storageClassName = %q, want %q", d.StorageClassName, tt.want)
+			if d.StorageClassName != tt.wantClass || d.VolumeMode != tt.wantVolumeMode || d.FsType != tt.wantFsType {
+				t.Fatalf("published metadata = {class %q, volumeMode %q, fsType %q}, want {%q, %q, %q}",
+					d.StorageClassName, d.VolumeMode, d.FsType, tt.wantClass, tt.wantVolumeMode, tt.wantFsType)
 			}
-			// The rest of the enrichment must be unaffected either way.
-			if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || len(d.AccessModes) != 1 || d.Size != "500Mi" {
-				t.Fatalf("enrichment damaged by the import class stamp: %#v", d)
+			// Fields the import metadata does not carry must survive enrichment untouched either way.
+			if len(d.AccessModes) != 1 || d.Size != "500Mi" {
+				t.Fatalf("enrichment damaged by the import metadata stamp: %#v", d)
 			}
 		})
 	}

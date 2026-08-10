@@ -1451,23 +1451,74 @@ func assertResourceGone(ctx context.Context, gvr schema.GroupVersionResource, ns
 	}).WithContext(ctx).WithTimeout(timeout).WithPolling(5*time.Second).Should(Succeed(), "%s %s should be GC'd", gvr.Resource, name)
 }
 
-// waitImportedLeafStorageClass waits until the StorageClass the imported bytes were staged into
-// (DataImport.spec.storageParams.storageClassName) is visible on BOTH halves of the imported leaf: the
-// aggregator-owned SnapshotContent.status.data.storageClassName and the leaf's own mirrored
-// status.data.storageClassName.
+// importedLeafVolumeData is the import-only volume metadata an imported leaf must carry: the StorageClass the
+// bytes were staged into, the volumeMode of the volume they were staged onto, and the filesystem they were
+// actually written onto. None of the three can be re-derived after the import — the scratch volume is destroyed
+// right after capture, the durable VolumeSnapshotContent records neither mode nor filesystem, and the
+// DataImport itself is reaped by its idle TTL.
+type importedLeafVolumeData struct {
+	StorageClassName string
+	VolumeMode       string
+	// FsType may legitimately be empty: a Block import has no filesystem, and a CSI driver may record none on
+	// the volume. It is compared for EQUALITY either way, so an empty expectation asserts the leaf publishes
+	// none either, rather than asserting nothing.
+	FsType string
+}
+
+// importedLeafVolumeDataFromDataImport reads the expectation off the DataImport that staged the bytes, which is
+// the authority for all three values (spec.storageParams.storageClassName, status.volumeMode,
+// status.data.fsType). Deriving it from the cluster rather than hard-coding it keeps the assertion exact
+// without assuming how the target StorageClass formats a volume — while still failing when the projection
+// drops a value the DataImport did publish.
 //
-// It pins the import round-trip contract d8 depends on: `d8 snapshot download` copies the LEAF's
-// status.data into snapshot.yaml verbatim, and reading that archive back fails closed on an empty
-// storageClassName — so an empty field here silently breaks import -> download -> import (and the class is
-// unrecoverable once the DataImport is reaped by its idle TTL). The content half is asserted too because it
-// is the durable copy; the leaf is only its mirror.
-func waitImportedLeafStorageClass(ctx context.Context, ns, kind, leafName, want string, timeout time.Duration) error {
-	if want == "" {
-		return fmt.Errorf("waitImportedLeafStorageClass: expected storageClassName is empty; the assertion would be vacuous")
+// wantClass is what the test asked the import to stage into; a mismatch means the fixture and the DataImport
+// have drifted apart, which would make everything below assert the wrong thing.
+func importedLeafVolumeDataFromDataImport(ctx context.Context, ns, name, wantClass string) (importedLeafVolumeData, error) {
+	di, err := suiteDyn.Resource(dataImportGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return importedLeafVolumeData{}, fmt.Errorf("get DataImport %s/%s for the imported volume metadata: %w", ns, name, err)
+	}
+	class, _, _ := unstructured.NestedString(di.Object, "spec", "storageParams", "storageClassName")
+	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
+	fsType, _, _ := unstructured.NestedString(di.Object, "status", "data", "fsType")
+	if wantClass != "" && class != wantClass {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s stages into %q, but the test expects %q", ns, name, class, wantClass)
+	}
+	if class == "" {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s carries no spec.storageParams.storageClassName; the assertion would be vacuous", ns, name)
+	}
+	// storage-foundation republishes the scratch volume's mode for every import, so an empty one here is a
+	// producer-side defect rather than an accepted state — and it would make the leaf assertion vacuous.
+	if volumeMode == "" {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s published no status.volumeMode; downstream export fails closed on an empty volumeMode", ns, name)
+	}
+	GinkgoWriter.Printf("  DataImport %s/%s attests storageClassName=%q volumeMode=%q fsType=%q\n", ns, name, class, volumeMode, fsType)
+	return importedLeafVolumeData{StorageClassName: class, VolumeMode: volumeMode, FsType: fsType}, nil
+}
+
+// waitImportedLeafVolumeData waits until the import-only volume metadata is visible on BOTH halves of the
+// imported leaf: the aggregator-owned SnapshotContent.status.data and the leaf's own mirrored status.data.
+//
+// It pins the import round-trip contract d8 depends on: `d8 snapshot download` copies the LEAF's status.data
+// into snapshot.yaml verbatim, and reading that archive back fails closed on an empty storageClassName — so an
+// empty field here silently breaks import -> download -> import. volumeMode matters just as much on the export
+// side: storage-foundation treats an empty one as "not populated yet" and waits forever rather than guessing
+// Filesystem, so an imported snapshot that never receives it can never be exported. fsType decides the
+// filesystem the restored volume is created with. The content half is asserted too because it is the durable
+// copy; the leaf is only its mirror.
+func waitImportedLeafVolumeData(ctx context.Context, ns, kind, leafName string, want importedLeafVolumeData, timeout time.Duration) error {
+	if want.StorageClassName == "" || want.VolumeMode == "" {
+		return fmt.Errorf("waitImportedLeafVolumeData: expected storageClassName/volumeMode are empty; the assertion would be vacuous")
 	}
 	gvr, ok := gvrForSnapshotKind(kind)
 	if !ok {
-		return fmt.Errorf("waitImportedLeafStorageClass: unknown snapshot kind %q (%s)", kind, leafName)
+		return fmt.Errorf("waitImportedLeafVolumeData: unknown snapshot kind %q (%s)", kind, leafName)
+	}
+	read := func(obj *unstructured.Unstructured) importedLeafVolumeData {
+		class, _, _ := unstructured.NestedString(obj.Object, "status", "data", "storageClassName")
+		volumeMode, _, _ := unstructured.NestedString(obj.Object, "status", "data", "volumeMode")
+		fsType, _, _ := unstructured.NestedString(obj.Object, "status", "data", "fsType")
+		return importedLeafVolumeData{StorageClassName: class, VolumeMode: volumeMode, FsType: fsType}
 	}
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -1476,22 +1527,22 @@ func waitImportedLeafStorageClass(ctx context.Context, ns, kind, leafName, want 
 		if err != nil {
 			last = fmt.Sprintf("get %s/%s: %v", kind, leafName, err)
 		} else {
-			leafSC, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "storageClassName")
+			leafData := read(leaf)
 			contentName, _, _ := unstructured.NestedString(leaf.Object, "status", "boundSnapshotContentName")
-			contentSC := ""
+			contentData := importedLeafVolumeData{}
 			contentErr := ""
 			if contentName == "" {
 				contentErr = "leaf has no status.boundSnapshotContentName"
 			} else if content, cErr := getResource(ctx, snapshotContentGVR, "", contentName); cErr != nil {
 				contentErr = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
 			} else {
-				contentSC, _, _ = unstructured.NestedString(content.Object, "status", "data", "storageClassName")
+				contentData = read(content)
 			}
-			if contentErr == "" && leafSC == want && contentSC == want {
+			if contentErr == "" && leafData == want && contentData == want {
 				return nil
 			}
-			last = fmt.Sprintf("%s/%s leaf status.data.storageClassName=%q, content %s status.data.storageClassName=%q, want %q%s",
-				kind, leafName, leafSC, contentName, contentSC, want, func() string {
+			last = fmt.Sprintf("%s/%s leaf status.data=%+v, content %s status.data=%+v, want %+v%s",
+				kind, leafName, leafData, contentName, contentData, want, func() string {
 					if contentErr == "" {
 						return ""
 					}
@@ -1499,7 +1550,7 @@ func waitImportedLeafStorageClass(ctx context.Context, ns, kind, leafName, want 
 				}())
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for the imported StorageClass to reach the leaf and its content; last: %s", last)
+			return fmt.Errorf("timeout waiting for the imported volume metadata to reach the leaf and its content; last: %s", last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
 			return ctx.Err()
@@ -1556,7 +1607,8 @@ func setSnapshotContentStorageClass(ctx context.Context, contentName, class stri
 // (separate watch streams order nothing between resources). Seeing a stale di != nil it would find the
 // latch mismatched on the class and re-publish realSC over the probe. A one-shot probe would then never
 // be re-written and the wait would hang to its full timeout instead of failing with a reason.
-func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName, realSC string, timeout time.Duration) error {
+func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName string, real importedLeafVolumeData, timeout time.Duration) error {
+	realSC := real.StorageClassName
 	gvr, ok := gvrForSnapshotKind(kind)
 	if !ok {
 		return fmt.Errorf("assertImportedLeafMirrorsAfterDataImportGone: unknown snapshot kind %q (%s)", kind, leafName)
@@ -1594,8 +1646,14 @@ func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind,
 	if err := setSnapshotContentStorageClass(ctx, contentName, realSC); err != nil {
 		return fmt.Errorf("restore the real StorageClass on %s: %w", contentName, err)
 	}
-	if err := waitImportedLeafStorageClass(ctx, ns, kind, leafName, realSC, timeout); err != nil {
-		return fmt.Errorf("imported leaf %s/%s did not converge back to its real StorageClass: %w", kind, leafName, err)
+	// The whole descriptor is re-asserted, not just the class. The probe itself only ever rewrites
+	// status.data.storageClassName and leaves the other fields alone — but the probe window is a window in
+	// which the aggregator may re-publish the data leg (it starts from a stale cached DataImport and later
+	// observes the delete), and a re-publish rebuilds the binding from {sourceRef, artifactRef}. So this is
+	// where a volumeMode/fsType lost to any such re-publish surfaces, instead of travelling on into the
+	// restore/export legs unnoticed.
+	if err := waitImportedLeafVolumeData(ctx, ns, kind, leafName, real, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s did not converge back to its real volume metadata: %w", kind, leafName, err)
 	}
 	return nil
 }

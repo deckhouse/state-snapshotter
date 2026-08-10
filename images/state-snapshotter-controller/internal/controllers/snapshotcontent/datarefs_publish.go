@@ -47,7 +47,8 @@ import (
 // It mutates and returns the same slice. A transient read error is returned so the caller requeues
 // instead of publishing partial metadata (which would otherwise be frozen by the steady-state coverage
 // gate). Only a genuinely-gone source PVC (NotFound) is tolerated: it is logged and its binding's
-// metadata is left empty, since there is nothing left to read.
+// metadata is left empty, since there is nothing left to read. A live PVC that carries the source name but
+// a different UID is treated the same way — it is a different volume (see below).
 func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, direct client.Reader, bindings []storagev1alpha1.SnapshotDataBinding) ([]storagev1alpha1.SnapshotDataBinding, error) {
 	if direct == nil {
 		direct = c
@@ -83,6 +84,20 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 				continue
 			}
 			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.SourceRef.Namespace, b.SourceRef.Name, err)
+		}
+		// A PVC name identifies a volume only while that PVC exists, so a name match is not an identity
+		// match. Two producers of this binding hand us a name whose live holder may be a stranger: an
+		// IMPORTED leaf's sourceRef is reconstructed from the checkpoint manifest (the PVC it describes lives
+		// in another cluster, or another incarnation of this one), and a restore can recreate a PVC under the
+		// captured name. Enriching from a different volume is worse than enriching from nothing: an inverted
+		// volumeMode restores a Block source as a filesystem and serves garbage, and the wrong fsType /
+		// StorageClass is silently plausible. So verify identity and skip when it does not hold; the import
+		// path fills these fields from the DataImport, which is their only authority. A sourceRef without a
+		// UID cannot be verified and is enriched as before.
+		if b.SourceRef.UID != "" && pvc.UID != b.SourceRef.UID {
+			log.Info("live PVC with the captured source name has a different UID; skipping volume-metadata enrichment",
+				"pvc", b.SourceRef.Namespace+"/"+b.SourceRef.Name, "sourceRefUID", string(b.SourceRef.UID), "livePVCUID", string(pvc.UID))
+			continue
 		}
 		// PVC.spec.volumeMode defaults to Filesystem when nil (Kubernetes semantics).
 		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != "" {

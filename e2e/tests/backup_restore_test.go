@@ -864,23 +864,32 @@ func runImportVariant(ctx context.Context, label, importNS string, rootManifests
 		return fmt.Errorf("import children Ready: %w", err)
 	}
 	logf("import-root Snapshot + bound content %s Ready; all %d tree node(s) Ready", content, len(nodes))
-	// The StorageClass the bytes were staged into must be durable on the imported tree: the aggregator
-	// publishes it into the leaf's SnapshotContent and the leaf mirrors it. Without it `d8 snapshot download`
-	// writes storageClassName: "" into snapshot.yaml and every later read of that archive (resumed download,
-	// localscan, re-import) fails validation.
+	// The volume metadata the bytes were staged with must be durable on the imported tree: the aggregator
+	// publishes it into the leaf's SnapshotContent and the leaf mirrors it. Without the class `d8 snapshot
+	// download` writes storageClassName: "" into snapshot.yaml and every later read of that archive (resumed
+	// download, localscan, re-import) fails validation; without volumeMode the imported snapshot can never be
+	// exported (an empty one fails closed instead of defaulting to Filesystem); without fsType the volume a
+	// restore creates gets no filesystem type at all. None of the three can be recovered afterwards — the
+	// scratch volume is destroyed at capture and the DataImport is reaped by its idle TTL.
 	for _, leaf := range leaves {
 		wantSC, _, _, perr := sourcePVCScratchParams(ctx, backup.srcNS, leaf.pvcName)
 		if perr != nil {
 			return fmt.Errorf("read expected storageClassName for %s: %w", leaf.name, perr)
 		}
-		if err := waitImportedLeafStorageClass(ctx, importNS, leaf.kind, leaf.name, wantSC, suiteCfg.snapshotReadyTO); err != nil {
+		// The DataImport of a data leaf is named after the leaf (see uploadDataLeaves) and is still alive here,
+		// so it can state what the import actually staged.
+		wantLeafData, werr := importedLeafVolumeDataFromDataImport(ctx, importNS, leaf.name, wantSC)
+		if werr != nil {
+			return werr
+		}
+		if err := waitImportedLeafVolumeData(ctx, importNS, leaf.kind, leaf.name, wantLeafData, suiteCfg.snapshotReadyTO); err != nil {
 			return err
 		}
-		logf("imported leaf %s/%s carries storageClassName=%q on both the leaf and its content", leaf.kind, leaf.name, wantSC)
+		logf("imported leaf %s/%s carries %+v on both the leaf and its content", leaf.kind, leaf.name, wantLeafData)
 		// A finished import outlives its DataImport (idle-TTL reaped), and that must NOT freeze the leaf:
 		// the DataImport is deleted here to reach the steady state deterministically instead of waiting out
 		// the TTL, and the leaf is then required to still track its SnapshotContent.
-		if err := assertImportedLeafMirrorsAfterDataImportGone(ctx, importNS, leaf.kind, leaf.name, leaf.name, wantSC, suiteCfg.snapshotReadyTO); err != nil {
+		if err := assertImportedLeafMirrorsAfterDataImportGone(ctx, importNS, leaf.kind, leaf.name, leaf.name, wantLeafData, suiteCfg.snapshotReadyTO); err != nil {
 			return err
 		}
 		logf("imported leaf %s/%s still mirrors its SnapshotContent with no DataImport in the namespace", leaf.kind, leaf.name)
