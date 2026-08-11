@@ -100,7 +100,7 @@ func snapshotLeafStatusDataSchema() apiextensionsv1.JSONSchemaProps {
 }
 
 // snapshotContentDataRefSchema is the Variant A singular status.data schema (cardinality ≤1): a
-// SnapshotContent carries at most one data binding as an object, not a list. wave5 renamed the binding
+// SnapshotContent carries at most one data binding as an object, not a list. An earlier rename moved it
 // (status.dataRef->data), moved the source PVC under data.sourceRef, and dropped the standalone targetUID
 // (the volume identity is data.sourceRef.uid).
 func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
@@ -818,7 +818,7 @@ var _ = BeforeSuite(func() {
 	for i := range genericSnapGVKs {
 		Expect(snapshotController.AddWatchForPair(mgr, genericSnapGVKs[i], genericContentGVKs[i])).To(Succeed())
 	}
-	// wave7 (w7-creator): mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
+	// Mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
 	// startup so the root SnapshotContent is created/bound without waiting for a CSD-driven Syncer.Sync.
 	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
 		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
@@ -840,7 +840,7 @@ var _ = BeforeSuite(func() {
 	for _, snapshotGVK := range runtimeSnapGVKs {
 		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	}
-	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10),
+	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap),
 	// so the root pair must be marked domain-capture on the content controller too.
 	if rootSnapGVK, _, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
 		contentController.MarkDomainCaptureKind(rootSnapGVK)

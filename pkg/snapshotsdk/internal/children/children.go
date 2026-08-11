@@ -84,7 +84,7 @@ func ensureChild(ctx context.Context, c client.Client, desired client.Object, ow
 			return oErr
 		}
 		// Stamp the authoritative delete-protection state into the CREATE payload so the child appears in
-		// the API already protected (delete-protection-contract.md §6.1). A child node is introduced into
+		// the API already protected. A child node is introduced into
 		// the tree here; it must never exist unprotected, and a post-create patch would leave a race.
 		storagev1alpha1.StampDeleteProtected(child)
 		return c.Create(ctx, child)
@@ -116,10 +116,10 @@ func SortRefs(refs []storagev1alpha1.SnapshotChildRef) {
 }
 
 // UnionRefs returns the set union of two child-ref slices, de-duplicated by full ref identity
-// (apiVersion+kind+name) and sorted deterministically. It is the additive publication primitive (wave5):
+// (apiVersion+kind+name) and sorted deterministically. It is the additive publication primitive:
 // a planning pass unions its freshly derived refs INTO the already-published set rather than replacing it,
 // so refs contributed by a co-writer of the same field — the namespace root's orphan VolumeSnapshot wave,
-// which a given planning pass does not itself enumerate (see wave5 design §6.2) — are preserved. This keeps
+// which a given planning pass does not itself enumerate — are preserved. This keeps
 // SDK v1 delete-free: refs only accumulate; a child no longer desired is simply not re-added by its
 // emitter, nothing is removed here.
 func UnionRefs(existing, added []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {

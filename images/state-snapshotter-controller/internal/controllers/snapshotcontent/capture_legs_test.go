@@ -35,7 +35,7 @@ import (
 )
 
 // These tests cover the main-owned capture-leg lifecycle (reconcileOwnerCaptureLegs) that moved off the
-// binder onto the SnapshotContentController aggregator (main-owned commonController, decision #10): the
+// binder onto the SnapshotContentController aggregator (main-owned commonController): the
 // eager-init, the manifestCaptured/dataCaptured latch-and-reap (latch strictly before the delete), the
 // native-CSI dataCaptured latch, and the childSubtreesManifestsPersisted children-only latch. They reuse
 // the projTest* fixtures + helpers from datarefs_projection_test.go (same package).
@@ -392,7 +392,7 @@ func TestReconcileOwnerCaptureLegs_ManifestLegMCRRecoveryReapWhenAlreadyLatched(
 	}
 }
 
-// Native-CSI data leg (§11.4): a VolumeSnapshot owner has no VCR — the aggregator latches dataCaptured
+// Native-CSI data leg: a VolumeSnapshot owner has no VCR — the aggregator latches dataCaptured
 // once the content carries a published status.data (the projection performs the VSC handoff first). No
 // request to reap.
 func TestReconcileOwnerCaptureLegs_NativeCSIDataCaptured(t *testing.T) {

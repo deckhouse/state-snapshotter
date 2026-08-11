@@ -99,7 +99,7 @@ const (
 	CSDConditionAccepted      = "Accepted"
 	CSDConditionAccessGranted = "AccessGranted"
 
-	// AccessGranted condition reasons per ADR (architecture-decision-records: dkp/storage/state-snapshotter/old2/2026-01-23-unified-snapshots-registry.md) §2.
+	// AccessGranted condition reasons.
 	AccessGrantedReasonPending     = "Pending"     // snapshot GVR not yet resolvable via discovery
 	AccessGrantedReasonApplyFailed = "ApplyFailed" // ClusterRole/Binding creation or update failed
 	AccessGrantedReasonApplied     = "Applied"     // RBAC successfully applied for all snapshot GVRs

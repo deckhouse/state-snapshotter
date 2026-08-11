@@ -131,7 +131,7 @@ func contentDiagExtract(obj *unstructured.Unstructured) (string, string, bool) {
 
 // contentChildRefsSet reads status.childrenSnapshotContentRefs from a SnapshotContent and returns the
 // deterministic, order-independent set signature (sorted, comma-joined child names; "" when empty/absent).
-// It is the observable for the Block 4 frozen-set detector: every distinct value is one recorded transition.
+// It is the observable for the frozen-set detector: every distinct value is one recorded transition.
 func contentChildRefsSet(obj *unstructured.Unstructured) string {
 	refs, _, _ := unstructured.NestedSlice(obj.Object, "status", "childrenSnapshotContentRefs")
 	names := make([]string, 0, len(refs))
@@ -157,7 +157,7 @@ func contentChildRefsExtract(obj *unstructured.Unstructured) (string, string, bo
 }
 
 // assertChildrenRefsFrozen fails the spec if status.childrenSnapshotContentRefs ever changed after it first
-// became non-empty (Block 4, INV-CONTENT-CHILDREN-2: the set is frozen once populated). The ONLY allowed
+// became non-empty (INV-CONTENT-CHILDREN-2: the set is frozen once populated). The ONLY allowed
 // transition is empty -> complete: a first non-empty set latches "frozen"; any later sample that differs
 // from it — a grow, a shrink (including back to empty), a reorder-as-different-membership, or a replace — is
 // a violation. This is the on-cluster counterpart to the CEL admission test: it proves the SOLE writer (the
@@ -386,7 +386,7 @@ func readyFlapSpecs() {
 			Expect(err).NotTo(HaveOccurred(), "start SnapshotContent diagnostic recorder")
 			defer contentStop()
 
-			// Block 4 frozen-set detector: record every distinct childrenSnapshotContentRefs value the root
+			// frozen-set detector: record every distinct childrenSnapshotContentRefs value the root
 			// content passes through (empty -> complete is the only legal transition; the aggregator is the
 			// sole, all-or-nothing edge writer). Opened before the content exists so the very first write is
 			// captured, and asserted at the settle step to prove the set never flapped/shrank/grew.
@@ -439,7 +439,7 @@ func readyFlapSpecs() {
 			GinkgoWriter.Printf("%s\n", formatLedger("SnapshotContent "+content, contentRec.ledger()))
 			assertReadyMonotonic("Snapshot "+srcNS+"/"+readyFlapRootSnapshot, snapLedger)
 
-			By("Asserting Block 4 frozen set: childrenSnapshotContentRefs was written once and never flapped/shrank")
+			By("Asserting the frozen set: childrenSnapshotContentRefs was written once and never flapped/shrank")
 			childRefsLedger := childRefsRec.ledger()
 			GinkgoWriter.Printf("%s\n", formatLedger("SnapshotContent "+content+" childrenSnapshotContentRefs", childRefsLedger))
 			assertChildrenRefsFrozen("SnapshotContent "+content, childRefsLedger)

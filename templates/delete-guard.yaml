@@ -1,5 +1,5 @@
 {{- /*
-Unified-snapshot delete guard (marker-model rev.2 — design/delete-protection-contract.md).
+Unified-snapshot delete guard (marker model rev.2).
 
 An apiserver-enforced ValidatingAdmissionPolicy (cluster is v1.34, VAP is GA) that protects the unified
 snapshot tree from direct removal. It checks ONLY the authoritative marker
@@ -53,7 +53,7 @@ spec:
   variables:
     # Exempt actors: legitimate teardown/GC/reclaim initiators. system:masters is intentionally NOT exempt.
     # The criterion is the verified INITIATOR of each routine delete (audit/admission request), not merely a
-    # ServiceAccount found in a Deployment (plan P4 / contract §8).
+    # ServiceAccount found in a Deployment.
     - name: exempt
       expression: >-
         request.userInfo.username in [

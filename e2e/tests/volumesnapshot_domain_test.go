@@ -30,7 +30,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// Block 3d (content-single-writer design §11.6): under the deployed storage-foundation VolumeSnapshot
+// Under the deployed storage-foundation VolumeSnapshot
 // DOMAIN controller a module-managed CSI VolumeSnapshot is an ordinary state-snapshotter domain snapshot.
 // The fork stamps storage-foundation.deckhouse.io/processed on entry; the domain controller latches the
 // exclude-veto outcome onto state-snapshotter.deckhouse.io/managed (true = domain-captured, false = plain
@@ -201,12 +201,12 @@ func assertVolumeSnapshotStatusDataMirrored(ctx context.Context, g Gomega, ns, n
 	g.Expect(sc).NotTo(BeEmpty(), "VolumeSnapshot %s/%s status.data.storageClassName", ns, name)
 }
 
-// volumeSnapshotDomainSpecs registers the Block 3d VolumeSnapshot-domain specs (env-gated by
+// volumeSnapshotDomainSpecs registers the VolumeSnapshot-domain specs (env-gated by
 // E2E_VOLUME_DATA): a user-created standalone VolumeSnapshot is adopted + d8-exportable, and a
 // VolumeSnapshot on a vetoed PVC stays a plain CSI snapshot (managed=false, no MCR, no state-snapshotter
 // content). The orphan-PVC-as-domain-child assertions live in volumeDataSpecs (they reuse the phase-3 tree).
 func volumeSnapshotDomainSpecs() {
-	Context("Block 3d: VolumeSnapshot domain (user + vetoed)", func() {
+	Context("VolumeSnapshot domain (user + vetoed)", func() {
 		var (
 			ns       string
 			sc       string
@@ -222,7 +222,7 @@ func volumeSnapshotDomainSpecs() {
 
 		BeforeAll(func() {
 			if !suiteCfg.volumeData {
-				Skip("E2E_VOLUME_DATA=false: skipping the Block 3d VolumeSnapshot-domain specs (they run by default)")
+				Skip("E2E_VOLUME_DATA=false: skipping the VolumeSnapshot-domain specs (they run by default)")
 			}
 			sc = suiteCfg.storageClass
 			ns = uniqueNS("p3d-vsdom")

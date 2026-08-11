@@ -610,13 +610,13 @@ func volumeDataSpecs() {
 		})
 
 		It("hands off each captured VolumeSnapshotContent to its SnapshotContent (Retain + ownerRef)", func() {
-			// Block 3 regression (content-single-writer design §4 Slice 3 / §11.4): the data leg publish moved
+			// Regression guard: the data leg publish moved
 			// from the binder to the SnapshotContentController aggregator, which is now the single writer of
 			// status.data AND performs the durable VolumeSnapshotContent handoff — deletionPolicy=Retain plus an
 			// ownerReference back to the owning SnapshotContent — so the artifact survives its transient
 			// VolumeCaptureRequest being reaped and is GC-tied to the content. Assert every domain data leg in
 			// the captured tree landed that handoff (the legacy orphan leaf does the same handoff on the snapshot
-			// path until Block 3d, so it is covered here too when present).
+			// path, so it is covered here too when present).
 			Expect(rootContent).NotTo(BeEmpty(), "the capture spec must run first and populate the root content")
 
 			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+3*time.Minute)
@@ -728,8 +728,8 @@ func volumeDataSpecs() {
 			}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
 		})
 
-		It("latches commonController.dataCaptured on each domain data-leaf xxxSnapshot (main-written) and reaps the VCR with no churn (Block 7 §11.4, decision #10)", func() {
-			// Block 7 (main-owned commonController): the data-leg latch + the VolumeCaptureRequest reap moved
+		It("latches commonController.dataCaptured on each domain data-leaf xxxSnapshot (main-written) and reaps the VCR with no churn", func() {
+			// Main-owned commonController: the data-leg latch + the VolumeCaptureRequest reap moved
 			// off the binder INTO the aggregator (main). Once the aggregator's published status.data covers a
 			// domain data leaf's VCR targets AND the VSC handoff is durable (Retain + ownerRef, asserted by the
 			// sibling handoff spec), main latches commonController.dataCaptured=true SIDEWAYS onto the leaf
@@ -794,8 +794,8 @@ func volumeDataSpecs() {
 			}).WithTimeout(15 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 		})
 
-		It("latches commonController.subtreePlanned bottom-up and gates the orphan/residual wave — no premature or duplicate root exclude (Block 7 §8.1/§8.4, decision #10)", func() {
-			// Block 7 Part B: subtreePlanned is a main-computed, snapshot-native recursive latch (true once a
+		It("latches commonController.subtreePlanned bottom-up and gates the orphan/residual wave — no premature or duplicate root exclude", func() {
+			// subtreePlanned is a main-computed, snapshot-native recursive latch (true once a
 			// node is Planned AND every direct child's subtreePlanned is true). The residual/orphan-PVC wave
 			// now gates on the root's direct children's subtreePlanned (parent_graph.go), so an orphan PVC is
 			// evaluated only after every declared subtree's coverage is fully computable — preventing both a
@@ -845,8 +845,8 @@ func volumeDataSpecs() {
 			}).WithTimeout(suiteCfg.snapshotReadyTO).WithPolling(pollInterval).Should(Succeed())
 		})
 
-		It("captures the orphan PVC as a VolumeSnapshot DOMAIN child (Block 3d: fork+managed labels, MCP leg, Ready mirrored)", func() {
-			// Block 3d (content-single-writer design §11.6): the root residual/orphan PVC (demo-pvc, owned by
+		It("captures the orphan PVC as a VolumeSnapshot DOMAIN child (fork+managed labels, MCP leg, Ready mirrored)", func() {
+			// The root residual/orphan PVC (demo-pvc, owned by
 			// no demo CR) is no longer a bespoke "child volume node" the namespace domain writes — it is an
 			// ORDINARY CSI VolumeSnapshot domain child. The storage-foundation VS domain controller adopts it
 			// (fork label + managed=true), the core binder creates+binds its SnapshotContent, and the
@@ -945,8 +945,8 @@ func volumeDataSpecs() {
 			}
 		})
 
-		It("captures each source PVC by exactly one data leg — no under-coverage or duplicate orphan capture (Block 5: data-bearing subtree coverage)", func() {
-			// Block 5 (content-single-writer design §11.6, orphan coverage rewrite): subtree coverage is now
+		It("captures each source PVC by exactly one data leg — no under-coverage or duplicate orphan capture (data-bearing subtree coverage)", func() {
+			// Orphan coverage rewrite: subtree coverage is now
 			// driven by the domain contract — a node contributes PVC coverage iff its kind RequiresDataArtifact
 			// (CSD/GVKRegistry), replacing the old "if the node has children it is an aggregator, skip it"
 			// heuristic — plus an owner fallback (the in-flight VolumeCaptureRequest name for VCR-backed domains
@@ -977,7 +977,7 @@ func volumeDataSpecs() {
 			By("Asserting each of the three source PVCs is captured by exactly one data leg (no duplicate orphan capture)")
 			for _, pvc := range wantPVCs {
 				Expect(perPVC[pvc]).To(Equal(1),
-					"source PVC %s must be backed by exactly one data leg (got %d): >1 means the residual wave double-captured a domain-covered PVC (Block 5 fail-closed-pending / owner-fallback regression); 0 means under-coverage", pvc, perPVC[pvc])
+					"source PVC %s must be backed by exactly one data leg (got %d): >1 means the residual wave double-captured a domain-covered PVC (fail-closed-pending / owner-fallback regression); 0 means under-coverage", pvc, perPVC[pvc])
 			}
 
 			By("Asserting no source PVC anywhere in the tree carries more than one data leg")

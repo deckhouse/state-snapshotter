@@ -28,11 +28,11 @@ import (
 // namespaceManifestSpec converts the root's namespace manifest capture targets (built by
 // usecase.BuildRootNamespaceManifestCaptureTargets, the wave-barrier exclude-set builder) into the SDK's
 // ManifestCaptureSpec target SET. The root's manifest leg is the whole namespace, so — unlike a
-// single-object domain — it hands the SDK many targets at once (enabled by the wave5 multi-target
+// single-object domain — it hands the SDK many targets at once (enabled by the multi-target
 // ManifestCaptureSpec). The SDK owns MCR create + name publication; this is a pure shaping helper.
 //
-// Pure planner (PR-A, wave5 design §6.3): extracted so it can be unit-tested and later fed to
-// sdk.EnsureManifestCapture (PR-B) without duplicating the target-set logic.
+// Pure planner: extracted so it can be unit-tested and later fed to
+// sdk.EnsureManifestCapture without duplicating the target-set logic.
 func namespaceManifestSpec(targets []namespacemanifest.ManifestTarget) snapshotsdk.ManifestCaptureSpec {
 	specTargets := make([]snapshotsdk.ManifestTarget, 0, len(targets))
 	for _, t := range targets {
@@ -52,8 +52,8 @@ func namespaceManifestSpec(targets []namespacemanifest.ManifestTarget) snapshots
 // the planner mirrors what parent_graph.go's ensureParentOwnedChildSnapshot builds at CREATE time, minus
 // the owner ref the SDK now stamps.
 //
-// Pure planner (PR-A, wave5 design §6.2): extracted so the child-object shape is unit-testable in
-// isolation and later emitted via sdk.EnsureChildren (PR-B).
+// Pure planner: extracted so the child-object shape is unit-testable in
+// isolation and later emitted via sdk.EnsureChildren.
 func buildNamespaceChildSpec(namespace, name string, gvk schema.GroupVersionKind, src controllercommon.SnapshotSourceIdentity) snapshotsdk.ChildSpec {
 	child := &unstructured.Unstructured{
 		Object: map[string]interface{}{

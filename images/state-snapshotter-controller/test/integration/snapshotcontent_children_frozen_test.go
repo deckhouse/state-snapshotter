@@ -31,9 +31,9 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// Block 4 (content-single-writer design §3.4, INV-CONTENT-CHILDREN-2): status.childrenSnapshotContentRefs is
+// INV-CONTENT-CHILDREN-2: status.childrenSnapshotContentRefs is
 // FROZEN once non-empty. The aggregator is the sole writer and publishes the complete child set in one
-// transition (all-or-nothing, empty -> complete), so the Option A CEL rule
+// transition (all-or-nothing, empty -> complete), so the frozen-set CEL rule
 // (oldSelf.size()==0 || self==oldSelf) can pin true immutability at the API level: the empty->set transition
 // is the ONLY allowed change; any later add, remove, reorder, or replace is rejected. These admission
 // contract tests pin that behaviour (they also transitively prove the regenerated CRD's CEL cost estimate is

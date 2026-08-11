@@ -33,7 +33,7 @@ import (
 // IsResidualRootPVCCaptureScope is true for namespace root capture (subtree residual discovery).
 // Domain/demo nodes use listDomainNodeOwnedPVCTargets instead of listing all namespace PVCs.
 //
-// wave7 content-free: residual scope is decided from the Snapshot itself (its child graph / identity), not
+// content-free: residual scope is decided from the Snapshot itself (its child graph / identity), not
 // the bound SnapshotContent, so it holds before the root content is bound. The bound-content argument is
 // retained for signature stability and is intentionally unused.
 func IsResidualRootPVCCaptureScope(snap *storagev1alpha1.Snapshot, _ *storagev1alpha1.SnapshotContent) bool {
@@ -55,7 +55,7 @@ func listResidualRootOwnedPVCTargets(
 	_ *storagev1alpha1.SnapshotContent,
 	dataBearing DataBearingKindFunc,
 ) ([]vcpkg.Target, error) {
-	// wave7 content-free coverage: derive the subtree-covered PVC UID set from the Snapshot child graph
+	// content-free coverage: derive the subtree-covered PVC UID set from the Snapshot child graph
 	// (status.childrenSnapshotRefs + each descendant's mirrored status.data), NOT the bound SnapshotContent
 	// tree — so residual/orphan discovery is computable before the root content is bound ("late Planned").
 	covered, err := CollectSubtreeCoveredPVCUIDsFromSnapshot(ctx, c, snap, dataBearing)

@@ -256,7 +256,7 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 }
 
 // volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
-// VolumeCaptureRequest is deleted (durable-artifact contract, ADR 2026-06-09 / spec §3.9.6, §3.9.11).
+// VolumeCaptureRequest is deleted (durable-artifact contract, /).
 const volumeSnapshotContentRetainPolicy = "Retain"
 
 // EnsureVolumeSnapshotContentsOwnedByContent performs the durable-artifact handoff for each bound VSC:
@@ -297,7 +297,7 @@ func ensureVolumeSnapshotContentOwnedByContent(
 		if err := c.Get(ctx, client.ObjectKey{Name: vscName}, obj); err != nil {
 			return err
 		}
-		// A VSC that is being deleted MUST NOT be patched (spec §3.9.10): touching ownerRef or
+		// A VSC that is being deleted MUST NOT be patched: touching ownerRef or
 		// deletionPolicy on an object with a deletionTimestamp is pointless (it is going away) and could
 		// race finalizer removal. Data readiness already treats a deleting VSC as ArtifactMissing. The
 		// self-heal caller pre-checks this too; the guard here makes the publish-path handoff equally safe.

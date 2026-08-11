@@ -276,7 +276,7 @@ func TestReconcileDataLegProjection_VCRFailedIsContentTerminal(t *testing.T) {
 	}
 }
 
-// Native-CSI data leg (§11.4): a VolumeSnapshot owner has no VCR — the fork binds it to a
+// Native-CSI data leg: a VolumeSnapshot owner has no VCR — the fork binds it to a
 // VolumeSnapshotContent (status.boundVolumeSnapshotContentName) and the domain reconciler publishes the
 // captured PVC (status.sourceRef). The aggregator builds the {source PVC, VSC} binding and performs
 // the same enrich + Retain/ownerRef handoff + publish.

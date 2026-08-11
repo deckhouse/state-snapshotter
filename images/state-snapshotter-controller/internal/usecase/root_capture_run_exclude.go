@@ -105,13 +105,13 @@ func BuildRootNamespaceManifestCaptureTargets(
 		Name:       targetNamespace,
 	})
 
-	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child (content-single-writer
-	// design §11.6): that child owns its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
+	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child: that child owns
+	// its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
 	// its own data leg. The root is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So
 	// the residual root-owned PVCs (ownedPVC) are excluded from the root MCR UP FRONT — independent of
 	// whether the orphan VolumeSnapshot's content / MCP already exists — because CSI binding of the orphan
 	// VolumeSnapshot is async and would otherwise race the (near-instant) root manifest leg into
-	// double-capturing the PVC manifest on both the root and the child (co-ownership violation, spec §3.9.2).
+	// double-capturing the PVC manifest on both the root and the child (co-ownership violation).
 	// Every residual root PVC goes through ensureOrphanPVCVolumeSnapshots → VolumeSnapshot child, so dropping
 	// them here never loses a manifest.
 	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExclude))

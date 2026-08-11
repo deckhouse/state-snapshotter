@@ -26,7 +26,7 @@ import (
 func TestResolveResourceSelector_NilStillHonorsExcludeVeto(t *testing.T) {
 	// A nil snapshot and a nil resourceSelector both mean "no user filtering", but the exclude veto is
 	// ALWAYS ANDed on top: the resolved selector matches everything EXCEPT objects carrying
-	// ExcludeLabelKey. It is therefore no longer Empty() (unlike the pre-wave4A "Everything") — that is
+	// ExcludeLabelKey. It is therefore no longer Empty() (unlike the earlier "Everything") — that is
 	// the key regression this test guards.
 	for _, s := range []*Snapshot{nil, {}} {
 		sel, err := s.ResolveResourceSelector()

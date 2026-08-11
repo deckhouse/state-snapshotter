@@ -35,8 +35,8 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          CustomSnapshotDefinition registers custom snapshot types for platform modules.
-          See the "unified snapshots registry" ADR in the Deckhouse architecture-decision-records repository.
+          CustomSnapshotDefinition registers a custom snapshot type provided by a platform module:
+          it maps a source resource kind to the snapshot kind that materializes it.
         properties:
           apiVersion:
             description: |-

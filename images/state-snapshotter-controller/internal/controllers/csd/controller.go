@@ -37,7 +37,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
-// CSD condition types (ADR: architecture-decision-records: dkp/storage/state-snapshotter/old2/2026-01-23-unified-snapshots-registry.md).
+// CSD condition types.
 const (
 	CSDConditionAccepted      = "Accepted"
 	CSDConditionAccessGranted = "AccessGranted"
@@ -403,7 +403,7 @@ func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
 	return metav1.ConditionTrue, "Resolved", "mapping resolved, content CRDs are cluster-scoped"
 }
 
-// computeCSDReady mirrors ADR: Ready=True iff Accepted=True, AccessGranted=True, both observedGeneration == metadata.generation.
+// computeCSDReady: Ready=True iff Accepted=True, AccessGranted=True, and both have observedGeneration == metadata.generation.
 func computeCSDReady(accepted metav1.ConditionStatus, rbac *metav1.Condition, gen int64) metav1.ConditionStatus {
 	if accepted != metav1.ConditionTrue {
 		return metav1.ConditionFalse

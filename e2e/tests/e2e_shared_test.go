@@ -151,7 +151,7 @@ const (
 	subManifestsUpload   = "manifests-and-children-refs-upload"
 	// subManifestsIdentities is the cluster-scoped SnapshotContent subresource returning the flat,
 	// de-duplicated set of object identities captured across a content's ENTIRE subtree (its own
-	// ManifestCheckpoint plus every descendant). Block 7 Part C (content-single-writer design §8.3): the
+	// ManifestCheckpoint plus every descendant). The
 	// root manifest-exclude is computed from this endpoint (sdk.SubtreeManifestIdentities) instead of an
 	// in-reconciler archive read. It is fail-closed (HTTP 409 while any subtree MCP is not Ready or an
 	// object is double-captured across nodes).
@@ -203,7 +203,7 @@ var (
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcheckpoints",
 	}
 	// manifestCaptureRequestGVR is the transient MCR a domain node creates for its own-scope manifest
-	// capture. Block 7 (main-owned commonController, decision #10): the aggregator latches
+	// capture. The capture legs are main-owned (commonController): the aggregator latches
 	// commonController.manifestCaptured on the xxxSnapshot then REAPS the MCR in the SAME pass, so at
 	// steady state no MCR remains and none is re-created (latch-before-reap => no churn).
 	manifestCaptureRequestGVR = schema.GroupVersionResource{
@@ -224,8 +224,8 @@ var (
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
 	}
 	// volumeSnapshotContentGVR is the cluster-scoped CSI VolumeSnapshotContent — the durable data
-	// artifact a captured node's SnapshotContent.status.data points at. Block 3 moved the ownership
-	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) onto the aggregator, so the e2e
+	// artifact a captured node's SnapshotContent.status.data points at. The ownership
+	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) moved onto the aggregator, so the e2e
 	// asserts it via this GVR.
 	volumeSnapshotContentGVR = schema.GroupVersionResource{
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents",
@@ -846,8 +846,8 @@ func truncate(b []byte, n int) string {
 }
 
 // snapshotCommonControllerLatch reads a core-owned capture-leg latch
-// status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
-// commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
+// status.captureState.commonController.<leg> from an xxxSnapshot object. Every
+// commonController latch — manifestCaptured, dataCaptured,
 // childSubtreesManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
 // SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
 // found=false for these latches (the aggregator never writes them onto its own content). Returns
@@ -1346,7 +1346,7 @@ func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, 
 
 const (
 	// breakGlassAnnotation is the persistent/reversible override that lets an operator delete a
-	// delete-protected object directly (design/delete-protection-contract.md §6.4). It matches the
+	// delete-protected object directly. It matches the
 	// deckhouse-controller literal/polarity.
 	breakGlassAnnotation = "deckhouse.io/allow-delete"
 	// deleteProtectedLabel is the authoritative delete-protection marker (api/storage/v1alpha1).

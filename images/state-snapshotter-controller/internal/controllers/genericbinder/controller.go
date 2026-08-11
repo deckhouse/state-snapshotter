@@ -75,7 +75,7 @@ type GenericSnapshotBinderController struct {
 	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). The binder
 	// uses the set only to gate eager content-shell creation on the domain claim (domainHasClaimed) — the
 	// capture-leg latches, the request reap, and all status projection are main-owned
-	// (SnapshotContentController, decision #10). Guarded by domainCaptureMu.
+	// (SnapshotContentController). Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex
 	domainCaptureGVKs map[string]struct{}
 }
@@ -227,7 +227,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 				logger.Error(err, "Failed to delete reconstructed ManifestCheckpoint for deleted import leaf")
 			}
 		}
-		// Fail-fast self-report (P5): a snapshot CR with its OWN deletionTimestamp is doomed — it is being
+		// Fail-fast self-report: a snapshot CR with its OWN deletionTimestamp is doomed — it is being
 		// torn down and cannot be restored/downloaded. While a finalizer still holds it in Terminating, it
 		// must honestly say so instead of lingering at a stale Ready=True. This mirrors the symmetric
 		// content-deleting mirror below (patchSnapshotNotReadyFromContent with ReasonDeleting). Best-effort:
@@ -259,23 +259,23 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		return r.reconcileGenericImport(ctx, obj, snapshotLike)
 	}
 
-	// Domain-claim gate (content-single-writer design §11.3/§11.6): for a domain-capture kind, DO NOT
+	// Domain-claim gate: for a domain-capture kind, DO NOT
 	// materialize any state (ObjectKeeper, eager SnapshotContent shell) until the domain controller has
 	// CLAIMED the object by writing status.captureState.domainSpecificController. This is what lets a domain
 	// expose only a SUBSET of a registered kind as domain objects: instances the domain skips — a
-	// VolumeSnapshot that is legacy/unlabeled, vetoed, import-mode, or pre-provisioned (§11.3) — are never
+	// VolumeSnapshot that is legacy/unlabeled, vetoed, import-mode, or pre-provisioned — are never
 	// claimed, so the binder leaves them entirely untouched (a plain CSI snapshot with no content and no
 	// ObjectKeeper). For domains where every instance is domain-driven (the namespace Snapshot, demo kinds)
 	// the claim is present on the domain's first reconcile, so this only defers the shell to that first
 	// write and never blocks: the claim is independent of the content existing (proven for the root: the
 	// step-3 EnsureChildren claim precedes the step-4 orphan-wave Ready gate), so the eager-shell creation
-	// cycle (§9) stays broken. The binder wakes on the snapshot's own watch when the claim is written.
+	// cycle stays broken. The binder wakes on the snapshot's own watch when the claim is written.
 	if r.isDomainCaptureKind(obj.GetObjectKind().GroupVersionKind()) && !domainHasClaimed(obj) {
 		logger.V(1).Info("domain-capture snapshot not yet claimed by its domain controller; deferring content shell until captureState.domainSpecificController is written")
 		return ctrl.Result{}, nil
 	}
 
-	// Eager content shell (creator/main, content-single-writer design §9): the SnapshotContent object is
+	// Eager content shell (creator/main): the SnapshotContent object is
 	// created and BOUND as soon as the snapshot exists, decoupled from the domain phase>=Planned barrier.
 	// This is the deadlock fix. A child's ResolveParentSnapshotContentOwnerRef needs the parent content
 	// BOUND (not just created), and the namespace root's pre-Planned orphan wave needs its children Ready
@@ -378,7 +378,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		contentObj.SetOwnerReferences([]metav1.OwnerReference{*contentOwnerRef})
 		// Stamp the authoritative delete-protection state into the CREATE payload: SnapshotContent is a
-		// durable tree node and must appear in the API already protected (delete-protection-contract.md §6.1).
+		// durable tree node and must appear in the API already protected.
 		storagev1alpha1.StampDeleteProtected(contentObj)
 
 		if err := r.Create(ctx, contentObj); err != nil {
@@ -425,7 +425,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		logger.V(1).Info("Content shell created+bound; waiting for domain controller to reach capture phase Planned before projecting status legs")
 		return ctrl.Result{}, nil
 	}
-	// Main-owned commonController (decision #10): the capture-leg eager-init, the
+	// Main-owned commonController: the capture-leg eager-init, the
 	// manifestCaptured/dataCaptured latches, and the MCR/VCR reap moved to the SnapshotContentController
 	// (capture_legs.go) — the binder is a pure creator and writes no captureState. A data-leg terminal
 	// (failed VCR) is surfaced by main's owner Ready mirror, not co-written here.
@@ -575,7 +575,7 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 			Spec: wantSpec,
 		}
 		// Our ObjectKeeper is a protocol node (retention link of the tree): stamp delete-protection into
-		// the CREATE payload (delete-protection-contract.md §6.1, §8.3).
+		// the CREATE payload.
 		storagev1alpha1.StampDeleteProtected(objectKeeper)
 
 		if err := r.Create(ctx, objectKeeper); err != nil {
@@ -687,7 +687,7 @@ func genericBinderObjectKeeperSpecMatches(want *deckhousev1alpha1.ObjectKeeperSp
 // express (bound content missing or being deleted). GenericSnapshotBinderController does not aggregate
 // children; SnapshotContent is the single source of truth for readiness.
 //
-// wave7 final-wave-1: the STEADY-STATE Ready mirror is owned by the SnapshotContentController
+// The STEADY-STATE Ready mirror is owned by the SnapshotContentController
 // (mirrorReadyToOwnerSnapshot) — the single post-bind writer that mirrors content.Ready, bubbles a domain
 // phase=Failed, and applies the barrier-2 (phase=Finished) finalization gate in the SAME pass that computes
 // content.Ready (no cross-controller staleness, INV-FAIL-PROP). The binder no longer re-derives content.Ready
@@ -738,7 +738,7 @@ func (r *GenericSnapshotBinderController) checkConsistencyAndSetReady(
 	}
 
 	// The childSubtreesManifestsPersisted latch onto commonController is written by main
-	// (snapshotcontent/capture_legs.go — main-owned commonController, decision #10).
+	// (snapshotcontent/capture_legs.go — main-owned commonController).
 
 	// Steady-state Ready (content.Ready mirror + phase=Failed bubble + barrier-2 gate) is owned by the
 	// SnapshotContentController's single post-bind writer; the binder does not re-derive it here.
@@ -906,8 +906,8 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 		// per-poll re-check that previously gated children on the Reconcile RequeueAfter fallback. See
 		// mapParentContentToChildSnapshots.
 		Watches(contentObj, handler.EnqueueRequestsFromMapFunc(r.mapParentContentToChildSnapshots(gvk))).
-		// No MCR watch: the binder no longer latches/reaps the capture legs (main-owned commonController,
-		// decision #10) — the aggregator carries its own MCR watch (mapMCRToBoundContent) for the
+		// No MCR watch: the binder no longer latches/reaps the capture legs (main-owned
+		// commonController) — the aggregator carries its own MCR watch (mapMCRToBoundContent) for the
 		// projection + latch + reap lifecycle.
 		Named(fmt.Sprintf("snapshot-%s-%s", gvk.Group, gvk.Kind)).
 		// Independent XxxSnapshots (one per set + per child) fan out under a multi-tree burst; a single

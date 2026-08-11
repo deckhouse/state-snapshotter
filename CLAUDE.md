@@ -53,7 +53,7 @@ golangci-lint run --build-tags ce ./...
 
 ## Controller redeploy & remote e2e (SSOT)
 
-- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: `testing/e2e-testing-strategy.md` in the internal docs repo (see "Docs: SSOT & boundaries").
+- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: the internal e2e testing strategy (see "Docs: SSOT & boundaries").
 - **Before redeploy:** (1) unit tests `cd images/state-snapshotter-controller && go test ./pkg/... ./internal/...`; (2) linter `./go-lint.sh` with CI `GO_BUILD_TAGS`; (3) **if controller code changed: commit AND push first** (below), then redeploy and wait for rollout success.
 - **After redeploy:** integration/e2e or cluster smoke as required by the strategy doc / CI.
 - **Kubeconfig:** standard dev location (`~/.kube/config` / `KUBECONFIG`) — but for e2e nested-cluster debugging use the persistent tunnel below.
@@ -89,40 +89,39 @@ Any change relying on this must preserve and document the snapshot-controller de
 
 ## Delivery gating (MUST)
 
-- Implement strictly within the currently agreed stage model in `operations/project-status.md` (internal docs repo). Each change declares its stage. Do NOT pull features from a later stage.
+- Implement strictly within the currently agreed stage model recorded in the internal project-status doc. Each change declares its stage. Do NOT pull features from a later stage.
 - After codegen (if API touched) and before moving to the next stage, run & pass the full test plan for the current stage.
 - Regression guarantee: on Stage N, all tests from stages 0..N must pass. Fix regressions in the same change set — no "fix later".
 
 ## Docs: SSOT & boundaries (MUST)
 
-Internal design docs do **not** live in this repository. They live in the internal docs repo
-**`deckhouse/storage/internal-docs/state-snapshotter`** (fox.flant.com), tree `state-snapshotter-rework/`;
-long-form ADR drafts live in **`deckhouse/architecture-decision-records`** under
-`dkp/storage/state-snapshotter/` (historical drafts in `old2/`). Paths named below are relative to those
-repos. This repository keeps only user-facing docs (`docs/README*.md`, `docs/USER_GUIDE*.md`).
+Internal design docs do **not** live in this repository. They live in internal project documentation
+that is not public — ask the storage team for its current location. The table below names what each of
+those documents owns, not where it sits. This repository keeps only user-facing docs
+(`docs/README*.md`, `docs/USER_GUIDE*.md`).
 
 Single source of truth per information type; others reference it.
 
-| Type | Responsibility |
-|------|----------------|
-| `spec/` | Normative contract only (state machines, keys, invariants) |
-| `architecture/` | Diagrams and high-level flow; not normative |
-| `design/` | Redesign/migration/rollout plan; does not become status |
-| `adr/` | Why a decision was made; not edited as current spec |
-| `testing/` | Test strategy/scenarios/run modes; references spec, does not copy it |
-| `operations/` | High-level status only; no spec/design copy |
+| Document | Responsibility |
+|----------|----------------|
+| spec | Normative contract only (state machines, keys, invariants) |
+| architecture | Diagrams and high-level flow; not normative |
+| design | Redesign/migration/rollout plan; does not become status |
+| ADR | Why a decision was made; not edited as current spec |
+| testing | Test strategy/scenarios/run modes; references spec, does not copy it |
+| operations/status | High-level status only; no spec/design copy |
 
 - Do NOT copy contract across documents. Separate clearly: **implemented / current target / planned / legacy**.
-- Extended ADR drafts (ADR repo, `dkp/storage/state-snapshotter/old2/`) must keep normative summaries in sync with `spec/system-spec.md`; those drafts alone are NOT SSOT for implementable contract.
+- Long-form ADR drafts must keep their normative summaries in sync with the internal system spec; those drafts alone are NOT SSOT for implementable contract.
 - Development order: **design → spec → tests → code.** If code and spec disagree, fix one — never leave inconsistent.
-- Before changing code, read `spec/system-spec.md` (redesign → `design/`; touching a decision → `adr/`). On contract change: update spec, run e2e checks, add ADR if needed.
+- Before changing code, read the internal system spec (redesign → the design doc; touching a decision → the ADR). On contract change: update the spec, run e2e checks, add an ADR if needed.
 - Cross-doc consistency: when changing spec / architecture overview / implementation-plan / e2e-testing-strategy / project-status, check for contradictions (registry vs runtime watch activation; DSC conditions `Accepted`/`AccessGranted`/derived `Ready`; unified CRD bootstrap vs DSC-driven registry; manifest/MCR vs unified snapshot registry; stage/progress across the docs). Fix in the same change or document a temporary divergence + follow-up.
 - Naming: docs `kebab-case.md`; ADR `adr-XXXX-short-title.md`; e2e scripts `NN_description.sh`.
 
 ## Operations status (MUST)
 
-- Update `operations/project-status.md` (internal docs repo) only when a change is **critical** to plan/status — not for minor/cosmetic changes.
-- Keep it **high-level only**: stage status table, short implemented summary, in progress, planned, blockers/rollout dependencies. Do NOT put there: full state machine, long rollout steps, file-level TODOs, or spec/design/testing copy — those belong in `spec/` `design/` `testing/` `adr/`.
+- Update the internal project-status doc only when a change is **critical** to plan/status — not for minor/cosmetic changes.
+- Keep it **high-level only**: stage status table, short implemented summary, in progress, planned, blockers/rollout dependencies. Do NOT put there: full state machine, long rollout steps, file-level TODOs, or spec/design/testing copy — those belong in the spec, design, testing and ADR documents.
 
 ## E2E cluster access — persistent tunnel (127.0.0.1:6445)
 

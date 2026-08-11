@@ -54,8 +54,8 @@ rules:
 # Deletion is normally the Deckhouse ObjectKeeper controller after follow+TTL; then GC removes retained
 # content/MCP. The controller deletes ObjectKeepers in exactly one case: the dedicated import-MCP keeper
 # (names.ImportManifestCheckpointObjectKeeperName) is removed after the reconstructed ManifestCheckpoint is
-# handed off to its SnapshotContent (content-single-writer design §10.1) — that keeper FollowObjects the
-# still-live import snapshot, so nothing else would ever reclaim it.
+# handed off to its SnapshotContent — that keeper FollowObjects the still-live import snapshot, so
+# nothing else would ever reclaim it.
 # No objectkeepers/status: state-snapshotter does not write ObjectKeeper status.
 - apiGroups: ["deckhouse.io"]
   resources: ["objectkeepers"]
@@ -100,7 +100,6 @@ rules:
 # Unified Snapshots RBAC (for XxxxSnapshot roots and common SnapshotContent)
 # RBAC is scoped to API group, not to concrete Snapshot kinds
 # Adding a new Snapshot kind requires adding its resource name here
-# See ADR section 7 (RBAC Strategy) for details
 # Note: Kubernetes RBAC does NOT support wildcards in resource names
 # We need to list all snapshot resource types explicitly
 

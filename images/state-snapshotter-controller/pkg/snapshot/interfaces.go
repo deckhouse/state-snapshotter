@@ -42,28 +42,20 @@ type DataBindingRef struct {
 
 // SnapshotLike is a typed interface for any XxxxSnapshot resource.
 //
-// This interface is a formal contract defined in unified-snapshots-test-plan.md.
 // It allows the common controller to work with any snapshot type without using
 // dynamic client or JSONPath.
 //
 // IMPORTANT: Interface Stability Contract
 //
-// This interface MUST NOT be changed without updating the architectural documents:
-//   - unified-snapshots-test-plan.md (PACKAGE INTERFACES section)
-//   - unified-snapshots-architecture-diagrams.md (GLOBAL INVARIANTS)
-//
-// Changes to this interface require:
-//  1. Architectural justification
-//  2. Test plan update
-//  3. Backward compatibility consideration
+// Every snapshot kind implements this interface, including domain kinds whose controllers run
+// out-of-process, so a change here breaks implementors outside this repository. Changes require
+// architectural justification and explicit backward-compatibility consideration.
 //
 // Contract Rules:
 //   - Getter methods MUST be pure functions (no side effects, no mutations)
 //   - Getter methods MUST be idempotent
 //   - Setter methods (SetStatusConditions) MAY have side effects
 //   - Interface MUST remain stable across implementation refactoring
-//
-// See: unified-snapshots-test-plan.md (TESTING PHILOSOPHY, PACKAGE INTERFACES)
 type SnapshotLike interface {
 	runtime.Object
 	metav1.Object
@@ -115,26 +107,17 @@ type SnapshotLike interface {
 
 // SnapshotContentLike is a typed interface for any XxxxSnapshotContent resource.
 //
-// This interface is a formal contract defined in unified-snapshots-test-plan.md.
-//
 // IMPORTANT: Interface Stability Contract
 //
-// This interface MUST NOT be changed without updating the architectural documents:
-//   - unified-snapshots-test-plan.md (PACKAGE INTERFACES section)
-//   - unified-snapshots-architecture-diagrams.md (GLOBAL INVARIANTS)
-//
-// Changes to this interface require:
-//  1. Architectural justification
-//  2. Test plan update
-//  3. Backward compatibility consideration
+// Every snapshot-content kind implements this interface, including domain kinds whose controllers run
+// out-of-process, so a change here breaks implementors outside this repository. Changes require
+// architectural justification and explicit backward-compatibility consideration.
 //
 // Contract Rules:
 //   - Getter methods MUST be pure functions (no side effects, no mutations)
 //   - Getter methods MUST be idempotent
 //   - Setter methods (SetStatusConditions) MAY have side effects
 //   - Interface MUST remain stable across implementation refactoring
-//
-// See: unified-snapshots-test-plan.md (TESTING PHILOSOPHY, PACKAGE INTERFACES)
 type SnapshotContentLike interface {
 	runtime.Object
 	metav1.Object

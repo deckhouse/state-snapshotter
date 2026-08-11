@@ -47,7 +47,7 @@ const (
 
 var mastersGroup = []string{"system:masters"}
 
-// deleteGuardSpecs registers the unified-snapshot delete-guard e2e (plan P6). It builds its OWN manifest
+// deleteGuardSpecs registers the unified-snapshot delete-guard e2e. It builds its OWN manifest
 // tree so its destructive cases never disturb the shared `captured` tree, then exercises: DELETE-deny of
 // protected internal nodes, break-glass override (marker persists), UPDATE marker-immutability, exempt
 // actor, fail-fast degradation, root free delete + cascade teardown, and (volume-data-gated) managed

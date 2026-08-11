@@ -35,8 +35,8 @@ import (
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
-// reconcileDataLegProjection is the single writer of SnapshotContent.status.data for domain owners
-// (content-single-writer design §4 Slice 3 / §11.4). It replaces the binder's data-leg publish
+// reconcileDataLegProjection is the single writer of SnapshotContent.status.data for domain owners.
+// It replaces the binder's data-leg publish
 // (genericbinder/domain_content.go): the aggregator projects the owning snapshot's captured volume
 // artifact onto status.data, performs the VolumeSnapshotContent Retain + ownerRef handoff, and enriches
 // volume metadata.
@@ -51,9 +51,9 @@ import (
 //
 // Two data sources by owner kind:
 //   - VCR domains (demo disk, etc.): captureState.domainSpecificController.volumeCaptureRequestName ->
-//     VolumeCaptureRequest -> VolumeSnapshotContent (§4 Slice 3);
-//   - native-CSI kind VolumeSnapshot (§11.4): the fork binds the VS to a VSC directly, so the aggregator
-//     reads owner.status.boundVolumeSnapshotContentName. Active once the CSD registers the kind (Block 3c).
+//     VolumeCaptureRequest -> VolumeSnapshotContent;
+//   - native-CSI kind VolumeSnapshot: the fork binds the VS to a VSC directly, so the aggregator
+//     reads owner.status.boundVolumeSnapshotContentName. Active once the CSD registers the kind.
 //
 // The route is taken through dataleg.Classify, on the two structural discriminators {owner is a CSI
 // VolumeSnapshot, owner declares spec.mode: Import}. Those four combinations ARE the four cells of the
@@ -75,13 +75,13 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 	)
 	switch scenario {
 	case dataleg.NativeCapture, dataleg.NativeImport:
-		// Native-CSI data leg (§11.4): the VolumeSnapshot IS the volume capture; project from its bound VSC.
+		// Native-CSI data leg: the VolumeSnapshot IS the volume capture; project from its bound VSC.
 		// This covers BOTH capture VS (fork binds it) and import VS (the import binder publishes
 		// snapshotSource + boundVolumeSnapshotContentName), so import VS does not take the DataImport branch.
 		return r.projectContentDataLegFromBoundVSC(ctx, contentObj, owner, ownerNamespace)
 
 	case dataleg.DomainImport:
-		// Generic import leaf (§10): no live VCR — the volume artifact comes from the reverse-looked-up
+		// Generic import leaf: no live VCR — the volume artifact comes from the reverse-looked-up
 		// DataImport's produced VolumeSnapshotContent. Structural import nodes (root/VM) are not data-bearing
 		// and short-circuit inside.
 		return r.projectContentDataLegFromDataImport(ctx, contentObj, owner)
@@ -195,11 +195,11 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 	return requeue, "", "", err
 }
 
-// projectContentDataLegFromBoundVSC projects the native-CSI data leg (§11.4): a VolumeSnapshot owner is
+// projectContentDataLegFromBoundVSC projects the native-CSI data leg: a VolumeSnapshot owner is
 // bound to a VolumeSnapshotContent by the fork's CSI machinery (status.boundVolumeSnapshotContentName), so
 // the aggregator builds the {source PVC, VSC artifact} binding from the owner status and performs the same
 // enrich + Retain/ownerRef handoff + publish as the VCR branch. The source PVC is published by the domain
-// reconciler at adoption (owner.status.sourceRef). Active once the CSD registers the kind (Block 3c).
+// reconciler at adoption (owner.status.sourceRef). Active once the CSD registers the kind.
 //
 // This branch is SHARED by capture and import VolumeSnapshots (the import binder publishes both
 // status.sourceRef and status.boundVolumeSnapshotContentName, so imports project uniformly with capture).
@@ -432,7 +432,7 @@ func (r *SnapshotContentController) contentHasData(ctx context.Context, contentN
 }
 
 // volumeSnapshotOwnerSource builds the captured PVC source ref from a VolumeSnapshot owner's published
-// status.sourceRef (design §11.4, written by the foundation domain reconciler at adoption). Absent
+// status.sourceRef (written by the foundation domain reconciler at adoption). Absent
 // fields yield an empty ref, which the caller treats as "source not published yet".
 func volumeSnapshotOwnerSource(owner *unstructured.Unstructured) storagev1alpha1.SnapshotSubjectRef {
 	apiVersion, _, _ := unstructured.NestedString(owner.Object, "status", "sourceRef", "apiVersion")

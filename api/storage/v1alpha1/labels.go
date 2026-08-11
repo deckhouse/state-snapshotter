@@ -28,8 +28,8 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 // controllers; there must be no hardcoded string duplicates elsewhere.
 const ExcludeLabelKey = APIGroup + "/exclude"
 
-// LabelDeleteProtected is the canonical authoritative protection state for the unified snapshot tree
-// (delete-protection-contract.md). It is NOT a diagnostic marker: it is the single source of truth the
+// LabelDeleteProtected is the canonical authoritative protection state for the unified snapshot tree.
+// It is NOT a diagnostic marker: it is the single source of truth the
 // delete-guard admission consults. Its presence with value LabelDeleteProtectedValue means the object is
 // an internal node of a unified snapshot and MUST NOT be deleted by a direct user DELETE — legal removal
 // happens only through root Snapshot teardown / controller GC / reclaim (exempt actors) or an explicit

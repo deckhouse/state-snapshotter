@@ -158,7 +158,7 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("did not expect namespace key in cluster artifact JSON: %#v", artifact)
 	}
 	if _, ok := status["dataRef"]; ok {
-		t.Fatal("legacy singular dataRef key must not be present in JSON (wave5 renamed it to data)")
+		t.Fatal("legacy singular dataRef key must not be present in JSON (it was renamed to data)")
 	}
 	if _, ok := status["dataRefs"]; ok {
 		t.Fatal("plural dataRefs must not be present in JSON (Variant A: singular data)")

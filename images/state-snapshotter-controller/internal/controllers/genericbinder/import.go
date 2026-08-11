@@ -89,7 +89,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	// Content owner: a non-root imported leaf's SnapshotContent is owned by the parent's SnapshotContent
 	// (d8 sets child->parent ownerRefs); a ROOT import snapshot's content is owned by the root ObjectKeeper
 	// exactly like the capture root. Resolve the parent ownerRef first; a nil (non-pending) result means
-	// this is a root, which the binder now also creates (content-single-writer design §10, creator=binder).
+	// this is a root, which the binder now also creates (creator=binder).
 	ownerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -107,7 +107,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 				"snapshot", obj.GetName(), "gvk", gvk.String())
 			return ctrl.Result{}, nil
 		}
-		// Root import (content-single-writer design §10): the binder is the creator for import roots too,
+		// Root import: the binder is the creator for import roots too,
 		// not the namespace Snapshot orchestrator. Anchor the root content on the root ObjectKeeper (unified
 		// TTL GC) exactly like the capture root; the orchestrator (reconcileImport) mirrors Ready and the
 		// aggregator projects the manifest leg + children edges. The binder is the creator ONLY for the root
@@ -134,7 +134,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			},
 			Spec: importSnapshotContentSpec(obj),
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		// Durable tree node: stamp delete-protection into the CREATE payload.
 		storagev1alpha1.StampDeleteProtected(content)
 		if err := r.Create(ctx, content); err != nil && !errors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
@@ -184,8 +184,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, nil
 	}
 
-	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of status.manifestCheckpointName
 	// for import too, projecting the reconstructed checkpoint name (keyed to the leaf UID) once the upload
 	// endpoint has created it. The binder no longer publishes it; it only waits for the checkpoint to exist
 	// before proceeding to the data leg (the manifest must be uploaded before the leaf can be Ready anyway).
@@ -198,8 +198,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, err
 	}
 
-	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
-	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the
+	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1):
+	// the aggregator projects childrenSnapshotContentRefs from the
 	// uploaded status.childrenSnapshotRefs the same way for capture and import (an import owner has no domain
 	// phase, so the "planned" gate is exactly "every uploaded child snapshot has bound its content"). The
 	// binder no longer publishes the child edge set; the content's mirrored Ready (gated by the aggregator's
@@ -222,8 +222,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			}
 			return ctrl.Result{}, nil
 		}
-		// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-		// content-single-writer design §10): the aggregator is the single writer of content.status.data for
+		// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+		// the aggregator is the single writer of content.status.data for
 		// import too (projectContentDataLegFromDataImport runs the same DataImport->VSC Retain+ownerRef
 		// handoff + publish). The binder keeps ONLY the two leaf-facing jobs the aggregator cannot: surface a
 		// non-retryable artifact terminal on the leaf, and mirror the aggregator-published content.status.data

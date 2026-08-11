@@ -43,7 +43,7 @@ import (
 )
 
 // captureSDK constructs the in-process capture SDK the namespace root drives — the SAME SDK external/demo
-// domains use ("dogfooding", wave5). Mirrors the demo controllers' capture() helper
+// domains use ("dogfooding"). Mirrors the demo controllers' capture() helper
 // (snapshotsdk.New(client, apiReader, NewStorageFoundationProvider(client))). The root is an aggregator
 // whose manifest leg spans objects its children also capture, so it wires the subresource REST client
 // (WithSubresourceREST) the ManifestExclude capability needs: reconcileNamespaceManifestLeg computes the
@@ -53,8 +53,8 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 	return snapshotsdk.New(r.Client, r.APIReader, snapshotsdk.NewStorageFoundationProvider(r.Client), snapshotsdk.WithSubresourceREST(r.SubresourceREST))
 }
 
-// reconcileNamespaceCapture drives the namespace-root capture through the snapshotsdk recipe (wave5
-// content-free flip). It replaces the bespoke create-content + parent_graph + reconcileCaptureN2a path:
+// reconcileNamespaceCapture drives the namespace-root capture through the snapshotsdk recipe
+// (content-free flip). It replaces the bespoke create-content + parent_graph + reconcileCaptureN2a path:
 // the generic binder (which now watches the root — see unifiedbootstrap.DomainCaptureSnapshotKinds) is the
 // SOLE SnapshotContent creator/binder/Ready-mirror, while the root only PLANS via the SDK and drives its
 // own residual/orphan + manifest legs.
@@ -75,7 +75,7 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  8. DomainCaptureStatus Finished (barrier 2) once the manifest leg is captured
 //     (CoreCaptureOutcome==Captured).
 //
-// PIT freeze (ADR "Late Planned" → "once a node is Planned, the plan is frozen and the set is not recomputed"):
+// PIT freeze ("Late Planned"): once a node is Planned, the plan is frozen and the set is not recomputed.
 // steps 1-5 (plan + enumerate + freeze the declared child set) run ONLY before barrier 1
 // (namespaceDomainPrePlanned — phase absent/Planning). Once the node is past Planned the composition is
 // frozen, so this reconciler stops re-planning entirely and drives only the post-bind legs (6-8); a
@@ -127,7 +127,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		}
 		if plan.outcome == namespaceChildrenTerminal {
 			// Terminal child-graph failure: route it through DomainCaptureStatus Failed (terminal SINK), not a
-			// bare Ready patch. The root content is created + bound EAGERLY (pre-Planned, genericbinder §9), so
+			// bare Ready patch. The root content is created + bound EAGERLY (pre-Planned, genericbinder), so
 			// the content->Snapshot Ready mirror is already live for the root; a Ready-only write would
 			// ping-pong with the mirror's non-terminal content view (mirror overwrites, this gate re-asserts).
 			// With phase=Failed the mirror bubbles the SAME reason/message (ownerDomainCaptureFailed), so both
@@ -147,7 +147,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		}
 
 		// 3. Create/adopt the planned children and publish their refs. Publication is ADDITIVE (union): the
-		//    residual/orphan VolumeSnapshot wave (§5) co-writes childrenSnapshotRefs and must be preserved.
+		//   residual/orphan VolumeSnapshot wave co-writes childrenSnapshotRefs and must be preserved.
 		if err := sdk.EnsureChildren(ctx, adapter, plan.desired, plan.excluded); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -161,9 +161,9 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 
 		// 4. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 		//    the CSI VolumeSnapshots for uncovered PVCs and declare them as REGULAR domain children via the SDK
-		//    EnsureChildren (content-single-writer design §11.6). Each orphan VolumeSnapshot is a standard
-		//    domain snapshot now (adopted + planned by the storage-foundation VolumeSnapshot domain controller,
-		//    §11.2/§11.3): its content shell is created + bound by the generic binder and ALL its content status
+		//   EnsureChildren. Each orphan VolumeSnapshot is a standard
+		//   domain snapshot now (adopted + planned by the storage-foundation VolumeSnapshot domain
+		//   controller): its content shell is created + bound by the generic binder and ALL its content status
 		//    (data, manifestCheckpointName, childrenSnapshotContentRefs, Ready) is projected by the aggregator —
 		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
 		//    enumeration before Planned means the FULL child set (domain children + orphan VolumeSnapshots)
@@ -210,7 +210,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	// (040) reads to drop the transient wide-read RoleBinding) is owned solely by main: the aggregator's
 	// capture-leg lifecycle eager-inits it to false and latches it true after the root MCP handoff is durable,
 	// then reaps the root MCR — the namespace-root Snapshot is a domain-capture kind (main.go dogfooding), so
-	// reconcileOwnerCaptureLegs runs for its bound content (main-owned commonController, decision #10). The
+	// reconcileOwnerCaptureLegs runs for its bound content (main-owned commonController). The
 	// root reconciler no longer stamps the latch itself (single-writer per sub-structure).
 
 	// Refresh the root so main's commonController latch and any concurrent SDK status writes are observed by
@@ -218,7 +218,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 	// domain children now: the binder creates + binds their content and the aggregator projects their status
 	// (data from the bound VSC, manifestCheckpointName from the VS domain's MCR, Ready mirror), and their
 	// content edges are linked into the root's childrenSnapshotContentRefs by the aggregator — no snapshot-side
-	// orphan content-materialization step remains (content-single-writer design §11.6).
+	// orphan content-materialization step remains.
 	if err := r.snapshotReader().Get(ctx, key, nsSnap); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -256,7 +256,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 // projection freezes it ("late Planned"). The orphan VolumeSnapshot is a standard domain snapshot from here
 // on: it is adopted + planned by the storage-foundation VolumeSnapshot domain controller, its content is
 // created + bound by the generic binder, and its content status is projected by the aggregator
-// (content-single-writer design §11.6) — the namespace domain writes no SnapshotContent.
+// — the namespace domain writes no SnapshotContent.
 //
 // The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
 // from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily
@@ -317,7 +317,7 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 // nonOrphanCSIVolumeSnapshotChildRefs drops the root's own orphan-wave output (CSI VolumeSnapshot children)
 // from a child-ref slice, leaving only the coverage-providing domain children. Used to gate the residual
 // wave on coverage completeness WITHOUT waiting on (or wedging behind) the orphan VolumeSnapshots the wave
-// itself produces (content-single-writer design §11.6; see ensureOrphanVolumeSnapshotsPrePlanned).
+// itself produces (see ensureOrphanVolumeSnapshotsPrePlanned).
 func nonOrphanCSIVolumeSnapshotChildRefs(refs []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	out := make([]storagev1alpha1.SnapshotChildRef, 0, len(refs))
 	for _, ref := range refs {
@@ -459,7 +459,7 @@ const unreadableNamespacePlanMessagePrefix = "namespace manifest plan is incompl
 // reportUnreadableNamespacePlan publishes the fail-closed "namespace manifest plan is incomplete"
 // diagnosis when BuildRootNamespaceManifestCaptureTargets reports unreadable resource types. It is
 // observability ONLY: it never builds a partial MCR (the caller already returned before EnsureManifestCapture)
-// and never writes the core-owned Ready condition (post-wave7 writer discipline — the ns domain must not
+// and never writes the core-owned Ready condition (writer discipline — the ns domain must not
 // co-write Ready; the binder still mirrors the bound content's pending Ready). The diagnosis flows through
 // two channels that sit OUTSIDE that discipline:
 //

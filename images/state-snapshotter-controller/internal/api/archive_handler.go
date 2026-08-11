@@ -159,7 +159,7 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 			{
 				// Internal, read-only exclude-computation endpoint: returns object IDENTITIES for the
 				// whole subtree (own node + descendants), fail-closed. Granted to domain controllers
-				// (which have no MCP/generic content RBAC) as one narrow verb (see wave5 §6.3).
+				// (which have no MCP/generic content RBAC) as one narrow verb.
 				Name:       "snapshotcontents/subtree-manifest-identities",
 				Namespaced: false,
 				Kind:       "SnapshotContent",

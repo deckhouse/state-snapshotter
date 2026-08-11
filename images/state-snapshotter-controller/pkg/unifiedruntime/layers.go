@@ -28,9 +28,9 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 )
 
-// LayeredGVKState is the explicit desired → eligible → merged desired → resolved split from
-// design/r2-phase-2b-r3-runtime-registry.md in the internal docs repo. It does not include
-// controller-runtime wiring; "active" watches are tracked separately on the Syncer.
+// LayeredGVKState is the explicit desired → eligible → merged desired → resolved split of the runtime
+// GVK registry. It does not include controller-runtime wiring; "active" watches are tracked separately
+// on the Syncer.
 type LayeredGVKState struct {
 	// BootstrapDesired is a copy of the static bootstrap list passed into the syncer.
 	BootstrapDesired []unifiedbootstrap.UnifiedGVKPair

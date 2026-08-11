@@ -4,9 +4,8 @@
 
 > Статус: **developer-facing usage guide** для команд, интегрирующих свой домен со
 > snapshot-контроллером через `pkg/snapshotsdk`. Это «как пользоваться», а не нормативный контракт.
-> Норматив контракта домен↔ядро — SDK-ADR (`2026-06-29-domain-snapshot-sdk.md`); godoc в
-> `pkg/snapshotsdk` — норматив точных Go-сигнатур и инвариантов уровня кода; этот README — **не
-> норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
+> Норматив точных Go-сигнатур и инвариантов уровня кода — godoc в `pkg/snapshotsdk`; этот
+> README — **не норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
 > demo-контроллеры в репозитории `sds-unified-snapshots-poc` (`images/domain-controller/internal/controllers/demo`).
 >
 > Скоуп SDK v1 — **capture-only** (планирование снапшота: дочерние снапшоты + захват данных + захват

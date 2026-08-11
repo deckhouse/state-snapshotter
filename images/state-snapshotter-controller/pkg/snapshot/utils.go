@@ -518,7 +518,7 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 		return nil
 	}
 	// Variant A: status.data is a single object (cardinality <=1), not a list. Return it as a
-	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The wave5 rename moved the
+	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The rename moved the
 	// binding under status.data and the source PVC under data.sourceRef (the standalone targetUID was dropped;
 	// the volume identity is data.sourceRef.uid). The internal DataBindingRef keeps its field names.
 	entry, ok := status["data"].(map[string]interface{})
@@ -687,7 +687,7 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataSnapshotMethod() strin
 }
 
 // GenerateSnapshotContentName returns the deterministic SnapshotContent name for a snapshot object, keyed
-// by its UID (unified wave4C scheme, see api/names). The snapshotName argument is retained for signature
+// by its UID (unified scheme, see api/names). The snapshotName argument is retained for signature
 // compatibility but no longer part of the name (names are opaque; connectivity is via refs).
 func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
 	_ = snapshotName
@@ -695,7 +695,7 @@ func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
 }
 
 // GenerateObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed
-// by its UID (unified wave4C scheme, see api/names).
+// by its UID (unified scheme, see api/names).
 func GenerateObjectKeeperName(snapshotUID types.UID) string {
 	return names.ObjectKeeperName(snapshotUID)
 }

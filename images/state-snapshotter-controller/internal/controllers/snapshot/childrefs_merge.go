@@ -40,7 +40,7 @@ func snapshotChildRefKey(ref storagev1alpha1.SnapshotChildRef) string {
 }
 
 // mergeSnapshotChildRefs returns a new slice: all entries from existing, then each upsert overwrites
-// or appends by key (apiVersion, kind, name). Result is sorted for stable status (spec §3.2 / INV-REF-M1).
+// or appends by key (apiVersion, kind, name). Result is sorted for stable status (INV-REF-M1).
 func mergeSnapshotChildRefs(existing, upsert []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	m := make(map[string]storagev1alpha1.SnapshotChildRef, len(existing)+len(upsert))
 	order := make([]string, 0, len(existing)+len(upsert))

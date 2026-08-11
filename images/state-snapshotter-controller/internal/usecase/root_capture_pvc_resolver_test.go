@@ -36,7 +36,7 @@ func TestListOwnedPVCTargets_duplicateSubtreePVCFailsClosed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = storagev1alpha1.AddToScheme(scheme)
 
-	// wave7 content-free coverage walks the SNAPSHOT child graph (status.childrenSnapshotRefs -> each
+	// content-free coverage walks the SNAPSHOT child graph (status.childrenSnapshotRefs -> each
 	// direct child's bound SnapshotContent), not the root content tree. Two domain children whose bound
 	// contents claim the same PVC UID must fail closed with ErrDuplicateCoveredPVCUID before any residual
 	// PVC listing. Passing a nil root content also exercises the "late Planned" pre-bind (content-free) path.

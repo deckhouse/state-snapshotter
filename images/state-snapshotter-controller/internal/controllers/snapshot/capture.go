@@ -67,7 +67,7 @@ func (r *SnapshotReconciler) buildSnapshotMachineryGVKs() (namespacemanifest.Sna
 
 // dataBearingKindFunc returns the coverage data-bearing predicate backed by the live GVK registry
 // (CSD spec.requiresDataArtifact via GVKRegistry.RequiresDataArtifact). Coverage keys the decision on
-// the owning snapshot kind — NOT the shape of the subtree (Block 5, design §8.5). Returns
+// the owning snapshot kind — NOT the shape of the subtree. Returns
 // snapshotgraphregistry.ErrGraphRegistryNotReady when the registry is not built yet so callers requeue
 // (fail-closed: never under-cover with an empty registry, which would let an already-captured PVC be
 // re-captured as orphan).

@@ -442,7 +442,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				g.Expect(meta.IsStatusConditionTrue(fresh.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
 			}, "60s", "200ms").Should(Succeed(), "bound SnapshotContent should become Ready=True")
 
-			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. wave7
+			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready.
 			// moved the post-bind Ready mirror out of the binder into the SnapshotContentController
 			// (mirrorReadyToOwnerSnapshot, resolved via content.spec.snapshotRef + the boundSnapshotContentName
 			// writer-switch), so drive the CONTENT controller to run the mirror; the binder reconcile is kept

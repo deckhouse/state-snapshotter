@@ -88,7 +88,7 @@ func TestReconstructManifestCheckpoint_BuildsReadyCheckpoint(t *testing.T) {
 		t.Fatalf("checkpoint name %q must use the capture prefix %q", name, namespacemanifest.CheckpointNamePrefix)
 	}
 
-	// Chunk names are recorded in status and read back from there (unified wave4C scheme keys them by the
+	// Chunk names are recorded in status and read back from there (unified scheme keys them by the
 	// checkpoint UID, not the name), so resolve chunk 0 via the recorded ChunkInfo rather than derivation.
 	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{}
 	if err := cl.Get(ctx, types.NamespacedName{Name: cp.Status.Chunks[0].Name}, chunk); err != nil {

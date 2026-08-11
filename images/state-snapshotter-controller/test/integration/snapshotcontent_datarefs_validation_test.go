@@ -54,7 +54,7 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 	}
 
 	// Variant A (cardinality ≤1): a SnapshotContent carries at most one data binding (a singular object,
-	// not a list), so a duplicate-in-a-list validation is structurally impossible. The wave5 hard rename
+	// not a list), so a duplicate-in-a-list validation is structurally impossible. The hard rename
 	// dropped the standalone required targetUID; the volume identity is now data.sourceRef.uid (optional at
 	// the CRD level), so there is no longer a CRD-level "empty uid" rejection to assert here.
 	It("accepts a single status.data on Status().Update", func() {

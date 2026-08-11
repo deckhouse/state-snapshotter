@@ -30,8 +30,8 @@ import (
 )
 
 // projectContentDataLegFromDataImport is the import twin of the capture data-leg projection (VCR / bound
-// VSC): it makes the aggregator the single writer of SnapshotContent.status.data for GENERIC import leaves
-// (content-single-writer design §10). A generic import leaf carries no live VCR — its volume artifact is
+// VSC): it makes the aggregator the single writer of SnapshotContent.status.data for GENERIC import
+// leaves. A generic import leaf carries no live VCR — its volume artifact is
 // produced by a DataImport found by reverse-lookup (DataImport.spec.targetRef -> this leaf). Once the
 // DataImport has produced its VolumeSnapshotContent the aggregator enriches, hands the VSC off to the
 // content (Retain + ownerRef), and publishes status.data. The binder retains ONLY the leaf-facing work
@@ -124,8 +124,8 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 // fault. Pure function (no client) so it is unit-tested directly and shared by the aggregator (publish) and
 // the import binder (terminal-reason precondition + export mirror).
 //
-// Moved from genericbinder to the aggregator's package in the import creator/main unification
-// (content-single-writer design §10): the aggregator is the sole writer of content.status.data.
+// Moved from genericbinder to the aggregator's package in the import creator/main unification: the
+// aggregator is the sole writer of content.status.data.
 func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Unstructured) (binding *storagev1alpha1.SnapshotDataBinding, ready bool, terminalReason string, terminalMessage string) {
 	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "kind")

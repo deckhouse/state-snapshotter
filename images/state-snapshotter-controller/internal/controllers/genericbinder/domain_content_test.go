@@ -43,7 +43,7 @@ import (
 
 // The domain-capture request lifecycle (capture-leg eager-init, manifestCaptured/dataCaptured latches, the
 // childSubtreesManifestsPersisted latch, and the MCR/VCR reap) moved to the SnapshotContentController
-// aggregator (main-owned commonController, decision #10); its coverage lives in
+// aggregator (main-owned commonController); its coverage lives in
 // snapshotcontent/capture_legs_test.go. What remains on the binder is the leaf status.data export mirror
 // (mirrorLeafDataFromContent) and the pure data-binding renderer — covered below.
 
@@ -112,7 +112,7 @@ func domainTestDomainSnapshotUnstructured(t *testing.T, vcrName string) *unstruc
 
 // mirrorLeafDataFromContent copies the bound SnapshotContent's self-contained data binding verbatim onto
 // the namespaced data leaf's top-level status.data (source + artifact + volume metadata) and writes NO
-// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data in wave5).
+// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data).
 func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)

@@ -47,16 +47,16 @@ type childGraphSeed struct {
 }
 
 // mergeChildGraphIntoRoot wires ONE child into the root graph (single-child convenience wrapper). The root
-// content's childrenSnapshotContentRefs goes empty -> [child] in one write, which the Block 4 frozen-set CEL
-// (Option A) allows (oldSelf.size()==0).
+// content's childrenSnapshotContentRefs goes empty -> [child] in one write, which the frozen-set CEL
+// allows (oldSelf.size()==0).
 func mergeChildGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootName, childNSSName, childSnapshotContentName string) error {
 	return mergeChildrenGraphIntoRoot(ctx, c, rootNS, rootName, []childGraphSeed{{snapshotName: childNSSName, contentName: childSnapshotContentName}})
 }
 
 // mergeChildrenGraphIntoRoot wires status.childrenSnapshotRefs on the root Snapshot and the matching
 // childrenSnapshotContentRefs on the root SnapshotContent (integration seed only), writing the COMPLETE
-// child-content set in a SINGLE status update. Block 4 (INV-CONTENT-CHILDREN-2) freezes
-// childrenSnapshotContentRefs once non-empty (Option A CEL), so seeding children one-by-one — which grows a
+// child-content set in a SINGLE status update. INV-CONTENT-CHILDREN-2 freezes
+// childrenSnapshotContentRefs once non-empty (frozen-set CEL), so seeding children one-by-one — which grows a
 // non-empty set — is rejected; a multi-child tree must be seeded atomically here (this mirrors production,
 // where the aggregator publishes the complete frozen set all-or-nothing).
 func mergeChildrenGraphIntoRoot(ctx context.Context, c client.Client, rootNS, rootName string, children []childGraphSeed) error {

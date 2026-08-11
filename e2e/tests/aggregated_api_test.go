@@ -379,7 +379,7 @@ func aggregatedAPISpecs() {
 		})
 	})
 
-	// Degraded root + scope=node (ADR degraded-relax): a user-addressed root whose Ready=False carries a
+	// Degraded root + scope=node (degraded-relax): a user-addressed root whose Ready=False carries a
 	// recoverable DegradedReadyReasons reason (ChildSnapshotDeleted — a child snapshot CR was deleted while
 	// its content survives in the recycle bin) still serves its OWN manifests at scope=node, while the
 	// default subtree stays fail-closed (409). Runs on its OWN isolated tree so it never degrades the shared
@@ -432,19 +432,19 @@ func aggregatedAPISpecs() {
 		})
 	})
 
-	// Block 7 (content-single-writer design §2/§3/§8.1/§8.3, decision #10 — main-owned commonController):
+	// Main-owned commonController:
 	// the whole captureState.commonController (the manifest/data capture-leg latches plus the new
 	// subtreePlanned field) is written by the SnapshotContentController (main) SIDEWAYS onto the
 	// xxxSnapshot, and main REAPS the domain MCR/VCR in the same pass after the durable handoff
 	// (latch-before-reap => no re-creation churn). The root manifest-exclude is computed from the
 	// subtree-manifest-identities subresource. These specs run on the shared manifest-only capture tree.
-	Context("Block 7: main-owned commonController + root manifest-exclude via subtree-manifest-identities", func() {
+	Context("Main-owned commonController + root manifest-exclude via subtree-manifest-identities", func() {
 		BeforeAll(func() {
 			Expect(captured.namespace).NotTo(BeEmpty(), "capture phase must have run first")
 			Expect(captured.rootContent).NotTo(BeEmpty(), "root SnapshotContent must be resolved")
 		})
 
-		It("serves the root subtree-manifest-identities as a de-duplicated set spanning the whole subtree (design §8.3)", func() {
+		It("serves the root subtree-manifest-identities as a de-duplicated set spanning the whole subtree", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
@@ -476,7 +476,7 @@ func aggregatedAPISpecs() {
 			}
 		})
 
-		It("excludes subtree-captured objects from the root own-manifests so no object is double-captured (design §8.3)", func() {
+		It("excludes subtree-captured objects from the root own-manifests so no object is double-captured", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 
@@ -509,7 +509,7 @@ func aggregatedAPISpecs() {
 			Expect(hasCM).To(BeTrue(), "the root own-manifests must still carry the root-owned ConfigMap %s", srcConfigMapName)
 		})
 
-		It("latches commonController.manifestCaptured on every xxxSnapshot node (main-written) and reaps the MCR with no churn (decision #10)", func() {
+		It("latches commonController.manifestCaptured on every xxxSnapshot node (main-written) and reaps the MCR with no churn", func() {
 			// Sequential waits under one ctx: the per-node latch checks + the MCR-reaped Eventually (each
 			// bounded by captureReadyTO) plus the 15s no-churn Consistently — size the parent to their sum.
 			ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.captureReadyTO+time.Minute)
@@ -563,7 +563,7 @@ func aggregatedAPISpecs() {
 			}).WithTimeout(15 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
 		})
 
-		It("latches commonController.subtreePlanned on every xxxSnapshot node (main-written, snapshot-native) (design §8.1, decision #10)", func() {
+		It("latches commonController.subtreePlanned on every xxxSnapshot node (main-written, snapshot-native)", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 			ns := captured.namespace
@@ -733,7 +733,7 @@ func aggregatedAPISpecs() {
 			Expect(rval).To(BeTrue(), "the root childSubtreesManifestsPersisted must be true once every declared child subtree is persisted")
 		})
 
-		It("composes whole-subtree-persisted as manifestCaptured && childSubtreesManifestsPersisted, and gates the root manifest-exclude on it (design §8.3, SDK pre-gate)", func() {
+		It("composes whole-subtree-persisted as manifestCaptured && childSubtreesManifestsPersisted, and gates the root manifest-exclude on it (SDK pre-gate)", func() {
 			// The two core-owned latches decompose "the whole node subtree is durably persisted":
 			// manifestCaptured (this node's OWN manifests handed off) AND childSubtreesManifestsPersisted (every
 			// declared child subtree persisted). On a Ready tree both are true on every node. The children-only

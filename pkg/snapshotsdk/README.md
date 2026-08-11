@@ -4,9 +4,8 @@
 
 > **Status: developer-facing usage guide** for teams integrating their domain with the
 > snapshot controller through `pkg/snapshotsdk`. This is *how to use it*, not the normative
-> contract. The normative source for the domain↔core contract is the SDK ADR
-> (`2026-06-29-domain-snapshot-sdk.md`); the godoc in `pkg/snapshotsdk` is normative for the exact
-> Go signatures and code-level invariants; this README is **not normative**. The code-quality
+> contract. The godoc in `pkg/snapshotsdk` is normative for the exact Go signatures and code-level
+> invariants; this README is **not normative**. The code-quality
 > contract is [`CLAUDE.md`](./CLAUDE.md). The reference implementation is the demo controllers in the
 > `sds-unified-snapshots-poc` repo (`images/domain-controller/internal/controllers/demo`).
 >

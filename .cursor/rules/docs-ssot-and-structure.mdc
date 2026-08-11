@@ -1,30 +1,29 @@
 ---
-description: SSOT, internal docs repo structure, document boundaries table, naming, development order.
+description: SSOT, internal documentation roles, document boundaries table, naming, development order.
 alwaysApply: true
 ---
 
 # Documentation SSOT and structure
 
-Internal design docs do **not** live in this repository. They live in the internal docs repo
-**`deckhouse/storage/internal-docs/state-snapshotter`** (fox.flant.com), tree `state-snapshotter-rework/`;
-long-form ADR drafts live in **`deckhouse/architecture-decision-records`** under
-`dkp/storage/state-snapshotter/` (historical drafts in `old2/`). Paths below are relative to those repos.
+Internal design docs do **not** live in this repository. They live in internal project documentation
+that is not public — ask the storage team for its current location. The names below identify what each
+of those documents owns, not where it sits.
 This repository keeps only user-facing docs (`docs/README*.md`, `docs/USER_GUIDE*.md`).
 
 ## 1. Single source of truth
 
 Each type of information lives in one place; others reference it.
 
-| Type | Where |
-|------|--------|
-| spec/ | Normative contract (state machines, keys, invariants) |
-| architecture/ | Diagrams and high-level flow |
-| design/ | Redesign, migration, rollout plan |
-| adr/ | Reasons for decisions |
-| testing/ | Test strategy, scenarios, run modes |
-| operations/ | High-level status only; no copy of spec/design |
+| Document | Owns |
+|----------|------|
+| spec | Normative contract (state machines, keys, invariants) |
+| architecture | Diagrams and high-level flow |
+| design | Redesign, migration, rollout plan |
+| ADR | Reasons for decisions |
+| testing | Test strategy, scenarios, run modes |
+| operations/status | High-level status only; no copy of spec/design |
 
-Do not copy contract across documents. Extended ADR drafts live in the ADR repo under `dkp/storage/state-snapshotter/old2/` — keep **normative summaries** in sync with `spec/system-spec.md`; do not treat those drafts alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
+Do not copy contract across documents. Long-form ADR drafts must keep their **normative summaries** in sync with the internal system spec; do not treat those drafts alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
 
 ## 2. Document boundaries (explicit)
 
@@ -39,19 +38,13 @@ In docs, separate clearly: **implemented** | **current target** | **planned/futu
 
 ## 3. Structure
 
-```
-state-snapshotter-rework/            # internal docs repo
-  spec/system-spec.md
-  architecture/overview.md (diagrams may add system-overview.puml)
-  design/implementation-plan.md (and other design notes)
-  adr/README.md (long-form ADR lives in the ADR repo, dkp/storage/state-snapshotter/old2/)
-  testing/e2e-testing-strategy.md
-  operations/project-status.md
-```
+The internal documentation set (not public) holds one document per role: the system spec, the
+architecture overview (plus diagrams), the implementation plan and other design notes, the long-form
+ADR, the e2e testing strategy, and the project status.
 
 ## 4. Before changing code
 
-Read spec/system-spec.md; if redesign — design/; if touching a decision — adr/. On contract change: update spec; run e2e checks; add ADR if needed. New mechanism: design → spec → tests → code.
+Read the internal system spec; if redesign — the design notes; if touching a decision — the ADR. On contract change: update spec; run e2e checks; add ADR if needed. New mechanism: design → spec → tests → code.
 
 ## 5. Development order
 

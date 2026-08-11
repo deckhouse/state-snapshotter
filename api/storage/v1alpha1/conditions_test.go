@@ -51,8 +51,8 @@ func TestIsReasonDegraded(t *testing.T) {
 	}
 }
 
-// TestDegradedReadyReasons_ExactMembership guards the catalog against verbatim drift from the ADR:
-// it must contain exactly {ChildSnapshotDeleted}.
+// TestDegradedReadyReasons_ExactMembership pins the catalog against silent drift: it must contain
+// exactly {ChildSnapshotDeleted}. UI and d8 branch on this set, so a change here is a contract change.
 func TestDegradedReadyReasons_ExactMembership(t *testing.T) {
 	if len(DegradedReadyReasons) != 1 {
 		t.Fatalf("DegradedReadyReasons must have exactly 1 member, got %d: %v", len(DegradedReadyReasons), DegradedReadyReasons)

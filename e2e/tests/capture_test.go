@@ -130,10 +130,10 @@ func captureSpecs() {
 		})
 
 		It("captures the demo snapshot tree (root Snapshot + SnapshotContent Ready)", func() {
-			// This is the regression guard for the pre-Planned orphan-wave deadlock (content-single-writer
-			// design §9.2): before the eager-shell fix the root Snapshot never reached Ready on this exact
+			// This is the regression guard for the pre-Planned orphan-wave deadlock: before the
+			// eager-shell fix the root Snapshot never reached Ready on this exact
 			// demo tree (root content <- root Planned <- children Ready <- child content bound <- root content).
-			// If Block 0 regresses, this wait times out.
+			// If the eager shell regresses, this wait times out.
 			//
 			// Snapshot creation (capture) must complete quickly, so both waits below are bounded by the
 			// short captureReadyTO (fail fast) instead of the generous restore-path snapshotReadyTO.
@@ -153,13 +153,13 @@ func captureSpecs() {
 		})
 
 		It("writes childrenSnapshotContentRefs equal to the declared children exactly (single-writer edges)", func() {
-			// Block 1 (content-single-writer design §3.1/§3.2, INV-CONTENT-CHILDREN-1): the
+			// INV-CONTENT-CHILDREN-1: the
 			// SnapshotContentController is the single writer of status.childrenSnapshotContentRefs, projected
 			// from the owning snapshot's status.childrenSnapshotRefs. For every snapshot node in the tree its
 			// bound content's childrenSnapshotContentRefs must equal EXACTLY the set of bound-content names of
 			// its declared NON-LEAF children — no missing edge, no duplicate. CSI VolumeSnapshot visibility
 			// leaves are skipped (they have no backing SnapshotContent; their orphan edge is linked by the
-			// snapshot path until Block 3, and the manifest-only tree has no orphan PVCs anyway).
+			// snapshot path, and the manifest-only tree has no orphan PVCs anyway).
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 			Expect(captured.rootContent).NotTo(BeEmpty(), "the capture spec must run first and record the root content")
@@ -198,7 +198,7 @@ func captureSpecs() {
 		})
 
 		It("publishes each node's manifestCheckpointName pointing at a Ready ManifestCheckpoint owned by its content (single-writer manifest leg)", func() {
-			// Block 2 (content-single-writer design §3.1/§3.2, INV-CONTENT-WRITER-1): the
+			// INV-CONTENT-WRITER-1: the
 			// SnapshotContentController aggregator is the single writer of status.manifestCheckpointName,
 			// projected from the owning snapshot's ManifestCaptureRequest (MCR -> mcr.status.checkpointName).
 			// For every snapshot node in the tree its bound content must publish a manifestCheckpointName that
@@ -296,7 +296,7 @@ func captureSpecs() {
 		})
 
 		It("stamps the delete-protected marker on system-created children and every SnapshotContent, but never on the user-created root", func() {
-			// Delete-protection write-path (design/delete-protection-contract.md, spec/system-spec.md):
+			// Delete-protection write-path:
 			// the authoritative marker state-snapshotter.deckhouse.io/delete-protected="true" must be present
 			// on every object the system creates as part of the tree (child domain snapshots + all bound
 			// SnapshotContents), and MUST be absent on the user-created root Snapshot so the operator can

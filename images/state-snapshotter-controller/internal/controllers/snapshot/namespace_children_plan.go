@@ -37,7 +37,7 @@ import (
 )
 
 // namespaceChildrenOutcome is the planning verdict planNamespaceChildren returns for the reconciler to map
-// onto the SDK recipe (wave5 design §4.2): AllPlanned → MarkPlanned/Finished gate; Pending/Forbidden →
+// onto the SDK recipe: AllPlanned → MarkPlanned/Finished gate; Pending/Forbidden →
 // requeue (non-terminal); Terminal → sdk.Fail. It replaces the bespoke reconcileParentOwnedChildGraph's
 // (changed, ready, err) tri-return once the root is content-free.
 type namespaceChildrenOutcome int
@@ -70,7 +70,7 @@ type namespaceChildrenPlan struct {
 }
 
 // planNamespaceChildren reproduces the bespoke reconcileParentOwnedChildGraph enumeration as a pure
-// planner (wave5 design §6.2): CSD-eligible resource mappings, ascending weight layers, resourceSelector
+// planner: CSD-eligible resource mappings, ascending weight layers, resourceSelector
 // narrowing, exclude-label veto, and cross-layer coverage dedup — but it BUILDS []ChildSpec instead of
 // creating child snapshots, and returns the planning outcome instead of patching status. The reconciler
 // then calls sdk.EnsureChildren(desired, excluded) to create/adopt + publish, and maps the outcome onto
@@ -259,7 +259,7 @@ func (r *SnapshotReconciler) detectLostDomainChildrenPrePlanned(
 // the weight-layer readiness gate + coverage seeding), and the top-level drops. Owner-reference stamping
 // and create/adopt are the SDK's job (sdk.EnsureChildren), so the spec carries no owner ref.
 //
-// NOTE (wave5 PR-B, transitional): this duplicates the enumeration loop of ensureParentOwnedChildGraphLayer
+// NOTE (transitional): this duplicates the enumeration loop of ensureParentOwnedChildGraphLayer
 // deliberately, so the bespoke create path keeps working until the atomic content-free flip wires the SDK
 // recipe. The bespoke ensureParentOwnedChildGraphLayer/reconcileParentOwnedChildGraph are removed in the
 // same flip, retiring this duplication.
@@ -309,7 +309,7 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	})
 	for i := range items {
 		resource := &items[i]
-		// Absolute exclude veto (wave4A): a top-level source object carrying the exclude label is dropped
+		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped
 		// from every leg (it also fails selector.Matches below, since ResolveResourceSelector folds the veto
 		// in) and recorded as an explicit top-level drop — the root node's OWN direct exclusion.
 		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {

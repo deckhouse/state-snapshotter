@@ -31,8 +31,8 @@ import (
 // The domain-capture request lifecycle that used to live here — the capture-leg eager-init, the
 // commonController.manifestCaptured/dataCaptured latches, the childSubtreesManifestsPersisted latch,
 // and the MCR/VCR reap — moved to the SnapshotContentController aggregator
-// (snapshotcontent/capture_legs.go): main-owned commonController, content-single-writer design §2/§3,
-// decision #10. The binder is a pure creator; it keeps only the leaf status.data mirror below (top-level
+// (snapshotcontent/capture_legs.go): main-owned commonController.
+// The binder is a pure creator; it keeps only the leaf status.data mirror below (top-level
 // export descriptor for d8, not part of captureState).
 
 // mirrorLeafDataFromContent mirrors the bound SnapshotContent's self-contained data binding
@@ -114,11 +114,11 @@ func domainCaptureAtLeastPlanned(obj *unstructured.Unstructured) bool {
 // status.captureState.domainSpecificController (its MCR/VCR names, children/excluded refs, or phase). The
 // binder gates eager content-shell creation for domain-capture kinds on this claim so that a domain which
 // plans only a SUBSET of a registered kind's instances (e.g. the storage-foundation VolumeSnapshot domain,
-// which skips legacy/unlabeled, vetoed, import-mode, and pre-provisioned VolumeSnapshots — design §11.3)
+// which skips legacy/unlabeled, vetoed, import-mode, and pre-provisioned VolumeSnapshots)
 // leaves the rest unclaimed; the binder then materializes NEITHER an ObjectKeeper NOR a SnapshotContent for
 // them, so a pre-existing/legacy CSI VolumeSnapshot stays a plain CSI object.
 //
-// Deadlock-safety (design §9): the claim is written on the domain's FIRST reconcile, independent of the
+// Deadlock-safety: the claim is written on the domain's FIRST reconcile, independent of the
 // content existing (for the namespace root it is the step-3 EnsureChildren write, strictly BEFORE the
 // step-4 orphan-wave Ready gate; for a leaf domain it is the first EnsureManifestCapture/MarkPlanned). It
 // is therefore strictly EARLIER than the phase>=Planned projection barrier, so gating on it does not
@@ -131,5 +131,5 @@ func domainHasClaimed(obj *unstructured.Unstructured) bool {
 
 // Barrier-2 (phase=Finished) finalization and the phase=Failed bubble are applied by the single post-bind
 // Ready writer in the SnapshotContentController (ready_mirror.go: ownerDomainCapturePhase /
-// ownerDomainCaptureFailed), not here — wave7 final-wave-1 removed the binder's steady-state Ready mirror.
+// ownerDomainCaptureFailed), not here — the binder's steady-state Ready mirror was removed.
 // domainCapturePhase / domainCaptureAtLeastPlanned above remain for the Step-1 barrier (isDomainPlanningComplete).

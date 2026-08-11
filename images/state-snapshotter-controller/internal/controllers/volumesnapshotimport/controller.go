@@ -187,7 +187,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				controllercommon.SnapshotSubjectRefFromObject(vs),
 			),
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		// Durable tree node: stamp delete-protection into the CREATE payload.
 		storagev1alpha1.StampDeleteProtected(content)
 		if cErr := r.Create(ctx, content); cErr != nil && !errors.IsAlreadyExists(cErr) {
 			return ctrl.Result{}, cErr
@@ -209,8 +209,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of status.manifestCheckpointName
 	// (projecting the reconstructed checkpoint name keyed to the VS UID once the per-CR upload endpoint has
 	// created it). This controller no longer publishes it; it still waits for the checkpoint to exist and to
 	// go Ready below, because it recovers the orphan PVC manifest from the checkpoint chunks for the dataRef.
@@ -312,8 +312,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, lErr
 	}
 
-	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10/§11.4): the aggregator is the single writer of content.status.data.
+	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of content.status.data.
 	// For a native-CSI VolumeSnapshot it builds the {captured PVC source, bound VSC} binding from
 	// status.sourceRef + status.boundVolumeSnapshotContentName and performs the enrich +
 	// Retain/ownerRef handoff + publish itself. This controller therefore publishes the recovered orphan PVC

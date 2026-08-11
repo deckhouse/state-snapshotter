@@ -349,7 +349,7 @@ func main() {
 	}
 	// Carry CSD spec.requiresDataArtifact from the merged pairs onto BOTH controllers' GVK registries
 	// (they hold separate instances): the binder's import path and main's capture-leg eager-init
-	// (main-owned commonController, decision #10) read the same flag. Built-in/bootstrap pairs stay false.
+	// (main-owned commonController) read the same flag. Built-in/bootstrap pairs stay false.
 	anyDataArtifactKind := false
 	for _, p := range mergedPairs {
 		snapshotController.MarkRequiresDataArtifact(p.Snapshot.Kind, p.RequiresDataArtifact)
@@ -376,21 +376,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	// wave7 (w7-creator): additionally register the built-in root Snapshot pair on the binder at boot.
-	// FilterGenericSnapshotGVKPairs strips the root (a dedicated kind) but since wave5 the binder is the
+	// Additionally register the built-in root Snapshot pair on the binder at boot.
+	// FilterGenericSnapshotGVKPairs strips the root (a dedicated kind), but the binder is the
 	// creator/owner of the root SnapshotContent, and the compensating unifiedSync.Sync only runs on CSD
 	// reconciles — so without this the binder never watches the root at startup and root content is never
 	// created. See unifiedbootstrap.StartupDomainCaptureRootPair. Idempotent w.r.t. a later Sync.
 	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(snapshotGVKs, snapshotContentGVKs); ok {
 		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
-		// Main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10).
+		// Main runs the root's capture-leg lifecycle (latches + MCR reap).
 		contentController.MarkDomainCaptureKind(rootSnapGVK)
 		if err := snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK); err != nil {
 			log.Error(err, "Failed to setup GenericSnapshotBinderController root Snapshot watch", "snapshotGVK", rootSnapGVK.String(), "snapshotContentGVK", rootContentGVK.String())
 			cancel()
 			os.Exit(1)
 		}
-		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup (w7-creator)", "snapshotGVK", rootSnapGVK.String())
+		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup", "snapshotGVK", rootSnapGVK.String())
 	}
 	// Built-in CSI VolumeSnapshot: mark it domain-capture at boot. Unlike the root it is NOT a dedicated
 	// kind, so FilterGenericSnapshotGVKPairs kept it and the loop above already added its watch — only the

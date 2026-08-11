@@ -359,7 +359,7 @@ func desiredAccessGrantedCondition(generation int64, status metav1.ConditionStat
 
 // patchCSDAccessGranted performs a read-modify-update on the CSD status to set only
 // the AccessGranted condition, preserving Accepted and Ready (owned by the controller).
-// Retries on conflict per the ADR ownership model.
+// Retries on conflict: the controller owns Accepted and Ready, this hook owns AccessGranted only.
 func patchCSDAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)

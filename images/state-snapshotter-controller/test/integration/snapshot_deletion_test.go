@@ -364,8 +364,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			}
 		})
 
-		// Block 0 (eager shell): the content object is created AND bound as soon as the Snapshot exists,
-		// decoupled from the domain phase>=Planned barrier (content-single-writer design §9, the deadlock
+		// Eager shell: the content object is created AND bound as soon as the Snapshot exists,
+		// decoupled from the domain phase>=Planned barrier (the deadlock
 		// fix). A Snapshot deleted BEFORE Planned latches boundSnapshotDeleted on its content and RETAINS the
 		// parent-protect finalizer regardless of phase — the durable Retain shell lingers (recycle-bin
 		// clutter) but never wedges the Snapshot's deletion (hazard H7): the content is a separate
@@ -398,7 +398,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				},
 			}
 
-			// Eager create+bind must complete WITHOUT the domain reaching Planned (before Block 0 the
+			// Eager create+bind must complete WITHOUT the domain reaching Planned (previously the
 			// content did not exist until Planned, and that wait was the deadlock).
 			var contentName string
 			Eventually(func() bool {

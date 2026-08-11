@@ -6,7 +6,7 @@ globs: images/state-snapshotter-controller/test/**/*
 
 # Demo and remote validation
 
-The e2e strategy (`testing/e2e-testing-strategy.md` in the internal docs repo) MUST support:
+The internal e2e testing strategy MUST support:
 
 1. **Automated remote validation** — tests run on remote cluster (runner/node), not locally for validation.
 2. **Environment preparation** for demo (prerequisites: MinIO/S3, controller namespace, storage class, etc.).
