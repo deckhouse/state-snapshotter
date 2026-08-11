@@ -34,7 +34,7 @@ import (
 type Expectation string
 
 const (
-	// MustBeSet — обязано: the path MUST carry this value onto status.data.
+	// MustBeSet — required: the path MUST carry this value onto status.data.
 	//
 	// Read it as a PROPAGATION contract, not as a claim that every volume in the world has the value: the
 	// judged binding is one whose source carried it (the unit fixtures construct exactly that, the e2e
@@ -44,14 +44,14 @@ const (
 	// instead, with the reason written down.
 	MustBeSet Expectation = "MustBeSet"
 
-	// MayBeEmpty — законно пусто: the value may be absent from a settled binding, and Reason says why the
-	// absence is legitimate. It is the weakest expectation and it is never a shrug: an empty value here
-	// must be indistinguishable-by-design from a lost one, otherwise use MustBeSet.
+	// MayBeEmpty — legitimately empty: the value may be absent from a settled binding, and Reason says
+	// why the absence is legitimate. It is the weakest expectation and it is never a shrug: an empty
+	// value here must be indistinguishable-by-design from a lost one, otherwise use MustBeSet.
 	MayBeEmpty Expectation = "MayBeEmpty"
 
-	// MustBeEmpty — не применимо: the field does not apply to this cell and a NON-empty value is itself a
-	// violation. This is the direction that catches a value arriving from the wrong volume: an fsType on a
-	// raw block binding can only have come from a namesake stranger PVC or from a pre-fix revision.
+	// MustBeEmpty — not applicable: the field does not apply to this cell and a NON-empty value is itself
+	// a violation. This is the direction that catches a value arriving from the wrong volume: an fsType on
+	// a raw block binding can only have come from a namesake stranger PVC or from a pre-fix revision.
 	MustBeEmpty Expectation = "MustBeEmpty"
 
 	// MustBeSetUnlessBlock — MustBeSet on a Filesystem volume, MustBeEmpty on a Block one. The single
