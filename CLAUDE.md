@@ -100,6 +100,22 @@ that is not public — ask the storage team for its current location. The table 
 those documents owns, not where it sits. This repository keeps only user-facing docs
 (`docs/README*.md`, `docs/USER_GUIDE*.md`).
 
+### Comments and descriptions are self-contained (MUST)
+
+This repository is public. A reader must never be sent to something they cannot open, so in comments,
+CRD descriptions, `docs/**`, and test/spec names reference only what is in this repository or publicly
+reachable: a symbol, a path, a test name, a public URL. Not a document that is not here, not its path,
+not its section number, and not internal process shorthand (phase, block or decision ids).
+
+- **State the rule instead of its address.** If an invariant must match a document outside this
+  repository verbatim, the link is a **guard test** here — name it, e.g.
+  `TestDegradedReadyReasons_ExactMembership` — not a pointer in a comment.
+- **Doc comments on API types are user documentation.** controller-gen turns them into the CRD
+  descriptions under `crds/`, which reach users through `kubectl explain` and the documentation site.
+  Keep them about the contract, not about how the implementation got there.
+- Commit messages and PR descriptions are public as well, and unlike a comment they cannot be
+  corrected without rewriting history. Check before push.
+
 Single source of truth per information type; others reference it.
 
 | Document | Responsibility |
