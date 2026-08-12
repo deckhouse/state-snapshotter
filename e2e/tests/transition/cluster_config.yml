@@ -1,12 +1,14 @@
 # Transition e2e nested test cluster (manual, dev-only).
 #
-# Verifies the snapshot-controller + storage-volume-data-manager (svdm) -> state-snapshotter +
-# storage-foundation consolidation on ONE dev cluster, driving all module lifecycle at RUNTIME
-# (enable / MPO-retag / order) from the test — NOT from this file. See README.md.
+# Verifies bringing state-snapshotter + storage-foundation up on ONE dev cluster that already runs the
+# legacy snapshot stack — snapshot-controller plus the storage-volume-data-manager module (svdm) —
+# with the data module left ENABLED, driving all module lifecycle at RUNTIME (enable / MPO-retag /
+# order) from the test, NOT from this file. See README.md.
 #
 # Why the snapshot stack is NOT enabled here:
-#   The whole point of the transition scenario is to START without state-snapshotter/
-#   storage-foundation and with the LEGACY stack (snapshot-controller + svdm) instead, then flip.
+#   The whole point of the scenario is to START without state-snapshotter/storage-foundation and
+#   with the legacy stack (snapshot-controller + svdm) instead, then bring the new stack up beside
+#   svdm, which keeps serving its own API group throughout.
 #   A dev Deckhouse build does NOT enforce module requirements and DOES auto-enable modules from
 #   the bundle, so simply omitting them is not enough — the four snapshot-stack modules are
 #   preseeded here with `enabled: false` as an explicit auto-activation blocker. The test enables
@@ -58,7 +60,9 @@ clusterDefinition:
         modulePullOverride: "main"
         dependencies: []
       # Preseed the four snapshot-stack modules DISABLED as an auto-activation blocker. The test
-      # enables them at runtime in the required order; tags come from env (see README.md).
+      # enables them at runtime in the required order; tags come from env (see README.md). Being
+      # preseeded off here says nothing about a module's future: storage-volume-data-manager is
+      # enabled in phase B and stays enabled to the end of the run — the scenario never turns it off.
       - name: "snapshot-controller"
         version: 1
         enabled: false

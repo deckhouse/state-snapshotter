@@ -14,13 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Un-freeze snapshot-controller when it is registered on the gated v0.2.0 handoff build.
+# Un-freeze snapshot-controller when it is registered on a build that requires storage-foundation.
 #
-# snapshot-controller v0.2.0 declares requirements.modules.storage-foundation >= 1.0.0, and Deckhouse
-# ignores a ModulePullOverride while a module is DISABLED. So a cluster left with snapshot-controller
-# *registered* as v0.2.0 while disabled (a completed run, a failed phase-B run, or a manual pr101
-# apply) stays gated on storage-foundation, and the next transition run's phase-B enable is
-# webhook-denied ("depends on disabled module(s): storage-foundation").
+# Older snapshot-controller builds declared a requirements.modules.storage-foundation dependency (the
+# v0.2.0 build this suite installs no longer does — it installs standalone), and Deckhouse ignores a
+# ModulePullOverride while a module is DISABLED. So a cluster left with snapshot-controller
+# *registered* on such a gated build while disabled stays gated on storage-foundation, and the next
+# transition run's phase-B enable is webhook-denied ("depends on disabled module(s):
+# storage-foundation").
 #
 # Re-registering it on the non-gated legacy tag:
 #   - if it is still ENABLED, retagging the MPO is enough;
@@ -95,7 +96,7 @@ if ! gated; then
 	exit 0
 fi
 
-echo "  snapshot-controller is registered on the gated v0.2.0 handoff build; re-registering on '$LEGACY_TAG'..."
+echo "  snapshot-controller is registered on a build that requires storage-foundation; re-registering on '$LEGACY_TAG'..."
 set_mpo "$SNAPC" "$LEGACY_TAG"
 
 transient=""
