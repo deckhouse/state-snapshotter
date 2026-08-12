@@ -355,7 +355,7 @@ func publishDataImportSpecs() {
 			Expect(createServiceAccountIfNotExists(ctx, importNS, publishDISA)).To(Succeed())
 			Expect(createDataDownloadRole(ctx, importNS, publishDIRole, dataImportGVR.Resource)).To(Succeed())
 			Expect(bindRoleToServiceAccount(ctx, importNS, publishDIBinding, publishDIRole, importNS, publishDISA)).To(Succeed())
-			t, tokErr := issueServiceAccountToken(ctx, importNS, publishDISA, publishTokenTTL)
+			t, tokErr := issueServiceAccountToken(ctx, importNS, publishDISA)
 			Expect(tokErr).NotTo(HaveOccurred())
 			token = t
 

@@ -130,7 +130,12 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
-	deleteGuardSpecs()               // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
+	// The coexistence specs are registered LAST of the non-destructive set, because one of them forces
+	// storage-foundation through a converge: that restarts the data-plane controllers every earlier phase
+	// depends on, so it must not run in the middle of them.
+	coexistenceSpecs()              // coexistence_test.go: storage-volume-data-manager exports a live PVC next to storage-foundation, and a forced storage-foundation converge leaves its CRDs, its DataExport and its PVC finalizer untouched (default on; opt-out: E2E_COEXISTENCE=false)
+	publicAddressSchemeGuardSpecs() // coexistence_test.go: guard on the documented limitation — sequentially, both modules publish one live PVC under the SAME public address (default on; opt-out: E2E_COEXISTENCE=false; also needs E2E_PUBLISH)
+	deleteGuardSpecs()              // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
 })
 
 func prepareSuite() {
@@ -150,6 +155,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  namespace-capture extended: %v  (default on; E2E_NS_CAPTURE_REWORK=false to disable)\n", envEnabledByDefault(os.Getenv(envNSCaptureRework)))
 	GinkgoWriter.Printf("  resourceSelector specs:     %v  (default OFF — the field left the Snapshot API; E2E_RESOURCE_SELECTOR=true to enable)\n", envBool(os.Getenv(envResourceSelector)))
 	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
+	GinkgoWriter.Printf("  coexistence module+specs:   %v  (default on; E2E_COEXISTENCE=false drops the %s module AND its specs)\n", suiteCfg.coexistence, volumeDataManagerModuleName)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
@@ -180,11 +186,11 @@ func prepareSuite() {
 		checkPublishInfra()
 	}
 
-	// waitModuleAndCSDReady enables + waits for the whole module stack (five modules across three
-	// dependency levels: state-snapshotter/sds-node-configurator -> storage-foundation/poc ->
-	// sds-local-volume), then the demo CSD. Each wait is bounded by moduleReadyTO; convergence is largely
-	// serial along the dependency chain, so the parent context budgets for a few of them plus a buffer for
-	// the (retrying) enable step.
+	// waitModuleAndCSDReady enables + waits for the whole module stack (state-snapshotter and
+	// sds-node-configurator -> storage-foundation and the PoC domain -> sds-local-volume, plus the
+	// dependency-free storage-volume-data-manager when E2E_COEXISTENCE is on), then the demo CSD. Each wait
+	// is bounded by moduleReadyTO; convergence is largely serial along the dependency chain, so the parent
+	// context budgets for a few of them plus a buffer for the (retrying) enable step.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 

@@ -337,11 +337,11 @@ func bindRoleToServiceAccount(ctx context.Context, roleNS, bindingName, roleName
 // issueServiceAccountToken mints a Bearer token for the SA via the TokenRequest API (the programmatic
 // `kubectl create token`). The token is returned as a plain string for the specs to pass to the curl
 // runner; it is never written to a Secret or pod spec.
-func issueServiceAccountToken(ctx context.Context, ns, saName string, ttl time.Duration) (string, error) {
-	if ttl <= 0 {
-		ttl = publishTokenTTL
-	}
-	secs := int64(ttl.Seconds())
+//
+// The lifetime is always publishTokenTTL — every caller wants the same thing (a token that outlives one
+// spec while staying short-lived), so it is a constant here rather than a parameter each call site repeats.
+func issueServiceAccountToken(ctx context.Context, ns, saName string) (string, error) {
+	secs := int64(publishTokenTTL.Seconds())
 	// The kube-apiserver enforces a minimum TokenRequest expiration (default 10m); floor to be safe.
 	if secs < 600 {
 		secs = 600

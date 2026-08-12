@@ -887,7 +887,7 @@ func downloadAndPersistBlock(ctx context.Context, ns, exportURL, destFile string
 
 // backupDownloadSpecs registers the phase-4 backup-system download flow (env-gated by E2E_VOLUME_DATA):
 // capture a Block-volume demo tree, download manifests via the aggregated API and volume bytes via
-// SVDM DataExport from an in-cluster backup pod, then verify against live cluster state.
+// storage-foundation DataExport from an in-cluster backup pod, then verify against live cluster state.
 func backupDownloadSpecs() {
 	Context("Phase 4: backup-system HTTP download", func() {
 		var targets []dataExportTarget

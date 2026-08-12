@@ -55,6 +55,7 @@ const (
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envGetLoad              = "E2E_GET_LOAD"
 	envPublish              = "E2E_PUBLISH"
+	envCoexistence          = "E2E_COEXISTENCE"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -103,14 +104,24 @@ const (
 	storageFoundationModuleName   = "storage-foundation"
 	sdsNodeConfiguratorModuleName = "sds-node-configurator"
 	sdsLocalVolumeModuleName      = "sds-local-volume"
+	// storage-volume-data-manager ships its own DataExport/DataImport data plane under its own API group and
+	// runs PERMANENTLY alongside storage-foundation (see coexistence_test.go). The suite enables it by
+	// default so the coexistence specs exercise a cluster where both are live; E2E_COEXISTENCE=false takes
+	// BOTH the module and those specs out of the run.
+	volumeDataManagerModuleName = "storage-volume-data-manager"
 	// The demo domain (from the PoC module) ships two flat CSDs (one snapshot kind per object): the
 	// structural VM snapshot and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
-	// d8DataManagerNS is the namespace of the DataExport/DataImport controller. The feature was absorbed
-	// from the former storage-volume-data-manager module into storage-foundation (d8-storage-foundation).
+	// d8DataManagerNS is the namespace of the storage-foundation DataExport/DataImport controller — the data
+	// plane this suite captures and restores through. It is NOT where storage-volume-data-manager runs: that
+	// module serves its own DataExport/DataImport resources, under its own API group, from its own namespace
+	// (d8VolumeDataManagerNS), and both modules are enabled at the same time.
 	d8DataManagerNS = "d8-storage-foundation"
+	// d8VolumeDataManagerNS is the storage-volume-data-manager controller namespace. Its controller logs are
+	// what a failing coexistence spec needs, so diagnostics dump them alongside the two above.
+	d8VolumeDataManagerNS = "d8-storage-volume-data-manager"
 )
 
 // demoCRDNames are the PoC-group CRDs the suite applies against. Module Ready + CSD AccessGranted can
@@ -135,9 +146,9 @@ var captureLatchSchemaCRDNames = []string{
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
 var phase5ImportNS string
 
-// Aggregated subresource API groups (C8/C9). The core group serves the generic and core-Snapshot
-// subresources; the demo group is the domain controller's own aggregated apiserver; the VS connector
-// group is the generic-PVC extended VolumeSnapshot read surface.
+// Aggregated subresource API groups. The core group serves the generic and core-Snapshot subresources; the
+// demo group is the domain controller's own aggregated apiserver; the VS connector group is the generic-PVC
+// extended VolumeSnapshot read surface.
 const (
 	coreSubresGroup   = "subresources.state-snapshotter.deckhouse.io"
 	coreSubresVersion = "v1alpha1"
@@ -299,7 +310,15 @@ type e2eConfig struct {
 	// publish opts into the publish (ingress + tokens) specs. It is a BeforeSuite sanity-check gate
 	// (mirrors volumeData): the infra is provisioned by the storage-e2e bootstrap, so this flag only
 	// asserts it is present and records the discovered ingress facts in suitePublishInfra.
-	publish           bool
+	publish bool
+	// coexistence opts into the storage-volume-data-manager coexistence specs AND into enabling that module
+	// at all. It has to gate both: gating only the specs would still leave the suite waiting for the module
+	// to become Ready, so the knob would not actually take it out of the run. Its LIMIT: on an
+	// alwaysCreateNew cluster the committed tests/cluster_config.yml also declares the module, and
+	// storage-e2e applies that file at bring-up, before any suite code runs — so this knob removes the
+	// suite's dependency on the module and its specs, it does not keep the module off a freshly built
+	// cluster.
+	coexistence       bool
 	storageClass      string
 	probeImage        string
 	backupClientImage string
@@ -330,6 +349,7 @@ func loadConfig() e2eConfig {
 		volumeData:        envEnabledByDefault(os.Getenv(envVolumeData)),
 		getLoad:           envEnabledByDefault(os.Getenv(envGetLoad)),
 		publish:           envEnabledByDefault(os.Getenv(envPublish)),
+		coexistence:       envEnabledByDefault(os.Getenv(envCoexistence)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
@@ -516,7 +536,9 @@ func ensureModulesEnabled(ctx context.Context) error {
 	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
 	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
 	// dependency '...' is disabled"). Each ModulePullOverride comes from <MODULE>_MODULE_PULL_OVERRIDE
-	// (defaulting to "main"), matching the alwaysCreateNew path.
+	// (defaulting to "main"), matching the alwaysCreateNew path. The one entry that is conditional
+	// (storage-volume-data-manager, below) is declared in cluster_config.yml too; E2E_COEXISTENCE=false only
+	// stops this runtime path from enabling and waiting for it.
 	specs := []storagekube.ModuleSpec{
 		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
 		// storage-foundation requires state-snapshotter (module.yaml).
@@ -531,6 +553,16 @@ func ensureModulesEnabled(ctx context.Context) error {
 		// and storage-foundation (module.yaml) — both must be listed or SLV stays "turned off".
 		{Name: sdsLocalVolumeModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(sdsLocalVolumeModuleName), Dependencies: []string{sdsNodeConfiguratorModuleName, storageFoundationModuleName}},
 	}
+	if suiteCfg.coexistence {
+		// storage-volume-data-manager has no module requirements of its own and is NOT a dependency of
+		// anything here: it is a second, independent DataExport/DataImport data plane that must keep working
+		// with storage-foundation live (coexistence_test.go). Its tag follows the same
+		// <MODULE>_MODULE_PULL_OVERRIDE convention as every other module, defaulting to "main".
+		specs = append(specs, storagekube.ModuleSpec{
+			Name: volumeDataManagerModuleName, Version: 1, Enabled: true,
+			ModulePullOverride: moduleTagFromEnv(volumeDataManagerModuleName),
+		})
+	}
 	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
 		return fmt.Errorf("ensure required modules enabled: %w", err)
 	}
@@ -540,12 +572,23 @@ func ensureModulesEnabled(ctx context.Context) error {
 // requiredModulesInReadyOrder lists every module the suite depends on, ordered so a module never appears
 // before a module it depends on — WaitForModuleReady is then called in an order that observes each
 // dependency level as it converges (a dependent cannot become Ready before its dependencies anyway).
-var requiredModulesInReadyOrder = []string{
-	moduleName,                    // state-snapshotter (base)
-	sdsNodeConfiguratorModuleName, // base (LVM node backend)
-	storageFoundationModuleName,   // needs state-snapshotter
-	pocModuleName,                 // needs state-snapshotter
-	sdsLocalVolumeModuleName,      // needs sds-node-configurator + storage-foundation
+//
+// It is a function, not a var, because the set is not fixed: with E2E_COEXISTENCE=false the suite neither
+// enables storage-volume-data-manager nor waits for it. A knob that left the module in this list would not
+// switch anything off — the run would still sit in WaitForModuleReady on a module nobody installed.
+func requiredModulesInReadyOrder() []string {
+	modules := []string{
+		moduleName,                    // state-snapshotter (base)
+		sdsNodeConfiguratorModuleName, // base (LVM node backend)
+		storageFoundationModuleName,   // needs state-snapshotter
+		pocModuleName,                 // needs state-snapshotter
+		sdsLocalVolumeModuleName,      // needs sds-node-configurator + storage-foundation
+	}
+	if suiteCfg.coexistence {
+		// No requirements, no dependents: an independent second data plane, waited for last.
+		modules = append(modules, volumeDataManagerModuleName)
+	}
+	return modules
 }
 
 // moduleTagFromEnv returns a module's image tag from its <MODULE>_MODULE_PULL_OVERRIDE env var (the
@@ -587,7 +630,7 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
 	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. Established=True also
 	// remains latched during an in-place CRD update; the schema-field wait below closes both races.
-	for _, m := range requiredModulesInReadyOrder {
+	for _, m := range requiredModulesInReadyOrder() {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
 		}

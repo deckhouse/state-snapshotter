@@ -257,7 +257,7 @@ func publishDataExportSpecs() {
 			By("Creating the token identity (SA + dataexports/download Role) WITHOUT the RoleBinding yet")
 			Expect(createServiceAccountIfNotExists(ctx, srcNS, publishDESA)).To(Succeed())
 			Expect(createDataDownloadRole(ctx, srcNS, publishDERole, dataExportGVR.Resource)).To(Succeed())
-			t, terr := issueServiceAccountToken(ctx, srcNS, publishDESA, publishTokenTTL)
+			t, terr := issueServiceAccountToken(ctx, srcNS, publishDESA)
 			Expect(terr).NotTo(HaveOccurred())
 			token = t
 

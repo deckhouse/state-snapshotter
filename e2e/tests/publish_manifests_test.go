@@ -165,7 +165,7 @@ func publishManifestsSpecs() {
 			By("Creating the token identity (SA + snapshots/manifests-download Role) WITHOUT the RoleBinding yet")
 			Expect(createServiceAccountIfNotExists(ctx, srcNS, publishManifestsSA)).To(Succeed())
 			Expect(createManifestsDownloadRole(ctx, srcNS, publishManifestsRole)).To(Succeed())
-			t, err := issueServiceAccountToken(ctx, srcNS, publishManifestsSA, publishTokenTTL)
+			t, err := issueServiceAccountToken(ctx, srcNS, publishManifestsSA)
 			Expect(err).NotTo(HaveOccurred())
 			token = t
 
