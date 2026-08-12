@@ -22,8 +22,10 @@ tools
 werf*.yaml
 e2e
 pkg
+snapshot-rework
 .git
 .github
+.gitlab-ci.yml
 .claude
 .gitignore
 .cursor
@@ -31,3 +33,5 @@ pkg
 .golangci.yaml
 .dmtlint.yaml
 go-lint.sh
+test-smoke.sh
+test-cleanup.sh

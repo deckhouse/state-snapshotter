@@ -34,9 +34,7 @@ const (
 )
 
 const (
-	// ReasonArtifactMissing: TERMINAL Ready=False — the durable data artifact (a
-	// VolumeSnapshotContent) of a published data leg is missing or being deleted; the captured
-	// data cannot be recovered for this snapshot. In TerminalReadyReasons.
+	// ReasonArtifactMissing: a required data artifact is missing.
 	ReasonArtifactMissing = "ArtifactMissing"
 
 	// ReasonCompleted: terminal success reason (Ready=True).
@@ -91,17 +89,9 @@ var TerminalReadyReasons = map[string]struct{}{
 	"VolumeCaptureFailed":      {},
 	"DuplicateCoveredPVCUID":   {},
 	"ChildrenFailed":           {},
-	// ArtifactMissing (the durable data artifact — a VolumeSnapshotContent — of a published data
-	// leg is gone or being deleted) and DomainCaptureFailed (the domain-side capture failed
-	// terminally) originate on SnapshotContent, but the Ready mirror copies content reasons
-	// verbatim onto the owner snapshot object, so clients DO observe them on user-facing Ready
-	// conditions. Both are unrecoverable for this snapshot; a client treating them as still-in-
-	// progress would wait forever on an object that can never become Ready.
-	ReasonArtifactMissing:     {},
-	"DomainCaptureFailed":     {},
-	ReasonGraphPlanningFailed: {},
-	ReasonCreateChildFailed:   {},
-	ReasonChildSnapshotLost:   {},
+	ReasonGraphPlanningFailed:  {},
+	ReasonCreateChildFailed:    {},
+	ReasonChildSnapshotLost:    {},
 }
 
 // IsReasonTerminal reports whether a Ready=False reason is terminal (unrecoverable for this snapshot;
@@ -125,10 +115,9 @@ func IsReasonTerminal(reason string) bool {
 // It is both a classification catalog for presentation — the single source of truth mirrored verbatim by
 // the UI/d8 surfaces exactly as they already mirror TerminalReadyReasons — and a runtime classifier: the
 // restore resolver applies IsReasonDegraded to relax the Ready gate for a user-addressed root at
-// scope=node (a recoverable Ready=False root still serves its own manifests).
-//
-// The exact membership of this set is part of the API contract: UI and d8 branch on it, so adding or
-// removing a reason changes observable behaviour. TestDegradedReadyReasons_ExactMembership pins it.
+// scope=node (a recoverable Ready=False root still serves its own manifests). See the primary ADR
+// (2026-06-29-unified-snapshots-overview, section "Conditions & Reasons", subcategory
+// "Recoverable degradation — DegradedReadyReasons").
 var DegradedReadyReasons = map[string]struct{}{
 	ReasonChildSnapshotDeleted: {},
 }

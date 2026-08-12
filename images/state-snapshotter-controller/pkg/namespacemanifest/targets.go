@@ -91,9 +91,9 @@ func (s SnapshotMachineryGVKs) containsGroupKind(gk schema.GroupKind) bool {
 //
 // The returned target slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
 //
-// selector is resolved by the caller and layered on top of ShouldIncludeNamespaceObject: an object is kept
-// only if it passes the built-in rules AND matches the selector. A nil selector means no filtering. The
-// capture callers pass the exclude-veto selector, so objects carrying the veto label never become targets.
+// selector is the user-provided spec.resourceSelector (already resolved by the caller, see
+// Snapshot.ResolveResourceSelector). It is layered on top of ShouldIncludeNamespaceObject: an object is
+// kept only if it passes the built-in rules AND matches the selector. A nil selector means no filtering.
 func BuildManifestCaptureTargets(
 	ctx context.Context,
 	dyn dynamic.Interface,
@@ -160,8 +160,8 @@ func BuildManifestCaptureTargets(
 				if !ShouldIncludeNamespaceObject(&item, snapshotKinds) {
 					continue
 				}
-				// The caller's selector is layered on top of the built-in exclusions: it can only narrow
-				// capture. A nil selector means no filtering.
+				// User-provided resourceSelector is layered on top of the built-in exclusions: it can only
+				// narrow capture. A nil selector means no filtering.
 				if selector != nil && !selector.Matches(labels.Set(item.GetLabels())) {
 					continue
 				}

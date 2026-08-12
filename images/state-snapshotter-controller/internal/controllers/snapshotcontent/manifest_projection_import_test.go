@@ -57,7 +57,7 @@ func importOwnerUnstructured(uid string) *unstructured.Unstructured {
 	return owner
 }
 
-// TestReconcileManifestCheckpointNameProjection_ImportPublishesReconstructed pins:
+// TestReconcileManifestCheckpointNameProjection_ImportPublishesReconstructed pins content-single-writer §10:
 // the aggregator (not the import controllers) is the single writer of status.manifestCheckpointName on the
 // import path, projecting the deterministic reconstructed checkpoint name once the upload endpoint has
 // created it.

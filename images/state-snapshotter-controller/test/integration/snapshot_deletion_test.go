@@ -21,7 +21,6 @@ package integration
 
 import (
 	"context"
-	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -191,7 +190,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 					return false
 				}
 
-				return slices.Contains(freshContent.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return contains(freshContent.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "Finalizer should be added")
 
 			// Verify PRECONDITION: SnapshotContent exists and has finalizer
@@ -365,8 +364,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 			}
 		})
 
-		// Eager shell: the content object is created AND bound as soon as the Snapshot exists,
-		// decoupled from the domain phase>=Planned barrier (the deadlock
+		// Block 0 (eager shell): the content object is created AND bound as soon as the Snapshot exists,
+		// decoupled from the domain phase>=Planned barrier (content-single-writer design §9, the deadlock
 		// fix). A Snapshot deleted BEFORE Planned latches boundSnapshotDeleted on its content and RETAINS the
 		// parent-protect finalizer regardless of phase — the durable Retain shell lingers (recycle-bin
 		// clutter) but never wedges the Snapshot's deletion (hazard H7): the content is a separate
@@ -399,7 +398,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 				},
 			}
 
-			// Eager create+bind must complete WITHOUT the domain reaching Planned (previously the
+			// Eager create+bind must complete WITHOUT the domain reaching Planned (before Block 0 the
 			// content did not exist until Planned, and that wait was the deadlock).
 			var contentName string
 			Eventually(func() bool {
@@ -479,7 +478,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 					return false
 				}
 				boundDeleted, _, _ := unstructured.NestedBool(fresh.Object, "status", "boundSnapshotDeleted")
-				return boundDeleted && slices.Contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return boundDeleted && contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "pre-Planned deletion must latch boundSnapshotDeleted and RETAIN the content finalizer (no wedge; content is a separate object)")
 
 			// The Retain shell survives with its finalizer (recycle-bin clutter, not a wedge).

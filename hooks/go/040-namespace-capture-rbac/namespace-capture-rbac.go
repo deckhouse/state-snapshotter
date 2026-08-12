@@ -21,7 +21,7 @@ limitations under the License.
 //	a managed RoleBinding (to the wildcard capture ClusterRole) exists in namespace N
 //	  <=> N hosts at least one Snapshot with needsCaptureRBAC == true.
 //
-// The hook runs under the privileged deckhouse SA, so it needs no extra RBAC provisioning
+// The hook runs under the privileged deckhouse SA (see Phase 5.3), so it needs no extra RBAC provisioning
 // of its own, and the privilege-escalation guard for binding the wildcard role is satisfied automatically.
 package namespace_capture_rbac
 
@@ -30,15 +30,15 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/deckhouse/module-sdk/pkg"
+	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
+	"github.com/deckhouse/module-sdk/pkg/registry"
+	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/module-sdk/pkg"
-	sdkk8s "github.com/deckhouse/module-sdk/pkg/dependency/k8s"
-	"github.com/deckhouse/module-sdk/pkg/registry"
-	"github.com/deckhouse/module-sdk/pkg/utils/ptr"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )

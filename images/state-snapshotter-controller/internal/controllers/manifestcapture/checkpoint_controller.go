@@ -411,6 +411,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			},
 		}
 		// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
+		// (delete-protection-contract.md §6.1, §8.3).
 		snapstorage.StampDeleteProtected(objectKeeper)
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
@@ -486,7 +487,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		Spec:   storagev1alpha1.ManifestCheckpointSpec{},
 		Status: storagev1alpha1.ManifestCheckpointStatus{},
 	}
-	// Durable tree node: stamp delete-protection into the CREATE payload.
+	// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
 	snapstorage.StampDeleteProtected(checkpoint)
 
 	if err := r.Create(ctx, checkpoint); err != nil {
@@ -886,7 +887,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				Checksum:       r.calculateChunkChecksum(compressed),
 			},
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload.
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
 		snapstorage.StampDeleteProtected(chunk)
 
 		if err := r.Create(ctx, chunk); err != nil && !errors.IsAlreadyExists(err) {
@@ -952,7 +953,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// Split objects into chunks based on COMPRESSED size
 	// We need to estimate compressed size, so we'll use a conservative approach
 	//
-	// NOTE: Format implementation (it is NOT "one gzip stream split into chunks"):
+	// NOTE: Format implementation (differing from ADR comment about "one gzip + split"):
 	// Each chunk contains its own gzipped JSON array of objects, not a split of one global gzip.
 	// This allows precise control over final compressed+base64 size per chunk.
 	// Compression ratio may be slightly worse than a single global gzip, but is more practical.
@@ -1017,7 +1018,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 	// Create chunk resources
 	chunkInfos := make([]storagev1alpha1.ChunkInfo, 0, len(chunks))
 	for i, chunk := range chunks {
-		// Chunk name keyed by the ManifestCheckpoint UID (unified scheme, see api/names). The
+		// Chunk name keyed by the ManifestCheckpoint UID (unified wave4C scheme, see api/names). The
 		// name is recorded in status.chunks[].name and read back from there, so consumers never
 		// reverse-derive it.
 		chunkName := names.ChunkName(types.UID(checkpointUID), i)
@@ -1070,7 +1071,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				Checksum:       checksum,
 			},
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload.
+		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
 		snapstorage.StampDeleteProtected(chunk)
 
 		// Create chunk (fail-fast semantics - consistent with MCR lifecycle)

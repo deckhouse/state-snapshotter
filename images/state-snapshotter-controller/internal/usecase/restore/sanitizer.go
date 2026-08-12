@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// Read-path restore-safe sanitizer.
+// Read-path restore-safe sanitizer (ADR 2026-06-10 D3).
 //
 // The restore compiler emits apply-ready manifests, so it MUST strip runtime/server-managed
 // fields that block `kubectl apply` and rewrite the namespace to the restore target. Sanitization
@@ -30,7 +30,7 @@ import (
 
 // controlPlaneExactKinds are control-plane / snapshot-machinery kinds that MUST NOT appear in
 // restore output. VS/VSC and snapshot tree nodes are transferred separately (data + tree); the
-// compiler only references them, never emits them as apply manifests.
+// compiler only references them, never emits them as apply manifests (ADR 2026-06-10 D6/INV-RC11).
 var controlPlaneExactKinds = map[string]struct{}{
 	"Snapshot":                       {},
 	"SnapshotContent":                {},

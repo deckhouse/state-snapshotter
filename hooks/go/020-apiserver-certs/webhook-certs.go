@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	tlscertificate "github.com/deckhouse/module-sdk/common-hooks/tls-certificate"
+
 	"github.com/deckhouse/state-snapshotter/hooks/go/consts"
 )
 
