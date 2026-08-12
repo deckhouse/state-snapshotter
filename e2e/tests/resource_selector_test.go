@@ -19,6 +19,7 @@ package tests
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -26,6 +27,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// envResourceSelector opts the spec.resourceSelector coverage back IN; it is OFF by default. The field is
+// no longer part of the Snapshot API, so against a current image the apiserver PRUNES it on create and the
+// capture runs unfiltered — every include/exclude assertion below would fail while the controller behaves
+// exactly as designed. The specs and their fixtures are parked rather than deleted: a capture selector
+// keyed on resource kind is planned, and its coverage will grow from these namespaces and sources.
+//
+// Set E2E_RESOURCE_SELECTOR=true only against an image whose Snapshot CRD still carries the label selector.
+const envResourceSelector = "E2E_RESOURCE_SELECTOR"
 
 // resourceSelector e2e fixtures. The label key is namespaced to the e2e suite to avoid clashing with the
 // built-in capture exclusions (heritage=deckhouse etc.). Each source carries keep/drop/no-label variants
@@ -188,6 +198,14 @@ func containsString(haystack []string, want string) bool {
 // volume-data legs. It does not touch the shared `captured` tree.
 func resourceSelectorSpecs() {
 	Context("Phase 1b: resourceSelector include/exclude", func() {
+		if !envBool(os.Getenv(envResourceSelector)) {
+			// Register a single skipped spec so the suite documents why the block did not run.
+			It("is skipped unless "+envResourceSelector+"=true (spec.resourceSelector is no longer part of the Snapshot API)", func() {
+				Skip(envResourceSelector + " not set: the Snapshot CRD no longer carries spec.resourceSelector, so the apiserver prunes it and the capture runs unfiltered; opt in only against an image that still serves the field")
+			})
+			return
+		}
+
 		Context("include via matchLabels", func() {
 			var ns string
 

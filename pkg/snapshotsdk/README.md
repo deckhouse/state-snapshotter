@@ -609,7 +609,7 @@ Reference: `virtualmachinesnapshot_controller.go` (a parent with children).
 
 The label `state-snapshotter.deckhouse.io/exclude` (`snapshotsdk.ExcludeLabelKey`) is an
 **absolute, always-active** veto: any object carrying it (value ignored) is dropped from every
-snapshot, at every level of the tree, independently of the root's `spec.resourceSelector`.
+snapshot, at every level of the tree.
 
 The core folds the veto into its own resource resolution, but a **domain enumerator sees only the
 child specs it builds — not the source objects' labels** — so it MUST apply the veto itself:

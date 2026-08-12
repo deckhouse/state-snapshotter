@@ -62,19 +62,15 @@ func listResidualRootOwnedPVCTargets(
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the user-provided resourceSelector once (nil/Everything = capture all). It is applied here so
-	// excluded PVCs are dropped consistently from BOTH the volume-data leg and the root PVC manifest exclude
-	// set (both consumers go through this lister via ListOwnedPVCTargetsForLogicalContent). This mirrors the
-	// manifest leg, so a PVC is never half-captured (volume node without manifest, or vice versa).
-	selector, err := snap.ResolveResourceSelector()
-	if err != nil {
-		return nil, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
+	// The exclude veto is applied here so vetoed PVCs are dropped consistently from BOTH the volume-data leg
+	// and the root PVC manifest exclude set (both consumers go through this lister via
+	// ListOwnedPVCTargetsForLogicalContent). This mirrors the manifest leg, so a PVC is never half-captured
+	// (volume node without manifest, or vice versa).
 	candidates, labelsByUID, err := listNamespacePVCTargetsWithLabels(ctx, c, namespace)
 	if err != nil {
 		return nil, err
 	}
-	candidates = filterPVCTargetsBySelector(selector, candidates, labelsByUID)
+	candidates = filterPVCTargetsBySelector(storagev1alpha1.ExcludeVetoSelector(), candidates, labelsByUID)
 	return residualPVCTargets(candidates, covered), nil
 }
 

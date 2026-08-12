@@ -33,9 +33,7 @@ import (
 )
 
 // The exclude-veto (state-snapshotter.deckhouse.io/exclude) is honored unconditionally at EVERY level of a
-// snapshot tree, ANDed on top of any spec.resourceSelector (api ResolveResourceSelector). resourceSelector
-// itself narrows which sources a root captures. These specs cover the two mechanisms together across all
-// levels the POC exposes:
+// snapshot tree. These specs cover it across all levels the POC exposes:
 //
 //   - the root namespace object (a plain ConfigMap),
 //   - a domain child (a DemoVirtualMachine),
@@ -44,7 +42,10 @@ import (
 //     the VM snapshot captures ALONGSIDE the VM object itself), and
 //   - a PVC (orphan-capture + user-VolumeSnapshot adoption veto),
 //
-// plus the combo where a source matches the selector AND carries the veto (the veto wins). The domain veto
+// The selector half of this fixture (Root B, and the combo where a source matches a selector AND carries
+// the veto) is parked behind envResourceSelector together with the rest of the spec.resourceSelector
+// coverage — the field is gone from the Snapshot API, so Root B would capture the whole namespace. The
+// veto legs above run by default and are unaffected. The domain veto
 // outcome is asserted against the exact POC contract committed alongside these specs: the companion Secret
 // is a core/v1 Secret whose name is read from DemoVirtualMachine.status.secretRef (never hardcoded), and a
 // vetoed source is recorded in the capturing snapshot's status.captureState.domainSpecificController.excludedRefs
@@ -322,11 +323,12 @@ func vetoDemoDisk(ns, name, pvc, sc string, labels map[string]interface{}) *unst
 
 // --- registration ----------------------------------------------------------
 
-// vetoSelectorSpecs registers the exclude-veto + resourceSelector coverage (default-on opt-out gate
-// E2E_VETO_SELECTOR). Fixture A is manifest-only (no volume data); Fixture B is data-backed and additionally
-// gated by suiteCfg.volumeData. Both use their own namespaces and root Snapshots (no shared tree).
+// vetoSelectorSpecs registers the exclude-veto coverage (default-on opt-out gate E2E_VETO_SELECTOR); the
+// selector root inside Fixture A is additionally parked behind the opt-in E2E_RESOURCE_SELECTOR. Fixture A
+// is manifest-only (no volume data); Fixture B is data-backed and additionally gated by
+// suiteCfg.volumeData. Both use their own namespaces and root Snapshots (no shared tree).
 func vetoSelectorSpecs() {
-	Context("Phase 1c/3e: exclude-veto + resourceSelector across tree levels", func() {
+	Context("Phase 1c/3e: exclude-veto across tree levels", func() {
 		vetoSelectorManifestSpecs()
 		vetoSelectorVolumeDataSpecs()
 	})
@@ -340,7 +342,7 @@ func vetoSelectorManifestSpecs() {
 			ns                 string
 			vmPlainSecret      string // companion Secret of vm-plain (kept in the VM node)
 			vmSecretVetoSecret string // companion Secret of vm-secret-veto (vetoed at the manifest leg)
-			selectorPersisted  bool   // false against a controller image predating spec.resourceSelector
+			selectorEnabled    bool   // spec.resourceSelector coverage, opt-in via envResourceSelector
 		)
 
 		BeforeAll(func() {
@@ -388,10 +390,17 @@ func vetoSelectorManifestSpecs() {
 			vmSecretVetoSecret, err = labelCompanionSecret(ctx, ns, vsVMSecretVeto)
 			Expect(err).NotTo(HaveOccurred(), "veto %s companion Secret", vsVMSecretVeto)
 
-			By("Creating Root A (no selector) and Root B (matchLabels group=keep)")
+			By("Creating Root A (no selector)")
 			Expect(createRootSnapshot(ctx, ns, vsRootA)).To(Succeed())
-			Expect(createRootSnapshotWithSelector(ctx, ns, vsRootB, map[string]interface{}{rsLabelKey: rsValueKeep}, nil)).To(Succeed())
-			selectorPersisted = resourceSelectorPersisted(ctx, ns, vsRootB)
+
+			// Root B only exists to carry the selector assertions; without the field it would be a second
+			// capture-everything root, so it is not created at all when the selector coverage is off.
+			selectorEnabled = envBool(os.Getenv(envResourceSelector))
+			if selectorEnabled {
+				By("Creating Root B (matchLabels group=keep)")
+				Expect(createRootSnapshotWithSelector(ctx, ns, vsRootB, map[string]interface{}{rsLabelKey: rsValueKeep}, nil)).To(Succeed())
+				selectorEnabled = resourceSelectorPersisted(ctx, ns, vsRootB)
+			}
 		})
 
 		It("brings Root A (no selector) to Ready with its content", func() {
@@ -512,8 +521,8 @@ func vetoSelectorManifestSpecs() {
 		})
 
 		It("brings Root B (matchLabels selector) to Ready with its content", func() {
-			if !selectorPersisted {
-				Skip("deployed Snapshot CRD has no spec.resourceSelector (controller image predates the feature); skipping selector root")
+			if !selectorEnabled {
+				Skip(envResourceSelector + " not set (or the deployed Snapshot CRD has no spec.resourceSelector); skipping the selector root")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
@@ -524,8 +533,8 @@ func vetoSelectorManifestSpecs() {
 		})
 
 		It("combo veto+selector: the selector captures the un-vetoed match but the veto wins over the vetoed match", func() {
-			if !selectorPersisted {
-				Skip("deployed Snapshot CRD has no spec.resourceSelector (controller image predates the feature); skipping selector root")
+			if !selectorEnabled {
+				Skip(envResourceSelector + " not set (or the deployed Snapshot CRD has no spec.resourceSelector); skipping the selector root")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()

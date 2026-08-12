@@ -60,7 +60,11 @@ spec:
               spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
               UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
               no recapture (a new capture requires a new Snapshot).
-              resourceSelector is a capture-only input, so it is forbidden when mode is Import (see the field doc).
+              The rule below rejects the removed resourceSelector input. It exists because DELETING the field from the
+              schema would NOT reject it: the apiserver prunes fields it does not know BEFORE validation runs, so a
+              client still sending a selector would be answered "created" and silently get a snapshot of the whole
+              namespace instead of the subset it asked for. Keeping the field declared and refusing it is the only way
+              to turn that silent widening into an error. Verified against a live apiserver, not assumed.
             properties:
               mode:
                 default: Capture
@@ -75,20 +79,12 @@ spec:
                 type: string
               resourceSelector:
                 description: |-
-                  ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
-                  dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded via
-                  CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of the built-in
-                  capture exclusions and can only narrow the capture, never force-capture controller/own machinery.
+                  ResourceSelector is a REMOVED input that is NOT read by anything: it stays in the schema only so that
+                  the spec-level rule above can refuse a request that carries it. A Snapshot captures its whole
+                  namespace; objects are kept out with the ExcludeLabelKey label, not with a selector.
 
-                  Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together, so a single
-                  selector can both include and exclude - e.g. matchLabels {app: myapp} together with a NotIn/DoesNotExist
-                  matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
-                  When omitted, all resources are captured (no filtering).
-
-                  Forbidden in Import mode (rejected by CEL admission on create): Import materializes from an uploaded
-                  payload and does not list the live namespace, so a selector would be meaningless. This is symmetric
-                  with spec.sourceRef on domain snapshots and spec.source on the forked VolumeSnapshot, which are
-                  likewise forbidden on Import.
+                  Deprecated: never read and never set this field. It is a rejection stub kept for one deprecation
+                  cycle, after which it is dropped from the schema together with the rule that refuses it.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -137,8 +133,10 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable
               rule: self == oldSelf
-            - message: spec.resourceSelector is forbidden in Import mode
-              rule: self.mode != 'Import' || !has(self.resourceSelector)
+            - message: 'spec.resourceSelector was removed: a Snapshot captures its
+                whole namespace. Drop the field (and update d8: the -l/--selector
+                flag is gone); to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude'
+              rule: '!has(self.resourceSelector)'
           status:
             properties:
               boundSnapshotContentName:

@@ -18,8 +18,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
 )
 
 // +kubebuilder:object:root=true
@@ -66,8 +64,12 @@ const (
 // UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
 // no recapture (a new capture requires a new Snapshot).
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-// resourceSelector is a capture-only input, so it is forbidden when mode is Import (see the field doc).
-// +kubebuilder:validation:XValidation:rule="self.mode != 'Import' || !has(self.resourceSelector)",message="spec.resourceSelector is forbidden in Import mode"
+// The rule below rejects the removed resourceSelector input. It exists because DELETING the field from the
+// schema would NOT reject it: the apiserver prunes fields it does not know BEFORE validation runs, so a
+// client still sending a selector would be answered "created" and silently get a snapshot of the whole
+// namespace instead of the subset it asked for. Keeping the field declared and refusing it is the only way
+// to turn that silent widening into an error. Verified against a live apiserver, not assumed.
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceSelector)",message="spec.resourceSelector was removed: a Snapshot captures its whole namespace. Drop the field (and update d8: the -l/--selector flag is gone); to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude"
 type SnapshotSpec struct {
 	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
 	//   - Capture (default): dynamic namespace capture from the live cluster.
@@ -77,20 +79,12 @@ type SnapshotSpec struct {
 	// +optional
 	Mode SnapshotMode `json:"mode,omitempty"`
 
-	// ResourceSelector optionally restricts which namespace resources are captured. It is applied to the
-	// dynamic-capture legs: namespace manifests, top-level/standalone domain resources expanded via
-	// CustomSnapshotDefinition, and PVCs (volume data leg). It is layered (ANDed) on top of the built-in
-	// capture exclusions and can only narrow the capture, never force-capture controller/own machinery.
+	// ResourceSelector is a REMOVED input that is NOT read by anything: it stays in the schema only so that
+	// the spec-level rule above can refuse a request that carries it. A Snapshot captures its whole
+	// namespace; objects are kept out with the ExcludeLabelKey label, not with a selector.
 	//
-	// Standard Kubernetes label selector: matchLabels and matchExpressions are ANDed together, so a single
-	// selector can both include and exclude - e.g. matchLabels {app: myapp} together with a NotIn/DoesNotExist
-	// matchExpression. Because everything is ANDed, OR semantics cannot be expressed in one selector.
-	// When omitted, all resources are captured (no filtering).
-	//
-	// Forbidden in Import mode (rejected by CEL admission on create): Import materializes from an uploaded
-	// payload and does not list the live namespace, so a selector would be meaningless. This is symmetric
-	// with spec.sourceRef on domain snapshots and spec.source on the forked VolumeSnapshot, which are
-	// likewise forbidden on Import.
+	// Deprecated: never read and never set this field. It is a rejection stub kept for one deprecation
+	// cycle, after which it is dropped from the schema together with the rule that refuses it.
 	// +optional
 	ResourceSelector *metav1.LabelSelector `json:"resourceSelector,omitempty"`
 }
@@ -99,30 +93,6 @@ type SnapshotSpec struct {
 // snapshots are materialized from an uploaded payload and MUST NOT trigger dynamic namespace capture.
 func (s *Snapshot) IsImportMode() bool {
 	return s != nil && s.Spec.Mode == SnapshotModeImport
-}
-
-// ResolveResourceSelector converts spec.resourceSelector into a labels.Selector used by the dynamic
-// capture legs, with the absolute exclude veto ALWAYS ANDed on top. The veto (ExcludeLabelKey
-// DoesNotExist) is independent of the user selector, so a nil/empty resourceSelector no longer resolves
-// to labels.Everything() — it resolves to "everything except objects carrying the exclude label". This
-// single fold makes every core leg that resolves through this method honor the veto with one edit.
-//
-// A non-nil but malformed user selector is unlikely (the field is typed and the CRD schema validates
-// most of it at admission), but the conversion can still fail, so the error is returned rather than
-// swallowed.
-func (s *Snapshot) ResolveResourceSelector() (labels.Selector, error) {
-	excludeReq, err := labels.NewRequirement(ExcludeLabelKey, selection.DoesNotExist, nil)
-	if err != nil {
-		return nil, err
-	}
-	base := labels.Everything()
-	if s != nil && s.Spec.ResourceSelector != nil {
-		base, err = metav1.LabelSelectorAsSelector(s.Spec.ResourceSelector)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return base.Add(*excludeReq), nil
 }
 
 // +k8s:deepcopy-gen=true

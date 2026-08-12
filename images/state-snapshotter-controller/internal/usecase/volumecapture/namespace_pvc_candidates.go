@@ -36,7 +36,7 @@ func ListNamespacePVCTargets(ctx context.Context, c client.Reader, namespace str
 }
 
 // listNamespacePVCTargetsWithLabels lists all namespace PVCs once, returning both the volume capture targets
-// and their labels keyed by UID. The labels feed resourceSelector filtering from the same List call, so the
+// and their labels keyed by UID. The labels feed the exclude-veto filtering from the same List call, so the
 // residual leg does not issue a second namespace-wide List (avoiding a TOCTOU between two list snapshots).
 func listNamespacePVCTargetsWithLabels(ctx context.Context, c client.Reader, namespace string) ([]vcpkg.Target, map[string]labels.Set, error) {
 	if namespace == "" {

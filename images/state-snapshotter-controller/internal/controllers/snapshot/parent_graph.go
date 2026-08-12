@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -56,16 +55,6 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return changed, err == nil, err
 	}
 
-	// resourceSelector narrows which top-level/standalone domain source objects the root expands into child
-	// snapshots (nil = expand all). Resolved once here and threaded into every layer. Excluded objects are
-	// consistently dropped from the root manifest leg by the same selector. Nested domain children created by
-	// domain controllers are out of scope (see plan section 5a). A resolve error is surfaced as a graph
-	// planning failure by the caller (Ready=False/GraphPlanningFailed).
-	selector, err := nsSnap.ResolveResourceSelector()
-	if err != nil {
-		return false, false, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
-
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
@@ -79,7 +68,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -182,7 +171,6 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	nsSnap *storagev1alpha1.Snapshot,
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
-	selector labels.Selector,
 ) ([]storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	var excluded []storagev1alpha1.ExcludedObjectRef
@@ -215,22 +203,17 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
-		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped
-		// from EVERY leg (it also fails selector.Matches below, since ResolveResourceSelector folds the
-		// veto in) and is recorded as an explicit top-level drop. This is the root node's OWN direct
-		// exclusion, published into status.captureState.domainSpecificController.excludedRefs so the
-		// SnapshotContent aggregator folds it into the durable excludedRefs aggregate.
+		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped from EVERY
+		// leg — not expanded into a child here, and dropped from the root manifest leg by the same veto —
+		// and is recorded as an explicit top-level drop. This is the root node's OWN direct exclusion,
+		// published into status.captureState.domainSpecificController.excludedRefs so the SnapshotContent
+		// aggregator folds it into the durable excludedRefs aggregate.
 		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
 			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
 				APIVersion: mapping.SourceGVK.GroupVersion().String(),
 				Kind:       mapping.SourceGVK.Kind,
 				Name:       resource.GetName(),
 			})
-		}
-		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
-		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
-		// from the root manifest leg by the same selector, keeping the two legs consistent.
-		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
 			continue
 		}
 		covered, err := coverage.IsCovered(ctx, resource)

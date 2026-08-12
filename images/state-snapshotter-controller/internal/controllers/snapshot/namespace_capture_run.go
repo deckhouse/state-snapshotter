@@ -115,7 +115,7 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		}
 		plan, err := r.planNamespaceChildren(ctx, nsSnap, mappings)
 		if err != nil {
-			// A hard planning error (e.g. resourceSelector parse, coverage read): degrade Ready and requeue.
+			// A hard planning error (e.g. source list, coverage read): degrade Ready and requeue.
 			// The eager binder may already have created/bound the SnapshotContent shell, but status projection
 			// and steady-state Ready remain gated on phase>=Planned here — no dual-writer. (A source-list
 			// Forbidden is not an error here: planNamespaceChildren folds it into the non-terminal Forbidden

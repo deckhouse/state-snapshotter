@@ -81,14 +81,10 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, nil, err
 	}
 
-	// resourceSelector narrows the manifest base to objects matching the user selector (nil = capture all).
-	// The same selector is applied to the PVC and CSD legs so excluded objects are dropped consistently.
-	selector, err := rootNS.ResolveResourceSelector()
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
-
-	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, selector)
+	// The manifest base is the whole namespace minus the built-in exclusions, minus objects carrying the
+	// exclude veto label. The same veto selector filters the PVC leg, so a vetoed object is dropped from
+	// both and never half-captured.
+	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, storagev1alpha1.ExcludeVetoSelector())
 	if err != nil {
 		return nil, unreadable, err
 	}

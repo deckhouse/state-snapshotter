@@ -16,17 +16,42 @@ limitations under the License.
 
 package v1alpha1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+)
 
 // ExcludeLabelKey is the absolute snapshot veto label. Any namespaced object carrying this label key
 // (the value is ignored, matching Velero's backup.velero.io/exclude-from-backup convention) is excluded
-// from EVERY snapshot, unconditionally: it is honored independently of spec.resourceSelector and at every
-// level of the snapshot tree. Recursion is intrinsic and free — the check is local at each enumeration
-// point: a labeled parent's subtree is never expanded, and a labeled child drops out alone.
+// from EVERY snapshot, unconditionally, at every level of the snapshot tree. Recursion is intrinsic and
+// free — the check is local at each enumeration point: a labeled parent's subtree is never expanded, and
+// a labeled child drops out alone.
 //
 // This is the single exported source of truth for the veto key, reused by the core, the SDK, and domain
 // controllers; there must be no hardcoded string duplicates elsewhere.
 const ExcludeLabelKey = APIGroup + "/exclude"
+
+// excludeVetoSelector is built once at package init. ExcludeLabelKey is a compile-time constant that is a
+// valid label key and DoesNotExist takes no values, so the requirement cannot fail to build; a failure
+// would mean the constant itself became malformed, and that must stop the process (and every test binary)
+// rather than silently degrade the veto into "match everything".
+var excludeVetoSelector = func() labels.Selector {
+	req, err := labels.NewRequirement(ExcludeLabelKey, selection.DoesNotExist, nil)
+	if err != nil {
+		panic("malformed exclude veto label key " + ExcludeLabelKey + ": " + err.Error())
+	}
+	return labels.NewSelector().Add(*req)
+}()
+
+// ExcludeVetoSelector returns the label selector every list-based capture leg (namespace manifests, PVC
+// candidates) filters with: everything EXCEPT objects carrying ExcludeLabelKey. It is deliberately NOT
+// labels.Everything() — an empty selector would capture vetoed objects too. Enumeration legs that must
+// also RECORD what they dropped check the label directly instead, so the drop lands in excludedRefs.
+//
+// The returned selector is shared and read-only (Selector.Add does not mutate its receiver), so callers
+// must only match against it.
+func ExcludeVetoSelector() labels.Selector { return excludeVetoSelector }
 
 // LabelDeleteProtected is the canonical authoritative protection state for the unified snapshot tree.
 // It is NOT a diagnostic marker: it is the single source of truth the

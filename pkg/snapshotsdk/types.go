@@ -45,7 +45,7 @@ type ExcludedObjectRef = storagev1alpha1.ExcludedObjectRef
 
 // ExcludeLabelKey is the absolute snapshot veto label (re-exported from the api module — one source of
 // truth). Any object carrying this key (value ignored) is excluded from every snapshot, at every level of
-// the tree, independently of spec.resourceSelector. Domain enumerators MUST partition their candidate
+// the tree. Domain enumerators MUST partition their candidate
 // source objects with PartitionExcluded: build children from kept, record excluded into
 // DomainCaptureState.ExcludedRefs (published to status.captureState.domainSpecificController.excludedRefs).
 const ExcludeLabelKey = storagev1alpha1.ExcludeLabelKey
