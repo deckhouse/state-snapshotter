@@ -68,9 +68,14 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 			_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}})
 		})
 
-		b := binding("pvc-a")
-		sc.Status = storagev1alpha1.SnapshotContentStatus{Data: &b}
-		Expect(k8sClient.Status().Update(ctx, sc)).To(Succeed())
+		// k8sClient is the manager's cached client, so the Get can miss a just-created object, and
+		// SnapshotContentController stamps its finalizer as soon as it sees one — retry through both.
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sc), sc)).To(Succeed())
+			b := binding("pvc-a")
+			sc.Status = storagev1alpha1.SnapshotContentStatus{Data: &b}
+			g.Expect(k8sClient.Status().Update(ctx, sc)).To(Succeed())
+		}).Should(Succeed())
 	})
 
 	// Dropping a field from the Go type is only half of removing it: while the generated CRD still declares the
