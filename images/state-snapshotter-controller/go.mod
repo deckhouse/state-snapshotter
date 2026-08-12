@@ -1,7 +1,6 @@
 module github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller
 
 go 1.26.5
-
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/state-snapshotter/lib/go/common v0.0.0-00010101000000-000000000000
