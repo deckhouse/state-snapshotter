@@ -2,7 +2,7 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://openvex.dev/docs/public/vex-state-snapshotter-state-snapshotter-controller",
   "author": "Deckhouse <contact@deckhouse.io>",
-  "version": 1,
+  "version": 2,
   "statements": [
     {
       "vulnerability": {
@@ -16,7 +16,20 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the state-snapshotter-controller binary golang.org/x/crypto is pulled in transitively only by the embedded aggregated apiserver (internal/api -> k8s.io/apiserver/pkg/server/options/encryptionconfig -> golang.org/x/crypto/nacl/secretbox and golang.org/x/crypto/hkdf for encryption-at-rest, and k8s.io/apiserver/pkg/server -> golang.org/x/crypto/cryptobyte for TLS); `go mod why golang.org/x/crypto/openpgp` reports the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-gcjh-h69q-9w9g"
+      },
+      "products": [
+        {
+          "@id": "pkg:golang/github.com/google/cel-go@v0.22.0"
+        }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "Advisory covers cel-go's ext.NativeTypes and ext.ParseStructTag(s), which may expose unexported struct fields to CEL expressions. state-snapshotter-controller never builds a CEL environment of its own: cel-go is pulled in transitively by the embedded aggregated apiserver (internal/api -> k8s.io/apiserver/pkg/server -> k8s.io/apiserver/pkg/admission/plugin/policy/mutating -> github.com/google/cel-go/cel), and no package in the binary's dependency graph calls ext.NativeTypes, ext.ParseStructTag or ext.ParseStructTags. Accordingly the linker prunes them: `go tool nm` on the built binary reports no github.com/google/cel-go/ext.NativeTypes* or ext.ParseStructTag* symbol, so the vulnerable code is neither reachable nor present. The advisory is fixed only in cel-go 0.29.0 (vulnerable range >= 0.22.0, <= 0.28.1), whose ext.TwoVarComprehensions signature no k8s.io/apiserver release below v0.36 compiles against, so the finding cannot be resolved without moving the module to k8s 0.36 and controller-runtime 0.24 — tracked separately."
     }
   ],
-  "timestamp": "2026-07-20T00:00:00Z"
+  "timestamp": "2026-08-11T00:00:00Z"
 }
