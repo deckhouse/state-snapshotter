@@ -37,6 +37,9 @@ const (
 	importLeafAPIVer   = importLeafGroup + "/v1alpha1"
 	importLeafObjName  = "disk-snap"
 	importDataImportNS = projTestNS
+	// importDataImportName is the single DataImport every import-projection fixture creates; tests that
+	// reap it mid-flight delete by this identity.
+	importDataImportName = "di-1"
 	// importScratchStorageClass is the class a PopulateData DataImport stages the imported bytes into
 	// (spec.storageParams.storageClassName) — the authoritative import StorageClass mapping. It differs from
 	// the capture fixture's PVC class ("sc-a") so a test cannot pass by picking up the wrong source.
@@ -76,7 +79,7 @@ func importDataImportForLeafWithVolumeData(vscName, volumeMode, fsType string) *
 	di := &unstructured.Unstructured{}
 	di.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"})
 	di.SetNamespace(importDataImportNS)
-	di.SetName("di-1")
+	di.SetName(importDataImportName)
 	_ = unstructured.SetNestedField(di.Object, snapshot.DataImportModePopulateData, "spec", "mode")
 	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
 		"apiVersion": importLeafAPIVer, "kind": importLeafKind, "name": importLeafObjName,
@@ -672,5 +675,94 @@ func setVSCRestoreSize(t *testing.T, cl client.Client, vscName string, bytes int
 	}
 	if err := cl.Update(context.Background(), vsc); err != nil {
 		t.Fatalf("update VolumeSnapshotContent %s: %v", vscName, err)
+	}
+}
+
+// TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize pins the reap edge of the
+// same temporal hole the size-gated latch closes: the DataImport vanishes (idle TTL, GC, manual delete
+// of a "finished" import) AFTER the artifact publish but BEFORE the driver reports restoreSize. The
+// no-DataImport exit must not re-latch the incomplete binding: it has to keep publishing from the
+// published copy so the enricher backfills the size from the live VolumeSnapshotContent — otherwise
+// every later pass (including the VSC watch wake-up that delivers restoreSize) takes the same exit and
+// status.data keeps an empty size for good while the content goes Ready over it. The reap ordering is
+// the test: with the DataImport alive the size-gated latch already covers this hole.
+func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t *testing.T) {
+	ctx := context.Background()
+	r, cl := newImportProjectionFixtureWithArtifact(t, projContentTyped(), projVSCUnowned())
+	owner := importOwnerLeaf()
+
+	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("first pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || !requeue {
+		t.Fatalf("a fresh publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if published := projContentData(t, cl); published.Size != "" {
+		t.Fatalf("the artifact reports no restoreSize yet, so the published size must be empty, got %q", published.Size)
+	}
+
+	// The DataImport is reaped between the artifact publish and the driver reporting the size.
+	// Deleted by identity: the payload is irrelevant to a Delete, only {GVK, namespace, name} matter.
+	reaped := &unstructured.Unstructured{}
+	reaped.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"})
+	reaped.SetNamespace(importDataImportNS)
+	reaped.SetName(importDataImportName)
+	if err := cl.Delete(ctx, reaped); err != nil {
+		t.Fatalf("delete the DataImport (reap): %v", err)
+	}
+
+	// Size still unreported and no DataImport: the leg must NOT latch, must not disturb the published
+	// metadata, and must not churn (the re-publish rebuilds an equal binding; publish is a no-op on it).
+	rvWaiting := importContentResourceVersion(t, cl)
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("reaped waiting pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("a reaped DataImport with published data is a steady state, not a fault, got termReason=%q", termReason)
+	}
+	if !requeue {
+		t.Fatal("the leg latched an incomplete status.data after the DataImport reap; nothing would ever backfill the size and restore/export size the volume from that field")
+	}
+	waiting := projContentData(t, cl)
+	if waiting.FsType != importObservedFsType || waiting.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
+		waiting.StorageClassName != importScratchStorageClass {
+		t.Fatalf("a waiting pass without a DataImport must preserve the published import metadata: %#v", waiting)
+	}
+	if got := importContentResourceVersion(t, cl); got != rvWaiting {
+		t.Fatalf("a pass waiting for the size rewrote status.data (churn): resourceVersion %q -> %q", rvWaiting, got)
+	}
+
+	// The driver reports the size only now — with no DataImport left to attest anything.
+	setVSCRestoreSize(t, cl, projTestVSCName, 524288000)
+
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("backfill pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || !requeue {
+		t.Fatalf("the backfilling publish must requeue and not be terminal, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	published := projContentData(t, cl)
+	if published.Size != "500Mi" {
+		t.Fatalf("the size must be backfilled from the artifact even though the DataImport is gone, got %q", published.Size)
+	}
+	if published.FsType != importObservedFsType || published.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
+		published.StorageClassName != importScratchStorageClass {
+		t.Fatalf("the backfill must not disturb the import metadata the published copy carries: %#v", published)
+	}
+
+	// Complete now: the latch closes and a latched pass writes nothing.
+	rvLatched := importContentResourceVersion(t, cl)
+	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	if err != nil {
+		t.Fatalf("latched pass: reconcileDataLegProjection: %v", err)
+	}
+	if termReason != "" || requeue {
+		t.Fatalf("a fully published leg must latch after the backfill, got requeue=%v termReason=%q", requeue, termReason)
+	}
+	if got := importContentResourceVersion(t, cl); got != rvLatched {
+		t.Fatalf("a latched pass rewrote status.data (churn): resourceVersion %q -> %q", rvLatched, got)
 	}
 }

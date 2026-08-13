@@ -63,13 +63,16 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 		return false, "", "", lErr
 	}
 	if treason != "" {
-		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator only
-		// holds pending (keeps a prior latched publish if any, otherwise requeues until it resolves).
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator never
+		// trusts any of the ambiguous DataImports as authority — it requeues pre-publish, keeps a complete
+		// published binding, and finishes an incomplete one from the published copy alone.
+		return r.completeOrKeepPublishedImportLeg(ctx, contentName)
 	}
 	if di == nil {
-		// Pre-publish: DataImport not visible yet -> requeue. Post-publish: keep the latched status.data.
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		// Pre-publish: DataImport not visible yet -> requeue. Post-publish: keep a COMPLETE latched
+		// status.data; an INCOMPLETE one keeps publishing from the published copy so the reaped DataImport
+		// does not freeze the size gap (see completeOrKeepPublishedImportLeg).
+		return r.completeOrKeepPublishedImportLeg(ctx, contentName)
 	}
 
 	binding, ready, dtreason, _ := BuildImportDataBinding(di, owner)
@@ -90,8 +93,9 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// The volume metadata of an imported volume is carried only by the DataImport (its StorageClass in the
 	// spec, its volumeMode and the filesystem it was written onto in the status); the aggregator is the single
 	// writer that projects it into the content, and the leaf mirrors then copy the content verbatim. Unlike the
-	// shared bound-VSC branch, this one needs no fallback to the published copy for an unresolved DataImport:
-	// it has already returned above when di == nil, keeping the latched status.data untouched.
+	// shared bound-VSC branch, this one needs no fallback to the published copy HERE: the unresolved-DataImport
+	// case has already been handled above (completeOrKeepPublishedImportLeg keeps a complete binding and
+	// finishes an incomplete one from the published copy).
 	importMeta := importVolumeMetadataFromDataImport(di)
 
 	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the artifact,
@@ -115,6 +119,44 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 		return false, "", "", nil
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding}, importMeta)
+	return requeue, "", "", err
+}
+
+// completeOrKeepPublishedImportLeg handles the generic-import data leg when no single live DataImport
+// attests it any more (not created yet, reaped by its idle TTL after a completed import, or ambiguous):
+// pre-publish it requeues until one shows up; a COMPLETE published binding is kept latched untouched;
+// an INCOMPLETE one — empty size, the DataImport vanished between the artifact publish and the driver
+// reporting restoreSize — keeps publishing, rebuilt from the published copy itself, so the enricher
+// backfills the durable size from the live VolumeSnapshotContent named by the published artifactRef.
+//
+// Without the incomplete branch a bare "content has data -> keep" exit re-latched the size gap forever:
+// every later pass — including the VSC watch wake-up that delivers restoreSize — took the same exit, the
+// content went Ready with an empty size (readiness gates on readyToUse, not size), and an empty
+// volumeMode would fail-close export for good. The published copy is the only surviving record of the
+// import volume metadata (the same contract importVolumeMetadataFromPublished states), and rebuilding
+// the binding from {sourceRef, artifactRef} of the published copy preserves the artifact identity —
+// including the uid an earlier publish already enriched — instead of re-deriving it from anything live.
+func (r *SnapshotContentController) completeOrKeepPublishedImportLeg(ctx context.Context, contentName string) (requeue bool, termReason string, termMessage string, err error) {
+	content := &storagev1alpha1.SnapshotContent{}
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+		return false, "", "", cErr
+	}
+	published := content.Status.Data
+	if published == nil {
+		// Pre-publish: nothing recorded yet -> requeue until a DataImport becomes visible.
+		return true, "", "", nil
+	}
+	if published.Size != "" {
+		// Post-publish and complete: keep the latched status.data (a reaped DataImport with published
+		// data is the normal steady state of a finished import, not a fault).
+		return false, "", "", nil
+	}
+	binding := storagev1alpha1.SnapshotDataBinding{
+		SourceRef:   published.SourceRef,
+		ArtifactRef: published.ArtifactRef,
+	}
+	requeue, err = r.publishDataBindings(ctx, contentName,
+		[]storagev1alpha1.SnapshotDataBinding{binding}, importVolumeMetadataFromPublished(published))
 	return requeue, "", "", err
 }
 

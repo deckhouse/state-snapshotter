@@ -1698,7 +1698,46 @@ func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind,
 	if err := waitImportedLeafVolumeData(ctx, ns, kind, leafName, real, timeout); err != nil {
 		return fmt.Errorf("imported leaf %s/%s did not converge back to its real volume metadata: %w", kind, leafName, err)
 	}
+	// The durable size is the fourth field the reap window can freeze, and the three metadata fields
+	// above cannot see that freeze: they are published together with the artifact, while the size lands
+	// only when the driver reports restoreSize — a DataImport reaped in between must not latch the gap
+	// shut (restore/export size the target PVC from this field). Asserted on both sides of the mirror.
+	if err := waitImportedLeafDurableSize(ctx, gvr, ns, kind, leafName, contentName, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s: %w", kind, leafName, err)
+	}
 	return nil
+}
+
+// waitImportedLeafDurableSize waits until both the SnapshotContent and the leaf mirror publish a
+// non-empty status.data.size. An empty size surviving here is the reap-window freeze: the data leg
+// published as soon as the artifact appeared, the DataImport was reaped before the driver reported
+// restoreSize, and nothing ever backfilled the field.
+func waitImportedLeafDurableSize(ctx context.Context, gvr schema.GroupVersionResource, ns, kind, leafName, contentName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		content, cErr := getResource(ctx, snapshotContentGVR, "", contentName)
+		leaf, lErr := getResource(ctx, gvr, ns, leafName)
+		switch {
+		case cErr != nil:
+			last = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+		case lErr != nil:
+			last = fmt.Sprintf("get %s/%s: %v", kind, leafName, lErr)
+		default:
+			contentSize, _, _ := unstructured.NestedString(content.Object, "status", "data", "size")
+			leafSize, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "size")
+			if contentSize != "" && leafSize != "" {
+				return nil
+			}
+			last = fmt.Sprintf("status.data.size is empty (content=%q, leaf=%q) — the durable size was never backfilled after the DataImport reap", contentSize, leafSize)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for a non-empty durable status.data.size: %s", last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // waitImportedLeafMirrorsProbeClass drives probeSC through the leaf's SnapshotContent and waits for it to
