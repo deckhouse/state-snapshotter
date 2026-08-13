@@ -6,8 +6,8 @@
 > snapshot controller through `pkg/snapshotsdk`. This is *how to use it*, not the normative
 > contract. The godoc in `pkg/snapshotsdk` is normative for the exact Go signatures and code-level
 > invariants; this README is **not normative**. The code-quality
-> contract is [`CLAUDE.md`](./CLAUDE.md). The reference implementation is the demo controllers in the
-> `sds-unified-snapshots-poc` repo (`images/domain-controller/internal/controllers/demo`).
+> contract is [`CLAUDE.md`](./CLAUDE.md). The reference implementation is the demo domain controller
+> shipped as the `sds-unified-snapshots-poc` module (maintained in its own repository).
 >
 > SDK v1 scope is **capture-only** (snapshot planning: child snapshots + data capture +
 > manifest capture + lifecycle barriers). Restore is a separate sanctioned boundary
@@ -672,7 +672,7 @@ VM Snapshot
 **One snapshot node = at most one data capture (one PVC).** If the domain has several PVCs, that
 is **not** several `DataRef`s but several **child** snapshot nodes (each with its single PVC).
 
-The canonical model is **one logical data capture per snapshot** (Variant A, cardinality ≤1; see
+The canonical model is **one logical data capture per snapshot** (cardinality ≤1; see
 `api/storage/v1alpha1` `SnapshotContent.dataRef` — it too is a single pointer). That is why the
 field is a single pointer, not a slice:
 
@@ -761,7 +761,7 @@ case snapshotsdk.CaptureOutcomeCaptured:
 case snapshotsdk.CaptureOutcomeFailed:
 	// The core surfaced a terminal Ready reason (own manifest/volume leg, or a bubbled child failure).
 	// The domain does NOT re-drive it into phase=Failed — turning a core-owned leg failure into a
-	// terminal is the core's job (Variant A). Stop; requeuing would only spin.
+	// terminal is the core's job. Stop; requeuing would only spin.
 	// outcome.Reason / outcome.Message carry the terminal detail.
 	return ctrl.Result{}, nil
 default: // CaptureOutcomeCapturing
@@ -973,5 +973,5 @@ Take the demo implementation as a starting point and adapt it to your type:
    `virtualmachinesnapshot_controller.go` (a parent with children, manifest-only) — the reconcile
    skeleton.
 
-This is the reference implementation: the demo controllers in the `sds-unified-snapshots-poc` repo
+This is the reference implementation: the demo controllers of the `sds-unified-snapshots-poc` module
 are deliberately kept as executable documentation of the SDK.

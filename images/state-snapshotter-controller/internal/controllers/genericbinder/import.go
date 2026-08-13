@@ -47,7 +47,7 @@ const importContentPollInterval = 5 * time.Second
 // snapshot CRDs signal it with the enum spec.mode: Import (parity with Snapshot.IsImportMode / domain
 // IsImportMode); the shared helper reads the same enum off the extended CSI VolumeSnapshot fork (its
 // CSI-shaped VolumeSnapshot fork. An import leaf is materialized from the uploaded payload and — for
-// data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef),
+// data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.snapshotRef),
 // not from a name carried on the leaf.
 func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 	return usecase.IsUnstructuredImportMode(obj)
@@ -210,7 +210,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	// snapshot or root Snapshot) has only manifests + children, so it skips the data leg entirely —
 	// otherwise it would poll forever for a DataImport that never exists.
 	if r.GVKRegistry.RequiresDataArtifact(gvk.Kind) {
-		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.targetRef
+		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.snapshotRef
 		// points at this leaf (exactly one; >=2 is fail-closed).
 		di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, obj)
 		if lErr != nil {

@@ -59,7 +59,7 @@ rules:
   - get
   - patch
   - update
-# Per-CR manifest read subresources. The whole-subtree /manifests aggregation was removed in C9: export
+# Per-CR manifest read subresources. The whole-subtree /manifests aggregation was removed: export
 # now walks the tree client-side and downloads each node's own manifests via /manifests-download.
 # The core group serves manifests-download / manifests-with-data-restoration ONLY for the core Snapshot
 # kind; domain snapshot kinds are addressed through their own aggregated group (see the demo group grant
@@ -79,7 +79,7 @@ rules:
 # serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). Concrete domain
 # groups/resources are NOT enumerated here: they are domain-specific and belong to the domain module that
 # ships them, so a domain module grants access to its own aggregated subresources in its own templates.
-# C8 connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
+# Connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
 # user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
 # import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
 - apiGroups:

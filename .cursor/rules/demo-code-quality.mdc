@@ -8,7 +8,7 @@ alwaysApply: false
 
 The snapshot SDK (`pkg/snapshotsdk`) is **executable architecture documentation / reference
 implementation**. New engineers read it instead of ADRs, and copy-paste it into new domain controllers
-(the reference demo domain controller itself now lives in the `sds-unified-snapshots-poc` repo). A reader
+(the reference demo domain controller itself ships as the separate `sds-unified-snapshots-poc` module, maintained in its own repository). A reader
 must, from this code alone and in ~30 minutes (no ADR / design doc), be able to explain the **happy path,
 the failure paths, the ownership boundaries, and the lifecycle** (the measurable bar — see §8). "It works"
 is not enough — it must be **impossible to misread**. These standards are therefore *stricter than

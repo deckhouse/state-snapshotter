@@ -74,7 +74,8 @@ const (
 
 	// DataExportModuleNamespace is the namespace of the storage-foundation module, whose DataExport
 	// controller resolves snapshot exports generically (no domain types compiled in). The DataExport/
-	// DataImport feature was absorbed from the former storage-volume-data-manager module.
+	// DataImport feature here is an independent implementation of the capability the
+	// storage-volume-data-manager module also ships; the two modules run side by side.
 	DataExportModuleNamespace = "d8-storage-foundation"
 
 	// DataExportControllerSAName is the ServiceAccount name of the storage-foundation DataExport/DataImport

@@ -126,7 +126,7 @@ rules:
   resources: ["snapshotcontents/subtree-manifest-identities"]
   verbs: ["get"]
 
-# VolumeCaptureRequest (storage-foundation): N5 PR-4 ensure/publish/delete per SnapshotContent
+# VolumeCaptureRequest (storage-foundation): ensure/publish/delete per SnapshotContent
 - apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -134,7 +134,7 @@ rules:
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
-# DataImport (storage-foundation): the import binder (C5) reads a leaf's DataImport
+# DataImport (storage-foundation): the import binder reads a leaf's DataImport
 # status.dataArtifactRef to populate SnapshotContent.dataRef on import. Read-only (the controller never
 # writes DataImport); the import-safe RBAC gate for *creating* DataImports lives on d8/user roles.
 - apiGroups: ["storage-foundation.deckhouse.io"]
@@ -142,7 +142,7 @@ rules:
   verbs: ["get", "list", "watch"]
 
 # VolumeSnapshotContent handoff after VCR publish (ownerRef -> SnapshotContent).
-# "delete" is required by the C5 teardown physical reclaim: an import VSC carries a second
+# "delete" is required by the import teardown physical reclaim: an import VSC carries a second
 # (DataImport-keeper) ownerRef, so deleting the SnapshotContent does NOT GC it — the controller must
 # flip deletionPolicy Retain->Delete (patch) and then explicitly delete the VSC so CSI reclaims the data.
 - apiGroups: ["snapshot.storage.k8s.io"]
@@ -150,7 +150,7 @@ rules:
   verbs: ["get", "list", "watch", "update", "patch", "delete"]
 
 # VolumeSnapshot (CSI): root namespace residual/orphan PVC capture creates standard VS leaves; the import
-# binder (C5) binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
+# binder binds extended VS carrying the spec.source.import marker. VolumeSnapshot is a BUILT-IN pair
 # (unifiedbootstrap.BuiltInVolumeSnapshotPair) — this static grant is its RBAC source of truth and does NOT
 # depend on any CustomSnapshotDefinition or the dynamic domain-RBAC hook. The hook grants core-side access
 # for CSD-registered GVRs; it does not grant permissions to the out-of-process storage-foundation domain SA.
@@ -186,7 +186,7 @@ rules:
 # statically in its own Helm templates.
 
 ---
-# Transient per-namespace capture role (Phase 5.1). This wildcard read-only ClusterRole is deployed with
+# Transient per-namespace capture role. This wildcard read-only ClusterRole is deployed with
 # the module but is NOT bound by any binding here: the 040-namespace-capture-rbac hook creates a namespaced
 # RoleBinding to it (subjects = controller SA + webhooks SA) ONLY in namespaces that currently host a
 # Snapshot still capturing the live namespace (root captureState.commonController.manifestCaptured != true
@@ -253,7 +253,7 @@ subjects:
     namespace: d8-{{ .Chart.Name }}
 
 ---
-# Aggregation layer (C7): the core aggregated apiserver delegates authentication to genericapiserver,
+# Aggregation layer: the core aggregated apiserver delegates authentication to genericapiserver,
 # which reads the k8s-managed front-proxy requestheader CA + allowed-names from
 # kube-system/extension-apiserver-authentication. Bind to the built-in auth-reader Role so the controller
 # SA can read that ConfigMap (canonical aggregated-apiserver pattern, least privilege).
@@ -273,7 +273,7 @@ subjects:
     namespace: d8-{{ .Chart.Name }}
 
 ---
-# Aggregation layer (C7): delegated authentication (TokenReview) and authorization (SubjectAccessReview)
+# Aggregation layer: delegated authentication (TokenReview) and authorization (SubjectAccessReview)
 # require the system:auth-delegator ClusterRole. genericapiserver uses it to validate bearer tokens and to
 # authorize each request against the kube-apiserver.
 apiVersion: rbac.authorization.k8s.io/v1

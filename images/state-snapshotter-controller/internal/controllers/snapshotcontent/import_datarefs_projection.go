@@ -32,7 +32,7 @@ import (
 // projectContentDataLegFromDataImport is the import twin of the capture data-leg projection (VCR / bound
 // VSC): it makes the aggregator the single writer of SnapshotContent.status.data for GENERIC import
 // leaves. A generic import leaf carries no live VCR — its volume artifact is
-// produced by a DataImport found by reverse-lookup (DataImport.spec.targetRef -> this leaf). Once the
+// produced by a DataImport found by reverse-lookup (DataImport.spec.snapshotRef -> this leaf). Once the
 // DataImport has produced its VolumeSnapshotContent the aggregator enriches, hands the VSC off to the
 // content (Retain + ownerRef), and publishes status.data. The binder retains ONLY the leaf-facing work
 // (terminal-reason surfacing on an unsupported artifact, and the status.data export mirror onto the leaf

@@ -120,7 +120,7 @@ type ManifestExclude interface {
 }
 
 // CaptureInspection exposes read-only condition views the domain uses to build its own Finished/wait/stop
-// logic (Variant A): the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
+// logic: the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
 // owning snapshot, and it bubbles a failed leg up the content tree as ChildrenFailed. The domain never
 // turns a core-owned leg failure into a terminal itself — it only READS these to time its consistency
 // actions and to stop requeuing once the core has surfaced a terminal outcome. A snapshot's OWN Ready is

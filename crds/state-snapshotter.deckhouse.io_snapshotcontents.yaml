@@ -382,7 +382,7 @@ spec:
               data:
                 description: |-
                   Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
-                  Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+                  Cardinality ≤1 by design: a node carries at most one data artifact; multiple volumes are
                   represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
                   It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
                   onto the namespaced snapshot's top-level status.data.

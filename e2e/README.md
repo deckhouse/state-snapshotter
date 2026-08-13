@@ -13,7 +13,7 @@ coexistence with the second `DataExport`/`DataImport` data plane shipped by
 The suite installs the `state-snapshotter` module together with the
 `sds-unified-snapshots-poc` module (the reference demo domain: demo controller +
 demo CRDs + demo CSDs the suite captures/restores against) on a nested Deckhouse
-cluster brought up by [storage-e2e](../../../../e2e/repos/storage-e2e), mirroring
+cluster brought up by [storage-e2e](https://github.com/deckhouse/storage-e2e), mirroring
 the structure of the `sds-elastic` e2e suite.
 
 Modules enabled on the nested cluster (see `tests/cluster_config.yml` for the full

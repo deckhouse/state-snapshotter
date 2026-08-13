@@ -256,7 +256,7 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 }
 
 // volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
-// VolumeCaptureRequest is deleted (durable-artifact contract, /).
+// VolumeCaptureRequest is deleted (durable-artifact contract).
 const volumeSnapshotContentRetainPolicy = "Retain"
 
 // EnsureVolumeSnapshotContentsOwnedByContent performs the durable-artifact handoff for each bound VSC:

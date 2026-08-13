@@ -216,7 +216,7 @@ type ChildCaptureState struct {
 }
 
 // VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at
-// most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
+// most one data artifact (cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
 // multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A nil
 // DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
 // name.

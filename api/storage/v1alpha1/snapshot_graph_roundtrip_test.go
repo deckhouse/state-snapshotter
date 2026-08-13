@@ -161,7 +161,7 @@ func TestSnapshotContentStatus_TargetGraphFields_JSONRoundTrip(t *testing.T) {
 		t.Fatal("legacy singular dataRef key must not be present in JSON (it was renamed to data)")
 	}
 	if _, ok := status["dataRefs"]; ok {
-		t.Fatal("plural dataRefs must not be present in JSON (Variant A: singular data)")
+		t.Fatal("plural dataRefs must not be present in JSON (the wire shape is the singular data field)")
 	}
 }
 

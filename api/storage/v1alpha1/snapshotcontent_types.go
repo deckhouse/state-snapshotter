@@ -112,7 +112,7 @@ type SnapshotDataArtifactRef struct {
 }
 
 // SnapshotDataBinding associates the single PVC source of a logical snapshot node with its captured data
-// artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE data binding; multiple
+// artifact. Cardinality is ≤1 by design: a SnapshotContent carries at most ONE data binding; multiple
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
 // It is self-contained ({sourceRef, artifactRef, volume metadata}) so the core can mirror it verbatim onto
 // the namespaced snapshot's top-level status.data (see the status-source descriptor).
@@ -192,7 +192,7 @@ type SnapshotContentStatus struct {
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
 	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
-	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+	// Cardinality ≤1 by design: a node carries at most one data artifact; multiple volumes are
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
 	// It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
 	// onto the namespaced snapshot's top-level status.data.
@@ -240,7 +240,7 @@ type SnapshotContentStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// DataList returns status.data as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
+// DataList returns status.data as a slice of length 0 or 1. The design keeps cardinality ≤1 on a
 // node, but the coverage/dedup/publish helpers stay generic over a slice; this bridge lets them iterate
 // the single binding without each call site special-casing the nil pointer.
 func (c *SnapshotContent) DataList() []SnapshotDataBinding {

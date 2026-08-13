@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots that
 // carry the unified enum spec.mode: Import (parity with every other snapshot kind; the fork CRD hosts the
-// field). The owning DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this
+// field). The owning DataImport is found by reverse-lookup (DataImport.spec.snapshotRef -> this
 // VolumeSnapshot), not named on the leaf. The forked snapshot-controller skips import-mode
 // VolumeSnapshots, so this common controller is the sole binder for them.
 //
@@ -130,7 +130,7 @@ func importVolumeSnapshotPredicate() predicate.Predicate {
 // isImportModeVolumeSnapshot reports whether an extended VolumeSnapshot is in IMPORT mode, signalled by
 // the unified enum spec.mode: Import (parity with every other state-snapshotter snapshot kind; the fork
 // CRD hosts the field). The owning DataImport is not named here; it is found by reverse-lookup
-// (DataImport.spec.targetRef).
+// (DataImport.spec.snapshotRef).
 func isImportModeVolumeSnapshot(u *unstructured.Unstructured) bool {
 	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
 	return mode == string(storagev1alpha1.SnapshotModeImport)
@@ -224,7 +224,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Reverse-lookup the DataImport that materializes this leaf's data leg: the import marker carries no
-	// name; DataImport.spec.targetRef points back at this VolumeSnapshot. Exactly one is required (>=2 is
+	// name; DataImport.spec.snapshotRef points back at this VolumeSnapshot. Exactly one is required (>=2 is
 	// fail-closed; none means d8 has not created it yet — poll).
 	di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, vs)
 	if lErr != nil {

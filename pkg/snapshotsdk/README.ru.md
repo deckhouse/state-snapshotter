@@ -6,7 +6,7 @@
 > snapshot-контроллером через `pkg/snapshotsdk`. Это «как пользоваться», а не нормативный контракт.
 > Норматив точных Go-сигнатур и инвариантов уровня кода — godoc в `pkg/snapshotsdk`; этот
 > README — **не норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
-> demo-контроллеры в репозитории `sds-unified-snapshots-poc` (`images/domain-controller/internal/controllers/demo`).
+> demo-контроллер домена, поставляемый модулем `sds-unified-snapshots-poc` (ведётся в отдельном репозитории).
 >
 > Скоуп SDK v1 — **capture-only** (планирование снапшота: дочерние снапшоты + захват данных + захват
 > манифестов + барьеры жизненного цикла).
@@ -649,7 +649,7 @@ VM Snapshot
 **Один snapshot-узел = максимум один захват данных (один PVC).** Если у домена несколько PVC — это **не**
 несколько `DataRef`, а несколько **дочерних** snapshot-узлов (каждый со своим единственным PVC).
 
-Каноническая модель — **один логический захват данных на снапшот** (Variant A, cardinality ≤1; см.
+Каноническая модель — **один логический захват данных на снапшот** (cardinality ≤1; см.
 `api/storage/v1alpha1` `SnapshotContent.dataRef` — там тоже единичный указатель). Поэтому поле — единичный
 указатель, а не слайс:
 
@@ -733,8 +733,8 @@ case snapshotsdk.CaptureOutcomeCaptured:
 	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 case snapshotsdk.CaptureOutcomeFailed:
 	// Core выставил терминальный Ready-reason (своя manifest/volume-нога или всплывший child-fail).
-	// Домен НЕ re-drive-ит это в phase=Failed — превращение core-owned отказа ноги в терминал — работа core
-	// (Variant A). Останавливаемся; requeue только крутил бы. outcome.Reason / outcome.Message несут детали.
+	// Домен НЕ re-drive-ит это в phase=Failed — превращение core-owned отказа ноги в терминал — работа core.
+	// Останавливаемся; requeue только крутил бы. outcome.Reason / outcome.Message несут детали.
 	return ctrl.Result{}, nil
 default: // CaptureOutcomeCapturing
 	return ctrl.Result{RequeueAfter: retry}, nil
@@ -937,5 +937,5 @@ return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
 2. `virtualdisksnapshot_controller.go` (лист с захватом данных PVC) **или**
    `virtualmachinesnapshot_controller.go` (родитель с детьми, manifest-only) — reconcile-скелет.
 
-Это и есть reference-реализация: demo-контроллеры в репозитории `sds-unified-snapshots-poc` намеренно держатся
+Это и есть reference-реализация: demo-контроллеры модуля `sds-unified-snapshots-poc` намеренно держатся
 как executable-документация SDK.

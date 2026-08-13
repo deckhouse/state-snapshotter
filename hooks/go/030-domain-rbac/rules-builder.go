@@ -41,7 +41,7 @@ import (
 //     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
-//     projection, co-owned via D4a.
+//     projection (status fields there are split between core and domain by the single-writer model).
 //
 // It still grants NO delete on the snapshot GVRs (child cleanup is ownerRef GC, not an explicit core
 // delete) and NO /finalizers — those remain the domain SA's. These resource names are domain-specific
