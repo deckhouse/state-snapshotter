@@ -612,7 +612,7 @@ func childDegradationSpecs() {
 			By("Degrading the tree by deleting a child snapshot's bound SnapshotContent")
 			nodes, err := walkSnapshotTree(ctx, ns, "e3-snap")
 			Expect(err).NotTo(HaveOccurred())
-			childNode, ok := firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			childNode, ok := firstVMSnapshotNode(nodes)
 			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot child")
 			childObj, err := getResource(ctx, demoVMSnapshotGVR, ns, childNode.name)
 			Expect(err).NotTo(HaveOccurred())

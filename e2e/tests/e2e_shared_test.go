@@ -39,7 +39,12 @@ import (
 	"sigs.k8s.io/yaml"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/storage-e2e/pkg/cluster"
+	// storage-e2e/pkg/cluster is deprecated in favour of pkg/e2e (e2e.Connect), where the cluster
+	// lifecycle is driven by the framework's bootstrap/remove commands. The deprecation notice keeps
+	// the package supported for suites that already import it, and this suite is one of them: it owns
+	// its cluster lifecycle here. Moving to pkg/e2e changes how the whole run is bootstrapped, so it
+	// is a standalone migration — that migration removes this suppression, no edit here can.
+	"github.com/deckhouse/storage-e2e/pkg/cluster" //nolint:staticcheck // deprecated package, see the note above
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
@@ -1650,8 +1655,8 @@ func setSnapshotContentStorageClass(ctx context.Context, contentName, class stri
 // (separate watch streams order nothing between resources). Seeing a stale di != nil it would find the
 // latch mismatched on the class and re-publish realSC over the probe. A one-shot probe would then never
 // be re-written and the wait would hang to its full timeout instead of failing with a reason.
-func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName string, real importedLeafVolumeData, timeout time.Duration) error {
-	realSC := real.StorageClassName
+func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName string, realData importedLeafVolumeData, timeout time.Duration) error {
+	realSC := realData.StorageClassName
 	gvr, ok := gvrForSnapshotKind(kind)
 	if !ok {
 		return fmt.Errorf("assertImportedLeafMirrorsAfterDataImportGone: unknown snapshot kind %q (%s)", kind, leafName)
@@ -1695,7 +1700,7 @@ func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind,
 	// observes the delete), and a re-publish rebuilds the binding from {sourceRef, artifactRef}. So this is
 	// where a volumeMode/fsType lost to any such re-publish surfaces, instead of travelling on into the
 	// restore/export legs unnoticed.
-	if err := waitImportedLeafVolumeData(ctx, ns, kind, leafName, real, timeout); err != nil {
+	if err := waitImportedLeafVolumeData(ctx, ns, kind, leafName, realData, timeout); err != nil {
 		return fmt.Errorf("imported leaf %s/%s did not converge back to its real volume metadata: %w", kind, leafName, err)
 	}
 	// The durable size is the fourth field the reap window can freeze, and the three metadata fields

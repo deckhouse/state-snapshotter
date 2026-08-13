@@ -59,10 +59,11 @@ func findManifestOfKind(objs []unstructured.Unstructured, kind string) (*unstruc
 	return nil, false
 }
 
-// firstNodeOfKind returns the first walked child snapshot node of the requested kind.
-func firstNodeOfKind(nodes []childRef, kind string) (childRef, bool) {
+// firstVMSnapshotNode returns the first walked child snapshot node that is a DemoVirtualMachineSnapshot —
+// the demo tree's only per-VM node, and the one every caller reaches for.
+func firstVMSnapshotNode(nodes []childRef) (childRef, bool) {
 	for _, n := range nodes {
-		if n.kind == kind {
+		if n.kind == "DemoVirtualMachineSnapshot" {
 			return n, true
 		}
 	}
@@ -126,7 +127,7 @@ func aggregatedAPISpecs() {
 			nodes, err := walkSnapshotTree(ctx, captured.namespace, captured.rootSnap)
 			Expect(err).NotTo(HaveOccurred())
 			var ok bool
-			vmSnapshot, ok = firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			vmSnapshot, ok = firstVMSnapshotNode(nodes)
 			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot node")
 		})
 
@@ -405,7 +406,7 @@ func aggregatedAPISpecs() {
 			By("Degrading the root: delete the child DemoVirtualMachineSnapshot CR while its content survives (ChildSnapshotDeleted)")
 			nodes, err := walkSnapshotTree(ctx, ns, degradedRoot)
 			Expect(err).NotTo(HaveOccurred())
-			child, ok := firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			child, ok := firstVMSnapshotNode(nodes)
 			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot child node")
 			// A child domain snapshot CR is delete-protected: use break-glass before this deliberate deletion
 			// so the degradation trigger can proceed while the guard remains enforced.
@@ -659,7 +660,7 @@ func aggregatedAPISpecs() {
 			Expect(rval).To(BeTrue(), "the root childrenSettled must be true once every direct child is terminal")
 
 			By("Asserting the DemoVirtualMachineSnapshot aggregator, when it has disk children, shows childrenSettled=true after the disks go terminal")
-			if vm, ok := firstNodeOfKind(descendants, "DemoVirtualMachineSnapshot"); ok {
+			if vm, ok := firstVMSnapshotNode(descendants); ok {
 				vmGVR, gok := gvrForSnapshotKind(vm.kind)
 				Expect(gok).To(BeTrue())
 				vmSnap, err := getResource(ctx, vmGVR, ns, vm.name)

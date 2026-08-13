@@ -177,18 +177,19 @@ func snapshotSourceStatusSchema() apiextensionsv1.JSONSchemaProps {
 
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
 // from graph built-ins and eligible CSD rows. Non-built-in domain pairs are intentionally CSD-gated here.
-func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
+// A CSD listing error is not fatal: it degrades the result to the built-in pairs alone, the same way
+// production bootstrap keeps the built-in graph usable while the CSD rows are unreadable.
+func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind) {
 	csdPairs, derr := csdregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
 	if derr != nil {
 		csdPairs = nil
 	}
 	merged := unifiedbootstrap.MergeBootstrapAndCSDPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), csdPairs)
-	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+	return unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		merged,
 		ctrl.Log.WithName("integration-unified-bootstrap"),
 	)
-	return snapGVKs, contentGVKs, nil
 }
 
 // integrationSnapshotGraphRegistryRefresh rebuilds the integration graph registry (same hook as production CSD→refresh).
@@ -196,10 +197,7 @@ func integrationSnapshotGraphRegistryRefresh(ctx context.Context) error {
 	if integrationGraphRegProvider == nil {
 		return fmt.Errorf("integration graph registry provider is nil")
 	}
-	snapGVKs, contentGVKs, err := integrationParallelSnapshotGraphGVKs(ctx)
-	if err != nil {
-		return err
-	}
+	snapGVKs, contentGVKs := integrationParallelSnapshotGraphGVKs(ctx)
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
 	if err != nil {
 		return err

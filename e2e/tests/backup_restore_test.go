@@ -315,7 +315,7 @@ func countDataManagerServerPods(ctx context.Context, storageManagerName string) 
 	return n, nil
 }
 
-func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Duration) (url, ca string, err error) {
+func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Duration) (url string, err error) {
 	deadline := time.Now().Add(timeout)
 	var last string
 	var polls int
@@ -326,9 +326,11 @@ func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Dura
 			volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
-				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
+				// The CA is not returned (the uploader trusts it through the pod's mounted bundle), but a
+				// Ready DataImport must publish one — an empty status.ca means the endpoint is not servable yet.
+				ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
 				if url != "" && volMode == "Block" && ca != "" {
-					return url, ca, nil
+					return url, nil
 				}
 				last = fmt.Sprintf("Ready=True but url/volumeMode/ca incomplete (url=%q volumeMode=%q ca=%t)", url, volMode, ca != "")
 			} else {
@@ -345,10 +347,10 @@ func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Dura
 			dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			dumpStuckDataImportDiagnostics(dctx, ns, name)
 			dcancel()
-			return "", "", fmt.Errorf("timeout waiting for DataImport %s/%s Ready; last: %s", ns, name, last)
+			return "", fmt.Errorf("timeout waiting for DataImport %s/%s Ready; last: %s", ns, name, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
-			return "", "", ctx.Err()
+			return "", ctx.Err()
 		}
 	}
 }
@@ -743,7 +745,7 @@ func collectDataLeaves(nodes []*importNode) []*importNode {
 
 func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode) error {
 	for _, leaf := range leaves {
-		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
+		url, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
 		if werr != nil {
 			return fmt.Errorf("DataImport %s Ready: %w", leaf.name, werr)
 		}

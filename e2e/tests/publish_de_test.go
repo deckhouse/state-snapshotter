@@ -603,10 +603,10 @@ func runExternalClientCertProbe(ctx context.Context, t curlPodTarget, rawURL str
 		// publish_external_http_test.go). The host->IP override folds in the masterIP `--resolve` role.
 		return localClientCertProbe(ctx, rawURL, certPEM, keyPEM)
 	}
-	if _, err := writePodFile(ctx, t, publishDECertPodFile, string(certPEM)); err != nil {
+	if err := writePodFile(ctx, t, publishDECertPodFile, string(certPEM)); err != nil {
 		return 0, err
 	}
-	if _, err := writePodFile(ctx, t, publishDEKeyPodFile, string(keyPEM)); err != nil {
+	if err := writePodFile(ctx, t, publishDEKeyPodFile, string(keyPEM)); err != nil {
 		return 0, err
 	}
 	code, err := clientCertProbeOnce(ctx, t, rawURL, "")
@@ -645,11 +645,11 @@ func clientCertProbeOnce(ctx context.Context, t curlPodTarget, rawURL, resolveAr
 
 // writePodFile materializes content to an arbitrary in-pod path via an exec argv value (never persisted in
 // a resource). Generalizes writeCAToPodFile (which targets the fixed CA path) for the client-cert probe.
-func writePodFile(ctx context.Context, t curlPodTarget, path, content string) (string, error) {
+func writePodFile(ctx context.Context, t curlPodTarget, path, content string) error {
 	script := `printf '%s' "$1" > ` + shQuote(path)
 	_, stderr, err := t.exec(ctx, []string{"sh", "-c", script, "sh", content})
 	if err != nil {
-		return "", fmt.Errorf("write %s into %s/%s: %w (stderr=%q)", path, t.ns, t.pod, err, stderr)
+		return fmt.Errorf("write %s into %s/%s: %w (stderr=%q)", path, t.ns, t.pod, err, stderr)
 	}
-	return path, nil
+	return nil
 }

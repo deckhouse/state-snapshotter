@@ -21,13 +21,14 @@ import (
 	"os"
 	"time"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // envDeleteGuard gates destructive delete-guard assertions. The policy itself always enforces protection;
@@ -87,7 +88,7 @@ func deleteGuardSpecs() {
 			nodes, err := walkSnapshotTree(ctx, ns, rootSnap)
 			Expect(err).NotTo(HaveOccurred())
 			var ok bool
-			childNode, ok = firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			childNode, ok = firstVMSnapshotNode(nodes)
 			if !ok && len(nodes) > 0 {
 				childNode, ok = nodes[0], true
 			}

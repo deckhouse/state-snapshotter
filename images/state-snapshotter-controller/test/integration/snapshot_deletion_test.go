@@ -21,6 +21,7 @@ package integration
 
 import (
 	"context"
+	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -190,7 +191,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 					return false
 				}
 
-				return contains(freshContent.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return slices.Contains(freshContent.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "Finalizer should be added")
 
 			// Verify PRECONDITION: SnapshotContent exists and has finalizer
@@ -478,7 +479,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - Deletion Path",
 					return false
 				}
 				boundDeleted, _, _ := unstructured.NestedBool(fresh.Object, "status", "boundSnapshotDeleted")
-				return boundDeleted && contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return boundDeleted && slices.Contains(fresh.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "pre-Planned deletion must latch boundSnapshotDeleted and RETAIN the content finalizer (no wedge; content is a separate object)")
 
 			// The Retain shell survives with its finalizer (recycle-bin clutter, not a wedge).

@@ -50,7 +50,12 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 
-	"github.com/deckhouse/storage-e2e/pkg/cluster"
+	// storage-e2e/pkg/cluster is deprecated in favour of pkg/e2e (e2e.Connect), where the cluster
+	// lifecycle is driven by the framework's bootstrap/remove commands. The deprecation notice keeps
+	// the package supported for suites that already import it, and this scenario is one of them: it
+	// owns its cluster lifecycle here. Moving to pkg/e2e changes how the whole run is bootstrapped, so
+	// it is a standalone migration — that migration removes this suppression, no edit here can.
+	"github.com/deckhouse/storage-e2e/pkg/cluster" //nolint:staticcheck // deprecated package, see the note above
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
@@ -752,7 +757,7 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				modSvdm, firingAlertNames(ctx))
 		})
 
-		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(ctx SpecContext) {
+		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(_ SpecContext) {
 			if !dataPlaneEnabled() {
 				Skip("sds-local-volume is only enabled for the data-plane steps (see phase B)")
 			}
