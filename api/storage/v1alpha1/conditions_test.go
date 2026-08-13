@@ -62,6 +62,34 @@ func TestDegradedReadyReasons_ExactMembership(t *testing.T) {
 	}
 }
 
+// TestTerminalReadyReasons_ExactMembership pins the catalog against silent drift, exactly like the
+// degraded-catalog pin below: UI and d8 branch on this set, so a change here is a contract change.
+// ArtifactMissing and DomainCaptureFailed are members on purpose: they originate on SnapshotContent,
+// but the Ready mirror copies them verbatim onto owner snapshot objects, so clients observe them.
+func TestTerminalReadyReasons_ExactMembership(t *testing.T) {
+	want := []string{
+		"ListFailed",
+		"ManifestCheckpointFailed",
+		"NamespaceNotFound",
+		"VolumeCaptureFailed",
+		ReasonArtifactMissing,
+		"DomainCaptureFailed",
+		"DuplicateCoveredPVCUID",
+		"ChildrenFailed",
+		ReasonGraphPlanningFailed,
+		ReasonCreateChildFailed,
+		ReasonChildSnapshotLost,
+	}
+	if len(TerminalReadyReasons) != len(want) {
+		t.Fatalf("TerminalReadyReasons must have exactly %d members, got %d: %v", len(want), len(TerminalReadyReasons), TerminalReadyReasons)
+	}
+	for _, reason := range want {
+		if _, ok := TerminalReadyReasons[reason]; !ok {
+			t.Fatalf("TerminalReadyReasons must contain %q", reason)
+		}
+	}
+}
+
 // TestDegradedAndTerminalReasonsDisjoint proves no reason is classified as both degraded and terminal.
 func TestDegradedAndTerminalReasonsDisjoint(t *testing.T) {
 	for reason := range DegradedReadyReasons {
