@@ -105,7 +105,6 @@ rules:
   - watch
 # Domain inventory and generated child snapshots are NOT granted here: those resource names are
 # domain-specific, so the module that ships a domain grants access to its own CRs in its own templates.
-  - delete
 - apiGroups:
   - state-snapshotter.deckhouse.io
   resources:

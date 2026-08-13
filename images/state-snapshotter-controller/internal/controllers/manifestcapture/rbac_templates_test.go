@@ -81,21 +81,116 @@ func TestAdminKubeconfigRBACIsManualReadPath(t *testing.T) {
 	}
 }
 
+// extractYAMLRuleBlock returns every rules[] entry of the (possibly Helm-templated) RBAC manifest
+// that lists the given resource under its resources:, with comment lines dropped. Raw substring
+// search over the whole file is NOT usable here, for two reasons that already produced a missed
+// defect each: resources are also named inside header comments (the first match landed there and
+// the scanned "block" was comment text), and a verb line that follows a comment still belongs to
+// the preceding rule for the YAML parser (an orphaned "- delete" survived behind a comment while
+// this guard stayed green).
 func extractYAMLRuleBlock(content, resource string) string {
-	idx := strings.Index(content, resource)
-	if idx < 0 {
-		return ""
+	var blocks []string
+	var current []string
+	flush := func() {
+		if len(current) > 0 && ruleGrantsResource(current, resource) {
+			blocks = append(blocks, strings.Join(current, "\n"))
+		}
+		current = nil
 	}
-	// Walk back to apiGroups and forward until next apiGroups or end of rules.
-	start := strings.LastIndex(content[:idx], "apiGroups:")
-	if start < 0 {
-		start = idx
+	inRule := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue // a comment never carries a grant and never terminates the rule around it
+		}
+		switch {
+		case strings.HasPrefix(line, "- apiGroups:"):
+			flush()
+			inRule = true
+			current = append(current, line)
+		case inRule && (trimmed == "" || strings.HasPrefix(line, "  ")):
+			current = append(current, line)
+		default: // ---, apiVersion:, roleRef:, ... — the rules list is over
+			flush()
+			inRule = false
+		}
 	}
-	end := strings.Index(content[idx:], "\n- apiGroups:")
-	if end < 0 {
-		return content[start:]
+	flush()
+	return strings.Join(blocks, "\n")
+}
+
+// ruleGrantsResource reports whether the rule (given as its comment-free lines) names the resource
+// under its resources: key. Exact item match, so "snapshots" does not match "snapshots/status".
+func ruleGrantsResource(lines []string, resource string) bool {
+	inResources := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "resources:":
+			inResources = true
+		case strings.HasSuffix(trimmed, ":"):
+			inResources = false
+		case inResources && trimmed == "- "+resource:
+			return true
+		}
 	}
-	return content[start : idx+end]
+	return false
+}
+
+// The two fixtures below pin the extractor against the exact failure modes that let a live defect
+// through: a verb smuggled in after a comment must stay inside the rule, and a resource named only
+// in a comment must not produce a block at all.
+
+func TestExtractYAMLRuleBlockKeepsVerbAfterComment(t *testing.T) {
+	const planted = `rules:
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+  - list
+  - watch
+# a comment used to terminate the scanned block right here
+  - delete
+- apiGroups:
+  - other.io
+  resources:
+  - others
+  verbs:
+  - get
+`
+	block := extractYAMLRuleBlock(planted, "objectkeepers")
+	if block == "" {
+		t.Fatal("expected the objectkeepers rule to be extracted")
+	}
+	if !strings.Contains(block, "- delete") {
+		t.Fatal("a verb following a comment belongs to the rule and must be visible to the guard")
+	}
+	if strings.Contains(block, "others") {
+		t.Fatal("the neighboring rule must not leak into the extracted block")
+	}
+}
+
+func TestExtractYAMLRuleBlockIgnoresCommentMentions(t *testing.T) {
+	const fixture = `# Do NOT grant objectkeepers patch/update (comment only).
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+`
+	block := extractYAMLRuleBlock(fixture, "objectkeepers")
+	if strings.Contains(block, "patch") || strings.Contains(block, "update") {
+		t.Fatal("comment text must not leak into the extracted rule block")
+	}
+	if !strings.Contains(block, "- get") {
+		t.Fatal("the real rule body must be extracted")
+	}
+	if got := extractYAMLRuleBlock("# only a comment names objectkeepers\n", "objectkeepers"); got != "" {
+		t.Fatalf("a comment-only mention must not produce a block, got %q", got)
+	}
 }
 
 // TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: no static RBAC template may
