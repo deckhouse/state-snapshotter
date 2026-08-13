@@ -53,6 +53,29 @@ The model is **default-include**: every namespaced object in the target namespac
 
 > There is no special "exclude objects managed by Deckhouse" rule. Deckhouse-managed objects are filtered out by the same generic signals (controller-owned, control-plane noise, or module machinery). Everything else in the namespace — including resources you merely *configured* on top of modules — is treated as desired-state and captured.
 
+## Excluding objects from a snapshot
+
+A `Snapshot` captures its whole namespace. To keep an object out of the capture, label it with `state-snapshotter.deckhouse.io/exclude` **before** creating the `Snapshot` — a capture is one-shot, so labeling an object later does not change an existing snapshot:
+
+```shell
+d8 k -n myns label configmap scratch-cache state-snapshotter.deckhouse.io/exclude=""
+```
+
+The label's **presence** is what excludes the object; the value is ignored (`""`, `true` — anything works).
+
+The exclusion works at every level of the snapshot tree:
+
+- **A plain namespaced object** (`ConfigMap`, `Secret`, ...) is dropped from the captured namespace manifests.
+- **A domain resource** (for example a `VirtualMachine`) is not expanded into a child snapshot at all — its whole subtree is skipped.
+- **An object inside a domain subtree** (for example one `VirtualDisk` of a captured VM, or a companion `Secret`) is dropped alone; the owning node is still captured.
+- **A `PersistentVolumeClaim`** is not captured by the volume-data leg, and a user-created CSI `VolumeSnapshot` over an excluded PVC is left as a plain CSI snapshot — the module does not adopt it.
+
+The exclusion is **not inherited**: excluding a domain resource removes its snapshot subtree, but objects the other capture legs see on their own — its `PersistentVolumeClaim`s, companion objects — keep being captured unless they carry the label themselves.
+
+An excluded object is **recorded, not silently dropped**: the excluding snapshot node lists it in `status.captureState.domainSpecificController.excludedRefs` (exact `apiVersion`/`kind`/`name`), and the bound `SnapshotContent` aggregates the whole tree's exclusions in `status.excludedRefs`. Check there to confirm the exclusion took effect.
+
+> Like the built-in exclusions above, the label can only **narrow** the capture. There is no per-snapshot include list: a capture is always "the namespace minus exclusions". To capture different subsets, use separate namespaces.
+
 ## Creating a Snapshot
 
 Create a `Snapshot` in the namespace you want to capture. The default mode (no `spec.source`) performs dynamic namespace capture:
