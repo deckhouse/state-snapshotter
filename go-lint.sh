@@ -34,7 +34,11 @@ section_end() {
     fi
 }
 
-linter_version="v1.64.5"
+# Keep in sync with the golangci-lint version installed by the Go linter action
+# used in .github/workflows/go_checks.yaml: a local run has to read the same
+# .golangci.yaml and enable the same set of linters as CI does. The config is
+# written in the v2 schema, which only v2 binaries can read.
+linter_version="v2.9.0"
 # golangci-lint must be built with a Go toolchain >= the modules' `go` directive
 # (go.mod targets 1.26.x); otherwise it refuses to load with "the Go language
 # version used to build golangci-lint is lower than the targeted Go version".
@@ -46,7 +50,7 @@ linter_bin="$linter_bin_dir/golangci-lint"
 section_start "install_linter" "Installing golangci-lint@$linter_version with $linter_toolchain"
 if [ ! -x "$linter_bin" ]; then
     mkdir -p "$linter_bin_dir"
-    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/cmd/golangci-lint@$linter_version"; then
+    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version"; then
         section_end "install_linter"
         exit 1
     fi
