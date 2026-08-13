@@ -37,9 +37,11 @@ var dataImportListGVK = schema.GroupVersionKind{Group: "storage-foundation.deckh
 // spec.snapshotRef points at the leaf (apiVersion/kind/name; namespace implicit = leaf namespace), so the
 // binder lists DataImports in the leaf namespace and matches snapshotRef against the leaf identity. Matching
 // is by GroupKind — the leaf's own GVK carries its group and kind, and snapshotRef.apiVersion carries the
-// referenced group/version, so no RESTMapping is needed. CreatePVC DataImports carry no snapshotRef and
-// never match. It is the single source of the list+match+fail-closed semantics shared by the generic binder
-// (domain data leaves) and the VolumeSnapshot import binder (F2).
+// referenced group/version, so no RESTMapping is needed. CreatePVC DataImports never match: they carry no
+// snapshotRef by the producing module's CEL rule, and the lookup additionally filters on spec.mode itself,
+// so they could not match even if that foreign-owned rule weakened. It is the single source of the
+// list+match+fail-closed semantics shared by the generic binder (domain data leaves) and the
+// VolumeSnapshot import binder.
 //
 // Outcomes:
 //   - di != nil: exactly one DataImport targets the leaf;
@@ -70,6 +72,15 @@ func FindDataImportForLeaf(ctx context.Context, c client.Client, leaf *unstructu
 	count := 0
 	for i := range list.Items {
 		item := &list.Items[i]
+		if !isPopulateDataImport(item) {
+			// Only mode PopulateData materializes a snapshot node's data leg. A CreatePVC DataImport
+			// cannot legally carry spec.snapshotRef — but the CEL rule enforcing that lives in the
+			// producing module's CRD, another repository. Filtering by the CRD's own discriminator keeps
+			// this lookup fail-closed on our side, consistently with the Import* metadata readers below:
+			// if that foreign rule ever weakened, a CreatePVC import (whose artifact is a PVC the import
+			// CREATES AND KEEPS, not a captured snapshot volume) still could not bind to a leaf.
+			continue
+		}
 		apiVersion, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "apiVersion")
 		k, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "kind")
 		n, _, _ := unstructured.NestedString(item.Object, "spec", "snapshotRef", "name")

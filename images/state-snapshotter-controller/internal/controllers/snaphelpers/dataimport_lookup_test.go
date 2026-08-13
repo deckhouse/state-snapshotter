@@ -79,6 +79,17 @@ func dataImportLegacyTargetRef(name, namespace, group, kind, targetName string) 
 	}}
 }
 
+// dataImportCreatePVCWithSnapshotRef builds a CreatePVC DataImport that ILLEGALLY carries a
+// spec.snapshotRef matching the leaf. The producing module's CEL rule forbids this shape ("mode
+// CreatePVC forbids snapshotRef"), but that rule lives in another repository: these fixtures simulate
+// it weakening, and the lookup's own mode gate must still refuse the object — its artifact is a PVC the
+// import creates and keeps, not a captured snapshot volume.
+func dataImportCreatePVCWithSnapshotRef(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
+	di := dataImportTargeting(name, namespace, group, kind, targetName)
+	_ = unstructured.SetNestedField(di.Object, "CreatePVC", "spec", "mode")
+	return di
+}
+
 // leafObject builds a snapshot leaf with the given GVK / identity.
 func leafObject(group, version, kind, name, namespace string) *unstructured.Unstructured {
 	leaf := &unstructured.Unstructured{}
@@ -127,6 +138,20 @@ func TestFindDataImportForLeaf(t *testing.T) {
 				// Under the old matcher this would have matched; the snapshotRef matcher must skip it.
 				dataImportLegacyTargetRef("di-legacy", ns, leafGroup, leafKind, leafName),
 			},
+		},
+		{
+			name: "CreatePVC with an illegal snapshotRef is ignored (own mode gate, not the foreign CEL)",
+			dataImports: []*unstructured.Unstructured{
+				dataImportCreatePVCWithSnapshotRef("di-createpvc", ns, leafGroup, leafKind, leafName),
+			},
+		},
+		{
+			name: "CreatePVC with an illegal snapshotRef does not make the real match ambiguous",
+			dataImports: []*unstructured.Unstructured{
+				dataImportCreatePVCWithSnapshotRef("di-createpvc", ns, leafGroup, leafKind, leafName),
+				dataImportTargeting("di-real", ns, leafGroup, leafKind, leafName),
+			},
+			wantMatch: "di-real",
 		},
 		{
 			name: "group mismatch is ignored",
