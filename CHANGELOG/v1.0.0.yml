@@ -7,4 +7,4 @@ Changes:
   it.
 - Requires Deckhouse >= 1.76.9 (consistent with the unified snapshots stack that ships
   the d8 compatible CLI). The module is no longer activated on clusters below 1.76.9,
-  including the Minimal bundle.
+  including in the Minimal bundle
