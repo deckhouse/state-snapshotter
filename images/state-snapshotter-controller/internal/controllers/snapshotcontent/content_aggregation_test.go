@@ -496,7 +496,7 @@ func TestTerminalChildContentFailureClassification(t *testing.T) {
 	}
 }
 
-// Premature-Ready gate (content-single-writer §4 Slice 3 / §11.4): reconcileDataLegProjection is the single
+// Premature-Ready gate: reconcileDataLegProjection is the single
 // writer of status.data and publishes it via a SEPARATE status patch, so during a pass where the data leg is
 // still converging (just published, or the VCR/VSC not ready) the in-memory content has an empty
 // status.dataRefs that resolveDataReadiness treats as volume N/A (DataReady=True). For a content that HAS

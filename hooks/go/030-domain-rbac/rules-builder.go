@@ -41,7 +41,7 @@ import (
 //     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
-//     projection, co-owned via D4a.
+//     projection (status fields there are split between core and domain by the single-writer model).
 //
 // It still grants NO delete on the snapshot GVRs (child cleanup is ownerRef GC, not an explicit core
 // delete) and NO /finalizers — those remain the domain SA's. These resource names are domain-specific
@@ -119,6 +119,41 @@ func buildCoreSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1
 			APIGroups: []string{g},
 			Resources: sortedUnique(byGroup[g]),
 			Verbs:     []string{"get", "list"},
+		})
+	}
+	return rules
+}
+
+// buildWebhookSourceReadRules grants the WEBHOOKS SA get (and only get) on the dynamic domain SOURCE GVRs.
+// The MCR-validation admission webhook checks that every spec.targets[] entry exists in the MCR namespace
+// via one named dynamic Get per target (mcrValidator.findResourceNamespace); it never lists or watches
+// sources, so a single verb is the least privilege that keeps validation working.
+//
+// This is deliberately a STANDING grant rather than a reliance on the transient per-namespace capture
+// RoleBinding created by 040-namespace-capture-rbac: that RoleBinding exists only while a namespace is
+// actively capturing, and MCR admission is not ordered against it, so a Get outside that window would be
+// denied. The webhook treats a denial as an error (not as "target absent"), which would otherwise surface
+// as a misleading validation failure.
+func buildWebhookSourceReadRules(sourceGVRs []schema.GroupVersionResource) []rbacv1.PolicyRule {
+	if len(sourceGVRs) == 0 {
+		return nil
+	}
+	byGroup := make(map[string][]string)
+	var groupOrder []string
+	for _, gvr := range sourceGVRs {
+		if _, ok := byGroup[gvr.Group]; !ok {
+			groupOrder = append(groupOrder, gvr.Group)
+		}
+		byGroup[gvr.Group] = append(byGroup[gvr.Group], gvr.Resource)
+	}
+	sort.Strings(groupOrder)
+
+	var rules []rbacv1.PolicyRule
+	for _, g := range groupOrder {
+		rules = append(rules, rbacv1.PolicyRule{
+			APIGroups: []string{g},
+			Resources: sortedUnique(byGroup[g]),
+			Verbs:     []string{"get"},
 		})
 	}
 	return rules
@@ -203,11 +238,16 @@ func sortedUnique(in []string) []string {
 	return out
 }
 
-// applyDomainRBAC reconciles the two managed ClusterRoles + bindings of the split model:
+// applyDomainRBAC reconciles the three managed ClusterRoles + bindings of the split model:
 //   - DomainCoreReadClusterRoleName       bound to the CORE SA               (coreReadRules)
+//   - DomainWebhookReadClusterRoleName    bound to the WEBHOOKS SA           (webhookReadRules)
 //   - DomainDataExportReadClusterRoleName bound to the DataExport (storage-foundation) SA (dataExportReadRules)
-func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, coreReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
+func applyDomainRBAC(ctx context.Context, cl ctrlclient.Client, coreReadRules, webhookReadRules, dataExportReadRules []rbacv1.PolicyRule) error {
 	if err := applyManagedClusterRole(ctx, cl, consts.DomainCoreReadClusterRoleName, coreReadRules, consts.ControllerSAName, consts.ModuleNamespace); err != nil {
+		return err
+	}
+	// The webhooks SA lives in this module's namespace, alongside the core controller SA.
+	if err := applyManagedClusterRole(ctx, cl, consts.DomainWebhookReadClusterRoleName, webhookReadRules, consts.WebhooksSAName, consts.ModuleNamespace); err != nil {
 		return err
 	}
 	// The DataExport controller SA lives in the storage-foundation namespace, not this module's.
@@ -319,7 +359,7 @@ func desiredAccessGrantedCondition(generation int64, status metav1.ConditionStat
 
 // patchCSDAccessGranted performs a read-modify-update on the CSD status to set only
 // the AccessGranted condition, preserving Accepted and Ready (owned by the controller).
-// Retries on conflict per the ADR ownership model.
+// Retries on conflict: the controller owns Accepted and Ready, this hook owns AccessGranted only.
 func patchCSDAccessGranted(ctx context.Context, cl ctrlclient.Client, name string, cond metav1.Condition) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := new(v1alpha1.CustomSnapshotDefinition)

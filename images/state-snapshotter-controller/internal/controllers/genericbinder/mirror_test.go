@@ -30,8 +30,8 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// wave7 final-wave-1 moved the STEADY-STATE Ready mirror (content.Ready verbatim + phase=Failed bubble +
-// barrier-2 gate) to the SnapshotContentController's single post-bind writer (ready_mirror.go). The binder's
+// The STEADY-STATE Ready mirror (content.Ready verbatim + phase=Failed bubble +
+// barrier-2 gate) moved to the SnapshotContentController's single post-bind writer (ready_mirror.go). The binder's
 // checkConsistencyAndSetReady must therefore:
 //   - NOT overwrite Ready when the bound content exists (steady state is owned by the content controller), and
 //   - still co-write the E3 degradation Ready=False/ContentMissing when the bound content is gone (a deleted
@@ -118,7 +118,7 @@ func TestCheckConsistencyAndSetReady_DoesNotOverwriteReadyWhenContentPresent(t *
 	}
 }
 
-// Fail-fast self-report (P5): a Terminating snapshot CR (held by a finalizer) must honestly report
+// Fail-fast self-report: a Terminating snapshot CR (held by a finalizer) must honestly report
 // Ready=False/Deleting instead of lingering at a stale Ready=True. This asserts the exact write Step 0 of
 // the reconcile performs for a snapshot carrying its own deletionTimestamp.
 func TestSelfReportDeletingOnTerminatingSnapshot(t *testing.T) {

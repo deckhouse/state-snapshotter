@@ -79,6 +79,17 @@ func dataImportLegacyTargetRef(name, namespace, group, kind, targetName string) 
 	}}
 }
 
+// dataImportCreatePVCWithSnapshotRef builds a CreatePVC DataImport that ILLEGALLY carries a
+// spec.snapshotRef matching the leaf. The producing module's CEL rule forbids this shape ("mode
+// CreatePVC forbids snapshotRef"), but that rule lives in another repository: these fixtures simulate
+// it weakening, and the lookup's own mode gate must still refuse the object — its artifact is a PVC the
+// import creates and keeps, not a captured snapshot volume.
+func dataImportCreatePVCWithSnapshotRef(name, namespace, group, kind, targetName string) *unstructured.Unstructured {
+	di := dataImportTargeting(name, namespace, group, kind, targetName)
+	_ = unstructured.SetNestedField(di.Object, "CreatePVC", "spec", "mode")
+	return di
+}
+
 // leafObject builds a snapshot leaf with the given GVK / identity.
 func leafObject(group, version, kind, name, namespace string) *unstructured.Unstructured {
 	leaf := &unstructured.Unstructured{}
@@ -127,6 +138,20 @@ func TestFindDataImportForLeaf(t *testing.T) {
 				// Under the old matcher this would have matched; the snapshotRef matcher must skip it.
 				dataImportLegacyTargetRef("di-legacy", ns, leafGroup, leafKind, leafName),
 			},
+		},
+		{
+			name: "CreatePVC with an illegal snapshotRef is ignored (own mode gate, not the foreign CEL)",
+			dataImports: []*unstructured.Unstructured{
+				dataImportCreatePVCWithSnapshotRef("di-createpvc", ns, leafGroup, leafKind, leafName),
+			},
+		},
+		{
+			name: "CreatePVC with an illegal snapshotRef does not make the real match ambiguous",
+			dataImports: []*unstructured.Unstructured{
+				dataImportCreatePVCWithSnapshotRef("di-createpvc", ns, leafGroup, leafKind, leafName),
+				dataImportTargeting("di-real", ns, leafGroup, leafKind, leafName),
+			},
+			wantMatch: "di-real",
 		},
 		{
 			name: "group mismatch is ignored",
@@ -194,6 +219,128 @@ func TestFindDataImportForLeaf(t *testing.T) {
 	}
 }
 
+// realisticDataImport builds a DataImport with the FULL spec storage-foundation actually serves (ttl,
+// waitForFirstConsumer, mode, snapshotRef, storageParams), not just the field under test. The defect this
+// helper replaces was reading a path that does not exist on the object at all, so the fixture must be a
+// realistic object rather than a map shaped around the assertion — otherwise a wrong path could still pass
+// by accident. A nil storageParams omits the whole block; extra sets additional top-level spec fields.
+func realisticDataImport(mode string, storageParams, extra map[string]interface{}) *unstructured.Unstructured {
+	spec := map[string]interface{}{
+		"ttl":                  "24h",
+		"waitForFirstConsumer": false,
+		"publish":              false,
+		"snapshotRef": map[string]interface{}{
+			"apiVersion": "virtualization.deckhouse.io/v1alpha2",
+			"kind":       "VirtualDiskSnapshot",
+			"name":       "vd-snap-1",
+		},
+	}
+	if mode != "" {
+		spec["mode"] = mode
+	}
+	if storageParams != nil {
+		spec["storageParams"] = storageParams
+	}
+	for k, v := range extra {
+		spec[k] = v
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "storage-foundation.deckhouse.io/v1alpha1",
+		"kind":       "DataImport",
+		"metadata":   map[string]interface{}{"name": "di-1", "namespace": "team-a"},
+		"spec":       spec,
+	}}
+}
+
+// scratchStorageParams is a complete PopulateData spec.storageParams block.
+func scratchStorageParams(storageClassName string) map[string]interface{} {
+	params := map[string]interface{}{"size": "10Gi", "volumeMode": "Filesystem"}
+	if storageClassName != "" {
+		params["storageClassName"] = storageClassName
+	}
+	return params
+}
+
+// ImportStorageClassName must read the class from spec.storageParams.storageClassName — and from nowhere
+// else. Two regressions are pinned here: (1) the original bug, where the top-level spec.storageClassName was
+// read and always yielded "" because the field does not exist on the CRD; (2) the mode gate, which keeps the
+// read fail-closed on this CRD's own discriminator instead of resting on a CEL rule owned by another
+// repository.
+func TestImportStorageClassName(t *testing.T) {
+	tests := []struct {
+		name string
+		di   *unstructured.Unstructured
+		want string
+	}{
+		{
+			name: "nil DataImport (not resolved) yields empty",
+			di:   nil,
+		},
+		{
+			name: "PopulateData with storageParams.storageClassName",
+			di:   realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil),
+			want: "sc-import",
+		},
+		{
+			name: "PopulateData whose storageParams carry no storageClassName",
+			di:   realisticDataImport("PopulateData", scratchStorageParams(""), nil),
+		},
+		{
+			name: "PopulateData with no storageParams block at all",
+			di:   realisticDataImport("PopulateData", nil, nil),
+		},
+		{
+			// The original defect: spec.storageClassName is not a field of this CRD. Even if some producer
+			// wrote it, the helper must not read it — the scratch class is the authoritative one.
+			name: "top-level spec.storageClassName is NOT the path",
+			di:   realisticDataImport("PopulateData", nil, map[string]interface{}{"storageClassName": "sc-top-level"}),
+		},
+		{
+			// CEL forbids storageParams in CreatePVC, so this object cannot exist in a real cluster; the gate
+			// exists precisely so the helper does not depend on that guarantee holding in another repository.
+			name: "CreatePVC ignores storageParams (fail-closed mode gate)",
+			di:   realisticDataImport("CreatePVC", scratchStorageParams("sc-scratch"), nil),
+		},
+		{
+			name: "empty mode defaults to CreatePVC and is ignored",
+			di:   realisticDataImport("", scratchStorageParams("sc-scratch"), nil),
+		},
+		{
+			name: "an unknown future mode is ignored",
+			di:   realisticDataImport("SomeFutureMode", scratchStorageParams("sc-scratch"), nil),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImportStorageClassName(tt.di); got != tt.want {
+				t.Fatalf("ImportStorageClassName = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A DataImport the reverse-lookup actually returned must feed the class helper end to end: the two are
+// always used as a pair (find the leaf's DataImport, then read its scratch class), so the pairing is
+// covered rather than only each half in isolation.
+func TestFindDataImportForLeaf_FeedsImportStorageClassName(t *testing.T) {
+	leaf := leafObject("virtualization.deckhouse.io", "v1alpha2", "VirtualDiskSnapshot", "vd-snap-1", "team-a")
+	di := realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil)
+	cl := fake.NewClientBuilder().WithScheme(lookupScheme()).WithObjects(di).Build()
+
+	got, reason, _, err := FindDataImportForLeaf(context.Background(), cl, leaf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "" || got == nil {
+		t.Fatalf("expected exactly one match, got di=%v reason=%q", got, reason)
+	}
+	if sc := ImportStorageClassName(got); sc != "sc-import" {
+		t.Fatalf("ImportStorageClassName on the looked-up DataImport = %q, want sc-import", sc)
+	}
+}
+
 // TestFindDataImportForLeaf_NamespaceScoped verifies the reverse-lookup only considers DataImports in the
 // leaf's own namespace (snapshotRef namespace is implicit = leaf namespace), so a same-identity DataImport
 // in another namespace must not match.
@@ -208,5 +355,158 @@ func TestFindDataImportForLeaf_NamespaceScoped(t *testing.T) {
 	}
 	if got != nil || reason != "" {
 		t.Fatalf("DataImport in another namespace must not match; got di=%v reason=%q", got, reason)
+	}
+}
+
+// withImportStatus adds the FULL status storage-foundation actually publishes on a finished PopulateData
+// import (phase, the produced artifactRef, the scratch volume's mode and the filesystem observed on its PV),
+// not just the field under test — the same reason realisticDataImport builds a complete spec: a helper reading
+// a path that does not exist on the real object must not be able to pass on a fixture shaped around it.
+func withImportStatus(di *unstructured.Unstructured, volumeMode, fsType string) *unstructured.Unstructured {
+	_ = unstructured.SetNestedField(di.Object, "Completed", "status", "phase")
+	_ = unstructured.SetNestedMap(di.Object, map[string]interface{}{
+		"apiVersion": "snapshot.storage.k8s.io/v1",
+		"kind":       "VolumeSnapshotContent",
+		"name":       "snapcontent-abc",
+	}, "status", "data", "artifactRef")
+	if volumeMode != "" {
+		_ = unstructured.SetNestedField(di.Object, volumeMode, "status", "volumeMode")
+	}
+	if fsType != "" {
+		_ = unstructured.SetNestedField(di.Object, fsType, "status", "data", "fsType")
+	}
+	return di
+}
+
+// ImportVolumeMode must read status.volumeMode of a PopulateData import — the mode of the scratch volume the
+// bytes were staged onto, which the produced VolumeSnapshotContent does not record (CSI snapshots are
+// mode-agnostic) and which no live object carries on the import side. The mode gate matters here rather than
+// being defensive decoration: a CreatePVC import publishes the SAME status field for a PVC it creates and
+// keeps, which is not a captured snapshot's volume.
+func TestImportVolumeMode(t *testing.T) {
+	tests := []struct {
+		name string
+		di   *unstructured.Unstructured
+		want string
+	}{
+		{
+			name: "nil DataImport (not resolved, or reaped by TTL) yields empty",
+			di:   nil,
+		},
+		{
+			name: "PopulateData publishes the scratch volume mode",
+			di:   withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "Block", ""),
+			want: "Block",
+		},
+		{
+			name: "PopulateData that has not published a mode yet yields empty",
+			di:   withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "", ""),
+		},
+		{
+			name: "PopulateData with no status at all yields empty",
+			di:   realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil),
+		},
+		{
+			// The PVC a CreatePVC import provisions is the product of that import, not a captured volume.
+			name: "CreatePVC status.volumeMode is ignored (fail-closed mode gate)",
+			di:   withImportStatus(realisticDataImport("CreatePVC", nil, nil), "Filesystem", ""),
+		},
+		{
+			name: "empty mode defaults to CreatePVC and is ignored",
+			di:   withImportStatus(realisticDataImport("", nil, nil), "Filesystem", ""),
+		},
+		{
+			name: "an unknown future mode is ignored",
+			di:   withImportStatus(realisticDataImport("SomeFutureMode", nil, nil), "Filesystem", ""),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImportVolumeMode(tt.di); got != tt.want {
+				t.Fatalf("ImportVolumeMode = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// ImportFsType must read status.data.fsType — the filesystem storage-foundation observed on the scratch
+// PersistentVolume before destroying it. It is the only surviving record of the value, so reading the wrong
+// path yields "" silently and the loss is invisible until a restore mounts a filesystem-less volume.
+func TestImportFsType(t *testing.T) {
+	tests := []struct {
+		name string
+		di   *unstructured.Unstructured
+		want string
+	}{
+		{
+			name: "nil DataImport (not resolved, or reaped by TTL) yields empty",
+			di:   nil,
+		},
+		{
+			name: "PopulateData publishes the observed filesystem",
+			di:   withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "Filesystem", "ext4"),
+			want: "ext4",
+		},
+		{
+			// A Block import has no filesystem, and a driver may record none on the PV: empty means "not
+			// known", never "default to ext4".
+			name: "PopulateData that published no filesystem yields empty",
+			di:   withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "Block", ""),
+		},
+		{
+			name: "PopulateData with no status at all yields empty",
+			di:   realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil),
+		},
+		{
+			// status.fsType (top level) is not a field of this CRD; the value lives under status.data next to
+			// the artifactRef it describes. A helper reading the wrong path would yield "" on every real object.
+			name: "top-level status.fsType is NOT the path",
+			di: func() *unstructured.Unstructured {
+				di := withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "Filesystem", "")
+				_ = unstructured.SetNestedField(di.Object, "xfs", "status", "fsType")
+				return di
+			}(),
+		},
+		{
+			name: "CreatePVC status.data.fsType is ignored (fail-closed mode gate)",
+			di:   withImportStatus(realisticDataImport("CreatePVC", nil, nil), "Filesystem", "ext4"),
+		},
+		{
+			name: "empty mode defaults to CreatePVC and is ignored",
+			di:   withImportStatus(realisticDataImport("", nil, nil), "Filesystem", "ext4"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImportFsType(tt.di); got != tt.want {
+				t.Fatalf("ImportFsType = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The reverse-lookup and the status readers are always used as a pair (find the leaf's DataImport, then read
+// the volume metadata only it carries), so the pairing is covered rather than only each half in isolation.
+func TestFindDataImportForLeaf_FeedsImportVolumeMetadata(t *testing.T) {
+	leaf := leafObject("virtualization.deckhouse.io", "v1alpha2", "VirtualDiskSnapshot", "vd-snap-1", "team-a")
+	di := withImportStatus(realisticDataImport("PopulateData", scratchStorageParams("sc-import"), nil), "Filesystem", "ext4")
+	cl := fake.NewClientBuilder().WithScheme(lookupScheme()).WithObjects(di).Build()
+
+	got, reason, _, err := FindDataImportForLeaf(context.Background(), cl, leaf)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if reason != "" || got == nil {
+		t.Fatalf("expected exactly one match, got di=%v reason=%q", got, reason)
+	}
+	if mode := ImportVolumeMode(got); mode != "Filesystem" {
+		t.Fatalf("ImportVolumeMode on the looked-up DataImport = %q, want Filesystem", mode)
+	}
+	if fsType := ImportFsType(got); fsType != "ext4" {
+		t.Fatalf("ImportFsType on the looked-up DataImport = %q, want ext4", fsType)
 	}
 }

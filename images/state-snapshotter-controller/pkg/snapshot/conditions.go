@@ -97,7 +97,7 @@ const (
 	ReasonDataImportAmbiguous = "DataImportAmbiguous"
 	// ReasonVolumeCaptureFailed is the terminal data-leg reason when volume capture failed: a failed
 	// VolumeCaptureRequest (domain path) or a terminal CSI VolumeSnapshot/VolumeSnapshotContent error
-	// (namespace-root orphan-PVC path, ADR 2026-06-09 / spec §3.9.11).
+	// (namespace-root orphan-PVC path).
 	ReasonVolumeCaptureFailed = "VolumeCaptureFailed"
 	// ReasonDomainCaptureFailed is the canonical, tree-propagating terminal reason placed on a
 	// SnapshotContent's OWN Ready when its owning Snapshot reported a domain capture failure
@@ -171,18 +171,14 @@ const (
 //
 // IMPORTANT: Function Contract
 //
-// This function is a formal contract defined in unified-snapshots-test-plan.md.
-// The behavior MUST NOT be changed without updating:
-//   - unified-snapshots-test-plan.md (FUNCTIONS: pkg/snapshot Conditions)
-//
 // Contract Rules:
 //   - MUST be idempotent (setting same condition twice has no effect on LastTransitionTime)
 //   - MUST update LastTransitionTime ONLY when status changes
 //   - MUST work with any object implementing SnapshotLike or SnapshotContentLike
-//   - observedGeneration is NOT set automatically (remains 0) - it's optional per ADR
+//   - observedGeneration is NOT set automatically (remains 0) - it is optional
 //     Controllers should set it explicitly if needed (e.g., obj.GetGeneration())
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: SetCondition - Idempotency)
+// Pinned by TestSetCondition_Idempotency and TestSetCondition_StatusChangeUpdatesLastTransitionTime.
 func SetCondition(obj interface{}, conditionType string, status metav1.ConditionStatus, reason, message string) {
 	var conditions []metav1.Condition
 	var setter func([]metav1.Condition)
@@ -263,7 +259,7 @@ func GetCondition(obj interface{}, conditionType string) *metav1.Condition {
 // Contract: Pure function, idempotent, no side effects.
 // Works with any object implementing SnapshotLike or SnapshotContentLike.
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: IsReady - Returns True Only When Ready=True)
+// Pinned by TestIsReady_ReturnsTrueOnlyWhenReadyTrue.
 func IsReady(obj interface{}) bool {
 	return HasCondition(obj, ConditionReady, metav1.ConditionTrue)
 }

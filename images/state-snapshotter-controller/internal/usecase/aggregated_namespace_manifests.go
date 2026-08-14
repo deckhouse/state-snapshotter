@@ -98,7 +98,7 @@ func (s *AggregatedNamespaceManifests) resolveRootContentName(ctx context.Contex
 }
 
 func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx context.Context, namespace, snapshotName string) (string, error) {
-	// The root ObjectKeeper name is keyed by the (now-deleted) Snapshot UID (unified wave4C scheme), so it
+	// The root ObjectKeeper name is keyed by the (now-deleted) Snapshot UID (unified scheme), so it
 	// is not derivable from namespace/name here. Find the retained OK by listing ObjectKeepers and matching
 	// FollowObjectRef back at this Snapshot instead.
 	oks := &deckhousev1alpha1.ObjectKeeperList{}

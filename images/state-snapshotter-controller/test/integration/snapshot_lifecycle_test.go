@@ -201,8 +201,13 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				},
 			}
 
-			_, err = contentCtrl.Reconcile(ctx, contentReq)
-			Expect(err).NotTo(HaveOccurred())
+			// Driven by hand, this reconcile has no requeue behind it: colliding with another writer while
+			// it stamps the finalizer returns a conflict, and the spec dies on an error that a real manager
+			// would simply have retried. Retry it here the same way.
+			Eventually(func(g Gomega) {
+				_, reconcileErr := contentCtrl.Reconcile(ctx, contentReq)
+				g.Expect(reconcileErr).NotTo(HaveOccurred())
+			}).Should(Succeed())
 
 			// Wait for reconciliation
 			time.Sleep(200 * time.Millisecond)
@@ -385,22 +390,32 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				},
 			}
 
-			_, err = contentCtrl.Reconcile(ctx, contentReq)
-			Expect(err).NotTo(HaveOccurred())
+			// Driven by hand, this reconcile has no requeue behind it: colliding with another writer while
+			// it stamps the finalizer returns a conflict, and the spec dies on an error that a real manager
+			// would simply have retried. Retry it here the same way.
+			Eventually(func(g Gomega) {
+				_, reconcileErr := contentCtrl.Reconcile(ctx, contentReq)
+				g.Expect(reconcileErr).NotTo(HaveOccurred())
+			}).Should(Succeed())
 
 			// ACTIONS Step 3: Snapshot Ready mirror must keep polling while content is pending.
 			result, err := snapshotCtrl.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeNumerically(">", time.Duration(0)), "generic binder must poll pending content because SnapshotContent has no reverse Snapshot watch")
 
-			freshPendingSnapshot := &unstructured.Unstructured{}
-			freshPendingSnapshot.SetGroupVersionKind(snapshotGVK)
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshPendingSnapshot)).To(Succeed())
-			pendingLike, err := snapshot.ExtractSnapshotLike(freshPendingSnapshot)
-			Expect(err).NotTo(HaveOccurred())
-			pendingReady := snapshot.GetCondition(pendingLike, snapshot.ConditionReady)
-			Expect(pendingReady).NotTo(BeNil())
-			Expect(pendingReady.Status).To(Equal(metav1.ConditionFalse))
+			// k8sClient reads through the manager's cache, so the mirror the reconcile above just wrote is
+			// not necessarily visible on the first read: a point-in-time Get here finds no Ready condition
+			// at all and fails on a nil, which says nothing about the polling contract under test.
+			Eventually(func(g Gomega) {
+				freshPendingSnapshot := &unstructured.Unstructured{}
+				freshPendingSnapshot.SetGroupVersionKind(snapshotGVK)
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: snapshotObj.GetName(), Namespace: snapshotObj.GetNamespace()}, freshPendingSnapshot)).To(Succeed())
+				pendingLike, extractErr := snapshot.ExtractSnapshotLike(freshPendingSnapshot)
+				g.Expect(extractErr).NotTo(HaveOccurred())
+				pendingReady := snapshot.GetCondition(pendingLike, snapshot.ConditionReady)
+				g.Expect(pendingReady).NotTo(BeNil())
+				g.Expect(pendingReady.Status).To(Equal(metav1.ConditionFalse))
+			}).Should(Succeed())
 
 			// ACTIONS Step 4: drive the bound (common) SnapshotContent genuinely Ready. The controller owns
 			// Ready, so the test must not force-write it: publish a Ready ManifestCheckpoint and link it via
@@ -442,7 +457,7 @@ var _ = Describe("Integration: Snapshot ↔ SnapshotContent Lifecycle", func() {
 				g.Expect(meta.IsStatusConditionTrue(fresh.Status.Conditions, snapshot.ConditionReady)).To(BeTrue())
 			}, "60s", "200ms").Should(Succeed(), "bound SnapshotContent should become Ready=True")
 
-			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready. wave7
+			// ACTIONS Step 5: Snapshot.Ready is a verbatim mirror of the bound SnapshotContent.Ready.
 			// moved the post-bind Ready mirror out of the binder into the SnapshotContentController
 			// (mirrorReadyToOwnerSnapshot, resolved via content.spec.snapshotRef + the boundSnapshotContentName
 			// writer-switch), so drive the CONTENT controller to run the mirror; the binder reconcile is kept

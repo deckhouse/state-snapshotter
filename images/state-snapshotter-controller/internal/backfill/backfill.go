@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package backfill is the ONE-SHOT, cluster-wide list-and-patch migration that stamps the authoritative
 // delete-protection marker (api/storage/v1alpha1.LabelDeleteProtected) onto legacy unified-snapshot nodes
-// created before the write-path started stamping it (delete-protection-contract.md §7; plan P3).
+// created before the write-path started stamping it.
 //
 // It is the rollout GATE for switching the admission delete-guard from Audit to Deny: only once a full
 // pass proves that every object the classifier considers ours already carries the marker is strict Deny
@@ -29,7 +29,7 @@ limitations under the License.
 //     zero of OUR objects without it), NOT the unprovable "no uncovered object exists anywhere".
 //
 // The per-Kind classifier is the ONLY place legacy provenance signals (deterministic names, controller
-// ownerRefs to our kinds, the managed label) are read. Admission never reads them (§7, P9). Classifiers
+// ownerRefs to our kinds, the managed label) are read. Admission never reads them. Classifiers
 // fail closed: when a signal is ambiguous for a SHARED kind (ObjectKeeper / CSI VolumeSnapshot(Content)),
 // the object is treated as NOT ours so the backfill never marks a foreign object.
 package backfill

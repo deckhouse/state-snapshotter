@@ -62,7 +62,7 @@ func TestAllDirectDomainChildrenAtLeastPlanned(t *testing.T) {
 	domainRef := func(name string) storagev1alpha1.SnapshotChildRef {
 		return storagev1alpha1.SnapshotChildRef{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "Snapshot", Name: name}
 	}
-	// An orphan CSI VolumeSnapshot: under the content-single-writer model it is an ordinary domain child
+	// An orphan CSI VolumeSnapshot: under the it is an ordinary domain child
 	// (no longer a skipped "visibility leaf"), so it participates in the at-least-Planned gate like any
 	// other child — it must reach Planned/Finished to satisfy the gate.
 	orphanLeaf := storagev1alpha1.SnapshotChildRef{

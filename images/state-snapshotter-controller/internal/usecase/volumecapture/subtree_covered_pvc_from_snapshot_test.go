@@ -303,7 +303,7 @@ func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_plannedUnboundChildCoveredViaO
 func TestCollectSubtreeCoveredPVCUIDsFromSnapshot_volumeSnapshotCoveredViaSnapshotSource(t *testing.T) {
 	t.Parallel()
 	// A native-CSI VolumeSnapshot child (no VCR) is covered via the owner's status.sourceRef.uid,
-	// published at adoption before Planned (§11.7).
+	// published at adoption before Planned.
 	vs := withSnapshotSourceUID(snapNodeUnstructured("orphan-vs", snapshotpkg.CSISnapshotAPIVersion, snapshotpkg.KindVolumeSnapshot, ""), "uid-src")
 	root := snapNode("root", "", storagev1alpha1.SnapshotChildRef{
 		APIVersion: snapshotpkg.CSISnapshotAPIVersion, Kind: snapshotpkg.KindVolumeSnapshot, Name: "orphan-vs",

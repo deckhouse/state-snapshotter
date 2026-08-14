@@ -28,7 +28,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// Under the content-single-writer model an orphan CSI VolumeSnapshot is an ordinary domain child (no longer
+// An orphan CSI VolumeSnapshot is an ordinary domain child (no longer
 // a skipped "visibility leaf"): a brand-new edge to a VolumeSnapshot whose bound SnapshotContent is not
 // visible yet must REQUEUE (ok=false) rather than publish a dangling edge — exactly like any other child.
 func TestPublishSnapshotContentChildrenFromSnapshotRefsRequeuesUnboundVolumeSnapshotChild(t *testing.T) {
@@ -62,8 +62,8 @@ func TestPublishSnapshotContentChildrenFromSnapshotRefsRequeuesUnboundVolumeSnap
 	}
 }
 
-// TestPublishSnapshotContentChildrenRefsHoldsFrozenSet asserts the Block 4 frozen-set writer guard
-// (INV-CONTENT-CHILDREN-2, Option A CEL): once status.childrenSnapshotContentRefs is non-empty the writer
+// TestPublishSnapshotContentChildrenRefsHoldsFrozenSet asserts the frozen-set writer guard
+// (INV-CONTENT-CHILDREN-2, frozen-set CEL): once status.childrenSnapshotContentRefs is non-empty the writer
 // MUST NOT try to grow/replace it. The empty -> complete first write lands; a later attempt to add a child
 // to an already-populated set is held as-is (no patch), so the apiserver CEL never has to reject anything
 // and the reconcile never wedges. (The fake client does not enforce CEL, so this pins the WRITER guard; the

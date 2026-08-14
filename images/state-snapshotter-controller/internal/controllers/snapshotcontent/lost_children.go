@@ -113,7 +113,7 @@ func (r *SnapshotContentController) detectLostFromFrozenEdges(
 			return "", "", fmt.Errorf("get child SnapshotContent %q: %w", name, getErr)
 		}
 		if child.GetDeletionTimestamp() != nil {
-			// Fail-fast (P5): a frozen child SnapshotContent that is Terminating is doomed — its durable data
+			// Fail-fast: a frozen child SnapshotContent that is Terminating is doomed — its durable data
 			// is going away and cannot be recovered (UID-derived names, immutable edge set). Treat it as gone
 			// immediately instead of waiting for the object to disappear.
 			return snapshot.ReasonChildSnapshotLost,
@@ -190,7 +190,7 @@ func (r *SnapshotContentController) detectLostFromDeclaredRefs(
 			return "", "", gErr
 		}
 		if child.GetDeletionTimestamp() != nil {
-			// Fail-fast (P5): a declared child CR that is Terminating is doomed and cannot relink into the
+			// Fail-fast: a declared child CR that is Terminating is doomed and cannot relink into the
 			// frozen edge set the tree will build (UID-derived content names; ns domain does not re-plan
 			// after Planned). Treat it as lost now rather than after it disappears.
 			return snapshot.ReasonChildSnapshotLost,

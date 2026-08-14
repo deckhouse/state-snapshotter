@@ -36,8 +36,8 @@ const (
 
 // Execution requests must not appear in published dataRefs[].artifact. NOTE: the native-CSI data leg
 // publishes the durable VolumeSnapshotContent (kindVolumeSnapshotContent) as the artifact — never the
-// VolumeSnapshot itself — so the VolumeSnapshot kind is NOT special-cased here (content-single-writer
-// design §11.6); a stray VolumeSnapshot artifact still falls through to the unsupported-kind check below.
+// VolumeSnapshot itself — so the VolumeSnapshot kind is NOT special-cased here; a stray VolumeSnapshot
+// artifact still falls through to the unsupported-kind check below.
 var dataArtifactExecutionRequestKinds = map[string]struct{}{
 	"VolumeCaptureRequest":   {},
 	"ManifestCaptureRequest": {},

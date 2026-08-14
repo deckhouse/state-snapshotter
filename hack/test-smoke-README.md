@@ -7,17 +7,17 @@ Bash-скрипт для проверки работы контроллера un
 ## Использование
 
 ```bash
-./test-smoke.sh [namespace] [snapshot-kind]
+./hack/test-smoke.sh [namespace] [snapshot-kind]
 ```
 
 ### Примеры
 
 ```bash
 # Тест с Snapshot в namespace default
-./test-smoke.sh default Snapshot
+./hack/test-smoke.sh default Snapshot
 
 # Тест с Snapshot в namespace d8-backup
-./test-smoke.sh d8-backup Snapshot
+./hack/test-smoke.sh d8-backup Snapshot
 ```
 
 ## Что проверяет скрипт

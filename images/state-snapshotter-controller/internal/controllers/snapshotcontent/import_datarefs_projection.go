@@ -30,9 +30,9 @@ import (
 )
 
 // projectContentDataLegFromDataImport is the import twin of the capture data-leg projection (VCR / bound
-// VSC): it makes the aggregator the single writer of SnapshotContent.status.data for GENERIC import leaves
-// (content-single-writer design §10). A generic import leaf carries no live VCR — its volume artifact is
-// produced by a DataImport found by reverse-lookup (DataImport.spec.targetRef -> this leaf). Once the
+// VSC): it makes the aggregator the single writer of SnapshotContent.status.data for GENERIC import
+// leaves. A generic import leaf carries no live VCR — its volume artifact is
+// produced by a DataImport found by reverse-lookup (DataImport.spec.snapshotRef -> this leaf). Once the
 // DataImport has produced its VolumeSnapshotContent the aggregator enriches, hands the VSC off to the
 // content (Retain + ownerRef), and publishes status.data. The binder retains ONLY the leaf-facing work
 // (terminal-reason surfacing on an unsupported artifact, and the status.data export mirror onto the leaf
@@ -63,13 +63,16 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 		return false, "", "", lErr
 	}
 	if treason != "" {
-		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator only
-		// holds pending (keeps a prior latched publish if any, otherwise requeues until it resolves).
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator never
+		// trusts any of the ambiguous DataImports as authority — it requeues pre-publish, keeps a complete
+		// published binding, and finishes an incomplete one from the published copy alone.
+		return r.completeOrKeepPublishedImportLeg(ctx, contentName)
 	}
 	if di == nil {
-		// Pre-publish: DataImport not visible yet -> requeue. Post-publish: keep the latched status.data.
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		// Pre-publish: DataImport not visible yet -> requeue. Post-publish: keep a COMPLETE latched
+		// status.data; an INCOMPLETE one keeps publishing from the published copy so the reaped DataImport
+		// does not freeze the size gap (see completeOrKeepPublishedImportLeg).
+		return r.completeOrKeepPublishedImportLeg(ctx, contentName)
 	}
 
 	binding, ready, dtreason, _ := BuildImportDataBinding(di, owner)
@@ -87,15 +90,73 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, "", "", cErr
 	}
-	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches both the
-	// artifact and the (source-derived) volumeMode (matches the binder's former fast-path so a content bound
-	// before volumeMode propagation existed still self-heals).
+	// The volume metadata of an imported volume is carried only by the DataImport (its StorageClass in the
+	// spec, its volumeMode and the filesystem it was written onto in the status); the aggregator is the single
+	// writer that projects it into the content, and the leaf mirrors then copy the content verbatim. Unlike the
+	// shared bound-VSC branch, this one needs no fallback to the published copy HERE: the unresolved-DataImport
+	// case has already been handled above (completeOrKeepPublishedImportLeg keeps a complete binding and
+	// finishes an incomplete one from the published copy).
+	importMeta := importVolumeMetadataFromDataImport(di)
+
+	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the artifact,
+	// the durable restore size has been captured, AND every import-metadata field we know is published as such
+	// (a content bound before one of them was projected therefore self-heals instead of keeping the gap
+	// forever).
+	//
+	// Size MUST gate the latch, symmetrically with the bound-VSC branch, and for the same reason: this
+	// projection publishes as soon as the DataImport reports its artifact, which can PRECEDE the driver
+	// publishing VolumeSnapshotContent.status.restoreSize — the only place the durable size comes from (the
+	// imported leaf has no live PVC, and the DataImport records the REQUESTED scratch size in
+	// spec.storageParams, not the size the artifact can be restored to). Latching on the artifact alone freezes
+	// status.data with an empty size for good: every later pass re-evaluates this same condition and closes it
+	// again, so nothing ever backfills the field, and restore/export size the target PVC from it. Re-enriching
+	// until the size lands backfills it on the pass after the driver reports it; PublishSnapshotContentDataRef
+	// is a no-op once the binding is equal, so the waiting passes re-read but do not write.
 	if content.Status.Data != nil &&
 		content.Status.Data.ArtifactRef == binding.ArtifactRef &&
-		content.Status.Data.VolumeMode == binding.VolumeMode {
+		content.Status.Data.Size != "" &&
+		importMeta.matchesPublished(content.Status.Data) {
 		return false, "", "", nil
 	}
-	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding})
+	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding}, importMeta)
+	return requeue, "", "", err
+}
+
+// completeOrKeepPublishedImportLeg handles the generic-import data leg when no single live DataImport
+// attests it any more (not created yet, reaped by its idle TTL after a completed import, or ambiguous):
+// pre-publish it requeues until one shows up; a COMPLETE published binding is kept latched untouched;
+// an INCOMPLETE one — empty size, the DataImport vanished between the artifact publish and the driver
+// reporting restoreSize — keeps publishing, rebuilt from the published copy itself, so the enricher
+// backfills the durable size from the live VolumeSnapshotContent named by the published artifactRef.
+//
+// Without the incomplete branch a bare "content has data -> keep" exit re-latched the size gap forever:
+// every later pass — including the VSC watch wake-up that delivers restoreSize — took the same exit, the
+// content went Ready with an empty size (readiness gates on readyToUse, not size), and an empty
+// volumeMode would fail-close export for good. The published copy is the only surviving record of the
+// import volume metadata (the same contract importVolumeMetadataFromPublished states), and rebuilding
+// the binding from {sourceRef, artifactRef} of the published copy preserves the artifact identity —
+// including the uid an earlier publish already enriched — instead of re-deriving it from anything live.
+func (r *SnapshotContentController) completeOrKeepPublishedImportLeg(ctx context.Context, contentName string) (requeue bool, termReason string, termMessage string, err error) {
+	content := &storagev1alpha1.SnapshotContent{}
+	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
+		return false, "", "", cErr
+	}
+	published := content.Status.Data
+	if published == nil {
+		// Pre-publish: nothing recorded yet -> requeue until a DataImport becomes visible.
+		return true, "", "", nil
+	}
+	if published.Size != "" {
+		// Post-publish and complete: keep the latched status.data (a reaped DataImport with published
+		// data is the normal steady state of a finished import, not a fault).
+		return false, "", "", nil
+	}
+	binding := storagev1alpha1.SnapshotDataBinding{
+		SourceRef:   published.SourceRef,
+		ArtifactRef: published.ArtifactRef,
+	}
+	requeue, err = r.publishDataBindings(ctx, contentName,
+		[]storagev1alpha1.SnapshotDataBinding{binding}, importVolumeMetadataFromPublished(published))
 	return requeue, "", "", err
 }
 
@@ -105,8 +166,8 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 // fault. Pure function (no client) so it is unit-tested directly and shared by the aggregator (publish) and
 // the import binder (terminal-reason precondition + export mirror).
 //
-// Moved from genericbinder to the aggregator's package in the import creator/main unification
-// (content-single-writer design §10): the aggregator is the sole writer of content.status.data.
+// Moved from genericbinder to the aggregator's package in the import creator/main unification: the
+// aggregator is the sole writer of content.status.data.
 func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Unstructured) (binding *storagev1alpha1.SnapshotDataBinding, ready bool, terminalReason string, terminalMessage string) {
 	apiVersion, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "apiVersion")
 	kind, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "kind")
@@ -125,14 +186,21 @@ func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 				di.GetName(), kind, snapshot.KindVolumeSnapshotContent)
 	}
 	leafGVK := leaf.GetObjectKind().GroupVersionKind()
-	// volumeMode is the one piece of source volume metadata that downstream restore strictly requires
-	// (demo restore fails closed on an empty dataRef.volumeMode) and that EnrichDataBindingsWithVolumeMetadata
-	// cannot recover here: the binding targets the leaf snapshot, not a live PVC, so the PVC-based enricher
-	// only fills Size. DataImport republishes the original captured volumeMode into status.volumeMode (it
-	// reads capacity/storageClass/volumeMode from the uploaded manifest to provision its scratch PVC), so it
-	// is the authoritative source on the import side. storageClassName/accessModes/fsType are not exposed by
-	// DataImport and are resolved downstream from the disk spec / defaults.
-	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
+	// volumeMode and fsType describe the volume the bytes were staged onto and the filesystem they were
+	// actually written onto. EnrichDataBindingsWithVolumeMetadata cannot recover either here: the binding
+	// targets the leaf snapshot, not a live PVC, so the PVC-based enricher only fills Size. The DataImport is
+	// the authority for both (see controllercommon.ImportVolumeMode / ImportFsType for the paths and why the
+	// values exist nowhere else once it is reaped), and downstream restore fails CLOSED on an empty
+	// volumeMode rather than defaulting to Filesystem.
+	//
+	// storageClassName is NOT set here: it comes from the DataImport SPEC
+	// (spec.storageParams.storageClassName), not from its status, and this function is also called by the
+	// import binder purely to test for a terminal artifact fault. The caller
+	// (projectContentDataLegFromDataImport) assembles all three into importVolumeMetadata and passes them to
+	// publishDataBindings, which stamps them after enrichment; the two set here are the same values and let
+	// the caller's latch compare against the binding it is about to publish.
+	volumeMode := controllercommon.ImportVolumeMode(di)
+	fsType := controllercommon.ImportFsType(di)
 	return &storagev1alpha1.SnapshotDataBinding{
 		// The imported leaf has no live source PVC; use the leaf identity as the binding source so the
 		// data binding is stable/idempotent (size etc. are enriched from VolumeSnapshotContent.status.restoreSize).
@@ -150,5 +218,6 @@ func BuildImportDataBinding(di *unstructured.Unstructured, leaf *unstructured.Un
 			UID:        types.UID(uid),
 		},
 		VolumeMode: volumeMode,
+		FsType:     fsType,
 	}, true, "", ""
 }

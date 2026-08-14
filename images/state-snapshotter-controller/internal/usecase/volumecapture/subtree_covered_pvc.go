@@ -42,7 +42,7 @@ var ErrSubtreeDataRefsPending = errors.New("subtree data volume coverage pending
 
 // DataBearingKindFunc reports whether a snapshot Kind carries a volume data leg. It is backed by the CSD
 // spec.requiresDataArtifact (via snapshot.GVKRegistry.RequiresDataArtifact); unmarked/unknown kinds read
-// false (manifest-only kinds, built-in pairs). Coverage (Block 5, design §8.5) uses it to decide
+// false (manifest-only kinds, built-in pairs). Coverage uses it to decide
 // AUTHORITATIVELY — from the CSD, not the shape of the subtree — whether a node contributes a covered PVC
 // UID: a kind may carry both children and a data leg, so the old "a node with children has no data"
 // (hasChildren) heuristic is gone. It MUST be non-nil in production; passing a permissive
@@ -74,11 +74,11 @@ func CollectSubtreeCoveredPVCUIDs(
 		if content.Name == rootContent.Name {
 			return nil
 		}
-		// Orphan/residual-PVC VolumeSnapshot children are ordinary domain content now (content-single-writer
-		// design §11.6): the aggregator projects their status.data from the bound VSC, so they cover their own
+		// Orphan/residual-PVC VolumeSnapshot children are ordinary domain content now: the aggregator
+		// projects their status.data from the bound VSC, so they cover their own
 		// PVC UID here like every other data-bearing node — there is no visibility-leaf carve-out. Whether a
 		// node is data-bearing is decided authoritatively by dataBearing (CSD RequiresDataArtifact), not the
-		// shape of the tree (Block 5, design §8.5); the walk still recurses into every child unconditionally.
+		// shape of the tree; the walk still recurses into every child unconditionally.
 		uids, err := coveredPVCUIDsForContent(ctx, c, namespace, content, dataBearing)
 		if err != nil {
 			return err
@@ -159,8 +159,8 @@ func coveredPVCUIDsForContent(
 	dataBearing DataBearingKindFunc,
 ) ([]string, error) {
 	// Data-bearing decision is AUTHORITATIVE from the CSD (RequiresDataArtifact via dataBearing), keyed by
-	// the owning snapshot kind (content.spec.snapshotRef.kind) — NOT the shape of the tree (Block 5, design
-	// §8.5). A manifest-only aggregate (RequiresDataArtifact==false) contributes no covered PVC UID; the
+	// the owning snapshot kind (content.spec.snapshotRef.kind) — NOT the shape of the tree.
+	// A manifest-only aggregate (RequiresDataArtifact==false) contributes no covered PVC UID; the
 	// caller still recurses into its children unconditionally. A kind may legitimately carry BOTH children
 	// and a data leg, which the old `if hasChildren { return nil }` heuristic wrongly excluded.
 	kind := ""
@@ -179,7 +179,7 @@ func coveredPVCUIDsForContent(
 		return fromDataRefs, nil
 	}
 	// A->B window: status.data is not published yet. Fall back via the OWNING snapshot resolved from
-	// content.spec.snapshotRef (design §8.5/§11.7), NOT a content-UID-derived VCR (a domain data-leaf's VCR
+	// content.spec.snapshotRef, NOT a content-UID-derived VCR (a domain data-leaf's VCR
 	// is snapshot-owned and its real name is only published on the owner's captureState).
 	ref := content.Spec.SnapshotRef
 	if ref != nil && ref.Name != "" {
@@ -207,7 +207,7 @@ func coveredPVCUIDsForContent(
 }
 
 // coveredPVCUIDsFromOwnerObject reads the covered PVC UID(s) DIRECTLY from an owning xxxSnapshot object in
-// hand (design §8.5/§11.7): the in-flight VCR name on status.captureState.domainSpecificController.
+// hand: the in-flight VCR name on status.captureState.domainSpecificController.
 // volumeCaptureRequestName → that VCR's spec.targets[].uid (VCR-based domains), or status.sourceRef.uid
 // (native-CSI VolumeSnapshot, no VCR). Both are published by capture barrier 1 (Planned), so coverage is
 // computable at the relaxed phase>=Planned wave gate even before the node's SnapshotContent is bound.

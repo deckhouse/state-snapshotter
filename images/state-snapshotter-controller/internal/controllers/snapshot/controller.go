@@ -255,7 +255,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Ensure the root ObjectKeeper for the Snapshot record's own TTL GC. The returned keeper is no longer
 	// consumed here: import content is now created + anchored on the root keeper by the generic binder
-	// (creator, content-single-writer design §10), and the capture path anchors its own content. This
+	// (creator), and the capture path anchors its own content. This
 	// ensure is kept for its side-effect (the Snapshot-following keeper must exist for every path).
 	_, res, err := controllercommon.EnsureRootObjectKeeperWithTTL(
 		ctx,
@@ -292,7 +292,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Import-mode Snapshots (spec.mode: Import) are materialized from an uploaded payload
 	// (manifests-and-children-refs-upload) — the controller MUST NOT capture the live namespace. The
-	// generic binder (creator, content-single-writer design §10) creates + binds the root SnapshotContent
+	// generic binder (creator) creates + binds the root SnapshotContent
 	// from the uploaded ManifestCheckpoint (owned by the root ObjectKeeper ensured above) and the aggregator
 	// projects its status; this orchestrator only holds a non-terminal ImportPending until the binder binds,
 	// then mirrors the bound content's Ready.
@@ -300,12 +300,11 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.reconcileImport(ctx, nsSnap)
 	}
 
-	// wave5 content-free flip: the root no longer creates/binds its own SnapshotContent nor runs the
+	// Content-free flip: the root no longer creates/binds its own SnapshotContent nor runs the
 	// bespoke parent_graph + reconcileCaptureN2a legs. It drives capture through the in-process snapshotsdk
 	// (children planning + residual/orphan + manifest-exclude legs), while the generic binder — which now
 	// watches the root (unifiedbootstrap.DomainCaptureSnapshotKinds) — creates/binds the root
-	// SnapshotContent, chases its MCR->MCP, and mirrors Ready. See docs/wave5-namespace-domain-design.md
-	// and reconcileNamespaceCapture.
+	// SnapshotContent, chases its MCR->MCP, and mirrors Ready. See reconcileNamespaceCapture.
 	return r.reconcileNamespaceCapture(ctx, nsSnap, &ns)
 }
 

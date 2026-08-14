@@ -395,7 +395,7 @@ func snapshotRefMismatch(content *unstructured.Unstructured, wantAPIVersion, wan
 // verifyOrphanContentSnapshotRef enforces the anti-spoofing handshake for the orphan child volume node:
 // the bound child SnapshotContent must carry a spec.snapshotRef that points back at the VolumeSnapshot
 // handle (apiVersion/kind/namespace/name). The UID is matched only when the ref carries one — both the
-// import path (extended VolumeSnapshot) and the capture path (wave4B) now stamp it with the live VS UID,
+// import path (extended VolumeSnapshot) and the capture path now stamp it with the live VS UID,
 // and recycle-bin restore re-points it (relaxed-CEL) to the re-created VS handle's new UID; we verify it
 // against the live VS whenever present. Any missing/mismatched field is a contract violation (409), never
 // a transient not-ready.

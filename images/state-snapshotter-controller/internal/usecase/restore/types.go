@@ -23,7 +23,7 @@ import (
 )
 
 // RestoreNode is one node of the snapshot run tree used by the restore compiler
-// (manifests-with-data-restoration, ADR 2026-06-10). It walks the Snapshot run tree
+// (manifests-with-data-restoration). It walks the Snapshot run tree
 // (Snapshot -> status.childrenSnapshotRefs) so it carries the owning snapshot CR identity (needed by
 // domain restore transforms to point a restored object at its own snapshot) and the orphan-PVC
 // VolumeSnapshot visibility leaves.

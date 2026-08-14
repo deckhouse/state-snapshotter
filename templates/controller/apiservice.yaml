@@ -28,7 +28,7 @@ spec:
   version: v1alpha1
   versionPriority: 15
 ---
-# C8: connector group for the generic-PVC extended VolumeSnapshot. This is a SEPARATE aggregated
+# Connector group for the generic-PVC extended VolumeSnapshot. This is a SEPARATE aggregated
 # group (subresources.snapshot.storage.k8s.io) from the CSI CRD group (snapshot.storage.k8s.io), so it
 # does NOT intercept the real VolumeSnapshot/VolumeSnapshotContent CRDs. It only serves the virtual
 # volumesnapshots connector subresources (manifests-download / -with-data-restoration /

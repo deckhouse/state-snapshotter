@@ -39,7 +39,7 @@ const importContentPollInterval = 2 * time.Second
 // backs it (materialized from the out-of-band uploaded payload) is created, bound, and Ready — it no longer
 // creates the content itself.
 //
-// Creator = generic binder (content-single-writer design §10, creator/main): the binder creates + binds the
+// Creator = generic binder (creator/main): the binder creates + binds the
 // import root SnapshotContent (owned by the root ObjectKeeper for unified TTL GC, deletionPolicy=Delete)
 // exactly as it does for the capture root, and the SnapshotContentController aggregator projects ALL of its
 // status — the manifest leg from the reconstructed ManifestCheckpoint (keyed to the Snapshot UID), the

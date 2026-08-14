@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package volumesnapshotimport binds IMPORT-mode generic-PVC leaves: extended CSI VolumeSnapshots that
 // carry the unified enum spec.mode: Import (parity with every other snapshot kind; the fork CRD hosts the
-// field). The owning DataImport is found by reverse-lookup (DataImport.spec.targetRef -> this
+// field). The owning DataImport is found by reverse-lookup (DataImport.spec.snapshotRef -> this
 // VolumeSnapshot), not named on the leaf. The forked snapshot-controller skips import-mode
 // VolumeSnapshots, so this common controller is the sole binder for them.
 //
@@ -27,6 +27,11 @@ limitations under the License.
 // and the legacy CSI status.boundVolumeSnapshotContentName/readyToUse (so the VS reads as a bound, ready
 // snapshot pointing at the imported VSC). SnapshotContentController owns Ready; the parent aggregates this
 // leaf through its childrenSnapshotContentRefs.
+//
+// A finished import outlives its DataImport (reaped by its own idle TTL), so the absence of a DataImport on
+// an already-bound leaf is this controller's expected STEADY STATE, not a pending import: it stops polling
+// and keeps only the status.data export mirror. Its readiness surface stays the one-shot legacy CSI
+// readyToUse written at bind time — this controller never had, and does not gain, a steady-state Ready.
 package volumesnapshotimport
 
 import (
@@ -58,8 +63,9 @@ import (
 )
 
 const (
-	// importPollInterval is the polling fallback while the import is converging (upload not yet present,
+	// importPollInterval is the polling fallback while the import is CONVERGING (upload not yet present,
 	// DataImport artifact not yet produced). No DataImport/MCP watch is taken; this poll drives progress.
+	// A finished import stops polling even though its DataImport is gone — see Reconcile's di == nil branch.
 	importPollInterval = 5 * time.Second
 	// vscRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot is deleted.
 	vscRetainPolicy = "Retain"
@@ -124,7 +130,7 @@ func importVolumeSnapshotPredicate() predicate.Predicate {
 // isImportModeVolumeSnapshot reports whether an extended VolumeSnapshot is in IMPORT mode, signalled by
 // the unified enum spec.mode: Import (parity with every other state-snapshotter snapshot kind; the fork
 // CRD hosts the field). The owning DataImport is not named here; it is found by reverse-lookup
-// (DataImport.spec.targetRef).
+// (DataImport.spec.snapshotRef).
 func isImportModeVolumeSnapshot(u *unstructured.Unstructured) bool {
 	mode, _, _ := unstructured.NestedString(u.Object, "spec", "mode")
 	return mode == string(storagev1alpha1.SnapshotModeImport)
@@ -181,7 +187,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 				controllercommon.SnapshotSubjectRefFromObject(vs),
 			),
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		// Durable tree node: stamp delete-protection into the CREATE payload.
 		storagev1alpha1.StampDeleteProtected(content)
 		if cErr := r.Create(ctx, content); cErr != nil && !errors.IsAlreadyExists(cErr) {
 			return ctrl.Result{}, cErr
@@ -203,8 +209,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of status.manifestCheckpointName
 	// (projecting the reconstructed checkpoint name keyed to the VS UID once the per-CR upload endpoint has
 	// created it). This controller no longer publishes it; it still waits for the checkpoint to exist and to
 	// go Ready below, because it recovers the orphan PVC manifest from the checkpoint chunks for the dataRef.
@@ -218,7 +224,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Reverse-lookup the DataImport that materializes this leaf's data leg: the import marker carries no
-	// name; DataImport.spec.targetRef points back at this VolumeSnapshot. Exactly one is required (>=2 is
+	// name; DataImport.spec.snapshotRef points back at this VolumeSnapshot. Exactly one is required (>=2 is
 	// fail-closed; none means d8 has not created it yet — poll).
 	di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, vs)
 	if lErr != nil {
@@ -231,7 +237,21 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 	if di == nil {
-		return ctrl.Result{RequeueAfter: importPollInterval}, nil
+		// "No DataImport" has two opposite meanings and only one of them is "wait". Before the import
+		// completes d8 may not have created it yet. But a DataImport is reaped by its own idle TTL once it
+		// is done, so "no DataImport, content already carrying its data leg" is the PERMANENT end state of
+		// an imported leaf. Returning a requeue here unconditionally (as this branch used to) made that end
+		// state cost ~12 reconciles/min per leaf forever, each listing DataImports, while the export mirror
+		// — the only thing that carries a later content-side correction onto the VS that d8 reads — never
+		// ran again. Which of the two states we are in is decided by the content alone, so hand over to the
+		// mirror: it polls while the content has published nothing and settles once it has.
+		//
+		// Everything skipped in between needs the DataImport only to resolve and bind the VSC. Once the
+		// content carries the data leg that binding is done and durable: the VSC Retain policy and its
+		// volumeSnapshotRef back-ref are spec fields written at bind time (and the aggregator keeps up the
+		// Retain/ownerRef handoff), and status.sourceRef must have been published too, since the aggregator
+		// cannot have built content.status.data without it.
+		return r.mirrorPublishedContentData(ctx, req.NamespacedName, contentName)
 	}
 
 	// Data leg: resolve the DataImport's produced VolumeSnapshotContent and bind it.
@@ -292,8 +312,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, lErr
 	}
 
-	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10/§11.4): the aggregator is the single writer of content.status.data.
+	// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of content.status.data.
 	// For a native-CSI VolumeSnapshot it builds the {captured PVC source, bound VSC} binding from
 	// status.sourceRef + status.boundVolumeSnapshotContentName and performs the enrich +
 	// Retain/ownerRef handoff + publish itself. This controller therefore publishes the recovered orphan PVC
@@ -304,21 +324,30 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, sErr
 	}
 
-	// Export mirror: mirror the aggregator-published content.status.data onto the extended VS top-level
-	// status.data for d8 export/consumption (byte-identical wire shape to the domain data-leaf mirror
-	// genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's captured-volume descriptor (source
-	// + artifact + volume metadata) from the namespaced VolumeSnapshot alone, without touching the
-	// cluster-scoped SnapshotContent. It is a no-op until the aggregator publishes (snapshotSource + bound
-	// just propagated), so poll until it does. StorageClass is overridden from DataImport.spec.storageClassName
-	// (the authoritative import mapping), matching the domain import path.
+	return r.mirrorPublishedContentData(ctx, req.NamespacedName, contentName)
+}
+
+// mirrorPublishedContentData re-reads the bound SnapshotContent and mirrors its aggregator-published
+// status.data onto the extended VS top-level status.data for d8 export/consumption (byte-identical wire
+// shape to the domain data-leaf mirror genericbinder.mirrorDataToLeaf), so d8 resolves the imported leaf's
+// captured-volume descriptor (source + artifact + volume metadata) from the namespaced VolumeSnapshot
+// alone, without touching the cluster-scoped SnapshotContent. The copy is verbatim: the aggregator
+// publishes the whole descriptor including storageClassName (which it takes from
+// DataImport.spec.storageParams.storageClassName on import), so this controller adds nothing of its own.
+//
+// It is the single exit of Reconcile for BOTH the just-bound leg and the DataImport-less steady state of a
+// finished import, so the two cannot drift apart. A content that has not published its data leg yet is the
+// normal converging case: poll, since neither DataImport nor SnapshotContent is watched here.
+func (r *Controller) mirrorPublishedContentData(ctx context.Context, key client.ObjectKey, contentName string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return ctrl.Result{}, cErr
 	}
 	if content.Status.Data == nil {
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
-	scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, req.NamespacedName, *content.Status.Data, scOverride); mErr != nil {
+	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, key, *content.Status.Data); mErr != nil {
 		// The content was already confirmed present above, so mirrorDataToImportVolumeSnapshot's own
 		// NotFound can only be the reconciled VolumeSnapshot itself vanishing mid-reconcile: swallow it
 		// (standard "object gone, nothing to do"), don't error-requeue. Any other failure (real Patch/
@@ -327,7 +356,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			logger.Error(mErr, "Failed to mirror data binding to import VolumeSnapshot status")
 			return ctrl.Result{}, mErr
 		}
-		logger.V(1).Info("Import VolumeSnapshot not found while mirroring data; skipping", "volumeSnapshot", req.NamespacedName)
+		logger.V(1).Info("Import VolumeSnapshot not found while mirroring data; skipping", "volumeSnapshot", key)
 	}
 	return ctrl.Result{}, nil
 }
@@ -360,14 +389,12 @@ func (r *Controller) resolveDataImportArtifact(di *unstructured.Unstructured) (v
 // It mirrors the SAME binding just published onto the backing SnapshotContent, via the shared
 // snapshotcontent.SnapshotDataBindingToUnstructuredMap, so the wire shape is byte-identical to the domain
 // data-leaf mirror (genericbinder.mirrorDataToLeaf); d8 then resolves the imported leaf's captured-volume
-// descriptor from the namespaced VolumeSnapshot alone. scOverride, when non-empty, replaces the binding's
-// StorageClassName with DataImport.spec.storageClassName (the authoritative import StorageClass mapping),
-// matching the domain import path. The forked snapshot-controller skips import VS, so status.data is ours to
-// own. Idempotent: re-reads and short-circuits when status.data already equals the desired block.
-func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding, scOverride string) error {
-	if scOverride != "" {
-		binding.StorageClassName = scOverride
-	}
+// descriptor from the namespaced VolumeSnapshot alone. The binding is copied verbatim — including
+// storageClassName, which the aggregator (the single writer of content.status.data) fills from
+// DataImport.spec.storageParams.storageClassName on the import leg, matching the domain import path. The
+// forked snapshot-controller skips import VS, so status.data is ours to own. Idempotent: re-reads and
+// short-circuits when status.data already equals the desired block.
+func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key client.ObjectKey, binding storagev1alpha1.SnapshotDataBinding) error {
 	desired := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&binding)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}

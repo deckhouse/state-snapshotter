@@ -22,13 +22,13 @@ import (
 	"github.com/deckhouse/state-snapshotter/api/names"
 )
 
-// CheckpointNamePrefix is the prefix for ManifestCheckpoint names and related chunk names (unified wave4C
+// CheckpointNamePrefix is the prefix for ManifestCheckpoint names and related chunk names (unified
 // scheme, see api/names). Chunk names are recorded in status and read back from there, so this prefix is
 // not reverse-parsed by consumers.
 const CheckpointNamePrefix = "nss-mcp-"
 
 // SnapshotMCRName returns the deterministic ManifestCaptureRequest name for a Snapshot root, keyed by the
-// owning snapshot UID (unified wave4C scheme, see api/names).
+// owning snapshot UID (unified scheme, see api/names).
 func SnapshotMCRName(uid types.UID) string {
 	return names.ManifestCaptureRequestName(uid)
 }
@@ -36,20 +36,20 @@ func SnapshotMCRName(uid types.UID) string {
 // SnapshotVolumeMCRName returns the deterministic per-orphan-PVC ManifestCaptureRequest name for a child
 // volume node (Variant A): each loose/orphan PVC becomes its own snapshot node whose PVC manifest is
 // captured in its own ManifestCheckpoint. Keyed by the orphan VolumeSnapshot UID (the per-PVC leaf
-// identity, unified wave4C scheme), so it is stable across reconciles and distinct from the root MCR.
+// identity, unified scheme), so it is stable across reconciles and distinct from the root MCR.
 func SnapshotVolumeMCRName(orphanVSUID types.UID) string {
 	return names.ManifestCaptureRequestName(orphanVSUID)
 }
 
 // ManifestCaptureRequestObjectKeeperName returns the execution ObjectKeeper name for a ManifestCaptureRequest,
-// keyed by the MCR UID (unified wave4C scheme, see api/names). A recreated request with the same
+// keyed by the MCR UID (unified scheme, see api/names). A recreated request with the same
 // namespace/name gets a distinct UID and therefore a distinct OK, so a stale OK cannot collide.
 func ManifestCaptureRequestObjectKeeperName(uid types.UID) string {
 	return names.ObjectKeeperName(uid)
 }
 
 // GenerateManifestCheckpointNameFromUID returns the deterministic ManifestCheckpoint name for a
-// ManifestCaptureRequest UID (unified wave4C scheme, see api/names). Single SSOT with the checkpoint
+// ManifestCaptureRequest UID (unified scheme, see api/names). Single SSOT with the checkpoint
 // controller.
 func GenerateManifestCheckpointNameFromUID(mcrUID types.UID) string {
 	return names.ManifestCheckpointName(mcrUID)

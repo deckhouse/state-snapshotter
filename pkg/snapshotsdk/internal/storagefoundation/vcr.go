@@ -53,7 +53,7 @@ type Target struct {
 }
 
 // VCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a snapshot, keyed by the
-// snapshot UID (unified wave4C scheme, see api/names). The name is derivable from the snapshot alone,
+// snapshot UID (unified scheme, see api/names). The name is derivable from the snapshot alone,
 // without reading SnapshotContent.
 func VCRName(snapshotUID types.UID) string {
 	return names.VolumeCaptureRequestName(snapshotUID)

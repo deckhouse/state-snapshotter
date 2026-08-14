@@ -36,7 +36,7 @@ import (
 )
 
 // RootObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed by
-// its UID (unified wave4C scheme, see api/names). The OK is looked up after the Snapshot is gone by
+// its UID (unified scheme, see api/names). The OK is looked up after the Snapshot is gone by
 // listing ObjectKeepers and matching FollowObjectRef (see aggregated retained-content lookup), so the
 // name need not be derivable from namespace/name.
 func RootObjectKeeperName(snapshotUID types.UID) string {
@@ -107,7 +107,6 @@ func EnsureRootObjectKeeperWithTTL(
 		Spec:       want,
 	}
 	// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
-	// (delete-protection-contract.md §6.1, §8.3).
 	storagev1alpha1.StampDeleteProtected(ok)
 	if err := c.Create(ctx, ok); err != nil {
 		return nil, ctrl.Result{}, err

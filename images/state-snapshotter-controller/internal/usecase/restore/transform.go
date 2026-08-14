@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// Restore node transform (ADR 2026-06-10 D4/D5). Each RestoreNode's captured manifests are sanitized
+// Restore node transform. Each RestoreNode's captured manifests are sanitized
 // for restore output, then turned into apply-ready objects. This layer is domain-free: it only knows
 // generic Kubernetes/CSI restore (PVC -> VolumeSnapshot dataSourceRef). Any domain-specific rewrite
 // (e.g. a disk object pointing at its own snapshot) is owned by the out-of-process domain controller's

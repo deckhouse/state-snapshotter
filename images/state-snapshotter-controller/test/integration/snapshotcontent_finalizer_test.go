@@ -21,6 +21,7 @@ package integration
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,16 +34,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-// Helper function to check if slice contains element
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
 
 var _ = Describe("Integration: SnapshotContentController - Finalizer Management", func() {
 	// PHASE 2.2: Integration: SnapshotContentController - Finalizer Management
@@ -192,7 +183,7 @@ var _ = Describe("Integration: SnapshotContentController - Finalizer Management"
 
 				// Check if finalizer exists
 				finalizers := contentObj.GetFinalizers()
-				return len(finalizers) > 0 && contains(finalizers, snapshot.FinalizerParentProtect)
+				return len(finalizers) > 0 && slices.Contains(finalizers, snapshot.FinalizerParentProtect)
 			}).Should(BeTrue(), "Finalizer should be added by SnapshotContentController")
 
 			// ACTIONS Step 2: Check SnapshotContent finalizers

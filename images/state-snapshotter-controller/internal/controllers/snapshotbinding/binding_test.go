@@ -30,7 +30,7 @@ import (
 func TestStableContentName(t *testing.T) {
 	uid := types.UID("12345678-1234-1234-1234-123456789abc")
 	got := StableContentName("snap", uid)
-	// Unified wave4C scheme: opaque, UID-keyed, name-independent.
+	// Unified scheme: opaque, UID-keyed, name-independent.
 	if want := StableContentName("other-name", uid); got != want {
 		t.Fatalf("StableContentName must depend only on UID: %q != %q", got, want)
 	}

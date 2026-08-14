@@ -144,7 +144,7 @@ func pr7EnsureSharedCSIClasses(ctx context.Context) {
 
 // pr7CreateReadyVSC creates a cluster-scoped VolumeSnapshotContent that reports status.readyToUse=true, so
 // a hand-authored dataRef artifact (status.data[].artifact) resolves as a healthy durable artifact instead
-// of ArtifactMissing. Under wave7 a SnapshotContent with a dataRef is Ready only once the referenced VSC
+// of ArtifactMissing. A SnapshotContent with a dataRef is Ready only once the referenced VSC
 // exists and is readyToUse (resolveDataReadiness -> VolumeSnapshotContent status.readyToUse), so synthetic
 // dataRef fixtures need a real ready VSC behind them. The VSC CRD carries no status subresource
 // (pr7RootPreserveCRD), so status is persisted on create. Idempotent; cleaned up after the spec.
@@ -215,8 +215,7 @@ func pr7CreateCSIPVC(ctx context.Context, namespace, name string) *corev1.Persis
 }
 
 // pr7StartFakeExternalSnapshotter runs a background reactor that plays, for one namespace, BOTH roles
-// envtest is missing so the orphan wave can complete end to end under the content-single-writer domain
-// model (design §11.6):
+// envtest is missing so the orphan wave can complete end to end under the domain model:
 //
 //   - the external-snapshotter CSI sidecar (pr7ReactExternalSnapshotter): for every orphan VolumeSnapshot
 //     the controller creates it creates a bound VolumeSnapshotContent (deletionPolicy=Delete on purpose, to
@@ -429,7 +428,7 @@ func pr7SeedContentManifestLeg(ctx context.Context, dc client.Client, contentNam
 // pr7OrphanContentForPVC returns whether the orphan VolumeSnapshot domain child for the given residual PVC
 // has a bound SnapshotContent whose single data binding targets that PVC. It is the observable proof that a
 // residual PVC was captured as its own ordinary domain child (VolumeSnapshot + own SnapshotContent + dataRef)
-// under the content-single-writer model — the successor to the old "child volume node" observable.
+// the successor to the old "child volume node" observable.
 func pr7OrphanContentForPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (bool, error) {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(schema.GroupVersionKind{

@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/labels"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 func labeledCM(group string) func(map[string]interface{}) {
@@ -29,12 +31,23 @@ func labeledCM(group string) func(map[string]interface{}) {
 	}
 }
 
-func TestBuildManifestCaptureTargets_ResourceSelector(t *testing.T) {
+func vetoedCM() func(map[string]interface{}) {
+	return func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{storagev1alpha1.ExcludeLabelKey: "true"}
+	}
+}
+
+// TestBuildManifestCaptureTargets_LabelSelector pins the selector layer of the manifest sweep: it is a
+// plain label selector applied on top of the built-in exclusions, and it can only narrow. The last subtest
+// is the one production actually relies on — the capture caller passes the exclude-veto selector, so a
+// veto-labeled object must never become a manifest target.
+func TestBuildManifestCaptureTargets_LabelSelector(t *testing.T) {
 	entries := defaultGVRs()
 	keep := obj("v1", "ConfigMap", "cm-keep", labeledCM("keep"))
 	drop := obj("v1", "ConfigMap", "cm-drop", labeledCM("drop"))
 	noLabel := obj("v1", "ConfigMap", "cm-nolabel", nil)
-	dyn := dynamicFromEntries(entries, keep, drop, noLabel)
+	vetoed := obj("v1", "ConfigMap", "cm-vetoed", vetoedCM())
+	dyn := dynamicFromEntries(entries, keep, drop, noLabel, vetoed)
 
 	build := func(selector labels.Selector) map[string]struct{} {
 		t.Helper()
@@ -102,6 +115,18 @@ func TestBuildManifestCaptureTargets_ResourceSelector(t *testing.T) {
 		for _, k := range []string{"ConfigMap/cm-keep", "ConfigMap/cm-nolabel"} {
 			if _, ok := got[k]; !ok {
 				t.Errorf("NotIn (drop) must keep %q (no/other group), targets=%v", k, got)
+			}
+		}
+	})
+
+	t.Run("exclude-veto selector (what capture passes) drops only the vetoed object", func(t *testing.T) {
+		got := build(storagev1alpha1.ExcludeVetoSelector())
+		if _, ok := got["ConfigMap/cm-vetoed"]; ok {
+			t.Errorf("the veto selector must drop the veto-labeled ConfigMap, targets=%v", got)
+		}
+		for _, k := range []string{"ConfigMap/cm-keep", "ConfigMap/cm-drop", "ConfigMap/cm-nolabel"} {
+			if _, ok := got[k]; !ok {
+				t.Errorf("the veto selector must keep un-vetoed %q, targets=%v", k, got)
 			}
 		}
 	})

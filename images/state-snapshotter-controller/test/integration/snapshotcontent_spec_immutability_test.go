@@ -35,7 +35,7 @@ import (
 // The SnapshotContent spec is frozen by root-level CEL transition rules, with a single recycle-bin
 // carve-out: spec.snapshotRef may be re-pointed (restore) only once status.boundSnapshotDeleted latched true,
 // while spec.deletionPolicy stays immutable in all cases. These admission contract tests pin that
-// behaviour so the anti-spoofing handshake (alive parent) and the wave4B restore path cannot regress.
+// behaviour so the anti-spoofing handshake (alive parent) and the restore path cannot regress.
 var _ = Describe("Integration: SnapshotContent spec immutability", func() {
 	It("freezes spec while the parent is alive and allows only a snapshotRef re-point once boundSnapshotDeleted latches", func() {
 		ctx := context.Background()

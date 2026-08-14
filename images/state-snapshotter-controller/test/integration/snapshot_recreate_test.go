@@ -39,7 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-var _ = Describe("Integration: Snapshot recreate (stale MCR / §4.7)", func() {
+var _ = Describe("Integration: Snapshot recreate (stale MCR)", func() {
 	It("after deleting root and creating another with the same name, binds a new SnapshotContent and MCR by new UID and reaches Ready", func() {
 		ctx := context.Background()
 		contentName1 := ""
@@ -106,7 +106,7 @@ var _ = Describe("Integration: Snapshot recreate (stale MCR / §4.7)", func() {
 
 		// MCR was removed after first capture success; same metadata.name must still be usable for a new snapshot.
 		Expect(errors.IsNotFound(k8sClient.Get(ctx, mcrKey1, &ssv1alpha1.ManifestCaptureRequest{}))).To(BeTrue())
-		// The retained root ObjectKeeper follows the old run's Snapshot UID (unified wave4C scheme).
+		// The retained root ObjectKeeper follows the old run's Snapshot UID (unified scheme).
 		// A same-name Snapshot cannot reuse it; simulate TTL expiry before reusing the name.
 		oldOKName := snapshot.GenerateObjectKeeperName(uid1)
 		Expect(k8sClient.Delete(ctx, &deckhousev1alpha1.ObjectKeeper{ObjectMeta: metav1.ObjectMeta{Name: oldOKName}})).To(Succeed())

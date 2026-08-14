@@ -31,7 +31,7 @@ import (
 )
 
 // RequestName returns the deterministic ManifestCaptureRequest name for a snapshot, keyed by its UID
-// (unified wave4C scheme, see api/names). The name is derivable from the snapshot alone, so it is stable
+// (unified scheme, see api/names). The name is derivable from the snapshot alone, so it is stable
 // across reconciles and restarts.
 func RequestName(snapshotUID types.UID) string {
 	return names.ManifestCaptureRequestName(snapshotUID)

@@ -58,7 +58,7 @@ func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService
 // BuildManifestsWithDataRestoration is the restore compiler: it walks the Snapshot run tree and
 // compiles apply-ready manifests bottom-up (post-order), rewriting data references so the output can
 // be applied directly into targetNamespace. It never emits VolumeRestoreRequest or other
-// control-plane objects (ADR 2026-06-10).
+// control-plane objects.
 //
 // opts.Scope selects the depth: ScopeSubtree (default) walks the whole run-tree; ScopeNode resolves and
 // compiles ONLY the root node (children are not read). An object filter (opts.FilterKind/Name) further

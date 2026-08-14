@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package names is the single source of truth for the state-snapshotter object-name scheme (wave4C).
+// Package names is the single source of truth for the state-snapshotter object-name scheme.
 //
 // Every generated name is derived from cluster-local UIDs via a truncated sha256 hex hash, giving a stable,
 // deterministic, DNS-1123-safe name. Names are intentionally OPAQUE: object connectivity is carried by
@@ -42,7 +42,7 @@ const (
 	h16Len = 16
 )
 
-// Name prefixes for the wave4C object-name scheme. They are the single source of truth reused by both the
+// Name prefixes for the object-name scheme. They are the single source of truth reused by both the
 // generators below and by recognizers (e.g. the delete-protection backfill classifier, which — as a
 // migration-only mechanism — may key on the fact that a legacy object carries one of our deterministic
 // names). Admission never parses names; these are for provenance classification only.

@@ -27,7 +27,7 @@ import (
 
 // NamespaceSnapshotAdapter maps the namespace-root Snapshot to the generic capture protocol
 // (pkg/snapshotsdk.SnapshotAdapter), so the root reconciler can drive capture through the SAME SDK as
-// external/demo domains ("dogfooding", wave5 docs/wave5-namespace-domain-design.md).
+// external/demo domains ("dogfooding").
 //
 // Shape: the root is an aggregator domain — a namespace manifest leg plus children (domain subtrees and
 // orphan VolumeSnapshot leaves), with NO single-PVC data leg of its own (SourceRef is a Namespace, not a
@@ -40,7 +40,7 @@ import (
 // NEVER writes the Ready condition and NEVER writes the core-owned captureState.commonController — it
 // only reads them (CoreCaptureState, ReadyReason/ReadyMessage). On the root, commonController.manifestCaptured
 // is owned solely by main (the aggregator's capture-leg lifecycle latches it after the MCP handoff and reaps
-// the root MCR — the root is a domain-capture kind; decision #10), which the SDK only reads.
+// the root MCR — the root is a domain-capture kind), which the SDK only reads.
 type NamespaceSnapshotAdapter struct {
 	snap *storagev1alpha1.Snapshot
 }

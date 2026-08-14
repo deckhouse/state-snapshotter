@@ -81,14 +81,10 @@ func BuildRootNamespaceManifestCaptureTargets(
 		return nil, nil, err
 	}
 
-	// resourceSelector narrows the manifest base to objects matching the user selector (nil = capture all).
-	// The same selector is applied to the PVC and CSD legs so excluded objects are dropped consistently.
-	selector, err := rootNS.ResolveResourceSelector()
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
-
-	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, selector)
+	// The manifest base is the whole namespace minus the built-in exclusions, minus objects carrying the
+	// exclude veto label. The same veto selector filters the PVC leg, so a vetoed object is dropped from
+	// both and never half-captured.
+	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, storagev1alpha1.ExcludeVetoSelector())
 	if err != nil {
 		return nil, unreadable, err
 	}
@@ -105,13 +101,13 @@ func BuildRootNamespaceManifestCaptureTargets(
 		Name:       targetNamespace,
 	})
 
-	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child (content-single-writer
-	// design §11.6): that child owns its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
+	// A residual/orphan root PVC is captured as its own VolumeSnapshot domain child: that child owns
+	// its own SnapshotContent + ManifestCheckpoint holding the PVC manifest +
 	// its own data leg. The root is a pure aggregator (dataRef=nil) and MUST NOT carry any PVC manifest. So
 	// the residual root-owned PVCs (ownedPVC) are excluded from the root MCR UP FRONT — independent of
 	// whether the orphan VolumeSnapshot's content / MCP already exists — because CSI binding of the orphan
 	// VolumeSnapshot is async and would otherwise race the (near-instant) root manifest leg into
-	// double-capturing the PVC manifest on both the root and the child (co-ownership violation, spec §3.9.2).
+	// double-capturing the PVC manifest on both the root and the child (co-ownership violation).
 	// Every residual root PVC goes through ensureOrphanPVCVolumeSnapshots → VolumeSnapshot child, so dropping
 	// them here never loses a manifest.
 	exclude := make(map[string]struct{}, len(ownedPVC)+len(subtreeExclude))

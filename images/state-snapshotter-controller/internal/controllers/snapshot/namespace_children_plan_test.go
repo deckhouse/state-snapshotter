@@ -93,13 +93,9 @@ func TestPlanParentOwnedChildGraphLayerBuildsSpecs(t *testing.T) {
 		Client:  fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build(),
 	}
 	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
-	selector, err := nsSnap.ResolveResourceSelector()
-	if err != nil {
-		t.Fatalf("ResolveResourceSelector: %v", err)
-	}
 
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
-	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, f.mapping, coverage, selector)
+	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, f.mapping, coverage)
 	if err != nil {
 		t.Fatalf("planParentOwnedChildGraphLayer: %v", err)
 	}
@@ -368,12 +364,8 @@ func TestPlanParentOwnedChildGraphLayer_SkipsNativeCSIVolumeSnapshotMapping(t *t
 	}
 	r := &SnapshotReconciler{Dynamic: dyn, Client: fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()}
 	nsSnap := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1", UID: "root-uid"}}
-	selector, err := nsSnap.ResolveResourceSelector()
-	if err != nil {
-		t.Fatalf("ResolveResourceSelector: %v", err)
-	}
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
-	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, coverage, selector)
+	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, coverage)
 	if err != nil {
 		t.Fatalf("planParentOwnedChildGraphLayer: %v", err)
 	}

@@ -101,7 +101,7 @@ func pvcTarget() vcpkg.Target {
 // orphanPVCVolumeSnapshotClass resolves the VolumeSnapshotClass for a residual/orphan PVC and validates its
 // driver against the bound PV CSI driver. The full orphan-child declaration flow (EnsureChildren) is covered
 // by the n5_pr7 envtest integration; here we unit-test the deterministic class resolver + terminal/transient
-// classification (content-single-writer design §11.6).
+// classification.
 func TestOrphanPVCVolumeSnapshotClass_HappyPath(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

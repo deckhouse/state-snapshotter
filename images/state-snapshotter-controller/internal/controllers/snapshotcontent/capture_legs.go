@@ -37,7 +37,7 @@ import (
 )
 
 // reconcileOwnerCaptureLegs runs the main-owned capture-leg lifecycle for the content's owning
-// xxxSnapshot (main-owned commonController, content-single-writer design §2/§3, decision #10):
+// xxxSnapshot (main-owned commonController):
 //
 //   - eager-init: declare the applicable core-owned capture legs on the owner
 //     (commonController.manifestCaptured=false always; dataCaptured=false for data-artifact kinds) so
@@ -50,7 +50,7 @@ import (
 //     the VCR. A FAILED VCR is NOT surfaced here anymore: core makes the CONTENT terminal in
 //     reconcileDataLegProjection (DataReady=VolumeCaptureFailed, decision D2), which the mirror reflects
 //     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
-//   - data leg (native-CSI VolumeSnapshot owners, design §11.4): no VCR — latch dataCaptured once the
+//   - data leg (native-CSI VolumeSnapshot owners): no VCR — latch dataCaptured once the
 //     content carries a published status.data (the projection performs the VSC handoff first);
 //   - childSubtreesManifestsPersisted: eager-declare false, then monotonically latch true, the children-only
 //     aggregate onto the owner's commonController — "the subtrees of ALL declared direct children are fully
@@ -211,7 +211,7 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 				return false, delErr
 			}
 		case ownerGVK.Kind == snapshot.KindVolumeSnapshot:
-			// Native-CSI data leg (design §11.4): a VolumeSnapshot owner has NO VCR — the fork binds it to
+			// Native-CSI data leg: a VolumeSnapshot owner has NO VCR — the fork binds it to
 			// a VSC and the data projection publishes content.status.data only after the Retain + ownerRef
 			// handoff, so data-present ⇒ handoff durable. No request to reap.
 			hasData, hErr := r.contentHasPublishedData(ctx, contentName)
@@ -286,7 +286,7 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		}
 	}
 
-	// subtreePlanned (main-owned, snapshot-native, monotonic; design §8.1, decision #10): this node is
+	// subtreePlanned (main-owned, snapshot-native, monotonic): this node is
 	// planned (guaranteed past ownerDomainCaptureAtLeastPlanned above) AND every DIRECT child's own
 	// subtreePlanned latch is set. Latch true only when the whole direct-child set is planned; while any
 	// child is still pending, requeue so the 500 ms self-requeue re-evaluates as children latch bottom-up
@@ -459,7 +459,7 @@ func childSnapshotSettled(child *unstructured.Unstructured) bool {
 }
 
 // observeOwnerDataLegVCR observes the domain-created VolumeCaptureRequest to drive the main-owned VCR
-// lifecycle (moved off the binder, decision #10). It is READ-ONLY on the SnapshotContent — enrich + VSC
+// lifecycle (moved off the binder). It is READ-ONLY on the SnapshotContent — enrich + VSC
 // handoff + status.data publish live in the data-leg projection. Its ONLY job is the success latch: report
 // done=true once the published status.data covers the VCR targets, so the caller may latch dataCaptured
 // and reap the VCR. Otherwise it returns done=false (pending) and the caller requeues.
@@ -521,7 +521,7 @@ func (r *SnapshotContentController) contentHasPublishedData(ctx context.Context,
 // kinds, commonController.dataCaptured=false. Presence of the field declares the leg (nil = no leg); the
 // leg is later monotonically flipped true by setOwnerCaptureLegCaptured. This lets the SDK distinguish
 // "not started yet" from "nothing to wait for" when computing CoreCaptureOutcome. Sideways write onto the
-// owner (main-owned commonController, decision #10) under an optimistic-lock merge patch: the domain
+// owner (main-owned commonController) under an optimistic-lock merge patch: the domain
 // co-writes domainSpecificController in the same status, so a concurrent write yields 409 and the retry
 // re-reads.
 func (r *SnapshotContentController) eagerInitOwnerCaptureLegs(ctx context.Context, owner *unstructured.Unstructured) error {
@@ -561,7 +561,7 @@ func (r *SnapshotContentController) eagerInitOwnerCaptureLegs(ctx context.Contex
 // (status.captureState.commonController.<leg>) to true on the owner snapshot, under an optimistic-lock
 // merge patch + conflict retry. It MUST be called before the corresponding request is reaped so the
 // domain SDK (which suppresses re-creation on the latch via an authoritative uncached read) never
-// re-creates it. Main owns commonController (decision #10); the domain-owned request-name
+// re-creates it. Main owns commonController; the domain-owned request-name
 // (domainSpecificController) is never touched here (single-writer per sub-structure).
 func (r *SnapshotContentController) setOwnerCaptureLegCaptured(ctx context.Context, owner *unstructured.Unstructured, leg string) error {
 	gvk := owner.GetObjectKind().GroupVersionKind()
@@ -589,7 +589,7 @@ func (r *SnapshotContentController) setOwnerCaptureLegCaptured(ctx context.Conte
 // false: leaving it nil would silently disable the SDK manifest-exclude pre-gate (nil = pre-gate off), so
 // the field must exist as false while the children's subtrees are still capturing. It never downgrades a
 // latched true and skips a redundant patch when the value is unchanged. Sideways write under an
-// optimistic-lock merge patch (main owns commonController, decision #10).
+// optimistic-lock merge patch (main owns commonController).
 func (r *SnapshotContentController) setOwnerChildSubtreesManifestsPersisted(ctx context.Context, owner *unstructured.Unstructured, persisted bool) error {
 	gvk := owner.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: owner.GetName()}

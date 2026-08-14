@@ -19,7 +19,7 @@
 # Safely removes test Snapshots, SnapshotContents, and related resources
 #
 # Usage:
-#   ./test-cleanup.sh [options]
+#   ./hack/test-cleanup.sh [options]
 #
 # Options:
 #   --snapshot-name NAME     Cleanup specific Snapshot by name
@@ -30,9 +30,9 @@
 #   --force                  Force cleanup (remove finalizers)
 #
 # Examples:
-#   ./test-cleanup.sh --snapshot-name test-smoke-1234567890
-#   ./test-cleanup.sh --all --namespace default
-#   ./test-cleanup.sh --snapshot-name test-smoke-1234567890 --force
+#   ./hack/test-cleanup.sh --snapshot-name test-smoke-1234567890
+#   ./hack/test-cleanup.sh --all --namespace default
+#   ./hack/test-cleanup.sh --snapshot-name test-smoke-1234567890 --force
 
 set -euo pipefail
 

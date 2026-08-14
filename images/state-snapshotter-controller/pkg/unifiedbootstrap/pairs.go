@@ -100,12 +100,12 @@ func IsDedicatedSnapshotControllerKind(kind string) bool {
 // DomainCaptureSnapshotKinds lists IN-PROCESS dedicated Snapshot kinds whose domain controller plans
 // capture out-of-band (creates MCR/VCR/children, publishes captureState.domainSpecificController incl.
 // phase) but whose cluster-scoped SnapshotContent is owned by the GenericSnapshotBinderController
-// (content-ownership commit 2, D1). It is a strict subset of DedicatedSnapshotControllerKinds.
+// It is a strict subset of DedicatedSnapshotControllerKinds.
 //
-// wave5: the namespace-root "Snapshot" is the only member ("dogfooding" — the root reconciler drives
+// The namespace-root "Snapshot" is the only member ("dogfooding" — the root reconciler drives
 // capture through the same snapshotsdk as external domains and no longer owns its SnapshotContent; the
-// generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready). See
-// docs/wave5-namespace-domain-design.md. Out-of-process domain kinds (PoC demo, virtualization) are NOT
+// generic binder creates/binds/mirrors the root content, chases its MCR->MCP, and mirrors Ready).
+// Out-of-process domain kinds (PoC demo, virtualization) are NOT
 // listed here; they are marked domain-capture at runtime from their CustomSnapshotDefinition (the generic
 // else branch in unifiedruntime.Syncer.Sync), exactly like the built-in CSI VolumeSnapshot pair.
 var DomainCaptureSnapshotKinds = []string{
@@ -170,7 +170,7 @@ func FilterGenericSnapshotGVKPairs(snapGVKs, contentGVKs []schema.GroupVersionKi
 // resolved parallel slices, if present. ok is false when the root pair is not in the resolved set
 // (CRDs absent) or the slices are mismatched.
 //
-// The generic binder MUST watch this pair at startup. Since wave5 the namespace-root "Snapshot" is a
+// The generic binder MUST watch this pair at startup. The namespace-root "Snapshot" is a
 // domain-capture kind whose cluster-scoped SnapshotContent is created/bound/mirrored by the generic
 // binder (not by the root reconciler). But FilterGenericSnapshotGVKPairs strips every dedicated kind
 // (root included), and the only compensating registration — unifiedruntime.Syncer.Sync — runs on CSD

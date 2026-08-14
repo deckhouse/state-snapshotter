@@ -83,8 +83,24 @@ func ptrInt64(v int64) *int64 {
 	return &v
 }
 
+// snapshotLeafStatusDataSchema is the LEAF-side status.data schema: the whole SnapshotDataBinding wire
+// shape the binder mirrors verbatim off the bound SnapshotContent (the descriptor d8 reads on export), not
+// just the two refs a content node is asserted on. Every optional volume-metadata field must be listed or
+// the apiserver prunes it on the status patch and a mirror assertion silently passes against nothing —
+// storageClassName in particular, which is the whole point of the import mapping. It must list EXACTLY the
+// binding's optional fields: an entry for a field the API no longer has would keep a stale key alive on the
+// leaf here and hide that the wire shape has changed.
+func snapshotLeafStatusDataSchema() apiextensionsv1.JSONSchemaProps {
+	data := snapshotContentDataRefSchema()
+	data.Properties["volumeMode"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["fsType"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["storageClassName"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	data.Properties["size"] = apiextensionsv1.JSONSchemaProps{Type: "string"}
+	return data
+}
+
 // snapshotContentDataRefSchema is the Variant A singular status.data schema (cardinality ≤1): a
-// SnapshotContent carries at most one data binding as an object, not a list. wave5 renamed the binding
+// SnapshotContent carries at most one data binding as an object, not a list. An earlier rename moved it
 // (status.dataRef->data), moved the source PVC under data.sourceRef, and dropped the standalone targetUID
 // (the volume identity is data.sourceRef.uid).
 func snapshotContentDataRefSchema() apiextensionsv1.JSONSchemaProps {
@@ -161,18 +177,19 @@ func snapshotSourceStatusSchema() apiextensionsv1.JSONSchemaProps {
 
 // integrationParallelSnapshotGraphGVKs returns resolved graph-registry snapshot↔content GVK slices
 // from graph built-ins and eligible CSD rows. Non-built-in domain pairs are intentionally CSD-gated here.
-func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind, error) {
+// A CSD listing error is not fatal: it degrades the result to the built-in pairs alone, the same way
+// production bootstrap keeps the built-in graph usable while the CSD rows are unreadable.
+func integrationParallelSnapshotGraphGVKs(ctx context.Context) ([]schema.GroupVersionKind, []schema.GroupVersionKind) {
 	csdPairs, derr := csdregistry.EligibleUnifiedGVKPairs(ctx, mgr.GetAPIReader())
 	if derr != nil {
 		csdPairs = nil
 	}
 	merged := unifiedbootstrap.MergeBootstrapAndCSDPairs(unifiedbootstrap.DefaultGraphRegistryBuiltInPairs(), csdPairs)
-	snapGVKs, contentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
+	return unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		merged,
 		ctrl.Log.WithName("integration-unified-bootstrap"),
 	)
-	return snapGVKs, contentGVKs, nil
 }
 
 // integrationSnapshotGraphRegistryRefresh rebuilds the integration graph registry (same hook as production CSD→refresh).
@@ -180,10 +197,7 @@ func integrationSnapshotGraphRegistryRefresh(ctx context.Context) error {
 	if integrationGraphRegProvider == nil {
 		return fmt.Errorf("integration graph registry provider is nil")
 	}
-	snapGVKs, contentGVKs, err := integrationParallelSnapshotGraphGVKs(ctx)
-	if err != nil {
-		return err
-	}
+	snapGVKs, contentGVKs := integrationParallelSnapshotGraphGVKs(ctx)
 	reg, err := snapshot.NewGVKRegistryFromParallelSnapshotContentPairs(snapGVKs, contentGVKs)
 	if err != nil {
 		return err
@@ -336,6 +350,13 @@ var _ = BeforeSuite(func() {
 							Properties: map[string]apiextensionsv1.JSONSchemaProps{
 								"spec": {
 									Type: "object",
+									Properties: map[string]apiextensionsv1.JSONSchemaProps{
+										// The structural discriminator every snapshot kind carries
+										// (spec.mode: Capture|Import). Without it declared here the
+										// apiserver PRUNES the field and an import fixture silently
+										// reads back as a capture snapshot.
+										"mode": {Type: "string"},
+									},
 								},
 								"status": {
 									Type: "object",
@@ -343,6 +364,8 @@ var _ = BeforeSuite(func() {
 										"captureState":             snapshotStatusCaptureStateSchema(),
 										"sourceRef":                snapshotSourceStatusSchema(),
 										"boundSnapshotContentName": {Type: "string"},
+										// The export descriptor the binder mirrors off the bound content.
+										"data": snapshotLeafStatusDataSchema(),
 										"conditions": {
 											Type: "array",
 											Items: &apiextensionsv1.JSONSchemaPropsOrArray{
@@ -793,7 +816,7 @@ var _ = BeforeSuite(func() {
 	for i := range genericSnapGVKs {
 		Expect(snapshotController.AddWatchForPair(mgr, genericSnapGVKs[i], genericContentGVKs[i])).To(Succeed())
 	}
-	// wave7 (w7-creator): mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
+	// Mirror cmd/main.go — register the built-in root Snapshot pair on the binder at
 	// startup so the root SnapshotContent is created/bound without waiting for a CSD-driven Syncer.Sync.
 	if rootSnapGVK, rootContentGVK, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
 		snapshotController.MarkDomainCaptureKind(rootSnapGVK)
@@ -815,7 +838,7 @@ var _ = BeforeSuite(func() {
 	for _, snapshotGVK := range runtimeSnapGVKs {
 		Expect(contentController.AddSnapshotStatusWatch(mgr, snapshotGVK)).To(Succeed())
 	}
-	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap, decision #10),
+	// Mirror cmd/main.go: main runs the root's capture-leg lifecycle (latches + MCR reap),
 	// so the root pair must be marked domain-capture on the content controller too.
 	if rootSnapGVK, _, ok := unifiedbootstrap.StartupDomainCaptureRootPair(runtimeSnapGVKs, runtimeContentGVKs); ok {
 		contentController.MarkDomainCaptureKind(rootSnapGVK)

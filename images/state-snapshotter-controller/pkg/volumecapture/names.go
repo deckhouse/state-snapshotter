@@ -23,14 +23,14 @@ import (
 )
 
 // SnapshotContentVCRName returns the deterministic VolumeCaptureRequest name for a logical SnapshotContent,
-// keyed by the content UID (unified wave4C scheme, see api/names). Used only to clear a stale root VCR
+// keyed by the content UID (unified scheme, see api/names). Used only to clear a stale root VCR
 // left by a legacy VCR-based run (the Variant A orphan path never creates a root VCR).
 func SnapshotContentVCRName(contentUID types.UID) string {
 	return names.VolumeCaptureRequestName(contentUID)
 }
 
 // SnapshotOwnedVCRName returns the deterministic data-leg VolumeCaptureRequest name owned by a domain
-// snapshot, keyed by the snapshot UID (unified wave4C scheme, see api/names). Used by domain (demo)
+// snapshot, keyed by the snapshot UID (unified scheme, see api/names). Used by domain (demo)
 // controllers so the request name is derivable from the snapshot alone, without reading SnapshotContent.
 func SnapshotOwnedVCRName(snapshotUID types.UID) string {
 	return names.VolumeCaptureRequestName(snapshotUID)

@@ -97,7 +97,7 @@ type SnapshotContentController struct {
 
 	// domainCaptureGVKs holds snapshot GVKs (String()) whose domain controller plans capture out-of-band
 	// (creates MCR/VCR/children, publishes captureState.domainSpecificController incl. phase). For these
-	// owners main runs the capture-leg lifecycle (main-owned commonController, decision #10): eager-init +
+	// owners main runs the capture-leg lifecycle (main-owned commonController): eager-init +
 	// manifestCaptured/dataCaptured latches + childSubtreesManifestsPersisted latch, written sideways onto the
 	// xxxSnapshot, and the MCR/VCR reap after a durable handoff (latch-before-reap). Marked by the same
 	// callers that mark the binder (unifiedruntime.Syncer, main.go). Guarded by domainCaptureMu.
@@ -411,12 +411,12 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// Resolve the owning snapshot ONCE per pass and share it across the single-writer projections below
 	// (child edges + manifest pointer + data leg). All read the same owner status legs (childrenSnapshotRefs
 	// and captureState...manifestCaptureRequestName / boundVolumeSnapshotContentName), so a single
-	// APIReader.Get keeps the aggregator's per-pass owner read at the Block 1 level. A second, redundant Get
-	// (one per projection) perturbed the Block 0 eager-shell ObjectKeeper create race enough to wedge the
+	// APIReader.Get keeps the aggregator's per-pass owner reads down to one. A second, redundant Get
+	// (one per projection) perturbed the eager-shell ObjectKeeper create race enough to wedge the
 	// orphan wave.
 	//
-	// Orphan/standalone VolumeSnapshot children are ordinary domain contents now (content-single-writer
-	// design §11.6): their owner (the VolumeSnapshot) carries captureState + boundVolumeSnapshotContentName,
+	// Orphan/standalone VolumeSnapshot children are ordinary domain contents now: their owner
+	// (the VolumeSnapshot) carries captureState + boundVolumeSnapshotContentName,
 	// so they drive the same projections as every other content — there is no visibility-leaf owner-resolve
 	// carve-out.
 	owner, ownerNamespace, ownerFound, ownerErr := r.ownerSnapshot(ctx, obj)
@@ -444,7 +444,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Single-writer child edges (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2): the
+	// Single-writer child edges (INV-CONTENT-CHILDREN-1): the
 	// aggregator is the ONLY writer of status.childrenSnapshotContentRefs. Project them from the owning
 	// snapshot's childrenSnapshotRefs before aggregating status. The edge write is a separate
 	// optimistic-locked status patch (not folded into the condition MergeFrom below); a freshly written
@@ -456,7 +456,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Single-writer manifest pointer (INV-CONTENT-WRITER-1, content-single-writer design §3.1/§3.2): the
+	// Single-writer manifest pointer (INV-CONTENT-WRITER-1): the
 	// aggregator is the ONLY writer of status.manifestCheckpointName. Project it from the owning snapshot's
 	// ManifestCaptureRequest BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads it.
 	// Like the child edges above, this is a separate optimistic-locked status patch observed on the next
@@ -467,7 +467,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Single-writer data leg (INV-CONTENT-WRITER-1, content-single-writer design §4 Slice 3 / §11.4): the
+	// Single-writer data leg (INV-CONTENT-WRITER-1): the
 	// aggregator is the ONLY writer of status.data for domain owners. Project it from the owning snapshot's
 	// VolumeCaptureRequest (VCR domains) or its bound VolumeSnapshotContent (native-CSI VolumeSnapshot)
 	// BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads status.dataRefs. Like the
@@ -490,7 +490,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
 	}
-	// Main-owned capture legs (decision #10): eager-init + latch the owner's commonController legs and
+	// Main-owned capture legs: eager-init + latch the owner's commonController legs and
 	// reap the domain MCR/VCR after a durable handoff — latch strictly before the delete, same pass, so
 	// the domain SDK's uncached latch read never observes a reaped request with a false latch (no
 	// re-creation churn). A failed data-leg VCR (or Variant-A fault) is no longer folded here: core makes
@@ -608,7 +608,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		return false, err
 	}
 
-	// Data-leg-pending downgrade (content-single-writer §4 Slice 3 / §11.4, INV-CONTENT-WRITER-1).
+	// Data-leg-pending downgrade (INV-CONTENT-WRITER-1).
 	// reconcileDataLegProjection is the single writer of status.data and it publishes via a SEPARATE
 	// status patch, so on this pass `obj` is stale-empty for a data leg it just published or is still
 	// capturing. resolveDataReadiness reads an empty status.dataRefs as volume N/A (DataReady=True),
@@ -670,7 +670,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 		}
 	}
 
-	// Barrier 2 on the CONTENT's OWN Ready (ADR §6.2): fold the owning Snapshot's domain capture phase into
+	// Barrier 2 on the CONTENT's OWN Ready: fold the owning Snapshot's domain capture phase into
 	// this content's derived Ready. A domain phase=Failed becomes the canonical terminal
 	// ReasonDomainCaptureFailed and a not-yet-Finished domain holds Ready=False/ChildrenPending, so the
 	// domain outcome propagates up the CONTENT-aggregation tree (a not-Ready child content holds/fails its
@@ -846,7 +846,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 // deriveReadyStatus computes the aggregate Ready condition (readyStatus/readyReason/readyMessage) from the
 // already-populated legs, applying the single-reason priority order (see buildCommonSnapshotContentStatusPlan
 // doc). It is factored out of buildCommonSnapshotContentStatusPlan so a post-build leg adjustment (e.g. the
-// data-leg-pending downgrade in reconcileCommonSnapshotContentStatus, content-single-writer §4 Slice 3) can
+// data-leg-pending downgrade in reconcileCommonSnapshotContentStatus) can
 // re-derive Ready without duplicating the priority ladder.
 func deriveReadyStatus(plan *commonContentStatusPlan) {
 	switch {
@@ -1157,8 +1157,8 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 }
 
 // terminalChildContentFailureReasons lists child SnapshotContent Ready=False reasons treated as a
-// terminal failure that must propagate up the ancestor chain as ChildrenFailed (INV-FAIL1,
-// snapshot-rework/2026-06-03-snapshot-conditions-model.md §5). Any other Ready=False (e.g.
+// terminal failure that must propagate up the ancestor chain as ChildrenFailed (INV-FAIL1).
+// Any other Ready=False (e.g.
 // ArtifactNotReady, ManifestCapturePending, ChildrenPending, or no Ready condition yet) is
 // non-terminal and propagates as ChildrenPending so a transient child does not fail the tree.
 var terminalChildContentFailureReasons = map[string]struct{}{
@@ -1185,8 +1185,8 @@ func isTerminalChildContentFailure(reason string) bool {
 // message names the failed/pending child and carries its original Ready reason/message so a deeper
 // leaf failure is not lost as the failure climbs the ancestor chain.
 //
-// Declared-vs-linked read barrier: orphan/residual-PVC children are ordinary domain children now
-// (content-single-writer design §11.6), so they are covered by the generalized declared-non-leaf gate
+// Declared-vs-linked read barrier: orphan/residual-PVC children are ordinary domain children now,
+// so they are covered by the generalized declared-non-leaf gate
 // below (holds ChildrenReady=False/ChildrenLinkPending until every DECLARED child is linked into the
 // frozen edge set) — there is no orphan-specific link gate anymore.
 func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Context, parentContentObj *unstructured.Unstructured) (bool, string, string, error) {
@@ -1244,7 +1244,7 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 			"waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames), nil
 	}
 
-	// Read barrier (eager shells, content-single-writer design §3.6): with eager content creation a parent
+	// Read barrier (eager shells): with eager content creation a parent
 	// shell can exist with DECLARED non-leaf children but an empty/partial childrenSnapshotContentRefs edge
 	// set, so total==0 must NOT read as ChildrenReady=True for such a node — that would flip a subtree Ready
 	// before its children are linked. Hold ChildrenReady=False (ChildrenLinkPending, fail-closed) until every
@@ -1286,14 +1286,14 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 }
 
 // reconcileChildContentEdges is the aggregator's writer of the DOMAIN/generic/import child edges in
-// status.childrenSnapshotContentRefs (INV-CONTENT-CHILDREN-1, content-single-writer design §3.1/§3.2). It
+// status.childrenSnapshotContentRefs (INV-CONTENT-CHILDREN-1). It
 // projects this content's child edges from its owning snapshot's status.childrenSnapshotRefs: each declared
 // child (domain/generic/import, incl. orphan/residual-PVC VolumeSnapshot children — all ordinary domain
-// children now, §11.6) -> its bound child SnapshotContent name (all-or-nothing per pass, requeue until
+// children now) -> its bound child SnapshotContent name (all-or-nothing per pass, requeue until
 // every declared child is bound).
 //
-// The write is the ATOMIC FROZEN-SET write (Block 4, INV-CONTENT-CHILDREN-2): the field transitions
-// empty -> complete in one transition and is immutable thereafter (Option A CEL). Because that transition
+// The write is the ATOMIC FROZEN-SET write (INV-CONTENT-CHILDREN-2): the field transitions
+// empty -> complete in one transition and is immutable thereafter (frozen-set CEL). Because that transition
 // is irreversible, it MUST NOT run until the owner's DECLARED child set is itself frozen: a Capture owner
 // publishes childrenSnapshotRefs INCREMENTALLY while planning (domain children first, then the residual/
 // orphan VolumeSnapshot wave) and only freezes the declared set at barrier 1 (phase >= Planned). Freezing
@@ -1322,7 +1322,7 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 
 	// Gate the atomic frozen-set write on the owner's DECLARED child set being frozen (see the doc comment).
 	// A Capture owner publishes childrenSnapshotRefs incrementally while planning and only freezes the set at
-	// Planned; projecting before then would freeze an INCOMPLETE edge set (Option A CEL makes it immutable
+	// Planned; projecting before then would freeze an INCOMPLETE edge set (the frozen-set CEL makes it immutable
 	// once non-empty), permanently stranding a later-declared child (e.g. the orphan/residual VolumeSnapshot)
 	// as unlinked -> ChildrenLinkPending forever. Requeue until the owner freezes; Import owners have no
 	// capture phase, so ownerChildSetFrozen returns true for them and preserves today's behavior.
@@ -1334,7 +1334,7 @@ func (r *SnapshotContentController) reconcileChildContentEdges(ctx context.Conte
 	// owner's declared children (each declared child -> its bound child-content edge, deduped by name), and
 	// the owner's childrenSnapshotRefs is set-once at Planned, so the published set can never exceed the
 	// declared set. Once it reaches the declared count the edge set is COMPLETE, frozen, and stable — there
-	// is nothing left to add (and the Option A CEL would reject any change). Returning here (using only
+	// is nothing left to add (and the frozen-set CEL would reject any change). Returning here (using only
 	// the in-memory content, no API reads) avoids the per-child uncached resolution
 	// (ResolveChildSnapshotRefToBoundContentName) on every 500 ms readiness self-requeue, which a node keeps
 	// issuing for its whole not-ready lifetime while it waits on the subtree archive latch. Without this an
@@ -1386,14 +1386,14 @@ func ownerChildSetFrozen(owner *unstructured.Unstructured) bool {
 }
 
 // reconcileManifestCheckpointNameProjection is the aggregator's writer of status.manifestCheckpointName
-// (INV-CONTENT-WRITER-1, content-single-writer design §3.1/§3.2, Block 2). It projects the manifest leg
+// (INV-CONTENT-WRITER-1). It projects the manifest leg
 // pointer from the owning snapshot's ManifestCaptureRequest so the aggregator — not the binder — is the
 // sole writer of the field that fillOwnLegs then validates (MCP Ready + ownership handoff onto the content).
 //
 // Root and domain capture owners are one code path: the manifest SDK (EnsureManifestCapture) publishes BOTH
 // the root-namespace MCR name and every domain MCR name into the owner's
 // status.captureState.domainSpecificController.manifestCaptureRequestName, which is read here. Orphan/
-// residual-PVC VolumeSnapshot children are ordinary domain owners now (content-single-writer design §11.6):
+// residual-PVC VolumeSnapshot children are ordinary domain owners now:
 // their storage-foundation VS domain controller requests the manifest MCR and publishes its name the same
 // way, so this one projection path covers them too — there is no orphan carve-out.
 //
@@ -1412,8 +1412,8 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 	}
 	if usecase.IsUnstructuredImportMode(owner) {
 		// Import owners have no MCR: the manifest leg is UPLOADED (a reconstructed ManifestCheckpoint keyed
-		// to the owner UID), not captured. The aggregator is the single writer here too (content-single-writer
-		// design §10), projecting the deterministic reconstructed name once the upload endpoint has created
+		// to the owner UID), not captured. The aggregator is the single writer here too,
+		// projecting the deterministic reconstructed name once the upload endpoint has created
 		// the checkpoint — the import controllers (root snapshot / generic leaf / VolumeSnapshot) no longer
 		// publish it.
 		return r.projectImportManifestCheckpointName(ctx, contentObj, owner)
@@ -1457,8 +1457,8 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 // projectImportManifestCheckpointName is the import twin of the MCR-based capture projection: it publishes
 // status.manifestCheckpointName from the deterministic reconstructed ManifestCheckpoint name
 // (usecase.ReconstructedManifestCheckpointName keyed to the owner UID) that the manifests-and-children-refs
-// -upload endpoint creates out-of-band. It is the sole writer of the import manifest leg
-// (content-single-writer design §10). Until the checkpoint exists there is nothing to publish: requeue while
+// -upload endpoint creates out-of-band. It is the sole writer of the import manifest leg.
+// Until the checkpoint exists there is nothing to publish: requeue while
 // unpublished (the 500 ms self-requeue also covers it), and once published the pointer is a durable latch —
 // a later NotFound (the checkpoint reaped after the SnapshotContent handoff) keeps the pointer.
 func (r *SnapshotContentController) projectImportManifestCheckpointName(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, err error) {
@@ -2252,7 +2252,7 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	obj.SetGroupVersionKind(snapshotGVK)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
-		// Manifest-leg wake-up (content-single-writer design §3.2, Block 2): the aggregator is the single
+		// Manifest-leg wake-up: the aggregator is the single
 		// writer of status.manifestCheckpointName (reconcileManifestCheckpointNameProjection), which reads
 		// the owning snapshot's ManifestCaptureRequest status.checkpointName. The checkpoint controller
 		// claims that name on the MCR WITHOUT touching the snapshot/content/MCP, so without this watch the

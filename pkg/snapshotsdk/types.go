@@ -45,7 +45,7 @@ type ExcludedObjectRef = storagev1alpha1.ExcludedObjectRef
 
 // ExcludeLabelKey is the absolute snapshot veto label (re-exported from the api module — one source of
 // truth). Any object carrying this key (value ignored) is excluded from every snapshot, at every level of
-// the tree, independently of spec.resourceSelector. Domain enumerators MUST partition their candidate
+// the tree. Domain enumerators MUST partition their candidate
 // source objects with PartitionExcluded: build children from kept, record excluded into
 // DomainCaptureState.ExcludedRefs (published to status.captureState.domainSpecificController.excludedRefs).
 const ExcludeLabelKey = storagev1alpha1.ExcludeLabelKey
@@ -216,7 +216,7 @@ type ChildCaptureState struct {
 }
 
 // VolumeCaptureSpec is the domain's data-leg intent: the single PVC to capture. A snapshot node binds at
-// most one data artifact (Variant A, cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
+// most one data artifact (cardinality ≤1, see api/storage/v1alpha1 SnapshotContent.dataRef):
 // multiple volumes are modeled as child snapshot nodes, never as several data refs on one node. A nil
 // DataRef means the snapshot is manifest-only — the SDK ensures no VolumeCaptureRequest and publishes no
 // name.

@@ -103,7 +103,7 @@ func (h *RestoreHandler) SetupRoutes(mux *http.ServeMux) {
 	//   - manifests-download (GET, single-node): the import path's DataImport reads a node's original
 	//     manifest directly off its SnapshotContent before any namespaced snapshot CR binds.
 	//   - subtree-manifest-identities (GET, recursive): the exclude-computation endpoint an aggregator's
-	//     SDK calls on each child content to obtain the subtree identity set (fail-closed, §6.3).
+	//    SDK calls on each child content to obtain the subtree identity set (fail-closed).
 	//   - manifests-upload (POST, manifests-only, internal): the content-addressed import write. It has NO
 	//     bind-gate — the content exists by definition (cluster-scoped addressing), a missing content is a
 	//     plain 404, never ImportContentNotBound. It is the target the domain upload facade forwards

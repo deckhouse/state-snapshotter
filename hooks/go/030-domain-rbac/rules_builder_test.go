@@ -118,6 +118,39 @@ func TestBuildCoreSourceReadRulesReadOnlyNoWatch(t *testing.T) {
 	}
 }
 
+// The webhooks SA gets a standing `get` — and nothing else — on the domain SOURCE GVRs. The MCR-validation
+// webhook resolves each spec.targets[] entry with one named dynamic Get, so list/watch would be excess
+// privilege; and the grant must be standing rather than relying on the transient per-namespace capture
+// RoleBinding, because MCR admission is not ordered against that RoleBinding.
+func TestBuildWebhookSourceReadRulesGetOnly(t *testing.T) {
+	diskGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualdisks"}
+	vmGVR := schema.GroupVersionResource{Group: "sds-unified-snapshots-poc.deckhouse.io", Version: "v1alpha1", Resource: "demovirtualmachines"}
+	otherGVR := schema.GroupVersionResource{Group: "acme.deckhouse.io", Version: "v1", Resource: "widgets"}
+
+	rules := buildWebhookSourceReadRules([]schema.GroupVersionResource{vmGVR, otherGVR, diskGVR, vmGVR})
+
+	want := []rbacv1.PolicyRule{
+		{
+			APIGroups: []string{"acme.deckhouse.io"},
+			Resources: []string{"widgets"},
+			Verbs:     []string{"get"},
+		},
+		{
+			APIGroups: []string{"sds-unified-snapshots-poc.deckhouse.io"},
+			Resources: []string{"demovirtualdisks", "demovirtualmachines"},
+			Verbs:     []string{"get"},
+		},
+	}
+
+	if !reflect.DeepEqual(rules, want) {
+		t.Fatalf("rules = %#v, want %#v", rules, want)
+	}
+
+	if rules := buildWebhookSourceReadRules(nil); rules != nil {
+		t.Fatalf("expected nil rules for no source GVRs, got %#v", rules)
+	}
+}
+
 // The restore-delegation grant: get on <resource>/manifests-with-data-restoration in the domain's
 // "subresources."-prefixed API group, so core can call the out-of-process domain apiserver when the
 // restore compiler delegates a domain subtree.

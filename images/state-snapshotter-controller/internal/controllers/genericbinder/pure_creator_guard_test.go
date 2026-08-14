@@ -22,8 +22,8 @@ import (
 	"testing"
 )
 
-// TestBinderNeverReferencesCommonControllerStatusKey pins the pure-creator invariant (content-single-writer
-// design decision #10): the GenericSnapshotBinderController never reads or writes the main-owned
+// TestBinderNeverReferencesCommonControllerStatusKey pins the pure-creator invariant:
+// the GenericSnapshotBinderController never reads or writes the main-owned
 // status.captureState.commonController half. The mechanical proxy for that invariant is the absence of the
 // quoted "commonController" status-key literal in the package's non-test source — every commonController
 // access goes through an unstructured path built from that string, so a regression that reintroduces one
@@ -46,7 +46,7 @@ func TestBinderNeverReferencesCommonControllerStatusKey(t *testing.T) {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		if strings.Contains(string(data), forbidden) {
-			t.Errorf("%s contains the forbidden status-key literal %s: the binder is a pure creator and must not touch main-owned status.captureState.commonController (decision #10)", name, forbidden)
+			t.Errorf("%s contains the forbidden status-key literal %s: the binder is a pure creator and must not touch main-owned status.captureState.commonController", name, forbidden)
 		}
 	}
 }

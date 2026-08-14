@@ -131,7 +131,7 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOw
 	}
 }
 
-// A VSC that is being deleted MUST NOT be patched (spec §3.9.10), even though its ownerRef is wrong and
+// A VSC that is being deleted MUST NOT be patched, even though its ownerRef is wrong and
 // its deletionPolicy is not Retain: the handoff must skip it (data readiness reports ArtifactMissing).
 func TestEnsureVolumeSnapshotContentsOwnedByContent_SkipsDeletingVSC(t *testing.T) {
 	ctx := context.Background()

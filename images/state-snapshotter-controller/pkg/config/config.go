@@ -47,7 +47,7 @@ const (
 	// ObjectKeeper is nss-ok-*, retaining the nss-* snapshot content tree)
 	// when STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE is not set.
 	//
-	// Production default: 30 days (720h). This is the "recycle bin" retention window (wave4B) — how long the
+	// Production default: 30 days (720h). This is the "recycle bin" retention window — how long the
 	// durable cluster-scoped SnapshotContent tree survives after its namespaced Snapshot is deleted, during
 	// which the captured data remains recoverable. Override per install with the snapshotTtlAfterDelete
 	// module parameter (env STATE_SNAPSHOTTER_SNAPSHOT_TTL_AFTER_DELETE). Keep this comfortably long: retained

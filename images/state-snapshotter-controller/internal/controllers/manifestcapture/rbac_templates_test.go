@@ -81,44 +81,150 @@ func TestAdminKubeconfigRBACIsManualReadPath(t *testing.T) {
 	}
 }
 
+// extractYAMLRuleBlock returns every rules[] entry of the (possibly Helm-templated) RBAC manifest
+// that lists the given resource under its resources:, with comment lines dropped. Raw substring
+// search over the whole file is NOT usable here, for two reasons that already produced a missed
+// defect each: resources are also named inside header comments (the first match landed there and
+// the scanned "block" was comment text), and a verb line that follows a comment still belongs to
+// the preceding rule for the YAML parser (an orphaned "- delete" survived behind a comment while
+// this guard stayed green).
 func extractYAMLRuleBlock(content, resource string) string {
-	idx := strings.Index(content, resource)
-	if idx < 0 {
-		return ""
+	var blocks []string
+	var current []string
+	flush := func() {
+		if len(current) > 0 && ruleGrantsResource(current, resource) {
+			blocks = append(blocks, strings.Join(current, "\n"))
+		}
+		current = nil
 	}
-	// Walk back to apiGroups and forward until next apiGroups or end of rules.
-	start := strings.LastIndex(content[:idx], "apiGroups:")
-	if start < 0 {
-		start = idx
+	inRule := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue // a comment never carries a grant and never terminates the rule around it
+		}
+		switch {
+		case strings.HasPrefix(line, "- apiGroups:"):
+			flush()
+			inRule = true
+			current = append(current, line)
+		case inRule && (trimmed == "" || strings.HasPrefix(line, "  ")):
+			current = append(current, line)
+		default: // ---, apiVersion:, roleRef:, ... — the rules list is over
+			flush()
+			inRule = false
+		}
 	}
-	end := strings.Index(content[idx:], "\n- apiGroups:")
-	if end < 0 {
-		return content[start:]
-	}
-	return content[start : idx+end]
+	flush()
+	return strings.Join(blocks, "\n")
 }
 
-// TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: the controller SA static
-// RBAC (templates/controller/rbac-for-us.yaml) must stay domain-agnostic. Domain/demo rights are granted
-// externally by the Deckhouse RBAC controller/hook and signalled via CSD AccessGranted=True.
+// ruleGrantsResource reports whether the rule (given as its comment-free lines) names the resource
+// under its resources: key. Exact item match, so "snapshots" does not match "snapshots/status".
+func ruleGrantsResource(lines []string, resource string) bool {
+	inResources := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "resources:":
+			inResources = true
+		case strings.HasSuffix(trimmed, ":"):
+			inResources = false
+		case inResources && trimmed == "- "+resource:
+			return true
+		}
+	}
+	return false
+}
+
+// The two fixtures below pin the extractor against the exact failure modes that let a live defect
+// through: a verb smuggled in after a comment must stay inside the rule, and a resource named only
+// in a comment must not produce a block at all.
+
+func TestExtractYAMLRuleBlockKeepsVerbAfterComment(t *testing.T) {
+	const planted = `rules:
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+  - list
+  - watch
+# a comment used to terminate the scanned block right here
+  - delete
+- apiGroups:
+  - other.io
+  resources:
+  - others
+  verbs:
+  - get
+`
+	block := extractYAMLRuleBlock(planted, "objectkeepers")
+	if block == "" {
+		t.Fatal("expected the objectkeepers rule to be extracted")
+	}
+	if !strings.Contains(block, "- delete") {
+		t.Fatal("a verb following a comment belongs to the rule and must be visible to the guard")
+	}
+	if strings.Contains(block, "others") {
+		t.Fatal("the neighboring rule must not leak into the extracted block")
+	}
+}
+
+func TestExtractYAMLRuleBlockIgnoresCommentMentions(t *testing.T) {
+	const fixture = `# Do NOT grant objectkeepers patch/update (comment only).
+- apiGroups:
+  - deckhouse.io
+  resources:
+  - objectkeepers
+  verbs:
+  - get
+`
+	block := extractYAMLRuleBlock(fixture, "objectkeepers")
+	if strings.Contains(block, "patch") || strings.Contains(block, "update") {
+		t.Fatal("comment text must not leak into the extracted rule block")
+	}
+	if !strings.Contains(block, "- get") {
+		t.Fatal("the real rule body must be extracted")
+	}
+	if got := extractYAMLRuleBlock("# only a comment names objectkeepers\n", "objectkeepers"); got != "" {
+		t.Fatalf("a comment-only mention must not produce a block, got %q", got)
+	}
+}
+
+// TestCoreRBACDoesNotGrantDemoDomainResources enforces rbac-source-of-truth: no static RBAC template may
+// hardcode a domain's resource names. Domain rights are granted dynamically by the 030-domain-rbac hook from
+// the CSD-registered GVRs and signalled via CSD AccessGranted=True:
 //
-// Scope is deliberately the controller SA template only. The admin-kubeconfig template
-// (templates/rbac-for-us.yaml, manual kubectl / demo-e2e read path) and the webhook template
-// (templates/webhooks/rbac-for-us.yaml, MCR target validation inventory) legitimately reference demo
-// resources and are guarded by TestAdminKubeconfigRBACIsManualReadPath /
-// TestWebhookRBACDoesNotUseWildcardResourceReads — they are NOT the controller SA production RBAC.
+//   - controller SA        -> d8:state-snapshotter:controller:domain-read
+//   - webhooks SA          -> d8:state-snapshotter:webhooks:domain-read (get on source GVRs, for MCR
+//     target validation — a static allowlist here would only ever cover the domains someone remembered)
+//   - DataExport SA        -> d8:state-snapshotter:data-export:domain-read
+//
+// The admin-kubeconfig template likewise does not enumerate domain groups: a domain module grants access to
+// its own CRs and aggregated subresources in its own templates.
+//
+// delete-guard.yaml is excluded on purpose: it matches whole domain API *groups* (not resource names) so the
+// admission guard stays kind-agnostic, which is the opposite of hardcoding an inventory.
 func TestCoreRBACDoesNotGrantDemoDomainResources(t *testing.T) {
 	repoRoot := filepath.Clean("../../../../..")
-	controllerTemplate := filepath.Join(repoRoot, "templates", "controller", "rbac-for-us.yaml")
+	templates := []string{
+		filepath.Join(repoRoot, "templates", "controller", "rbac-for-us.yaml"),
+		filepath.Join(repoRoot, "templates", "webhooks", "rbac-for-us.yaml"),
+		filepath.Join(repoRoot, "templates", "rbac-for-us.yaml"),
+	}
 
-	content := readTemplate(t, controllerTemplate)
-	for _, forbidden := range []string{
-		"sds-unified-snapshots-poc.deckhouse.io",
-		"demovirtualmachines",
-		"demovirtualdisks",
-	} {
-		if strings.Contains(content, forbidden) {
-			t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it externally via AccessGranted)", controllerTemplate, forbidden)
+	for _, tmpl := range templates {
+		content := readTemplate(t, tmpl)
+		for _, forbidden := range []string{
+			"sds-unified-snapshots-poc.deckhouse.io",
+			"demovirtualmachines",
+			"demovirtualdisks",
+		} {
+			if strings.Contains(content, forbidden) {
+				t.Fatalf("%s must not hardcode demo/domain RBAC resource %q (grant it dynamically via the 030-domain-rbac hook / AccessGranted)", tmpl, forbidden)
+			}
 		}
 	}
 }

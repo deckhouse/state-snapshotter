@@ -42,7 +42,7 @@ import (
 // that the shared !isolated suite deliberately omits — several !isolated specs rely on
 // VolumeSnapshotContent being absent. Keep Serial too: even within their own pass they must not interleave.
 //
-// content-single-writer orphan model (§11.6): a residual/loose PVC in a namespace-root capture (one not
+// Orphan model: a residual/loose PVC in a namespace-root capture (one not
 // covered by a domain child subtree) is captured as its OWN ordinary domain child — an orphan VolumeSnapshot
 // whose bound SnapshotContent carries the PVC dataRef and its own ManifestCheckpoint holding that PVC's
 // manifest — not appended to the root aggregator MCR. The root MCR therefore never carries a PVC manifest.
@@ -57,18 +57,18 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		pr7EnsureSharedCSIClasses(ctx)
 	})
 
-	// DEFERRED TO BLOCK 5 (orphan coverage rewrite): the two reactor-driven orphan-domain-child specs below
+	// DEFERRED (orphan coverage rewrite): the two reactor-driven orphan-domain-child specs below
 	// exercise the FULL residual-PVC -> VolumeSnapshot domain pipeline (orphan wave creates the VS, the
 	// storage-foundation VS domain controller adopts+plans it, the generic binder creates+binds its
 	// SnapshotContent, the aggregator projects data+manifest, the root subtree barrier clears). That
-	// pipeline is not yet closed at the integration level after the Block 3d model rewrite: registering the
+	// pipeline is not yet closed at the integration level after the model rewrite: registering the
 	// production CSD (source PVC -> VolumeSnapshot) makes the namespace planner enumerate the residual PVCs
 	// and create VolumeSnapshot children as GENERIC shells (no spec.source.persistentVolumeClaimName), which
 	// the domain reactor cannot adopt, so the orphan content is never created and the root manifest leg
 	// hangs. Reconciling the namespace-planner-vs-orphan-wave overlap and the domain-capture VolumeSnapshot
-	// spec population is exactly Block 5's scope; these specs are marked Pending until it lands (they never
-	// passed after the Block 3d rewrite — the isolated pass was not run then). The duplicate-covered-PVC-UID
-	// guard spec below is Pending for the SAME root cause as the pending-VCR spec: the §8.5 data-bearing gate
+	// spec population is deferred; these specs are marked Pending until it lands (they never
+	// passed after the rewrite — the isolated pass was not run then). The duplicate-covered-PVC-UID
+	// guard spec below is Pending for the SAME root cause as the pending-VCR spec: the data-bearing gate
 	// (coverage keys on RequiresDataArtifact(kind) from the CSD, not the tree shape) makes synthetic core
 	// Snapshot children NON-data-bearing, so their dataRefs contribute no subtree coverage and the guard can
 	// never fire in envtest without a registered data-bearing domain kind (out of scope here, as for the VCR
@@ -103,7 +103,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		// The root MCR is created only after the orphan wave completes (both child volume nodes linked and
 		// ready); when it exists it carries no PVC manifest — both residual PVCs are excluded up front.
 		//
-		// The root MCR is a TRANSIENT execution handle: under the content-single-writer model the aggregator
+		// The root MCR is a TRANSIENT execution handle: the aggregator
 		// publishes the root content's manifestCheckpointName AND performs the ManifestCheckpoint ownership
 		// handoff in a single pass, so the binder GCs the MCR (ManifestCaptureRequestSafeToDelete) within one
 		// poll interval — too fast to reliably observe. So assert the Variant-A invariant on whichever signal
@@ -130,7 +130,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		}, 150*time.Second, 500*time.Millisecond).Should(Succeed())
 
 		// Each residual PVC is observable as its own ordinary domain child: an orphan VolumeSnapshot whose
-		// bound SnapshotContent carries a single dataRef for that PVC (content-single-writer model §11.6).
+		// bound SnapshotContent carries a single dataRef for that PVC.
 		Eventually(func(g Gomega) {
 			for _, pvc := range []*corev1.PersistentVolumeClaim{pvcA, pvcB} {
 				found, err := pr7OrphanContentForPVC(ctx, pvc)
@@ -142,7 +142,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 
 	// Pending: the pending-VCR coverage mechanism (pvcUIDsFromPendingVCR) is deterministically covered by
 	// the unit test TestCollectSubtreeCoveredPVCUIDs_pendingVCRTargets. Reproducing it at the integration
-	// level under wave7 is inherently racy: the only way to obtain a subtree child whose bound content has a
+	// level is inherently racy: the only way to obtain a subtree child whose bound content has a
 	// pending (dataRef-less) VCR is a synthetic empty-spec namespace child, and once the controller observes
 	// that owned VCR the child content's own volume-leg readiness races the fixture (and collides on the
 	// ObjectKeeper lifecycle ownerRef), so the root MCR sometimes never advances. A faithful, stable version
@@ -156,7 +156,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsName}})
 		})
 
-		// Synthetic covered PVC identity (NOT a live namespace PVC): under wave7 a namespace-root capture
+		// Synthetic covered PVC identity (NOT a live namespace PVC): a namespace-root capture
 		// owns residual PVC discovery itself, so a live PVC would be orphan-captured by the root AND covered
 		// by the child's VCR — a self-inflicted DuplicateCoveredPVCUID. The pending-VCR coverage mechanism
 		// (pvcUIDsFromPendingVCR) keys purely on the VCR target UID, so a synthetic identity exercises it
@@ -212,7 +212,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		}, 120*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
-	// PENDING: see the DEFERRED-TO-BLOCK-5 note above. Under the §8.5 data-bearing coverage gate the synthetic
+	// PENDING: see the deferral note above. Under the data-bearing coverage gate the synthetic
 	// core Snapshot children are non-data-bearing (RequiresDataArtifact("Snapshot")==false, a built-in pair),
 	// so their fixture dataRefs are never read into the subtree-covered set and the DuplicateCoveredPVCUID guard
 	// cannot fire without a registered data-bearing domain kind (out of scope for the core envtest, same as the
@@ -236,7 +236,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		dupPVC := &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{Name: "pvc-dup", Namespace: nsName, UID: types.UID("pr7-dup-covered-pvc-uid")},
 		}
-		// The colliding dataRef points at a real ready VolumeSnapshotContent: under wave7 a dataRef whose
+		// The colliding dataRef points at a real ready VolumeSnapshotContent: a dataRef whose
 		// artifact VSC is absent makes each child Ready=False/ArtifactMissing, so the root would mirror
 		// ChildrenFailed before reaching the duplicate guard. A ready VSC lets both children go Ready=True so
 		// the root actually walks subtree coverage and hits the DuplicateCoveredPVCUID guard.
@@ -268,7 +268,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		})).To(Succeed())
 		rootKey := types.NamespacedName{Namespace: nsName, Name: rootName}
 		_ = pr7WaitSnapshotBound(ctx, rootKey)
-		// Block 4 frozen-set CEL rejects growing childrenSnapshotContentRefs one child at a time; seed both
+		// frozen-set CEL rejects growing childrenSnapshotContentRefs one child at a time; seed both
 		// children of the root in a single atomic write.
 		Expect(mergeChildrenGraphIntoRoot(ctx, k8sClient, nsName, rootName, []childGraphSeed{
 			{snapshotName: child1Name, contentName: child1Snap.Status.BoundSnapshotContentName},
@@ -293,7 +293,7 @@ var _ = Describe("Integration: N5 PR-7 orphan-PVC domain children", Serial, Orde
 		}, 120*time.Second, 500*time.Millisecond).Should(Succeed())
 	})
 
-	// DEFERRED TO BLOCK 5 (orphan coverage rewrite): same reactor-driven orphan-domain-child pipeline as the
+	// DEFERRED (orphan coverage rewrite): same reactor-driven orphan-domain-child pipeline as the
 	// first spec — Pending until the namespace-planner/orphan-wave overlap is reconciled (see the note above).
 	PIt("root MCR captures non-PVC namespace objects while residual CSI PVCs are excluded (own child volume nodes)", func() {
 		ctx := context.Background()

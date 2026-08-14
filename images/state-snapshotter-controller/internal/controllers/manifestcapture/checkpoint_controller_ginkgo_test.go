@@ -1287,7 +1287,7 @@ var _ = Describe("Helper Functions", func() {
 })
 
 // ============================================================================
-// ADR and compliance tests
+// Compliance tests
 // ============================================================================
 // These tests verify architectural decisions, resource scoping, and RBAC compliance.
 
@@ -1474,7 +1474,7 @@ var _ = Describe("Source provenance", func() {
 	})
 })
 
-var _ = Describe("ADR Compliance", func() {
+var _ = Describe("Chunk RBAC and status compliance", func() {
 
 	Describe("RBAC compliance", func() {
 		It("should document allowed RBAC verbs for ManifestCheckpointContentChunk", func() {
@@ -1491,18 +1491,18 @@ var _ = Describe("ADR Compliance", func() {
 
 			// Verify allowed verbs are documented
 			for verb := range allowedVerbs {
-				Expect(allowedVerbs[verb]).To(BeTrue(), "Verb '%s' should be allowed for ManifestCheckpointContentChunk according to ADR", verb)
+				Expect(allowedVerbs[verb]).To(BeTrue(), "Verb '%s' should be allowed for ManifestCheckpointContentChunk", verb)
 			}
 
 			// Verify forbidden verbs are documented
 			for verb := range forbiddenVerbs {
-				Expect(forbiddenVerbs[verb]).To(BeTrue(), "Verb '%s' should be forbidden for ManifestCheckpointContentChunk according to ADR", verb)
+				Expect(forbiddenVerbs[verb]).To(BeTrue(), "Verb '%s' should be forbidden for ManifestCheckpointContentChunk", verb)
 			}
 
 			// This test serves as documentation that:
 			// 1. Controller RBAC in templates/controller/rbac-for-us.yaml should only have: create, get, delete
 			// 2. No other ClusterRole/Role should grant list/watch on manifestcheckpointcontentchunks
-			// 3. This is enforced by ADR and should be verified in production via RBAC manifest validation
+			// 3. In production this is verified via RBAC manifest validation
 		})
 	})
 })
@@ -1511,7 +1511,6 @@ var _ = Describe("ADR Compliance", func() {
 // Ready Condition Semantics Tests
 // ============================================================================
 // These tests verify the new Ready condition semantics with Processing reason.
-// See docs/architecture/ready-condition-semantics.md for the full specification.
 
 var _ = Describe("Ready Condition Semantics", func() {
 	var (
