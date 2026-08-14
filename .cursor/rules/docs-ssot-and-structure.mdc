@@ -1,24 +1,45 @@
 ---
-description: SSOT, docs/internal/state-snapshotter-rework structure, document boundaries table, naming, development order.
+description: SSOT, internal documentation roles, document boundaries table, naming, development order.
 alwaysApply: true
 ---
 
 # Documentation SSOT and structure
 
+Internal design docs do **not** live in this repository. They live in internal project documentation
+that is not public — ask the storage team for its current location. The names below identify what each
+of those documents owns, not where it sits.
+This repository keeps only user-facing docs (`docs/README*.md`, `docs/USER_GUIDE*.md`).
+
+## 0. Comments and descriptions are self-contained (MUST)
+
+This repository is public. A reader must never be sent to something they cannot open, so in comments,
+CRD descriptions, `docs/**`, and test/spec names reference only what is in this repository or publicly
+reachable: a symbol, a path, a test name, a public URL. Not a document that is not here, not its path,
+not its section number, and not internal process shorthand (phase, block or decision ids).
+
+- **State the rule instead of its address.** If an invariant must match a document outside this
+  repository verbatim, the link is a **guard test** here — name it, e.g.
+  `TestDegradedReadyReasons_ExactMembership` — not a pointer in a comment.
+- **Doc comments on API types are user documentation.** controller-gen turns them into the CRD
+  descriptions under `crds/`, which reach users through `kubectl explain` and the documentation site.
+  Keep them about the contract, not about how the implementation got there.
+- Commit messages and PR descriptions are public as well, and unlike a comment they cannot be
+  corrected without rewriting history. Check before push.
+
 ## 1. Single source of truth
 
 Each type of information lives in one place; others reference it.
 
-| Type | Where |
-|------|--------|
-| spec/ | Normative contract (state machines, keys, invariants) |
-| architecture/ | Diagrams and high-level flow |
-| design/ | Redesign, migration, rollout plan |
-| adr/ | Reasons for decisions |
-| testing/ | Test strategy, scenarios, run modes |
-| operations/ | High-level status only; no copy of spec/design |
+| Document | Owns |
+|----------|------|
+| spec | Normative contract (state machines, keys, invariants) |
+| architecture | Diagrams and high-level flow |
+| design | Redesign, migration, rollout plan |
+| ADR | Reasons for decisions |
+| testing | Test strategy, scenarios, run modes |
+| operations/status | High-level status only; no copy of spec/design |
 
-Do not copy contract across documents. Root: `docs/internal/state-snapshotter-rework/`. Extended ADR drafts live under `snapshot-rework/` at repo root — keep **normative summaries** in sync with `docs/internal/state-snapshotter-rework/spec/system-spec.md`; do not treat `snapshot-rework/` alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
+Do not copy contract across documents. Long-form ADR drafts must keep their **normative summaries** in sync with the internal system spec; do not treat those drafts alone as SSOT for implementable contract. When deprecating a doc: mark in README or file header; point to new source.
 
 ## 2. Document boundaries (explicit)
 
@@ -33,19 +54,13 @@ In docs, separate clearly: **implemented** | **current target** | **planned/futu
 
 ## 3. Structure
 
-```
-docs/internal/state-snapshotter-rework/
-  spec/system-spec.md
-  architecture/overview.md (diagrams may add system-overview.puml)
-  design/implementation-plan.md (and other design notes)
-  adr/README.md (long-form ADR may stay in snapshot-rework/ until migrated)
-  testing/e2e-testing-strategy.md
-  operations/project-status.md
-```
+The internal documentation set (not public) holds one document per role: the system spec, the
+architecture overview (plus diagrams), the implementation plan and other design notes, the long-form
+ADR, the e2e testing strategy, and the project status.
 
 ## 4. Before changing code
 
-Read spec/system-spec.md; if redesign — design/; if touching a decision — adr/. On contract change: update spec; run e2e checks; add ADR if needed. New mechanism: design → spec → tests → code.
+Read the internal system spec; if redesign — the design notes; if touching a decision — the ADR. On contract change: update spec; run e2e checks; add ADR if needed. New mechanism: design → spec → tests → code.
 
 ## 5. Development order
 

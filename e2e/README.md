@@ -5,31 +5,52 @@ demo VM/disk snapshot tree, the aggregated subresource APIs
 (`manifests-download` / `manifests-with-data-restoration` /
 `manifests-and-children-refs-upload`), manifest-level restore, the export ->
 import round-trip, TTL/GC cascade, the full volume-data flow (phase 3), backup-system
-HTTP download via aggregated manifests + SVDM `DataExport` (phase 4), and backup-system
-restore import via `DataImport` into another namespace (phase 5) — all without d8-cli.
+HTTP download via aggregated manifests + `storage-foundation` `DataExport` (phase 4),
+backup-system restore import via `DataImport` into another namespace (phase 5), and
+coexistence with the second `DataExport`/`DataImport` data plane shipped by
+`storage-volume-data-manager` — all without d8-cli.
 
 The suite installs the `state-snapshotter` module together with the
 `sds-unified-snapshots-poc` module (the reference demo domain: demo controller +
 demo CRDs + demo CSDs the suite captures/restores against) on a nested Deckhouse
-cluster brought up by [storage-e2e](../../../../e2e/repos/storage-e2e), mirroring
+cluster brought up by [storage-e2e](https://github.com/deckhouse/storage-e2e), mirroring
 the structure of the `sds-elastic` e2e suite.
+
+Modules enabled on the nested cluster (see `tests/cluster_config.yml` for the full
+set with tags and dependencies): `state-snapshotter` (under test),
+`storage-foundation` (extended-VS fork + the `DataExport`/`DataImport` data plane
+the suite exercises), `sds-unified-snapshots-poc` (demo domain),
+`sds-node-configurator` + `sds-local-volume` (the thin, snapshot-capable
+StorageClass), and `storage-volume-data-manager` — a **second, independent**
+`DataExport`/`DataImport` data plane that serves its own API group from its own
+namespace and is meant to run permanently alongside `storage-foundation`.
 
 ## Phases
 
 The specs run inside a single ordered `Describe`, registered by builder
 functions in dependency order:
 
-1. **Phase 1 & 2 - manifest-only flow** (`captureSpecs`, `aggregatedApiSpecs`,
-   `namespaceCaptureReworkSpecs`, `restoreSpecs`, `importSpecs`, `gcSpecs`): apply
+1. **Phase 1 & 2 - manifest-only flow** (`captureSpecs`, `aggregatedAPISpecs`,
+   `namespaceCaptureReworkSpecs`, `namespaceManifestCaptureSpecs`, `restoreSpecs`,
+   `restoreFidelitySpecs`, `importSpecs`, `gcSpecs`): apply
    the manifest-only source (an ownerless ConfigMap plus a single manifest-only
    `DemoVirtualMachine`), create a root `Snapshot`, assert the `Snapshot` /
    `SnapshotContent` and the demo child snapshot reach Ready, read the aggregated
    APIs, restore the manifests into a fresh namespace, run the export -> import
    round-trip, and exercise the root TTL/GC cascade. Generic-object discovery
    (RBAC/Service/Deployment/etc.) is covered by `namespaceCaptureReworkSpecs`, not
-   the capture fixture. All these cheap specs share one `captured` tree (gc uses
-   its own short-TTL sub-tree) and need only `state-snapshotter` (no volume-data
-   leg).
+   the capture fixture. `restoreFidelitySpecs` captures a small RBAC/secret fixture
+   of its own and asserts what the restore happy path cannot see: cross-object
+   namespace references (a `RoleBinding` subject), secret payloads, and that a
+   repeated read serves the captured state — the source object is changed in
+   between — instead of following the live source. Registration order matters only
+   for the specs that READ the shared `captured` tree — `aggregatedAPISpecs`,
+   `restoreSpecs`, `importSpecs` and the archived-latch spec of
+   `namespaceCaptureReworkSpecs` — which must stay after the `captureSpecs` that
+   creates it. The rest build their own namespaces and trees:
+   `namespaceManifestCaptureSpecs`, `restoreFidelitySpecs`, `gcSpecs` (own
+   short-TTL sub-tree) and the remaining rework specs. The whole phase is cheap and
+   needs only `state-snapshotter` (no volume-data leg).
 2. **Phase 3 - full volume-data flow** (`volumeDataSpecs`, env-gated by
    `E2E_VOLUME_DATA`): provision a thin, snapshot-capable StorageClass via
    `storage-e2e/pkg/testkit.EnsureDefaultStorageClass` (which auto-enables
@@ -42,10 +63,10 @@ functions in dependency order:
    attach `DemoVirtualMachine` to one disk while the other stays standalone,
    capture a snapshot, download manifests via the aggregated `manifests-download`
   API (compared to live cluster objects), and download volume bytes via
-  storage-foundation `DataExport` from an in-cluster backup-client pod (Bearer
+  `storage-foundation` `DataExport` from an in-cluster backup-client pod (Bearer
   auth + `GET /api/v1/block`, sha256 compared to source). Needs
   `storage-foundation` (enabled in `tests/cluster_config.yml`).
-4. **Phase 5 - backup-system restore import** (`backupRestoreSpecs`, env-gated by
+4. **Phase 5 - backup-system restore import** (`importVariantsSpecs`, env-gated by
    `E2E_VOLUME_DATA`, chained from phase 4): reshape the captured tree for the
    import upload path (VM manifest folded into root; three data leaves), POST
    manifests via `manifests-and-children-refs-upload`, upload volume bytes via
@@ -118,6 +139,41 @@ functions in dependency order:
    `snapshots/manifests-download` `get` in group
    `subresources.state-snapshotter.deckhouse.io`. Needs `state-snapshotter` and the
    publish infrastructure (see `E2E_PUBLISH`).
+8. **Coexistence 1 - the second data plane survives a `storage-foundation` converge**
+   (`coexistenceSpecs`, env-gated by `E2E_COEXISTENCE`): `storage-volume-data-manager`
+   and `storage-foundation` are meant to run permanently side by side, each serving its
+   own `DataExport`/`DataImport` resources — own API group, own namespace, own
+   finalizers. Spec (a) exports a live **Filesystem** PVC through
+   `storage-volume-data-manager` (`targetRef` `{kind, name}`, no `group` field), asserts
+   the source PVC gains that module's own finalizer (its active protection while the PV
+   is detached into the exporter), and downloads the file back through `status.url`
+   (`--cacert` from `status.ca`, SA Bearer token, sha256 compared to source). Spec (b)
+   then **forces `storage-foundation` through a converge** and asserts nothing the other
+   module owns moved: both of its CRDs are still the SAME objects (a CRD delete cascades
+   away every user `DataExport`/`DataImport`), its live `DataExport` has the same uid and
+   is still Ready, the PVC still carries its finalizer, and the export still serves the
+   same bytes. **The converge is the whole point**: the suite enables modules once in
+   `BeforeSuite` and never re-converges them, so without an explicit trigger anything
+   that runs on a converge never runs, and the assertions would hold trivially. The
+   trigger flips a rendered module setting (`logLevel`) through the same runtime path the
+   suite enables modules with; the proof it landed is a new pod-template `generation` on
+   the `storage-foundation` data-manager Deployment carrying the predicted rendered value
+   plus a completed rollout and the module back to Ready — never a timer. The original
+   setting is restored (and that converge awaited too) at the end.
+9. **Coexistence 2 - both modules publish one live PVC under the same public address**
+   (`publicAddressSchemeGuardSpecs`, env-gated by `E2E_COEXISTENCE`, also needs
+   `E2E_PUBLISH`): a guard on the **documented limitation** that one target must not be
+   exported through both modules at once. It exports one live PVC with `publish: true`
+   through `storage-foundation`, records `status.publicURL`, deletes that export, waits
+   for the PV to return to the source PVC, exports the **same** PVC through
+   `storage-volume-data-manager`, and asserts both addresses equal
+   `https://api.<public-domain>/<ns>/pvc/<pvc>/`. It compares addresses only — no ingress
+   behaviour. The protocol is **sequential** by necessity: a live-volume export takes over
+   the volume's PV and publishes only after it holds it, so two simultaneous exports never
+   yield two equal addresses (the loser never publishes), and the equality does not exist
+   on snapshot targets, where the two modules already use different path segments. If the
+   two schemes are ever split apart this guard fails, and the documented limitation has to
+   be corrected with it.
 
 ## Module dependency note
 
@@ -164,6 +220,9 @@ pseudo-version. `state-snapshotter/api` is always consumed via
   - `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` — only when co-developing
     `storage-foundation` (the extended-VS fork + phase-3 data-leg backend +
     the `DataImport`/`DataExport` volume data-transport engine).
+  - `STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE` — the second
+    `DataExport`/`DataImport` data plane exercised by the coexistence specs. Only when
+    co-developing it; the committed default `main` is published by its own CI.
 
   Unset modules keep the literal `main` from the YAML. The phase-3 storage
   backends (`sds-node-configurator` + `sds-local-volume`) are enabled at runtime
@@ -187,9 +246,12 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
 - `E2E_GC_TTL`: `snapshotTtlAfterDelete` applied for the GC spec. Defaults to `60s`.
-All feature flags below are **opt-out**: they are **ON by default** so a plain run on a
-full cluster exercises the entire suite. Disable what your environment cannot support by
-setting the flag to a falsey value (`false`/`0`/`no`/`off`).
+The spec gates listed below are **opt-out** with one exception: they are **ON by default** so a
+plain run on a full cluster exercises the entire suite, and you disable what your environment
+cannot support by setting the gate to a falsey value (`false`/`0`/`no`/`off`). The exception is
+`E2E_CONTROLLER_RESTART`, which is **opt-in** and marked as such where it is listed. The
+non-gate knobs further down — images, timeouts, `E2E_KEEP_CLUSTER_ON_FAILURE`,
+`E2E_KEEP_CLUSTER` — follow their own defaults, stated per entry.
 
 - `E2E_VOLUME_DATA`: **on by default** — runs phases 3-5 (full volume-data flow, backup
   download, and backup restore). Set `E2E_VOLUME_DATA=false` to run phases 1-2 only (no
@@ -255,6 +317,31 @@ setting the flag to a falsey value (`false`/`0`/`no`/`off`).
 
   TLS on the sslip.io host of a private master IP is typically self-signed (Let's Encrypt
   cannot reach it), so external requests use `-k` or the ingress CA (`status.ca`).
+- `E2E_COEXISTENCE`: **on by default** — the coexistence specs (8 and 9 above) **and** the
+  `storage-volume-data-manager` module they need. It gates both on purpose: gating only the
+  specs would still leave the suite waiting for that module to become Ready, i.e. the knob
+  would not switch anything off. Set `E2E_COEXISTENCE=false` to drop the module from the
+  suite's runtime enable/ready set and skip its specs — do this on clusters where you do not
+  want a second `DataExport`/`DataImport` data plane installed, or where its image is not
+  available. Its **limit**: `tests/cluster_config.yml` also declares the module, and
+  storage-e2e applies that file at bring-up (before any suite code runs), so on
+  `alwaysCreateNew` the knob does not keep the module off a freshly built cluster — it only
+  removes the suite's dependency on it. Spec 9 additionally needs the publish
+  infrastructure and is skipped when `E2E_PUBLISH=false` (the address it compares is
+  `status.publicURL`). The module's image tag follows the usual convention:
+  `STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE` (default `main`).
+- `E2E_CONTROLLER_RESTART`: **OFF by default — opt-in** (`E2E_CONTROLLER_RESTART=true`, and it
+  also needs the volume-data flow, so keep `E2E_VOLUME_DATA` on). Controller liveness: it
+  captures its own three-level data-backed tree in its own namespace and **kills the running
+  controller Pod** (grace period 0) in the middle of that capture — after the root froze its
+  plan, before the tree went terminal, decided from the object's own state and never from a
+  timer. The capture must then finish **by itself**: nothing is patched, annotated or
+  re-created afterwards. It asserts that the tree did not duplicate (every node's
+  `childrenSnapshotContentRefs` still equals its declared children exactly, and no
+  `ManifestCaptureRequest` / `VolumeCaptureRequest` was issued a second time for a node whose
+  leg had already latched) and that `Ready` never regressed once given. It is opt-in because
+  the controller Deployment is a single replica: while it restarts, nothing in the cluster
+  reconciles. The spec waits for the controller to lead again before it finishes.
 - `E2E_PUBLISH_INGRESS_INLET`: inlet for the `IngressNginxController` the publish step
   provisions when a cluster has no ingress class. Defaults to `HostPort` (the only inlet
   that works on the static nested cluster, whose publish domain is the master IP). Only
@@ -291,9 +378,9 @@ export SSH_VM_USER=cloud
 export DKP_LICENSE_KEY=<license>
 export REGISTRY_DOCKER_CFG=<base64-docker-config>
 export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=main   # module under test; or prN / mrN
-# Optional — only when co-developing these dependency modules (default main):
-# export STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=prN
+# Optional — only when co-developing these modules (default main):
 # export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE=prN
+# export STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=prN
 
 # Everything, on a full cluster (all feature flags default ON):
 cd e2e
@@ -306,6 +393,10 @@ E2E_VOLUME_DATA=false make test
 
 # Trim what a partial cluster cannot run (e.g. no publish ingress, skip the slow GET-load):
 E2E_PUBLISH=false E2E_GET_LOAD=false make test
+
+# Without the second DataExport/DataImport data plane (drops the storage-volume-data-manager
+# module from the suite's runtime module set and skips the coexistence specs):
+E2E_COEXISTENCE=false make test
 
 # GET-load measurement only (provisions its own SC; baseline = log only):
 make test-focus FOCUS="GET-load measurement"

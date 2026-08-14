@@ -518,7 +518,7 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 		return nil
 	}
 	// Variant A: status.data is a single object (cardinality <=1), not a list. Return it as a
-	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The wave5 rename moved the
+	// 0/1-length slice so slice-based readiness/coverage helpers stay generic. The rename moved the
 	// binding under status.data and the source PVC under data.sourceRef (the standalone targetUID was dropped;
 	// the volume identity is data.sourceRef.uid). The internal DataBindingRef keeps its field names.
 	entry, ok := status["data"].(map[string]interface{})
@@ -542,13 +542,14 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataRefs() []DataBindingRe
 	if storageClassName, ok := entry["storageClassName"].(string); ok {
 		binding.StorageClassName = storageClassName
 	}
-	if accessModesRaw, ok := entry["accessModes"].([]interface{}); ok {
-		for _, am := range accessModesRaw {
-			if s, ok := am.(string); ok {
-				binding.AccessModes = append(binding.AccessModes, s)
-			}
-		}
-	}
+	// Any key the wire carries but DataBindingRef does not model is ignored, not surfaced: this projection
+	// takes the fields it knows and never fails on the rest. The tolerance is for divergence between schema
+	// and code, NOT for reading history — a v1 CRD prunes unknown keys on READ as well as on write, so a key
+	// dropped from the schema is unreachable through the API while the served schema omits it; the stored value
+	// survives in etcd until the object's next write (and would resurface if the property were re-added to the
+	// schema before then). What must not break the reader: a rolling update where CRD and binary disagree about
+	// the schema, a client that writes more than we model, and decode paths that never prune at all (fixtures,
+	// manifests read off disk, unstructured objects assembled by hand).
 	return []DataBindingRef{binding}
 }
 
@@ -686,7 +687,7 @@ func (w *unstructuredSnapshotContentWrapper) GetStatusDataSnapshotMethod() strin
 }
 
 // GenerateSnapshotContentName returns the deterministic SnapshotContent name for a snapshot object, keyed
-// by its UID (unified wave4C scheme, see api/names). The snapshotName argument is retained for signature
+// by its UID (unified scheme, see api/names). The snapshotName argument is retained for signature
 // compatibility but no longer part of the name (names are opaque; connectivity is via refs).
 func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
 	_ = snapshotName
@@ -694,7 +695,7 @@ func GenerateSnapshotContentName(snapshotName, snapshotUID string) string {
 }
 
 // GenerateObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed
-// by its UID (unified wave4C scheme, see api/names).
+// by its UID (unified scheme, see api/names).
 func GenerateObjectKeeperName(snapshotUID types.UID) string {
 	return names.ObjectKeeperName(snapshotUID)
 }

@@ -21,7 +21,7 @@ limitations under the License.
 //	a managed RoleBinding (to the wildcard capture ClusterRole) exists in namespace N
 //	  <=> N hosts at least one Snapshot with needsCaptureRBAC == true.
 //
-// The hook runs under the privileged deckhouse SA (see Phase 5.3), so it needs no extra RBAC provisioning
+// The hook runs under the privileged deckhouse SA, so it needs no extra RBAC provisioning
 // of its own, and the privilege-escalation guard for binding the wildcard role is satisfied automatically.
 package namespace_capture_rbac
 

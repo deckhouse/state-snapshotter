@@ -34,7 +34,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// EnrichDataBindingsWithVolumeMetadata fills volumeMode/fsType/accessModes/storageClassName on each
+// EnrichDataBindingsWithVolumeMetadata fills volumeMode/fsType/storageClassName on each
 // PVC-targeted binding by reading the live source PVC (and its bound PV). CSI snapshots are
 // mode-agnostic, so this metadata MUST be captured now to faithfully restore the volume on export
 // (VolumeRestoreRequest builds CSI VolumeCapabilities from it) and to recreate the PVC on import.
@@ -47,7 +47,8 @@ import (
 // It mutates and returns the same slice. A transient read error is returned so the caller requeues
 // instead of publishing partial metadata (which would otherwise be frozen by the steady-state coverage
 // gate). Only a genuinely-gone source PVC (NotFound) is tolerated: it is logged and its binding's
-// metadata is left empty, since there is nothing left to read.
+// metadata is left empty, since there is nothing left to read. A live PVC that carries the source name but
+// a different UID is treated the same way — it is a different volume (see below).
 func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, direct client.Reader, bindings []storagev1alpha1.SnapshotDataBinding) ([]storagev1alpha1.SnapshotDataBinding, error) {
 	if direct == nil {
 		direct = c
@@ -84,18 +85,25 @@ func EnrichDataBindingsWithVolumeMetadata(ctx context.Context, c client.Client, 
 			}
 			return bindings, fmt.Errorf("read source PVC %s/%s for volume metadata: %w", b.SourceRef.Namespace, b.SourceRef.Name, err)
 		}
+		// A PVC name identifies a volume only while that PVC exists, so a name match is not an identity
+		// match. Two producers of this binding hand us a name whose live holder may be a stranger: an
+		// IMPORTED leaf's sourceRef is reconstructed from the checkpoint manifest (the PVC it describes lives
+		// in another cluster, or another incarnation of this one), and a restore can recreate a PVC under the
+		// captured name. Enriching from a different volume is worse than enriching from nothing: an inverted
+		// volumeMode restores a Block source as a filesystem and serves garbage, and the wrong fsType /
+		// StorageClass is silently plausible. So verify identity and skip when it does not hold; the import
+		// path fills these fields from the DataImport, which is their only authority. A sourceRef without a
+		// UID cannot be verified and is enriched as before.
+		if b.SourceRef.UID != "" && pvc.UID != b.SourceRef.UID {
+			log.Info("live PVC with the captured source name has a different UID; skipping volume-metadata enrichment",
+				"pvc", b.SourceRef.Namespace+"/"+b.SourceRef.Name, "sourceRefUID", string(b.SourceRef.UID), "livePVCUID", string(pvc.UID))
+			continue
+		}
 		// PVC.spec.volumeMode defaults to Filesystem when nil (Kubernetes semantics).
 		if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode != "" {
 			b.VolumeMode = string(*pvc.Spec.VolumeMode)
 		} else {
 			b.VolumeMode = string(corev1.PersistentVolumeFilesystem)
-		}
-		if len(pvc.Spec.AccessModes) > 0 {
-			modes := make([]string, 0, len(pvc.Spec.AccessModes))
-			for _, am := range pvc.Spec.AccessModes {
-				modes = append(modes, string(am))
-			}
-			b.AccessModes = modes
 		}
 		if pvc.Spec.StorageClassName != nil {
 			b.StorageClassName = *pvc.Spec.StorageClassName
@@ -201,11 +209,13 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 }
 
 // SnapshotDataBindingToUnstructuredMap renders a SnapshotDataBinding as a JSON-typed unstructured map
-// suitable for unstructured.SetNestedMap (only string / []interface{} / map[string]interface{} values).
-// sourceRef and artifactRef are always present (required); the volume-metadata fields are written only when
-// non-empty. This is the single wire-shape serializer for mirroring a binding onto a namespaced object's
-// top-level status.data — shared by the domain data-leaf mirror (genericbinder.mirrorDataToLeaf) and the
-// extended-VolumeSnapshot import mirror (volumesnapshotimport), so the two stay byte-identical for d8.
+// suitable for unstructured.SetNestedMap, which accepts only string / []interface{} / map[string]interface{}
+// values; every field of the binding is a string, so the rendered map holds nested maps of strings and
+// nothing else. sourceRef and artifactRef are always present (required); the volume-metadata fields are
+// written only when non-empty. This is the single wire-shape serializer for mirroring a binding onto a
+// namespaced object's top-level status.data — shared by the domain data-leaf mirror
+// (genericbinder.mirrorDataToLeaf) and the extended-VolumeSnapshot import mirror (volumesnapshotimport), so
+// the two stay byte-identical for d8.
 func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding) map[string]interface{} {
 	sourceRef := map[string]interface{}{
 		"apiVersion": d.SourceRef.APIVersion,
@@ -236,13 +246,6 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 	if d.FsType != "" {
 		out["fsType"] = d.FsType
 	}
-	if len(d.AccessModes) > 0 {
-		am := make([]interface{}, len(d.AccessModes))
-		for i, m := range d.AccessModes {
-			am[i] = m
-		}
-		out["accessModes"] = am
-	}
 	if d.StorageClassName != "" {
 		out["storageClassName"] = d.StorageClassName
 	}
@@ -253,7 +256,7 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 }
 
 // volumeSnapshotContentRetainPolicy keeps the bound VSC durable after the per-run VolumeSnapshot /
-// VolumeCaptureRequest is deleted (durable-artifact contract, ADR 2026-06-09 / spec §3.9.6, §3.9.11).
+// VolumeCaptureRequest is deleted (durable-artifact contract).
 const volumeSnapshotContentRetainPolicy = "Retain"
 
 // EnsureVolumeSnapshotContentsOwnedByContent performs the durable-artifact handoff for each bound VSC:
@@ -294,7 +297,7 @@ func ensureVolumeSnapshotContentOwnedByContent(
 		if err := c.Get(ctx, client.ObjectKey{Name: vscName}, obj); err != nil {
 			return err
 		}
-		// A VSC that is being deleted MUST NOT be patched (spec §3.9.10): touching ownerRef or
+		// A VSC that is being deleted MUST NOT be patched: touching ownerRef or
 		// deletionPolicy on an object with a deletionTimestamp is pointless (it is going away) and could
 		// race finalizer removal. Data readiness already treats a deleting VSC as ArtifactMissing. The
 		// self-heal caller pre-checks this too; the guard here makes the publish-path handoff equally safe.
@@ -350,20 +353,6 @@ func dataBindingEqual(x, y storagev1alpha1.SnapshotDataBinding) bool {
 	if x.ArtifactRef != y.ArtifactRef {
 		return false
 	}
-	if x.VolumeMode != y.VolumeMode || x.FsType != y.FsType || x.StorageClassName != y.StorageClassName || x.Size != y.Size {
-		return false
-	}
-	return stringSlicesEqual(x.AccessModes, y.AccessModes)
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return x.VolumeMode == y.VolumeMode && x.FsType == y.FsType &&
+		x.StorageClassName == y.StorageClassName && x.Size == y.Size
 }

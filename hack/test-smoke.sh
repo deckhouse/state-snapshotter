@@ -19,11 +19,11 @@
 # Tests basic Snapshot → SnapshotContent → Ready flow
 #
 # Usage:
-#   ./test-smoke.sh [namespace] [snapshot-kind] [backup-class-name]
+#   ./hack/test-smoke.sh [namespace] [snapshot-kind] [backup-class-name]
 #
 # Example:
-#   ./test-smoke.sh default Snapshot
-#   ./test-smoke.sh d8-backup Snapshot
+#   ./hack/test-smoke.sh default Snapshot
+#   ./hack/test-smoke.sh d8-backup Snapshot
 
 set -euo pipefail
 
@@ -185,7 +185,7 @@ cleanup() {
         "$cleanup_script" --snapshot-name "$SNAPSHOT_NAME" --namespace "$NAMESPACE" --snapshot-kind "$SNAPSHOT_KIND" --force || true
     else
         log_warn "Cleanup script not found, using inline cleanup"
-        log_warn "For better cleanup, use: ./test-cleanup.sh --snapshot-name $SNAPSHOT_NAME --namespace $NAMESPACE --force"
+        log_warn "For better cleanup, use: ./hack/test-cleanup.sh --snapshot-name $SNAPSHOT_NAME --namespace $NAMESPACE --force"
         
         # Fallback inline cleanup
         local snapshot_resource="${SNAPSHOT_KIND,,}s.${SNAPSHOT_API_GROUP}"

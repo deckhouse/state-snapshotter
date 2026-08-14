@@ -24,7 +24,7 @@ import (
 //
 // Contract: Pure function, idempotent, no side effects.
 //
-// See: unified-snapshots-test-plan.md (FUNCTIONS: pkg/snapshot Finalizers)
+// Pinned by TestHasFinalizer_Basic.
 func HasFinalizer(obj metav1.Object, finalizer string) bool {
 	finalizers := obj.GetFinalizers()
 	for _, f := range finalizers {
@@ -42,7 +42,7 @@ func HasFinalizer(obj metav1.Object, finalizer string) bool {
 // Contract: Idempotent - adding the same finalizer twice has no effect.
 // Modifies object state (sets finalizers).
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: AddFinalizer - Idempotency)
+// Pinned by TestAddFinalizer_Idempotency.
 func AddFinalizer(obj metav1.Object, finalizer string) bool {
 	if HasFinalizer(obj, finalizer) {
 		return false
@@ -58,7 +58,7 @@ func AddFinalizer(obj metav1.Object, finalizer string) bool {
 // Contract: Idempotent - removing non-existent finalizer has no effect.
 // Modifies object state (removes finalizer).
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: RemoveFinalizer - Idempotency)
+// Pinned by TestRemoveFinalizer_Idempotency.
 func RemoveFinalizer(obj metav1.Object, finalizer string) bool {
 	finalizers := obj.GetFinalizers()
 	for i, f := range finalizers {

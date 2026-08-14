@@ -94,7 +94,6 @@ func pollUntil(ctx context.Context, what string, timeout time.Duration, done fun
 // --- GVRs ------------------------------------------------------------------
 
 var (
-	pvcGVR = schema.GroupVersionResource{Version: "v1", Resource: "persistentvolumeclaims"}
 	nsGVR  = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
 	crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
 
@@ -107,9 +106,12 @@ var (
 	// modules.deckhouse.io carries each module's resolved properties (stage, requirements, version).
 	moduleGVR = schema.GroupVersionResource{Group: "deckhouse.io", Version: "v1alpha1", Resource: "modules"}
 
-	// DataExport/DataImport live under the LEGACY group in phase B (svdm pre-D1) and under the
-	// unified group from phase C onward (svdm D1). dataExportGVR(group)/dataImportGVR(group) build
-	// the right GVR per phase.
+	// The two API groups DataExport/DataImport are served under, by two different modules that end up
+	// running at the same time: storage-volume-data-manager serves the legacy group (the only one in
+	// play in phase B, and still its own after the flip), storage-foundation serves the unified group
+	// (which appears with the flip). Same kinds, different groups, different controllers, different
+	// namespaces — never the same object. dataExportGVR(group)/dataImportGVR(group) build the GVR for
+	// whichever of the two a step is talking to.
 	legacyGroup  = "storage.deckhouse.io"
 	unifiedGroup = "storage-foundation.deckhouse.io"
 )
@@ -422,10 +424,12 @@ func namespaceExists(ctx context.Context, name string) bool {
 
 // moduleRequiresModule reports whether the module's RESOLVED properties declare a
 // requirements.modules dependency on requiredModule. Used in phase A to detect a cluster left
-// contaminated by a handoff build: e.g. snapshot-controller frozen at its v0.2.0 registration
-// (requires storage-foundation) from a prior run — Deckhouse ignores an MPO while the module is
-// disabled, so it stays gated and the phase-B enable is webhook-denied ("depends on disabled
-// module(s): storage-foundation"). Returns false when the module object is absent (clean cluster).
+// contaminated by an OLDER registration: snapshot-controller builds from before the v0.2.0 one this
+// suite installs required storage-foundation, and Deckhouse ignores an MPO while the module is
+// disabled, so such a registration stays gated and the phase-B enable is webhook-denied ("depends on
+// disabled module(s): storage-foundation"). Returns false when the module object is absent (clean
+// cluster). The check is on PRESENCE of the requirement, not on a version — which version floor those
+// builds used does not matter here.
 func moduleRequiresModule(ctx context.Context, name, requiredModule string) bool {
 	obj, err := suiteDyn.Resource(moduleGVR).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -595,25 +599,6 @@ func waitStatusString(ctx context.Context, gvr schema.GroupVersionResource, ns, 
 	}
 }
 
-// listNames returns the names of all objects of a GVR in a namespace ("" = cluster-scoped/all-ns).
-func listNames(ctx context.Context, gvr schema.GroupVersionResource, ns string) ([]string, error) {
-	var l *unstructured.UnstructuredList
-	var err error
-	if ns == "" {
-		l, err = suiteDyn.Resource(gvr).List(ctx, metav1.ListOptions{})
-	} else {
-		l, err = suiteDyn.Resource(gvr).Namespace(ns).List(ctx, metav1.ListOptions{})
-	}
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(l.Items))
-	for i := range l.Items {
-		names = append(names, l.Items[i].GetName())
-	}
-	return names, nil
-}
-
 // createPVC creates a ReadWriteOnce PVC of the given size on storageClass and returns nothing;
 // callers wait for Bound implicitly by scheduling a pod that mounts it.
 func createPVC(ctx context.Context, ns, name, storageClass, size string) {
@@ -666,7 +651,8 @@ func createPVCFromSnapshot(ctx context.Context, ns, name, storageClass, vsName, 
 // status.url is an in-cluster service URL, so all HTTP calls run from a curl pod inside the
 // cluster (not the test runner). The pod runs as a ServiceAccount granted the download RBAC; the
 // projected SA token is sent as the Bearer credential, and the CA comes from the CR's status.ca.
-// Wire details mirror storage-volume-data-manager docs/FAQ.md "HTTP API".
+// The wire protocol both modules serve is the one svdmDownload/svdmUpload below spell out: GET/PUT
+// api/v1/files/<name> for the payload, POST api/v1/finished to close an upload.
 
 const (
 	httpClientPod = "svdm-http-client"
@@ -805,30 +791,47 @@ func createCSIVolumeSnapshot(ctx context.Context, ns, name, vsClass, srcPVC stri
 	})
 }
 
-// createLegacyDataExport creates a DataExport on the LEGACY storage.deckhouse.io group with the
-// pre-D1 schema (targetRef{kind,name}). Used in phase B while svdm is the legacy image.
+// Idle TTLs of the legacy-group CRs this suite creates. Both are idle timers on the serving pod, reset
+// by traffic, and each is sized for how long its object has to stay usable:
+//   - the DataExport is created in phase B and must STILL SERVE after the flip, whose two module
+//     enables alone are budgeted at moduleReadyTimeout each, so its TTL spans the suite's own timeout
+//     and it cannot lapse first;
+//   - the DataImport finishes inside phase B (upload -> importer UploadFinished -> populator rebind),
+//     a chain podRunningTimeout budgets, so a much shorter TTL is enough.
+//
+// An expired TTL does not delete the CR — both controllers leave it behind with Ready=Expired — but it
+// does tear the serving endpoint down and hand the reassigned PV back, which would turn the cross-flip
+// download into a confusing failure about something the flip did not do.
+const (
+	legacyExportTTL = "3h"
+	legacyImportTTL = "30m"
+)
+
+// createLegacyDataExport creates a DataExport on the legacy storage.deckhouse.io group in the shape
+// storage-volume-data-manager serves — targetRef{kind,name}, with NO group field, unlike the unified
+// schema below. That is one of the things making these objects unmistakably that module's own.
 func createLegacyDataExport(ctx context.Context, ns, name, targetKind, targetName string) error {
 	return applyUnstr(ctx, dataExportGVR(legacyGroup), ns, map[string]interface{}{
 		"apiVersion": legacyGroup + "/v1alpha1",
 		"kind":       "DataExport",
 		"metadata":   map[string]interface{}{"name": name, "namespace": ns},
 		"spec": map[string]interface{}{
-			"ttl":       "30m",
+			"ttl":       legacyExportTTL,
 			"publish":   false,
 			"targetRef": map[string]interface{}{"kind": targetKind, "name": targetName},
 		},
 	})
 }
 
-// createLegacyDataImport creates a DataImport on the LEGACY group with the pre-D1 schema
-// (targetRef{kind: PersistentVolumeClaim, pvcTemplate}). Used in phase B while svdm is legacy.
+// createLegacyDataImport creates a DataImport on the legacy group in the shape
+// storage-volume-data-manager serves (targetRef{kind: PersistentVolumeClaim, pvcTemplate}).
 func createLegacyDataImport(ctx context.Context, ns, name, pvcName, storageClass, size string) error {
 	return applyUnstr(ctx, dataImportGVR(legacyGroup), ns, map[string]interface{}{
 		"apiVersion": legacyGroup + "/v1alpha1",
 		"kind":       "DataImport",
 		"metadata":   map[string]interface{}{"name": name, "namespace": ns},
 		"spec": map[string]interface{}{
-			"ttl":                  "30m",
+			"ttl":                  legacyImportTTL,
 			"publish":              false,
 			"waitForFirstConsumer": false,
 			"targetRef": map[string]interface{}{
@@ -847,28 +850,21 @@ func createLegacyDataImport(ctx context.Context, ns, name, pvcName, storageClass
 	})
 }
 
-// pvcsWithFinalizer returns the ns/name of every PVC (all namespaces) still carrying the given
-// finalizer — used to assert the migration hook swept the legacy finalizer off PVCs.
-func pvcsWithFinalizer(ctx context.Context, finalizer string) ([]string, error) {
-	list, err := suiteClientset.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
+// pvcFinalizers returns the finalizers currently on a PVC — used to assert that the exporting
+// module's own volume protection is still in place after the flip.
+func pvcFinalizers(ctx context.Context, ns, name string) ([]string, error) {
+	pvc, err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get PVC %s/%s: %w", ns, name, err)
 	}
-	var hits []string
-	for i := range list.Items {
-		for _, f := range list.Items[i].Finalizers {
-			if f == finalizer {
-				hits = append(hits, list.Items[i].Namespace+"/"+list.Items[i].Name)
-				break
-			}
-		}
-	}
-	return hits, nil
+	return pvc.Finalizers, nil
 }
 
-// workloadResourceCount counts module-owned workload/RBAC objects in a namespace that a Helm guard
-// is expected to drop (Deployments, Services, ServiceAccounts except the system default). Used to
-// assert guard emptiness after the flip.
+// workloadResourceCount counts the module-owned workload objects in a namespace (Deployments and
+// Services), returning 0 when the namespace does not exist. Phase C reads it two ways: it must fall
+// to zero for snapshot-controller, whose chart guards itself off once storage-foundation is enabled,
+// and it must stay above zero for storage-volume-data-manager, which has no such guard and keeps
+// serving its own data plane.
 func workloadResourceCount(ctx context.Context, ns string) (int, error) {
 	if !namespaceExists(ctx, ns) {
 		return 0, nil
@@ -955,11 +951,11 @@ func expectAlertFiring(ctx context.Context, alertName, moduleLabel string) {
 		func() string { return "firing now: " + firingAlertNames(ctx) })
 }
 
-// --- unified-group (D1/storage-foundation) DataExport/DataImport -----------
+// --- unified-group (storage-foundation) DataExport/DataImport ---------------
 
 // createUnifiedDataExport creates a DataExport on the unified storage-foundation.deckhouse.io group
-// (targetRef{kind,name}; group omitted = core, as the migration hook emits for a PVC). Used to drive
-// svdm-D1-standalone (before the flip) and storage-foundation (after the flip).
+// (targetRef{kind,name}; the optional group field omitted, which means a core resource). Used after
+// the flip, when storage-foundation serves this group.
 func createUnifiedDataExport(ctx context.Context, ns, name, targetKind, targetName string) error {
 	return applyUnstr(ctx, dataExportGVR(unifiedGroup), ns, map[string]interface{}{
 		"apiVersion": unifiedGroup + "/v1alpha1",
@@ -973,8 +969,8 @@ func createUnifiedDataExport(ctx context.Context, ns, name, targetKind, targetNa
 	})
 }
 
-// createUnifiedDataImport creates a DataImport on the unified group with the D1/sf schema
-// (mode: CreatePVC + root pvcTemplate — no targetRef, unlike the legacy pre-D1 shape).
+// createUnifiedDataImport creates a DataImport on the unified group with the storage-foundation
+// schema (mode: CreatePVC + root pvcTemplate — no targetRef, unlike the legacy shape above).
 func createUnifiedDataImport(ctx context.Context, ns, name, pvcName, storageClass, size string) error {
 	return applyUnstr(ctx, dataImportGVR(unifiedGroup), ns, map[string]interface{}{
 		"apiVersion": unifiedGroup + "/v1alpha1",
@@ -1032,105 +1028,4 @@ func waitPVCPhase(ctx context.Context, ns, name string, want corev1.PersistentVo
 	pollUntil(ctx, fmt.Sprintf("PVC %s/%s == %s", ns, name, want), timeout,
 		func() bool { return pvcPhase(ctx, ns, name) == string(want) },
 		func() string { return "phase=" + pvcPhase(ctx, ns, name) })
-}
-
-// --- two-owner migration race (phase C race leg) -----------------------------
-//
-// The svdm 025-migrate-legacy-crds hook is mirrored by an identical storage-foundation hook: both
-// run OnBeforeHelm, are idempotent, and gate on the presence of the legacy CRDs, so whichever
-// module converges first migrates and the other must cleanly no-op. The race leg re-seeds a legacy
-// epoch AFTER the first phase-C spec migrated the real one, so that enabling storage-foundation —
-// which triggers a global converge re-running svdm's beforeHelm hooks too — makes BOTH owners see
-// the legacy CRDs in the same converge window. Both hooks are transitional/expiring; drop this leg
-// together with them.
-
-// createLegacyCRD installs a minimal stand-in for a pre-D1 svdm CRD (namespaced, v1alpha1,
-// x-kubernetes-preserve-unknown-fields) and waits until it is Established. Minimal is enough: the
-// migration hooks are schema-agnostic — they list the CRs unstructured, read/patch metadata and
-// spec, and delete the CRD; nothing else watches the legacy group at this point (svdm is already
-// the D1 build).
-func createLegacyCRD(ctx context.Context, kind, plural string) {
-	GinkgoHelper()
-	name := plural + "." + legacyGroup
-	crd := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "apiextensions.k8s.io/v1",
-		"kind":       "CustomResourceDefinition",
-		"metadata":   map[string]interface{}{"name": name},
-		"spec": map[string]interface{}{
-			"group": legacyGroup,
-			"scope": "Namespaced",
-			"names": map[string]interface{}{
-				"plural":   plural,
-				"singular": strings.ToLower(kind),
-				"kind":     kind,
-				"listKind": kind + "List",
-			},
-			"versions": []interface{}{map[string]interface{}{
-				"name":    "v1alpha1",
-				"served":  true,
-				"storage": true,
-				"schema": map[string]interface{}{
-					"openAPIV3Schema": map[string]interface{}{
-						"type":                                 "object",
-						"x-kubernetes-preserve-unknown-fields": true,
-					},
-				},
-			}},
-		},
-	}}
-	_, err := suiteDyn.Resource(crdGVR).Create(ctx, crd, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		Expect(err).NotTo(HaveOccurred(), "create legacy CRD %s", name)
-	}
-	pollUntil(ctx, fmt.Sprintf("legacy CRD %s Established", name), 2*time.Minute,
-		func() bool { return crdEstablished(ctx, name) },
-		func() string { return "not Established yet" })
-}
-
-// addFinalizer appends a finalizer to a namespaced object (PVC or CR) via the dynamic client,
-// retrying on write conflicts. Used to seed the legacy storage-manager finalizer the migration
-// hooks must sweep — there is no legacy controller left to put it there for real.
-func addFinalizer(ctx context.Context, gvr schema.GroupVersionResource, ns, name, finalizer string) {
-	GinkgoHelper()
-	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		obj, err := suiteDyn.Resource(gvr).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred(), "get %s %s/%s to add finalizer", gvr.Resource, ns, name)
-		for _, f := range obj.GetFinalizers() {
-			if f == finalizer {
-				return
-			}
-		}
-		obj.SetFinalizers(append(obj.GetFinalizers(), finalizer))
-		_, lastErr = suiteDyn.Resource(gvr).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
-		if lastErr == nil {
-			return
-		}
-		if !apierrors.IsConflict(lastErr) {
-			break
-		}
-	}
-	Expect(lastErr).NotTo(HaveOccurred(), "add finalizer %s to %s %s/%s", finalizer, gvr.Resource, ns, name)
-}
-
-// deletePVCAndWaitGone deletes a PVC and blocks until it is fully gone — the "deletes cleanly"
-// proof: with the legacy finalizer swept, nothing may hold the PVC in Terminating.
-func deletePVCAndWaitGone(ctx context.Context, ns, name string, timeout time.Duration) {
-	GinkgoHelper()
-	err := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		Expect(err).NotTo(HaveOccurred(), "delete PVC %s/%s", ns, name)
-	}
-	pollUntil(ctx, fmt.Sprintf("PVC %s/%s deleted", ns, name), timeout,
-		func() bool {
-			_, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
-			return apierrors.IsNotFound(gerr)
-		},
-		func() string {
-			pvc, gerr := suiteClientset.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
-			if gerr != nil {
-				return fmt.Sprintf("get err=%v", gerr)
-			}
-			return "still present, finalizers=" + fmt.Sprint(pvc.Finalizers)
-		})
 }

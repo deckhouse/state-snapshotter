@@ -23,7 +23,7 @@ import (
 )
 
 // subtractManifestTargets returns base minus every target whose identity is in exclude — the namespace
-// manifest MCR target set for the root aggregator (wave5 design §6.3: base = namespace allowlist,
+// manifest MCR target set for the root aggregator (base = namespace allowlist,
 // exclude = union of object identities captured across descendant snapshots' subtrees).
 //
 // Matching key is apiVersion|kind|name. Namespace is implied equal: the root manifest leg targets only
@@ -31,9 +31,9 @@ import (
 // (it is the MCR's namespace). The exclude identities may carry a namespace (they come from the recursive
 // subresource); it is intentionally NOT part of the key, since both sides are the same namespace by
 // construction. UID is likewise omitted for now (a recreated object under the same apiVersion|kind|name
-// is treated as the same manifest slot — matching the pre-wave5 in-reconciler exclude behavior).
+// is treated as the same manifest slot — matching the earlier in-reconciler exclude behavior).
 //
-// Pure function (no client) so the base-minus-exclude difference is unit-tested directly (design §9).
+// Pure function (no client) so the base-minus-exclude difference is unit-tested directly.
 func subtractManifestTargets(base []namespacemanifest.ManifestTarget, exclude []snapshotsdk.SubtreeManifestIdentity) []namespacemanifest.ManifestTarget {
 	if len(exclude) == 0 {
 		return base
@@ -60,15 +60,15 @@ func manifestIdentityKey(apiVersion, kind, name string) string {
 
 // allDirectDomainChildrenAtLeastPlanned reports whether every DIRECT DOMAIN child of the root has reached
 // capture barrier 1 (domainSpecificController.phase >= Planned). It is the "direct domain children
-// planned" half of the root's phase=Finished gate (design §4.2/§6.2).
+// planned" half of the root's phase=Finished gate.
 //
-// Orphan/residual CSI VolumeSnapshot children are ordinary domain children now (content-single-writer
-// design §11.6): the storage-foundation VolumeSnapshot domain controller runs MarkPlanned on them, so they
+// Orphan/residual CSI VolumeSnapshot children are ordinary domain children now: the
+// storage-foundation VolumeSnapshot domain controller runs MarkPlanned on them, so they
 // carry a phase and participate in this gate like every other domain child — there is no visibility-leaf
 // carve-out. phaseByName maps a child ref Name to its observed capture phase (empty = no phase yet). A root
 // with no domain children passes vacuously.
 //
-// Pure function (phases supplied by the caller) so the gate is unit-tested directly (design §9).
+// Pure function (phases supplied by the caller) so the gate is unit-tested directly.
 func allDirectDomainChildrenAtLeastPlanned(refs []storagev1alpha1.SnapshotChildRef, phaseByName map[string]storagev1alpha1.SnapshotCapturePhase) bool {
 	for _, ref := range refs {
 		switch phaseByName[ref.Name] {

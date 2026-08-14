@@ -54,6 +54,12 @@ func dumpFailedSpecDiagnostics(ctx context.Context) {
 	}
 	dumpControllerLogs(ctx, d8ModuleNS)
 	dumpControllerLogs(ctx, d8DataManagerNS)
+	if suiteCfg.coexistence {
+		// The second DataExport/DataImport data plane. Only its own controller can explain a coexistence
+		// failure (an export of its own that stopped serving, a finalizer of its own that vanished), and the
+		// namespace exists only while that module is enabled.
+		dumpControllerLogs(ctx, d8VolumeDataManagerNS)
+	}
 	GinkgoWriter.Printf("=======================================================\n\n")
 }
 

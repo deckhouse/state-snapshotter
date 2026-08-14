@@ -19,6 +19,7 @@ package genericbinder
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -42,7 +43,7 @@ import (
 
 // The domain-capture request lifecycle (capture-leg eager-init, manifestCaptured/dataCaptured latches, the
 // childSubtreesManifestsPersisted latch, and the MCR/VCR reap) moved to the SnapshotContentController
-// aggregator (main-owned commonController, decision #10); its coverage lives in
+// aggregator (main-owned commonController); its coverage lives in
 // snapshotcontent/capture_legs_test.go. What remains on the binder is the leaf status.data export mirror
 // (mirrorLeafDataFromContent) and the pure data-binding renderer — covered below.
 
@@ -111,7 +112,7 @@ func domainTestDomainSnapshotUnstructured(t *testing.T, vcrName string) *unstruc
 
 // mirrorLeafDataFromContent copies the bound SnapshotContent's self-contained data binding verbatim onto
 // the namespaced data leaf's top-level status.data (source + artifact + volume metadata) and writes NO
-// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data in wave5).
+// flat top-level storageClassName/size/volumeMode mirrors (folded into status.data).
 func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
@@ -127,7 +128,6 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 			Name: domainTestVSCName, UID: types.UID("vsc-uid-1"),
 		},
 		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
-		AccessModes:      []string{string(corev1.ReadWriteOnce)},
 		StorageClassName: "sc-a",
 		Size:             "10Gi",
 	}
@@ -139,7 +139,7 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, ""); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 
@@ -161,6 +161,9 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	if sc, _, _ := unstructured.NestedString(data, "storageClassName"); sc != "sc-a" {
 		t.Fatalf("status.data.storageClassName = %q, want sc-a", sc)
 	}
+	if vm, _, _ := unstructured.NestedString(data, "volumeMode"); vm != string(corev1.PersistentVolumeFilesystem) {
+		t.Fatalf("status.data.volumeMode = %q, want %q", vm, string(corev1.PersistentVolumeFilesystem))
+	}
 	if size, _, _ := unstructured.NestedString(data, "size"); size != "10Gi" {
 		t.Fatalf("status.data.size = %q, want 10Gi", size)
 	}
@@ -176,17 +179,23 @@ func TestMirrorLeafDataFromContent_WritesTopLevelStatusData(t *testing.T) {
 	}
 }
 
-// On import the content data carries no storageClassName; the caller passes it from
-// DataImport.spec.storageClassName as scOverride, which must land in the mirrored status.data.
-func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
+// On import the aggregator — the single writer of content.status.data — publishes the StorageClass it read
+// from DataImport.spec.storageParams.storageClassName. The binder's mirror must carry it onto the leaf
+// VERBATIM: the former scOverride parameter (which re-read the class from a DataImport path that does not
+// exist, spec.storageClassName) is gone, so a class that reached the content must reach the leaf with no
+// binder-side logic at all. The leaf is what d8 reads on export.
+func TestMirrorLeafDataFromContent_CopiesImportStorageClassNameVerbatim(t *testing.T) {
 	ctx := context.Background()
 	scheme := domainTestScheme(t)
 	domainObj := domainTestDomainSnapshotUnstructured(t, domainTestVCRName())
 	content := domainTestSnapshotContent()
 	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
-		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: domainTestPVCName, Namespace: domainTestNS, UID: types.UID(domainTestPVCUID)},
-		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
-		Size:        "5Gi",
+		// Import shape: the binding source is the LEAF identity (an imported leaf has no live source PVC),
+		// so nothing on the binder side could re-derive the class from a PVC even if it wanted to.
+		SourceRef:        storagev1alpha1.SnapshotSubjectRef{APIVersion: domainSnapshotGVK.GroupVersion().String(), Kind: domainSnapshotGVK.Kind, Name: domainTestSnap, Namespace: domainTestNS, UID: types.UID(domainTestSnapUID)},
+		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: domainTestVSCName},
+		StorageClassName: "sc-import",
+		Size:             "5Gi",
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -194,7 +203,7 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 		WithObjects(content, domainObj).
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, "sc-import"); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("mirrorLeafDataFromContent: %v", err)
 	}
 	fresh := &unstructured.Unstructured{}
@@ -203,39 +212,85 @@ func TestMirrorLeafDataFromContent_ScOverride(t *testing.T) {
 		t.Fatalf("get domain snapshot: %v", err)
 	}
 	if sc, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "storageClassName"); sc != "sc-import" {
-		t.Fatalf("scOverride not applied: status.data.storageClassName = %q, want sc-import", sc)
+		t.Fatalf("import storageClassName not mirrored verbatim: status.data.storageClassName = %q, want sc-import", sc)
+	}
+	if size, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "size"); size != "5Gi" {
+		t.Fatalf("status.data.size = %q, want 5Gi", size)
+	}
+	if src, _, _ := unstructured.NestedString(fresh.Object, "status", "data", "sourceRef", "kind"); src != domainSnapshotGVK.Kind {
+		t.Fatalf("status.data.sourceRef.kind = %q, want %q", src, domainSnapshotGVK.Kind)
 	}
 }
 
-// SnapshotDataBindingToUnstructuredMap renders sourceRef/artifactRef always, omits empty optionals, and
-// converts AccessModes to a JSON-typed []interface{} (required by unstructured.SetNestedMap).
+// SnapshotDataBindingToUnstructuredMap renders sourceRef/artifactRef always and omits empty optionals.
+//
+// Its rendered KEY SET is pinned in both directions, because this is the single wire shape both leaf mirrors
+// publish and the one d8 reads: a field that quietly (re)appears on it reaches consumers unannounced, and a
+// field that quietly stops being rendered strands them. accessModes is why the pin exists — it was dropped
+// from the binding before this schema was ever released, and only an exact key set can tell "not rendered"
+// from "rendered and nobody looked".
 func TestSnapshotDataBindingToMap(t *testing.T) {
-	m := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
-		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", UID: types.UID("u1")},
-		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
-		AccessModes: []string{"ReadWriteOnce"},
+	full := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
+		SourceRef:        storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc", Namespace: "ns1", UID: types.UID("u1")},
+		ArtifactRef:      storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc", UID: types.UID("a1")},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		FsType:           "ext4",
+		StorageClassName: "sc-a",
+		Size:             "10Gi",
 	})
-	if _, ok := m["sourceRef"].(map[string]interface{}); !ok {
-		t.Fatalf("sourceRef must be a map, got %#v", m["sourceRef"])
+	assertKeys(t, "a fully populated binding", full,
+		"sourceRef", "artifactRef", "volumeMode", "fsType", "storageClassName", "size")
+	assertKeys(t, "sourceRef", full["sourceRef"], "apiVersion", "kind", "name", "namespace", "uid")
+	assertKeys(t, "artifactRef", full["artifactRef"], "apiVersion", "kind", "name", "uid")
+	// Every optional is rendered as a plain string; nothing on this wire shape is a list any more.
+	for key, want := range map[string]string{
+		"volumeMode": string(corev1.PersistentVolumeFilesystem), "fsType": "ext4",
+		"storageClassName": "sc-a", "size": "10Gi",
+	} {
+		if got, ok := full[key].(string); !ok || got != want {
+			t.Errorf("%s = %#v, want string %q", key, full[key], want)
+		}
 	}
-	if _, ok := m["artifactRef"].(map[string]interface{}); !ok {
-		t.Fatalf("artifactRef must be a map, got %#v", m["artifactRef"])
+
+	// Only the two required refs are set here, so every optional — and the optional members of the refs
+	// themselves — must be absent rather than present-and-empty.
+	bare := snapshotcontent.SnapshotDataBindingToUnstructuredMap(&storagev1alpha1.SnapshotDataBinding{
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc"},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc"},
+	})
+	assertKeys(t, "a bare binding", bare, "sourceRef", "artifactRef")
+	assertKeys(t, "bare sourceRef", bare["sourceRef"], "apiVersion", "kind", "name")
+	assertKeys(t, "bare artifactRef", bare["artifactRef"], "apiVersion", "kind", "name")
+}
+
+// assertKeys fails unless m is a map whose key set is exactly want — no missing key and no extra one.
+func assertKeys(t *testing.T, what string, m interface{}, want ...string) {
+	t.Helper()
+	got, ok := m.(map[string]interface{})
+	if !ok {
+		t.Fatalf("%s must be a map[string]interface{}, got %#v", what, m)
 	}
-	am, ok := m["accessModes"].([]interface{})
-	if !ok || len(am) != 1 || am[0] != "ReadWriteOnce" {
-		t.Fatalf("accessModes must be []interface{}{\"ReadWriteOnce\"}, got %#v", m["accessModes"])
+	expected := make(map[string]struct{}, len(want))
+	for _, k := range want {
+		expected[k] = struct{}{}
+		if _, ok := got[k]; !ok {
+			t.Errorf("%s: key %q must be rendered, got keys %v", what, k, sortedKeys(got))
+		}
 	}
-	// Empty optionals are omitted.
-	if _, ok := m["storageClassName"]; ok {
-		t.Fatalf("empty storageClassName must be omitted")
+	for k := range got {
+		if _, ok := expected[k]; !ok {
+			t.Errorf("%s: key %q must NOT be rendered (rendered keys %v, want exactly %v)", what, k, sortedKeys(got), want)
+		}
 	}
-	if _, ok := m["size"]; ok {
-		t.Fatalf("empty size must be omitted")
+}
+
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
 	}
-	// The Namespace on sourceRef was empty -> omitted.
-	if src := m["sourceRef"].(map[string]interface{}); func() bool { _, ok := src["namespace"]; return ok }() {
-		t.Fatalf("empty sourceRef.namespace must be omitted")
-	}
+	sort.Strings(keys)
+	return keys
 }
 
 const (
@@ -356,7 +411,7 @@ func TestMirrorLeafDataFromContent_NoOpWithoutContentData(t *testing.T) {
 		Build()
 	r := &GenericSnapshotBinderController{Client: cl, APIReader: cl, Scheme: scheme}
 
-	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent, ""); err != nil {
+	if err := r.mirrorLeafDataFromContent(ctx, domainObj, domainTestContent); err != nil {
 		t.Fatalf("no-op without content.data must return nil, got %v", err)
 	}
 	fresh := &unstructured.Unstructured{}

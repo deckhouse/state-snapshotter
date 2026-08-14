@@ -1,48 +1,96 @@
+version: "2"
+
 run:
+  # v2 disables the total-work timeout by default; keep the explicit budget.
   timeout: 10m
   allow-parallel-runners: true
-  # golangci-lint v2.9.0 (installed by deckhouse/modules-actions/go_linter) is built with
-  # go1.25 and refuses to lint modules whose go directive is higher. Pin the target language
-  # version so it does not read 1.26.5 from go.mod and fail with "the Go language version
-  # (go1.25) used to build golangci-lint is lower than the targeted Go version".
+  # golangci-lint refuses to run when the targeted Go language version is a newer
+  # minor than the Go release the linter binary itself was built with. Without
+  # this pin the target is read from go.mod, so a binary built with an older Go
+  # minor than the modules declare fails with "the Go language version (...) used
+  # to build golangci-lint is lower than the targeted Go version". Pinning keeps
+  # the run independent of how new the installed binary happens to be.
   go: "1.25"
 
-issues:
-  exclude:
-    - ST1005.*
-    - "should not use dot imports"
-    - "don't use an underscore in package name"
-    - "exported: .*"
-    # QF1008 is a cosmetic staticcheck quickfix ("could remove embedded field");
-    # not a correctness issue, kept consistent with the other suppressed nits above.
-    - "QF1008.*"
-
-linters-settings:
-  gci:
-    sections:
-      - standard
-      - default
-      - prefix(github.com/deckhouse)
-
-  errcheck:
-    ignore: fmt:.*,[rR]ead|[wW]rite|[cC]lose,io:Copy
-
 linters:
-  disable-all: true
+  default: none
   enable:
+    - copyloopvar
     - dogsled
     - errcheck
-    - gci
     - gocritic
-    - gofmt
-    - gosimple
     - govet
     - ineffassign
     - misspell
     - revive
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - whitespace
-    - copyloopvar
+    # gosimple and typecheck are intentionally absent: v2 folded gosimple's S1
+    # checks into staticcheck (enabled above) and dropped typecheck as a linter
+    # because type errors are always reported.
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: (.+)\.go$
+        text: ST1005.*
+      - path: (.+)\.go$
+        text: should not use dot imports
+      - path: (.+)\.go$
+        text: don't use an underscore in package name
+      - path: (.+)\.go$
+        text: 'exported: .*'
+      # QF1008 is a cosmetic staticcheck quickfix ("could remove embedded field");
+      # not a correctness issue, kept consistent with the other suppressed nits above.
+      - path: (.+)\.go$
+        text: QF1008.*
+      # errcheck used to carry its own ignore list as regexps
+      # ("fmt:.*,[rR]ead|[wW]rite|[cC]lose,io:Copy"), matched against the name of
+      # the called function alone. That form is gone, and its replacement,
+      # errcheck's exclude-functions, takes exact signatures and so cannot express
+      # patterns -- hence these errcheck-scoped exclusions. They must stay anchored
+      # on the backquoted call in the message, because the text around it holds the
+      # receiver too: an unanchored pattern would also swallow `reader.Seek` or
+      # `writer.Chmod`, which the name-only match always reported.
+      # Known and deliberate gap: a call on no receiver is reported as "Error return
+      # value is not checked", with no name to match, so an unchecked closeAll() is
+      # reported here even though the name-only match hid it. Excluding that
+      # message would hide every unchecked plain call, which is far more than was
+      # ever excluded, so it is left reported.
+      - linters:
+          - errcheck
+        text: 'Error return value of `fmt\.'
+      - linters:
+          - errcheck
+        text: 'Error return value of `(?:[^`]*\.)?[^`.]*([rR]ead|[wW]rite|[cC]lose)[^`.]*` is not checked'
+      - linters:
+          - errcheck
+        text: 'Error return value of `io\.Copy'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/deckhouse)
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

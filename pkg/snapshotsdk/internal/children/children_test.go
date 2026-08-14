@@ -72,7 +72,7 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 
 // TestReconcileStampsDeleteProtectedInCreatePayload asserts the child snapshot node is born already
 // carrying the authoritative delete-protection label — it must be in the CREATE payload, not a follow-up
-// patch (delete-protection-contract.md §6.1). It also asserts the caller's template is left untouched.
+// patch. It also asserts the caller's template is left untouched.
 func TestReconcileStampsDeleteProtectedInCreatePayload(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()

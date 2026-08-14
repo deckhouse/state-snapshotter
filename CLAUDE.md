@@ -53,7 +53,7 @@ golangci-lint run --build-tags ce ./...
 
 ## Controller redeploy & remote e2e (SSOT)
 
-- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: `docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`.
+- **Where tests live:** integration + envtest-based e2e under `images/state-snapshotter-controller/test/` (there is no top-level `tests/e2e-go`). Orchestration and when to use cluster smoke: the internal e2e testing strategy (see "Docs: SSOT & boundaries").
 - **Before redeploy:** (1) unit tests `cd images/state-snapshotter-controller && go test ./pkg/... ./internal/...`; (2) linter `./go-lint.sh` with CI `GO_BUILD_TAGS`; (3) **if controller code changed: commit AND push first** (below), then redeploy and wait for rollout success.
 - **After redeploy:** integration/e2e or cluster smoke as required by the strategy doc / CI.
 - **Kubeconfig:** standard dev location (`~/.kube/config` / `KUBECONFIG`) — but for e2e nested-cluster debugging use the persistent tunnel below.
@@ -76,7 +76,7 @@ golangci-lint run --build-tags ce ./...
 
 - Do NOT use `// +kubebuilder:rbac` markers as an RBAC source in this module (prevents stale generated-RBAC hints). No such markers under `images/state-snapshotter-controller/internal/controllers/`.
 - Static production controller RBAC is maintained by hand in `templates/controller/rbac-for-us.yaml` — update that file for core-permission needs.
-- Per-CSD **core-side** RBAC is reconciled by `hooks/go/030-domain-rbac`: access for the core controller SA and DataExport SA is signaled through `CustomSnapshotDefinition.status.conditions[AccessGranted=True]`. The hook grants nothing to an out-of-process domain SA; each domain module declares its own SA rights statically in its Helm templates. Do NOT add demo/domain CRs to core production static RBAC.
+- Per-CSD **core-side** RBAC is reconciled by `hooks/go/030-domain-rbac`: access for the core controller SA, the DataExport SA, and the webhooks SA (read-only on the source GVRs, for capture-request target validation) is signaled through `CustomSnapshotDefinition.status.conditions[AccessGranted=True]`. The hook grants nothing to an out-of-process domain SA; each domain module declares its own SA rights statically in its Helm templates. Do NOT add demo/domain CRs to core production static RBAC.
 
 ## Restore rollout guard — CSI VolumeSnapshot (MUST)
 
@@ -89,34 +89,55 @@ Any change relying on this must preserve and document the snapshot-controller de
 
 ## Delivery gating (MUST)
 
-- Implement strictly within the currently agreed stage model in `docs/internal/state-snapshotter-rework/operations/project-status.md`. Each change declares its stage. Do NOT pull features from a later stage.
+- Implement strictly within the currently agreed stage model recorded in the internal project-status doc. Each change declares its stage. Do NOT pull features from a later stage.
 - After codegen (if API touched) and before moving to the next stage, run & pass the full test plan for the current stage.
 - Regression guarantee: on Stage N, all tests from stages 0..N must pass. Fix regressions in the same change set — no "fix later".
 
 ## Docs: SSOT & boundaries (MUST)
 
-Single source of truth per information type; others reference it. Root: `docs/internal/state-snapshotter-rework/`.
+Internal design docs do **not** live in this repository. They live in internal project documentation
+that is not public — ask the storage team for its current location. The table below names what each of
+those documents owns, not where it sits. This repository keeps only user-facing docs
+(`docs/README*.md`, `docs/USER_GUIDE*.md`).
 
-| Type | Responsibility |
-|------|----------------|
-| `spec/` | Normative contract only (state machines, keys, invariants) |
-| `architecture/` | Diagrams and high-level flow; not normative |
-| `design/` | Redesign/migration/rollout plan; does not become status |
-| `adr/` | Why a decision was made; not edited as current spec |
-| `testing/` | Test strategy/scenarios/run modes; references spec, does not copy it |
-| `operations/` | High-level status only; no spec/design copy |
+### Comments and descriptions are self-contained (MUST)
+
+This repository is public. A reader must never be sent to something they cannot open, so in comments,
+CRD descriptions, `docs/**`, and test/spec names reference only what is in this repository or publicly
+reachable: a symbol, a path, a test name, a public URL. Not a document that is not here, not its path,
+not its section number, and not internal process shorthand (phase, block or decision ids).
+
+- **State the rule instead of its address.** If an invariant must match a document outside this
+  repository verbatim, the link is a **guard test** here — name it, e.g.
+  `TestDegradedReadyReasons_ExactMembership` — not a pointer in a comment.
+- **Doc comments on API types are user documentation.** controller-gen turns them into the CRD
+  descriptions under `crds/`, which reach users through `kubectl explain` and the documentation site.
+  Keep them about the contract, not about how the implementation got there.
+- Commit messages and PR descriptions are public as well, and unlike a comment they cannot be
+  corrected without rewriting history. Check before push.
+
+Single source of truth per information type; others reference it.
+
+| Document | Responsibility |
+|----------|----------------|
+| spec | Normative contract only (state machines, keys, invariants) |
+| architecture | Diagrams and high-level flow; not normative |
+| design | Redesign/migration/rollout plan; does not become status |
+| ADR | Why a decision was made; not edited as current spec |
+| testing | Test strategy/scenarios/run modes; references spec, does not copy it |
+| operations/status | High-level status only; no spec/design copy |
 
 - Do NOT copy contract across documents. Separate clearly: **implemented / current target / planned / legacy**.
-- Extended ADR drafts under `snapshot-rework/` (repo root) must keep normative summaries in sync with `spec/system-spec.md`; `snapshot-rework/` alone is NOT SSOT for implementable contract.
+- Long-form ADR drafts must keep their normative summaries in sync with the internal system spec; those drafts alone are NOT SSOT for implementable contract.
 - Development order: **design → spec → tests → code.** If code and spec disagree, fix one — never leave inconsistent.
-- Before changing code, read `spec/system-spec.md` (redesign → `design/`; touching a decision → `adr/`). On contract change: update spec, run e2e checks, add ADR if needed.
+- Before changing code, read the internal system spec (redesign → the design doc; touching a decision → the ADR). On contract change: update the spec, run e2e checks, add an ADR if needed.
 - Cross-doc consistency: when changing spec / architecture overview / implementation-plan / e2e-testing-strategy / project-status, check for contradictions (registry vs runtime watch activation; DSC conditions `Accepted`/`AccessGranted`/derived `Ready`; unified CRD bootstrap vs DSC-driven registry; manifest/MCR vs unified snapshot registry; stage/progress across the docs). Fix in the same change or document a temporary divergence + follow-up.
 - Naming: docs `kebab-case.md`; ADR `adr-XXXX-short-title.md`; e2e scripts `NN_description.sh`.
 
 ## Operations status (MUST)
 
-- Update `docs/internal/state-snapshotter-rework/operations/project-status.md` only when a change is **critical** to plan/status — not for minor/cosmetic changes.
-- Keep it **high-level only**: stage status table, short implemented summary, in progress, planned, blockers/rollout dependencies. Do NOT put there: full state machine, long rollout steps, file-level TODOs, or spec/design/testing copy — those belong in `spec/` `design/` `testing/` `adr/`.
+- Update the internal project-status doc only when a change is **critical** to plan/status — not for minor/cosmetic changes.
+- Keep it **high-level only**: stage status table, short implemented summary, in progress, planned, blockers/rollout dependencies. Do NOT put there: full state machine, long rollout steps, file-level TODOs, or spec/design/testing copy — those belong in the spec, design, testing and ADR documents.
 
 ## E2E cluster access — persistent tunnel (127.0.0.1:6445)
 

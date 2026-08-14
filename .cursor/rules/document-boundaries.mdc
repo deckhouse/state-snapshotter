@@ -10,4 +10,4 @@ alwaysApply: true
 - **design** is not copied verbatim into spec.
 - **ADR** is not edited as if it were the current specification; it records why.
 - **Testing doc** does not copy system spec; it references spec and defines test model and run modes.
-- **status** (project-status.md) only summarises current state: stages, in progress, planned, blockers. No long archives, no full test plan, no stage-by-stage implementation notes. Detailed content belongs in spec/, design/, testing/, adr/.
+- **status** only summarises current state: stages, in progress, planned, blockers. No long archives, no full test plan, no stage-by-stage implementation notes. Detailed content belongs in the spec, design, testing and ADR documents.

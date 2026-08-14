@@ -1,8 +1,19 @@
-# Transition e2e — snapshot-controller + svdm → state-snapshotter + storage-foundation
+# Transition e2e — new snapshot stack beside a running data module
 
-Manual, developer-run scenario that verifies the consolidation of the legacy snapshot stack
-(`snapshot-controller` + `storage-volume-data-manager`) into `state-snapshotter` +
-`storage-foundation` **on one dev cluster**, without deleting the legacy workload at the flip.
+Manual, developer-run scenario that brings `state-snapshotter` + `storage-foundation` up **on one dev
+cluster that is already running the legacy snapshot stack** — `snapshot-controller` plus the
+`storage-volume-data-manager` module (`svdm` below, an abbreviation of that module name) — without
+deleting the legacy workload and **without turning the data module off**.
+
+The two legacy modules are in different situations, and the scenario treats them differently:
+
+- `snapshot-controller` is **superseded**. Its own Helm chart stops rendering workload once
+  `storage-foundation` is enabled, leaving only its deprecation alert, and `storage-foundation` takes
+  ownership of the CSI VolumeSnapshot CRDs it installed.
+- `storage-volume-data-manager` **stays**. It keeps serving its own API group
+  (`storage.deckhouse.io`), its own DataExport/DataImport resources and its own volume protection
+  while the new stack runs beside it. Phase C asserts the flip left every bit of that untouched: same
+  CRDs, same resources, same finalizer, same bytes served.
 
 It is a **separate Ginkgo suite** (own `cluster_config.yml`, own bootstrap) because the main
 state-snapshotter suite brings its cluster up with `storage-foundation`/`state-snapshotter`
@@ -13,24 +24,22 @@ already enabled — the opposite of what this scenario needs. All module lifecyc
 
 - **In scope:** the deprecated snapshot-controller running **standalone with the extended (sf) CRDs**
   — the bundled vanilla external-snapshotter must still bind a Capture-mode VolumeSnapshot against
-  them (the "old controller + new CRDs" check); module Helm-guard behaviour (legacy modules stop
-  rendering everything but their deprecation alert once storage-foundation is enabled) **and the
-  firing deprecation alerts themselves** (built-in `ModuleIsDeprecated` + the custom
-  `D8*ModuleDeprecated` for both modules);
-  the svdm legacy→v0.2.0 migration hook (CR migration to the new API group — asserted on a real
-  in-flight `DataExport` — legacy CRD removal, legacy finalizer sweep incl. PVCs) **and the
-  two-owner migration race** (the same hook is mirrored in storage-foundation; a legacy epoch is
-  re-seeded right before the flip so both 025 hooks see it in the same converge window — whichever
-  wins must migrate, the other must cleanly no-op) plus
-  **svdm-D1-standalone serving a new-group export before the flip** and **its clean teardown**
-  (deleting the migrated export recovers the source PVC from `Lost`); CSI snapshot / DataExport-
-  DataImport / restore data integrity across the flip, **a full new-group DataExport+DataImport
-  served by storage-foundation after the flip**, and the existing state-snapshotter e2e on the same
-  cluster after the flip.
+  them (the "old controller + new CRDs" check); its module Helm-guard behaviour (it stops rendering
+  everything but its deprecation alert once storage-foundation is enabled) **and the firing
+  deprecation alerts themselves** (built-in `ModuleIsDeprecated` + the custom
+  `D8SnapshotControllerModuleDeprecated`), together with the negative half — no deprecation alert may
+  fire for `storage-volume-data-manager`, which is not deprecated;
+  **the legacy epoch surviving the flip untouched**: both legacy CRDs keep their identity, the
+  DataExport and DataImport created in phase B are the same objects, the exported PVC keeps that
+  module's finalizer, the export started in phase B still serves the same bytes afterwards, and the
+  module keeps running its own workload; the export's **teardown under the new stack** (deleting it
+  recovers the source PVC from `Lost` to `Bound`); CSI snapshot / DataExport-DataImport / restore data
+  integrity across the flip, **a full storage-foundation DataExport+DataImport served on its own group
+  after the flip**, and the existing state-snapshotter e2e on the same cluster.
 - **Out of scope (tested by the runtime team, covered by canary channel rollout):** Deckhouse
   `requirements.deckhouse`/`requirements.modules` gating, `ModuleRelease` Pending→activation,
   bundle auto-enable. This suite runs on a **dev** Deckhouse build, which does not enforce
-  requirements — so `>= 1.76` and `storage-foundation >= 1.0.0` gates are intentionally NOT
+  requirements — so `>= 1.76.9` and `storage-foundation >= 1.0.0` gates are intentionally NOT
   exercised here.
 
 ## Running
@@ -64,12 +73,13 @@ importer `UploadFinished` → populator rebind → target PVC Bound) is bounded 
 
 ## Resetting a reused cluster
 
-The suite is re-runnable on the same dev cluster, but there is one sharp edge. `snapshot-controller`
-v0.2.0 (the phase-C handoff build) declares `requirements.modules.storage-foundation >= 1.0.0`, and
-**Deckhouse ignores a `ModulePullOverride` while the module is disabled**. So if snapshot-controller
-is left *registered* as v0.2.0 while disabled — after a completed run, or after manually applying the
-`pr101`/v0.2.0 tag to poke at it — it stays gated on storage-foundation, and the next run's phase-B
-enable is webhook-denied:
+The suite is re-runnable on the same dev cluster, but there is one sharp edge, and it applies to
+clusters carrying an **older** `snapshot-controller` registration. Earlier builds of that module
+declared a `requirements.modules.storage-foundation` dependency (the v0.2.0 build this suite installs
+dropped that requirement — it installs standalone, see the phase-B row in the table below), and
+**Deckhouse ignores a `ModulePullOverride` while the module is disabled**. So a cluster left with
+snapshot-controller *registered* on such a gated build while disabled stays gated on
+storage-foundation, and the next run's phase-B enable is webhook-denied:
 
 ```
 admission webhook "module-configs...": the 'snapshot-controller' module depends on disabled module(s): storage-foundation
@@ -78,11 +88,12 @@ admission webhook "module-configs...": the 'snapshot-controller' module depends 
 Phase A now fails fast with an explicit message when it detects this, instead of a cryptic phase-B error.
 
 **`make transition-clean` handles both cases** (always run it between runs) via
-`tests/transition/reset-cluster.sh`:
+`tests/transition/reset-cluster.sh`, which first checks whether the module is gated at all and
+no-ops when it is not:
 
 - if snapshot-controller is still *enabled*, it retags the MPO to `TRANSITION_SNAPC_LEGACY_TAG`
   (default `main`) and waits for it to re-register non-gated;
-- if it is *disabled* and frozen on v0.2.0 (an MPO alone is ignored, and Deckhouse checks a
+- if it is *disabled* and frozen on the gated build (an MPO alone is ignored, and Deckhouse checks a
   dependency's *effective* state — a module with no MPO/release has no version to deploy), it
   **redeploys the dependency chain**: it gives `state-snapshotter` then `storage-foundation` a
   ModulePullOverride, enables each and waits until it is effectively enabled, then enables
@@ -99,17 +110,22 @@ STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE=pr74 STORAGE_FOUNDATION_MODULE_PULL_OVERR
   make transition-reset-snapc          # or: sh tests/transition/reset-cluster.sh
 ```
 
+`make transition-clean` also drops the legacy-group CRDs at the end. Deckhouse does **not** remove a
+module's CRDs when the module is disabled, so they outlive the run; dropping them leaves the cluster
+without CRDs nobody serves, and phase B reinstalls them together with the module.
+
 ## Environment variables
 
 The scenario pins every module image via `ModulePullOverride.spec.imageTag`. Tags are chosen by
-the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded. `svdm` and
-`sds-local-volume` each need **two** image slots — a phase-B legacy image and a phase-C image the
-test retags to — because their current builds gate on something absent in phase B (svdm v0.2.0/D1
-moves to the new API group; sds-local-volume's current build requires `storage-foundation`, which is
-disabled in phase B, whereas its legacy build requires only `snapshot-controller`). `snapshot-controller`
-needs a single tag (its v0.2.0 build has no storage-foundation requirement, so it installs standalone
-in phase B and is only guard-flipped by the phase-C enable — no retag). Everything else uses
-storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
+the runner (PR tags such as `pr123`/`mr456`, or `main`); nothing is hard-coded and nothing is
+defaulted for the two modules that exist only in this scenario, so a run always records which build
+it exercised. `sds-local-volume` is the only module that needs **two** image slots — a phase-B image
+and a phase-C image the test retags to — because its current build requires `storage-foundation`,
+which is disabled in phase B, whereas its legacy build requires only `snapshot-controller`.
+`snapshot-controller` and `svdm` each need a single tag: snapshot-controller's v0.2.0 build has no
+storage-foundation requirement, so it installs standalone in phase B and is only guard-flipped by the
+phase-C enable, and svdm keeps serving its own API group throughout and is never retagged. Everything
+else uses storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 
 > **Tag format is validated up front.** `BeforeSuite` rejects any set image-tag / MPO env var that
 > is not a plain-ASCII tag matching `mr<N>` / `pr<N>` / `main` (the dev-registry image tags). This
@@ -122,9 +138,8 @@ storage-e2e's standard `<MODULE>_MODULE_PULL_OVERRIDE`.
 | `E2E_RUN_TRANSITION` | scenario gate | all | must be `true`, else the whole suite is skipped |
 | `SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE` | standard | A (bootstrap) | sds-node-configurator image |
 | `E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG` | scenario | B | snapshot-controller **v0.2.0** build (`Deprecated` + `D8SnapshotControllerModuleDeprecated` alert + extended storage-foundation CRDs). ONE tag: it has no storage-foundation requirement, so it installs standalone in phase B (no legacy/handoff split, no phase-C retag). Phase B asserts the vanilla controller works against the extended CRDs |
-| `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B | svdm image on the OLD `storage.deckhouse.io` group (pre-D1) |
+| `E2E_TRANSITION_SVDM_LEGACY_TAG` | scenario | B–D | svdm image. ONE tag, never retagged: the module serves DataExport/DataImport under `storage.deckhouse.io` — the group this suite calls the legacy one, hence the variable name — and keeps serving it while the new stack runs beside it. Its regular build is what phase B installs; no special build is needed |
 | `E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG` | scenario | B | sds-local-volume **legacy** image that depends on `snapshot-controller` (NOT storage-foundation). Required only when the data plane is enabled (sds-local-volume is the CSI backend for the data-plane steps); the current build requires storage-foundation and would be webhook-denied in phase B |
-| `E2E_TRANSITION_SVDM_TAG` | scenario | C | svdm v0.2.0/D1 image — MPO is retagged to this, triggering the migration hook |
 | `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` | standard | C | sds-local-volume storage-foundation-integrated image — MPO is retagged to this after the flip (default `main`). NOTE: the suite repoints this var at the legacy tag for phase B (the storage-e2e StorageClass testkit reads it when it lazily enables sds-local-volume), then restores it here — so during phase B its effective value is the legacy tag, by design |
 | `STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE` | standard | C | state-snapshotter image (new stack) |
 | `STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE` | standard | C | storage-foundation image (new stack) |
@@ -145,14 +160,14 @@ export SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE="main"
 # snapshot-controller v0.2.0 build (Deprecated, extended CRDs, no sf requirement) — installs
 # standalone here; ONE tag, no phase-C retag.
 export E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG="pr<N of the snapshot-controller v0.2.0 PR>"
-export E2E_TRANSITION_SVDM_LEGACY_TAG="<dev tag of a pre-D1 svdm build>"
+# svdm image; it stays on this build for the whole run.
+export E2E_TRANSITION_SVDM_LEGACY_TAG="main"
 # sds-local-volume legacy image (depends on snapshot-controller, NOT storage-foundation). Required
 # only when the data plane is enabled (see below). Its current build requires storage-foundation and
 # would be webhook-denied in phase B.
 export E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG="<dev tag of an sf-independent sds-local-volume build>"
 
-# Phase C (migrate svdm + flip to the new stack):
-export E2E_TRANSITION_SVDM_TAG="pr<N>"                        # svdm D1 branch build
+# Phase C (bring the new stack up beside the running data module):
 export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE="pr<N>"
 export STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE="pr<N>"
 export SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE="pr<N>"          # sf-integrated build; retagged after the flip
@@ -163,11 +178,6 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
 # export E2E_TRANSITION_PROBE_TIMEOUT="15m"                   # default 10m; bump for slow clusters
 ```
 
-> Legacy-image caveat: after the svdm D1 branch is merged to `main`, no `main` build carries the
-> OLD API group any more, and dev-registry cleanup may drop old per-commit tags. Run this scenario
-> **before** merging D1 (legacy = a pre-D1 tag, D1 = the PR tag), or pin a still-present legacy tag
-> for `E2E_TRANSITION_SVDM_LEGACY_TAG`.
-
 ## Phases
 
 - **A — bootstrap:** dev cluster with only `sds-node-configurator`; the four snapshot-stack modules
@@ -175,52 +185,59 @@ export E2E_TRANSITION_VS_CLASS="e2e-local-thin"
   snapshot-stack workloads/namespaces).
 - **B — legacy stack:** enable `snapshot-controller` (its single **v0.2.0** build — Deprecated, no
   storage-foundation requirement, so it installs **standalone** and ships the extended sf CRDs) then
-  `svdm` (legacy image) and — only when the data plane is enabled — `sds-local-volume` on its
+  `svdm` and — only when the data plane is enabled — `sds-local-volume` on its
   **legacy image** (`E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG`, depends on `snapshot-controller`,
   NOT storage-foundation; the current build would be webhook-denied here); create a PVC + pod, write deterministic data
   (checksum), create a CSI `VolumeSnapshot` and wait ready+bound. This doubles as the **"vanilla
   controller + extended CRDs" check**: assert the served VolumeSnapshot CRD carries `spec.mode`, that
   the API server defaulted the VS to `mode=Capture`, and that the bundled vanilla external-snapshotter
-  still bound it. Then DataExport a PVC and the VolumeSnapshot and download over the svdm HTTP API
-  (not `d8`); DataImport/upload into new PVCs; CSI-restore a PVC from the snapshot; verify every
-  checksum; keep everything.
-- **C — migrate + flip:** retag the svdm MPO legacy→`E2E_TRANSITION_SVDM_TAG` (D1) and verify the
-  migration hook (legacy CRDs removed, legacy finalizers incl. on PVCs swept, **and the real
-  in-flight `DataExport` migrated onto the unified group with its `targetRef` preserved**). Then,
-  **while storage-foundation is still off**, prove svdm-D1-standalone serves a fresh new-group
-  DataExport (download + checksum) and **tear down the migrated export cleanly** — deleting it must
-  recover the source PVC from `Lost` to `Bound` (svdm restores the reassigned PV), so no live export
-  crosses the flip. Then **re-seed a legacy epoch** for the two-owner migration race (minimal legacy
-  CRDs standing in for the pre-D1 ones + an ACTIVE legacy `DataImport` carrying the legacy finalizer
-  + a Pending PVC with the legacy finalizer — this leg needs no data-plane env). Then enable
-  `state-snapshotter` → `storage-foundation` **without disabling** the legacy modules — the enable
-  doubles as the race trigger: it re-converges svdm-D1 too, so BOTH 025 migration hooks run against
-  the seeded epoch in the same converge window. After the flip, assert the race outcome
-  winner-agnostically: legacy CRDs gone, the `DataImport` re-created on the unified group
-  (`mode: CreatePVC` + `pvcTemplate` hoisted, `targetRef` dropped), the legacy finalizer swept (the
-  swept PVC then deletes cleanly), both modules stay Ready (the loser's no-op must not error-loop),
-  and the outcome holds stable across follow-up converges. Also assert both legacy modules render no workload (all Deployments/Services gone), and
-  that **all four deprecation ClusterAlerts fire** (built-in `ModuleIsDeprecated` + custom
-  `D8*ModuleDeprecated`, for both modules). snapshot-controller needs no retag — it is already the
-  Deprecated v0.2.0 build from phase B; enabling storage-foundation just flips it from full workload
-  to alert-only via the guard. Finally (data plane only), **retag `sds-local-volume`** legacy→
-  `SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` (the storage-foundation-integrated build) now that
-  storage-foundation is up — the sds-local-volume analog of the svdm legacy→D1 retag, so the phase-D
-  data steps run against the sf-integrated CSI path.
-- **D — invariants:** every shared CRD (CSI `volumesnapshots`/`…contents`/`…classes` +
-  unified `dataexports`/`dataimports.storage-foundation.deckhouse.io`) stays **Established with the
-  same UID captured just before the flip** — proving the handoff re-applies them in place, not
-  delete+recreate (which would cascade-delete instances). The served schemas are checked for their
+  still bound it. Then DataExport the source PVC and download over the svdm HTTP API (not `d8`);
+  DataImport/upload into a new PVC; CSI-restore a PVC from the snapshot; verify every checksum; keep
+  everything. **The export is left live on purpose** — phase C reads it back across the flip.
+- **C — flip beside the data module:** enable `state-snapshotter` → `storage-foundation` **without
+  disabling** either legacy module and without touching svdm's image. The UIDs of the CSI CRDs and of
+  both legacy CRDs are captured immediately before the enable, along with the identity of the live
+  legacy epoch (the phase-B DataExport and DataImport, and the finalizer the export holds on the
+  source PVC) — recording the finalizer up front is what keeps "still there afterwards" from passing
+  on an epoch that never had one. Then assert:
+  - `snapshot-controller` renders no workload any more (Deployments/Services drain to zero) — its own
+    chart guard. `svdm` is deliberately **not** in that check: it has no such guard and must not gain
+    one;
+  - **the legacy epoch is untouched**: both legacy CRDs still exist, stay Established and keep their
+    UID (deleting either cascades away every DataExport/DataImport a user created through that
+    module, and reinstalling the CRD brings none of them back); the phase-B DataExport and DataImport
+    are the same objects; the source PVC still carries svdm's finalizer; the phase-B export still
+    serves the marker with a matching checksum; svdm still runs its own workload and both modules are
+    Ready side by side. That same spec then tears the export down under the new stack — the CR goes
+    away and the source PVC returns from `Lost` to `Bound`, so nothing in-flight crosses into phase D;
+  - the storage-foundation DataExport/DataImport CRDs **arrived with the flip** and are Established
+    (they are created by it, so there is no earlier UID to compare against; their absence beforehand
+    is not asserted, because a disabled module's CRDs stay in the cluster and a reused cluster may
+    still carry a previous run's copies);
+  - the deprecation alerts fire for `snapshot-controller` (built-in `ModuleIsDeprecated` + custom
+    `D8SnapshotControllerModuleDeprecated`) and **none** fires for `svdm` — checked after the positive
+    ones, so alert evaluation is known to have caught up.
+
+  Last in the phase (data plane only), **retag `sds-local-volume`**
+  legacy→`SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE` (the storage-foundation-integrated build) now that
+  storage-foundation is up — the only retag in the scenario — so the phase-D data steps run against
+  the sf-integrated CSI path.
+- **D — invariants:** every tracked CRD (CSI `volumesnapshots`/`…contents`/`…classes` + the legacy
+  `dataexports`/`dataimports.storage.deckhouse.io`) stays **Established with the same UID captured
+  just before the flip** — for the CSI ones that proves the handoff re-applied them in place instead
+  of delete+recreate (which would cascade-delete instances), for the legacy ones that the new stack
+  left the neighbouring module's resources alone; the storage-foundation CRDs the flip created are
+  Established too. The served schemas are checked for their
   storage-foundation marker fields (`spec.mode` on VolumeSnapshot, `targetRef.group` on DataExport,
   `spec.mode` on DataImport) so the served CRD is the extended/unified shape, not a vanilla
   reinstall. Full byte-for-byte CRD-manifest parity vs the repo YAML is **not** an e2e concern (the
   API server augments the live CRD with defaults/pruning/managedFields, so a manifest hash would
   never match) — it is verified by **storage-foundation CI** (`hack/check-consumer-crds.sh`, which
-  clones snapshot-controller/svdm at their latest tag and diffs `crds/`). Additionally:
-  the legacy ready+bound VolumeSnapshot is untouched (no new-domain labels/status); all checksums
-  still match, incl. a fresh CSI restore from the legacy snapshot after the flip; a brand-new
-  PVC/VS reaches ready+bound under the new controller; **a full new-group DataExport+DataImport is
-  served end-to-end by storage-foundation** (export → download → import → checksum); then the
-  existing state-snapshotter e2e passes on the same cluster. The deeper state-snapshotter *domain*
-  path (Snapshot + `processed`/`managed` + SnapshotContent via the d8/domain SDK) is left to that
-  suite.
+  diffs the CRDs it shares with its consumers). Additionally:
+  the phase-B ready+bound VolumeSnapshot is untouched (no new-domain labels/status); all checksums
+  still match, incl. a fresh CSI restore from that snapshot after the flip; a brand-new
+  PVC/VS reaches ready+bound under the new controller; **a full DataExport+DataImport is served
+  end-to-end by storage-foundation on its own group** (export → download → import → checksum) beside
+  the live neighbour; then the existing state-snapshotter e2e passes on the same cluster. The deeper
+  state-snapshotter *domain* path (Snapshot + `processed`/`managed` + SnapshotContent via the
+  d8/domain SDK) is left to that suite.

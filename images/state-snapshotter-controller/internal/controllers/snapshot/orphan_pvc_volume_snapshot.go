@@ -49,8 +49,8 @@ var (
 )
 
 // ensureOrphanPVCVolumeSnapshots creates a standard CSI VolumeSnapshot for each root residual (orphan) PVC
-// target and declares them as REGULAR domain children via the SDK EnsureChildren (content-single-writer
-// design §11.6). From here on the orphan VolumeSnapshot is an ordinary domain snapshot: the
+// target and declares them as REGULAR domain children via the SDK EnsureChildren.
+// From here on the orphan VolumeSnapshot is an ordinary domain snapshot: the
 // storage-foundation VolumeSnapshot domain controller adopts + plans it, the generic binder creates + binds
 // its SnapshotContent, and the aggregator projects ALL of that content's status (data from the bound VSC,
 // manifestCheckpointName from the VS domain's MCR, childrenSnapshotContentRefs, Ready). The namespace

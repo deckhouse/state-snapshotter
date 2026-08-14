@@ -3,7 +3,7 @@
 > Migrated from `.cursor/rules/demo-code-quality.mdc`, where the **full text lives**
 > ([`../../.cursor/rules/demo-code-quality.mdc`](../../.cursor/rules/demo-code-quality.mdc)).
 > Read it before editing here. SDK-specific highlights below. (The reference demo domain controller
-> that follows the same contract now lives in the `sds-unified-snapshots-poc` repo.)
+> that follows the same contract ships as the separate `sds-unified-snapshots-poc` module, maintained in its own repository.)
 
 `pkg/snapshotsdk` is **reference-implementation / executable architecture documentation** — cleaner than production, impossible to misread. Names must reveal owner/lifecycle/persistence/domain-vs-infra without explanation; no dumping-ground files (`helpers.go`, `utils.go`, `common.go`); comments explain WHY not WHAT.
 

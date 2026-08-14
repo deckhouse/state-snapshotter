@@ -1,10 +1,10 @@
 ---
-description: project-status.md is high-level only; no long archives, no detailed stage notes, no test plan.
+description: the project status is high-level only; no long archives, no detailed stage notes, no test plan.
 alwaysApply: true
 ---
 
 # Status high-level only
 
-- **project-status.md** (`docs/internal/state-snapshotter-rework/operations/project-status.md`) is **high-level only**.
+- The **project status** (internal documentation) is **high-level only**.
 - Do NOT keep there: long archives, detailed stage-by-stage implementation notes, full test plan, spec/design/testing copy.
-- Do keep: stage status table, short implemented summary, in progress, planned, blockers. Everything detailed belongs in spec/, design/, testing/, adr/.
+- Do keep: stage status table, short implemented summary, in progress, planned, blockers. Everything detailed belongs in the spec, design, testing and ADR documents.

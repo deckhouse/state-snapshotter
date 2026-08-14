@@ -4,10 +4,9 @@
 
 > Статус: **developer-facing usage guide** для команд, интегрирующих свой домен со
 > snapshot-контроллером через `pkg/snapshotsdk`. Это «как пользоваться», а не нормативный контракт.
-> Норматив контракта домен↔ядро — SDK-ADR (`2026-06-29-domain-snapshot-sdk.md`); godoc в
-> `pkg/snapshotsdk` — норматив точных Go-сигнатур и инвариантов уровня кода; этот README — **не
-> норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
-> demo-контроллеры в репозитории `sds-unified-snapshots-poc` (`images/domain-controller/internal/controllers/demo`).
+> Норматив точных Go-сигнатур и инвариантов уровня кода — godoc в `pkg/snapshotsdk`; этот
+> README — **не норматив**. Контракт качества кода — [`CLAUDE.md`](./CLAUDE.md). Reference-реализация —
+> demo-контроллер домена, поставляемый модулем `sds-unified-snapshots-poc` (ведётся в отдельном репозитории).
 >
 > Скоуп SDK v1 — **capture-only** (планирование снапшота: дочерние снапшоты + захват данных + захват
 > манифестов + барьеры жизненного цикла).
@@ -590,8 +589,7 @@ Reference: `virtualmachinesnapshot_controller.go` (родитель с деть�
 ## Exclude-veto
 
 Лейбл `state-snapshotter.deckhouse.io/exclude` (`snapshotsdk.ExcludeLabelKey`) — **абсолютный, всегда активный**
-veto: любой объект, несущий его (значение игнорируется), выпадает из каждого снапшота, на каждом уровне дерева,
-независимо от `spec.resourceSelector` рута.
+veto: любой объект, несущий его (значение игнорируется), выпадает из каждого снапшота, на каждом уровне дерева.
 
 Core вкладывает veto в собственный резолв ресурсов, но **доменный энумератор видит только собранные им
 child-спеки — не лейблы объектов-источников** — поэтому он ОБЯЗАН применить veto сам:
@@ -651,7 +649,7 @@ VM Snapshot
 **Один snapshot-узел = максимум один захват данных (один PVC).** Если у домена несколько PVC — это **не**
 несколько `DataRef`, а несколько **дочерних** snapshot-узлов (каждый со своим единственным PVC).
 
-Каноническая модель — **один логический захват данных на снапшот** (Variant A, cardinality ≤1; см.
+Каноническая модель — **один логический захват данных на снапшот** (cardinality ≤1; см.
 `api/storage/v1alpha1` `SnapshotContent.dataRef` — там тоже единичный указатель). Поэтому поле — единичный
 указатель, а не слайс:
 
@@ -735,8 +733,8 @@ case snapshotsdk.CaptureOutcomeCaptured:
 	return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 case snapshotsdk.CaptureOutcomeFailed:
 	// Core выставил терминальный Ready-reason (своя manifest/volume-нога или всплывший child-fail).
-	// Домен НЕ re-drive-ит это в phase=Failed — превращение core-owned отказа ноги в терминал — работа core
-	// (Variant A). Останавливаемся; requeue только крутил бы. outcome.Reason / outcome.Message несут детали.
+	// Домен НЕ re-drive-ит это в phase=Failed — превращение core-owned отказа ноги в терминал — работа core.
+	// Останавливаемся; requeue только крутил бы. outcome.Reason / outcome.Message несут детали.
 	return ctrl.Result{}, nil
 default: // CaptureOutcomeCapturing
 	return ctrl.Result{RequeueAfter: retry}, nil
@@ -939,5 +937,5 @@ return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).
 2. `virtualdisksnapshot_controller.go` (лист с захватом данных PVC) **или**
    `virtualmachinesnapshot_controller.go` (родитель с детьми, manifest-only) — reconcile-скелет.
 
-Это и есть reference-реализация: demo-контроллеры в репозитории `sds-unified-snapshots-poc` намеренно держатся
+Это и есть reference-реализация: demo-контроллеры модуля `sds-unified-snapshots-poc` намеренно держатся
 как executable-документация SDK.

@@ -54,8 +54,9 @@ func needsCaptureRBAC(snap *storagev1alpha1.Snapshot) bool {
 		cond.Status == metav1.ConditionFalse && storagev1alpha1.IsReasonTerminal(cond.Reason) {
 		return false
 	}
-	// Capture in progress or about to start: hold the rights (fail-open for the grant side narrows the
-	// fail-closed Phase 6 window; least-privilege is restored once captured or terminally failed).
+	// Capture in progress or about to start: hold the rights (fail-open on the grant side narrows the window
+	// in which a capture would fail closed on missing rights; least-privilege is restored once captured
+	// or terminally failed).
 	return true
 }
 

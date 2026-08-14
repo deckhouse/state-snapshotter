@@ -228,7 +228,8 @@ func checkPublishInfra() {
 	// (d) A working ingress class the publish ingresses (spec.ingressClassName=nginx, the data-manager
 	// default) can bind to. ensureIngress reuses an existing class, or provisions the ingress-nginx module
 	// + a HostPort controller on a cluster that lacks one (typically alwaysUseExisting).
-	suitePublishInfra.ingressClass = ensureIngress(ctx)
+	ensureIngress(ctx)
+	suitePublishInfra.ingressClass = nginxIngressClassName
 
 	GinkgoWriter.Printf("E2E_PUBLISH check OK:\n")
 	GinkgoWriter.Printf("  ingress class:             %s\n", suitePublishInfra.ingressClass)
@@ -325,7 +326,8 @@ func masterIPFromSslipDomain(domain string) string {
 	return ipPart
 }
 
-// ensureIngress makes a working ingress class available for the publish specs and returns its name. It is
+// ensureIngress makes the `nginx` ingress class (nginxIngressClassName — the data-manager
+// `ingressClassName` default the publish ingresses bind to) available for the publish specs. It is
 // idempotent and does the minimum a cluster needs:
 //   - Fast path: if the `nginx` IngressClass already exists (a cluster that already runs an ingress
 //     controller — including any set up out-of-band), it only waits for the ingress-nginx module to be
@@ -337,9 +339,8 @@ func masterIPFromSslipDomain(domain string) string {
 //     to), then waits for the module to be Ready and the class to appear.
 //
 // Operators who do not want the suite to touch ingress set E2E_PUBLISH=false, which skips the publish specs
-// and this whole step. The class name is `nginx` (the data-manager `ingressClassName` default the publish
-// ingresses bind to); it is returned so callers/diagnostics do not hardcode it.
-func ensureIngress(ctx context.Context) string {
+// and this whole step.
+func ensureIngress(ctx context.Context) {
 	class := nginxIngressClassName
 
 	// Fast path: a working class already exists — do not mutate the cluster.
@@ -348,7 +349,7 @@ func ensureIngress(ctx context.Context) string {
 		By(fmt.Sprintf("E2E_PUBLISH: IngressClass %q already present — reusing it", class))
 		Expect(storagekube.WaitForModuleReady(ctx, suiteRestCfg, ingressNginxModuleName, publishInfraCheckTO)).To(
 			Succeed(), "E2E_PUBLISH: ingress-nginx module is not Ready")
-		return class
+		return
 	}
 	Expect(apierrors.IsNotFound(err)).To(BeTrue(), fmt.Sprintf("E2E_PUBLISH: get IngressClass %q", class))
 
@@ -376,7 +377,6 @@ func ensureIngress(ctx context.Context) string {
 	waitIngressClassPresent(ctx, class, suiteCfg.moduleReadyTO)
 
 	By(fmt.Sprintf("E2E_PUBLISH: ingress class %q is ready (inlet %s)", class, inlet))
-	return class
 }
 
 // ensureIngressNginxModuleEnabled enables the ingress-nginx module via its ModuleConfig. It is idempotent:

@@ -21,6 +21,7 @@ package integration
 
 import (
 	"context"
+	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -223,7 +224,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 					return false
 				}
 
-				return contains(parentContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return slices.Contains(parentContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "Parent should have finalizer")
 
 			// Add finalizer to child
@@ -240,7 +241,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 					return false
 				}
 
-				return contains(childContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return slices.Contains(childContentObj.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "10s", "100ms").Should(BeTrue(), "Child should have finalizer")
 
 			// Verify PRECONDITION: Both have finalizers
@@ -281,7 +282,7 @@ var _ = Describe("Integration: SnapshotContentController - Cascade Deletion", fu
 					// Removed once its last finalizer went (deletionTimestamp + no finalizers).
 					return apierrors.IsNotFound(err)
 				}
-				return !contains(freshParent.GetFinalizers(), snapshot.FinalizerParentProtect)
+				return !slices.Contains(freshParent.GetFinalizers(), snapshot.FinalizerParentProtect)
 			}, "20s", "100ms").Should(BeTrue(), "Parent's own finalizer should be removed")
 
 			// ACTIONS Step 3: the child finalizer is RETAINED (ensured, never stripped by the parent). The

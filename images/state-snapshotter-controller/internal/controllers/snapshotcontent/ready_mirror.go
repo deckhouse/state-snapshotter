@@ -40,13 +40,13 @@ import (
 // and the mirror into one pass is what closes the staleness window where the binder re-derived a stale
 // Ready from a cross-controller hop (INV-FAIL-PROP).
 //
-// wave7 final-wave-1: this controller is now the SINGLE post-bind writer of the steady-state Snapshot.Ready
+// This controller is now the SINGLE post-bind writer of the steady-state Snapshot.Ready
 // (content.Ready verbatim + capture-leg terminal fold + phase=Failed bubble + barrier-2 phase=Finished
 // gate). The binder no longer re-derives content.Ready. The binder retains only (a) the pre-bind Ready and
 // the content-missing/deleting degradation Ready — a deleted content produces no reconcile here to mirror
 // from, so the binder co-writes ContentMissing, woken by its bound-content watch — and (b) the excludedRefs
 // side-channel mirror (not Ready; triggered by the same watch). Keeping (a)/(b) in the binder is why that
-// watch is not removed. The childSubtreesManifestsPersisted latch is main-owned (capture_legs.go, decision #10).
+// watch is not removed. The childSubtreesManifestsPersisted latch is main-owned (capture_legs.go).
 //
 // vcr-watch-core-terminal (decision D2): a failed data-leg VCR (or a Variant-A >1-artifact fault) is now
 // made terminal on the CONTENT itself by reconcileDataLegProjection (DataReady=VolumeCaptureFailed), so
@@ -77,8 +77,7 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshotWithOwner(ctx cont
 
 	// Writer switch (creator -> main): only mirror once the owner has adopted THIS content. Pre-bind the
 	// creator/binder owns Snapshot.Ready; a cross-binding (owner bound to a different content) is not ours to
-	// write. Every domain owner — including the VolumeSnapshot domain kind (content-single-writer design
-	// §11.6) — carries status.boundSnapshotContentName, so this one writer switch covers them all.
+	// write. Every domain owner — including the VolumeSnapshot domain kind — carries status.boundSnapshotContentName, so this one writer switch covers them all.
 	bound, _, _ := unstructured.NestedString(owner.Object, "status", "boundSnapshotContentName")
 	if bound != contentObj.GetName() {
 		return nil
@@ -97,7 +96,7 @@ func (r *SnapshotContentController) mirrorReadyToOwnerSnapshotWithOwner(ctx cont
 		reason = readyCond.Reason
 		message = readyCond.Message
 	}
-	// Barrier 2 (ADR §6.2 — "finalize Ready ONLY after domain phase=Finished") + domain-failure bubble.
+	// Barrier 2 ("finalize Ready ONLY after domain phase=Finished") + domain-failure bubble.
 	// The SAME shared fold is applied to the SnapshotContent's OWN Ready in
 	// reconcileCommonSnapshotContentStatus (forContent=true), so both post-bind Ready writers agree and a
 	// domain phase=Failed / not-yet-Finished propagates up the content-aggregation tree. forContent=false
@@ -186,7 +185,7 @@ func (r *SnapshotContentController) patchOwnerReadyFromContent(
 
 // applyDomainPhaseFold folds the owning Snapshot's domain capture phase
 // (status.captureState.domainSpecificController.phase) into a base Ready triple. It is the SINGLE shared
-// implementation of ADR §6.2 "barrier 2", used by BOTH post-bind Ready writers so they always agree:
+// implementation of "barrier 2", used by BOTH post-bind Ready writers so they always agree:
 //
 //   - reconcileCommonSnapshotContentStatus applies it to the SnapshotContent's OWN Ready (forContent=true)
 //     so a domain phase=Failed / not-yet-Finished propagates up the CONTENT-aggregation tree — a child

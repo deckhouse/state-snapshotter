@@ -112,10 +112,17 @@ type SnapshotDataArtifactRef struct {
 }
 
 // SnapshotDataBinding associates the single PVC source of a logical snapshot node with its captured data
-// artifact. Variant A (cardinality ≤1): a SnapshotContent carries at most ONE data binding; multiple
+// artifact. Cardinality is ≤1 by design: a SnapshotContent carries at most ONE data binding; multiple
 // volumes are modeled as child volume nodes (each its own SnapshotContent), never as a list on one node.
 // It is self-contained ({sourceRef, artifactRef, volume metadata}) so the core can mirror it verbatim onto
 // the namespaced snapshot's top-level status.data (see the status-source descriptor).
+//
+// Which volume properties belong here is a deliberate, narrow criterion: a property is carried only if
+// export/import needs it, OR if it is NOT preserved in the captured PVC manifest and is needed for
+// validation. Everything else is read back from the captured manifest on restore and would only be a second,
+// divergable copy. spec.accessModes is the worked example of what does NOT qualify: it round-trips through the
+// manifest untouched, and the transient export volume does not inherit the source modes (the provisioner
+// treats them as optional and defaults to ReadWriteOnce), so it was dropped before this schema was released.
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
 	// SourceRef identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
@@ -139,10 +146,6 @@ type SnapshotDataBinding struct {
 	// +optional
 	FsType string `json:"fsType,omitempty"`
 
-	// AccessModes records the source PVC access modes (e.g. ReadWriteOnce, ReadWriteMany).
-	// +optional
-	AccessModes []string `json:"accessModes,omitempty"`
-
 	// StorageClassName records the source StorageClass of the captured volume. Used by the
 	// aggregated /index and by import StorageClass mapping.
 	// +optional
@@ -165,21 +168,20 @@ type SnapshotContentStatus struct {
 
 	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
 	//
-	// It carries the FROZEN expected child set of the node. As of the content-single-writer design (Block 4,
-	// INV-CONTENT-CHILDREN-2) it is written in ONE transition by the SOLE writer, the aggregator
-	// (SnapshotContentController): the aggregator projects it from the owning snapshot's frozen
-	// status.childrenSnapshotRefs (set-once at phase=Planned) and publishes the COMPLETE set only once every
-	// declared child snapshot has materialized+bound its content (all-or-nothing; see
+	// It carries the FROZEN expected child set of the node, written in ONE transition by the SOLE writer,
+	// the aggregator (SnapshotContentController): the aggregator projects it from the owning snapshot's
+	// frozen status.childrenSnapshotRefs (set-once at phase=Planned) and publishes the COMPLETE set only
+	// once every declared child snapshot has materialized+bound its content (all-or-nothing; see
 	// PublishSnapshotContentChildrenFromSnapshotRefs). Until then nothing is written, so the field
 	// transitions empty -> complete in a single patch and never grows incrementally. ChildrenReady is a pure
-	// recompute against it (no flap); a failed child stays a node (E3 degradation, edge preserved).
+	// recompute against it (no flap); a failed child stays a node, so the edge is preserved.
 	//
-	// The XValidation transition rule makes this immutability an API-level guarantee (Option A): once the set
+	// The XValidation transition rule makes this immutability an API-level guarantee: once the set
 	// is non-empty it is frozen — no add, remove, reorder, or replace. The empty->set transition is the only
 	// allowed change (oldSelf.size()==0). The single-writer all-or-nothing publish is what makes this safe:
-	// it would be a wedge to enable this rule against an incremental (append) writer, which is why it lands
-	// only after the orphan special-path dismantling (Block 3d) unified the aggregator as the sole edge
-	// writer. self==oldSelf is an O(n) element comparison; MaxItems + the element name MaxLength bound the CEL
+	// the rule would wedge an incremental (append) writer, so it became enforceable only once the aggregator
+	// was the sole writer of child edges.
+	// self==oldSelf is an O(n) element comparison; MaxItems + the element name MaxLength bound the CEL
 	// estimated cost so the apiserver accepts the CRD (an unbounded list/name would exceed the cost budget —
 	// this is why the O(1) size-monotonic predecessor rule capped nothing). MaxItems=8192 is a generous
 	// per-node direct-child ceiling (far beyond any realistic fan-out) chosen to keep the cost well under
@@ -190,7 +192,7 @@ type SnapshotContentStatus struct {
 	ChildrenSnapshotContentRefs []SnapshotContentChildRef `json:"childrenSnapshotContentRefs,omitempty"`
 
 	// Data is the single PVC-source-to-data-artifact binding for this logical snapshot node.
-	// Variant A (cardinality ≤1): a node carries at most one data artifact; multiple volumes are
+	// Cardinality ≤1 by design: a node carries at most one data artifact; multiple volumes are
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
 	// It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
 	// onto the namespaced snapshot's top-level status.data.
@@ -228,7 +230,7 @@ type SnapshotContentStatus struct {
 	// (this node's own direct exclusions UNION the direct exclusions of all descendants; on the root, PLUS
 	// the explicit top-level drops). It is written ONLY by the core (single aggregator) and is the TRUTH:
 	// being on the cluster-scoped SnapshotContent, it outlives deletion of the namespaced Snapshot (the
-	// recycle bin, wave4B) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
+	// recycle bin) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
 	// than direct edges (like childrenSnapshotContentRefs) because an excluded object is non-navigable: no
 	// snapshot node is created for it, so per-node reconstruction is impossible after the fact.
 	// +optional
@@ -238,7 +240,7 @@ type SnapshotContentStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// DataList returns status.data as a slice of length 0 or 1. Variant A keeps cardinality ≤1 on a
+// DataList returns status.data as a slice of length 0 or 1. The design keeps cardinality ≤1 on a
 // node, but the coverage/dedup/publish helpers stay generic over a slice; this bridge lets them iterate
 // the single binding without each call site special-casing the nil pointer.
 func (c *SnapshotContent) DataList() []SnapshotDataBinding {

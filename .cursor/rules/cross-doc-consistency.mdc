@@ -5,20 +5,21 @@ alwaysApply: true
 
 # Cross-doc consistency
 
-When changing any of:
-- `docs/internal/state-snapshotter-rework/spec/system-spec.md`
-- `docs/internal/state-snapshotter-rework/architecture/overview.md` (or added `system-overview.puml`)
-- `docs/internal/state-snapshotter-rework/design/implementation-plan.md`
-- `docs/internal/state-snapshotter-rework/testing/e2e-testing-strategy.md`
-- `docs/internal/state-snapshotter-rework/operations/project-status.md`
+The documents below live in the internal (non-public) documentation set — see
+docs-ssot-and-structure. When changing any of:
+- the system spec
+- the architecture overview (or its diagrams)
+- the implementation plan
+- the e2e testing strategy
+- the project status
 
 check consistency (no contradiction) at least on:
 - registry state vs runtime watch activation
 - DSC conditions (`Accepted`, `AccessGranted`, derived `Ready`) and watch activation formula
 - optional unified CRD / bootstrap (S1–S2) vs future DSC-driven registry
 - manifest / MCR track vs unified snapshot registry (separate concerns)
-- stage / progress in `project-status.md` vs tables in `implementation-plan.md` and test IDs in `e2e-testing-strategy.md`
+- stage / progress in the project status vs tables in the implementation plan and test IDs in the e2e testing strategy
 
-Related long-form ADR under `snapshot-rework/` must not disagree with `spec/system-spec.md` without an explicit documented transition.
+The related long-form ADR must not disagree with the internal system spec without an explicit documented transition.
 
 Fix inconsistencies in the same change or document a temporary divergence and follow-up.

@@ -152,11 +152,11 @@ func TestCollectSubtreeCoveredPVCUIDs_missingChildContent(t *testing.T) {
 	}
 }
 
-// TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback exercises the Block 5 A->B coverage window: a
+// TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback exercises the A->B coverage window: a
 // data-bearing child whose status.data is not published yet is covered via its OWNING snapshot
 // (content.spec.snapshotRef), not a content-UID-derived VCR. The owner publishes the in-flight VCR name on
 // status.captureState.domainSpecificController.volumeCaptureRequestName; that VCR's spec.targets[].uid are
-// the covered PVC UIDs (design §8.5/§11.7).
+// the covered PVC UIDs.
 func TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback(t *testing.T) {
 	t.Parallel()
 	root := &storagev1alpha1.SnapshotContent{
@@ -202,7 +202,7 @@ func TestCollectSubtreeCoveredPVCUIDs_ownerVCRFallback(t *testing.T) {
 }
 
 // TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips pins the authoritative CSD decision: a child whose
-// kind is NOT data-bearing contributes no covered PVC UID even though it has children (Block 5 dropped the
+// kind is NOT data-bearing contributes no covered PVC UID even though it has children (this dropped the
 // old `if hasChildren { return nil }` heuristic in favor of RequiresDataArtifact).
 func TestCollectSubtreeCoveredPVCUIDs_notDataBearingSkips(t *testing.T) {
 	t.Parallel()
@@ -234,7 +234,7 @@ func TestListOwnedPVCTargets_residualExcludesSubtreeCovered(t *testing.T) {
 	ns := "ns"
 	pvcRoot := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "root-pvc", Namespace: ns, UID: types.UID("uid-root")}}
 	pvcChild := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "child-pvc", Namespace: ns, UID: types.UID("uid-child")}}
-	// wave7 root-content-free coverage: the covered child is discovered through the Snapshot child graph — a
+	// root-content-free coverage: the covered child is discovered through the Snapshot child graph — a
 	// child Snapshot node bound to its OWN content, whose data binding covers uid-child — NOT the root's
 	// SnapshotContent subtree.
 	childContent := &storagev1alpha1.SnapshotContent{

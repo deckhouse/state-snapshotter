@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
@@ -56,16 +55,6 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return changed, err == nil, err
 	}
 
-	// resourceSelector narrows which top-level/standalone domain source objects the root expands into child
-	// snapshots (nil = expand all). Resolved once here and threaded into every layer. Excluded objects are
-	// consistently dropped from the root manifest leg by the same selector. Nested domain children created by
-	// domain controllers are out of scope (see plan section 5a). A resolve error is surfaced as a graph
-	// planning failure by the caller (Ready=False/GraphPlanningFailed).
-	selector, err := nsSnap.ResolveResourceSelector()
-	if err != nil {
-		return false, false, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
-
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
 	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
@@ -79,7 +68,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		}
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -123,7 +112,7 @@ func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
 		return false, false, err
 	}
 
-	// Publish the root's OWN top-level exclude-veto drops (wave4A). Recorded on the root Snapshot's
+	// Publish the root's OWN top-level exclude-veto drops. Recorded on the root Snapshot's
 	// captureState.domainSpecificController.excludedRefs — the uniform "own direct exclusions" input the
 	// SnapshotContent aggregator reads for every node (domain CRs get theirs from the domain SDK; the root
 	// gets its top-level drops from here). Monotonic and only published once the full graph is enumerated.
@@ -182,7 +171,6 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	nsSnap *storagev1alpha1.Snapshot,
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
-	selector labels.Selector,
 ) ([]storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
 	var refs []storagev1alpha1.SnapshotChildRef
 	var excluded []storagev1alpha1.ExcludedObjectRef
@@ -215,22 +203,17 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 	})
 	for i := range list.Items {
 		resource := &list.Items[i]
-		// Absolute exclude veto (wave4A): a top-level source object carrying the exclude label is dropped
-		// from EVERY leg (it also fails selector.Matches below, since ResolveResourceSelector folds the
-		// veto in) and is recorded as an explicit top-level drop. This is the root node's OWN direct
-		// exclusion, published into status.captureState.domainSpecificController.excludedRefs so the
-		// SnapshotContent aggregator folds it into the durable excludedRefs aggregate.
+		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped from EVERY
+		// leg — not expanded into a child here, and dropped from the root manifest leg by the same veto —
+		// and is recorded as an explicit top-level drop. This is the root node's OWN direct exclusion,
+		// published into status.captureState.domainSpecificController.excludedRefs so the SnapshotContent
+		// aggregator folds it into the durable excludedRefs aggregate.
 		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
 			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
 				APIVersion: mapping.SourceGVK.GroupVersion().String(),
 				Kind:       mapping.SourceGVK.Kind,
 				Name:       resource.GetName(),
 			})
-		}
-		// User-provided resourceSelector narrows expansion: a domain source object whose labels do not match
-		// is not expanded into a child snapshot (nil selector = expand all). The same object is then dropped
-		// from the root manifest leg by the same selector, keeping the two legs consistent.
-		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
 			continue
 		}
 		covered, err := coverage.IsCovered(ctx, resource)
@@ -259,7 +242,7 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 }
 
 // snapshotChildSnapshotName is the name of a root-owned domain child snapshot CR, keyed by the parent
-// Snapshot UID and the captured source object UID (unified wave4C scheme, see api/names). The child
+// Snapshot UID and the captured source object UID (unified scheme, see api/names). The child
 // snapshot GVK is intentionally NOT part of the key (it is derived from the source GVK via the
 // CustomSnapshotDefinition); connectivity is carried by ownerRefs/childRefs, not the name.
 func snapshotChildSnapshotName(parentSnapshotUID, sourceUID types.UID) string {
@@ -307,7 +290,6 @@ func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
 		child.SetGroupVersionKind(gvk)
 		child.SetOwnerReferences([]metav1.OwnerReference{controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
 		// Child snapshot node introduced into the tree: stamp delete-protection into the CREATE payload
-		// (delete-protection-contract.md §6.1).
 		storagev1alpha1.StampDeleteProtected(child)
 		return r.Client.Create(ctx, child)
 	}
@@ -518,7 +500,7 @@ func childCaptureAtLeastPlanned(child *unstructured.Unstructured) bool {
 
 // childSubtreePlanned reports whether the child's main-computed recursive planning latch
 // status.captureState.commonController.subtreePlanned is present and true — i.e. the child AND its whole
-// subtree finished planning (design §8.1, decision #10). The orphan/residual wave gates on this rather
+// subtree finished planning. The orphan/residual wave gates on this rather
 // than the child's own phase so a PVC covered by a not-yet-planned GRANDCHILD is never momentarily seen
 // as orphan. nil/false (absent latch) reads as "subtree not planned yet".
 func childSubtreePlanned(child *unstructured.Unstructured) bool {
@@ -531,8 +513,8 @@ func childSubtreePlanned(child *unstructured.Unstructured) bool {
 // domainSpecificController.phase >= Planned, i.e. Planned or Finished). It is the wave barrier for root
 // orphan/residual PVC volume capture: orphan PVCs must be evaluated only once the already-declared domain
 // subtree's coverage is COMPUTABLE, so a PVC that a domain child covers is never momentarily seen as
-// orphan. Block 5 relaxed this from full Ready=True to phase>=Planned; Block 7b tightens it to the
-// main-computed recursive subtreePlanned latch (design §8.1, decision #10): each DIRECT child must report
+// orphan. The gate was relaxed from full Ready=True to phase>=Planned, and is now the
+// main-computed recursive subtreePlanned latch: each DIRECT child must report
 // commonController.subtreePlanned=true, which means the child AND all its descendants finished planning.
 // Direct phase>=Planned was insufficient — a PVC covered by a not-yet-planned GRANDCHILD could momentarily
 // be seen as orphan before that grandchild published its coverage. subtreePlanned needs only planning

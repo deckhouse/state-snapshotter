@@ -444,7 +444,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			mcr := waitForManifestCaptureRequestReady(ctx, testNS, TestFixtures.TestMCRName, testTimeout)
 			checkpointName := mcr.Status.CheckpointName
 
-			// ADR: one UID-aware ObjectKeeper exists for this MCR UID.
+			// Exactly one UID-aware ObjectKeeper exists for this MCR UID.
 			// This ObjectKeeper:
 			// - Uses FollowObject mode to follow MCR (no TTL - TTL is handled by MCR controller)
 			// - Holds the ManifestCheckpoint (MCP has ownerRef to this ObjectKeeper)
@@ -474,7 +474,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 
 		// TestObjectKeeperFollowsMCR verifies that when MCR is deleted, ObjectKeeper is also deleted
 		// (because it follows MCR in FollowObject mode), and checkpoint is deleted via GC.
-		// ADR states: ObjectKeeper follows MCR lifecycle. When MCR is deleted, ObjectKeeper is deleted.
+		// The ObjectKeeper follows the MCR lifecycle: when the MCR is deleted, the ObjectKeeper is deleted.
 		// When ObjectKeeper is deleted, GC deletes checkpoint through ownerRef.
 		// IMPORTANT: In envtest, kube-controller-manager is not running, so actual GC won't work.
 		// This test verifies that:
@@ -556,7 +556,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(mcrOK).NotTo(BeNil())
 
 			// Delete MCR ObjectKeeper manually (simulating deletion)
-			// ADR: When ObjectKeeper is deleted → GC deletes MCP (via ownerRef)
+			// When the ObjectKeeper is deleted, GC deletes the MCP via its ownerRef.
 			err := k8sClient.Delete(ctx, mcrOK)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -671,7 +671,7 @@ var _ = Describe("E2E Tests for ManifestCaptureRequest and ManifestCheckpoint", 
 			Expect(hasNamespaceRef).To(BeFalse(), "Checkpoint must NOT have ownerRef to Namespace")
 			Expect(hasObjectKeeperRef).To(BeTrue(), "Checkpoint must have ownerRef to ObjectKeeper")
 
-			// ADR: one UID-aware ObjectKeeper exists for this MCR UID.
+			// Exactly one UID-aware ObjectKeeper exists for this MCR UID.
 			// This ObjectKeeper uses FollowObject mode to follow MCR
 			retainerName := namespacemanifest.ManifestCaptureRequestObjectKeeperName(mcr.UID)
 			var objectKeeper deckhousev1alpha1.ObjectKeeper

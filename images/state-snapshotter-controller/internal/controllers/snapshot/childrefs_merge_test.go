@@ -134,8 +134,8 @@ func TestWeightLayerCaptureReady(t *testing.T) {
 // domainChildReady builds a bound child snapshot whose recursive planning latch reflects whether its
 // subtree finished planning: planned==true sets phase=Planned AND the main-computed
 // commonController.subtreePlanned=true (opens the orphan-PVC final-wave gate), planned==false sets
-// phase=Planning with no latch (still pending). Block 5 relaxed the gate from full Ready=True to
-// phase>=Planned; Block 7b tightened it to the recursive subtreePlanned latch, so this fixture keys on
+// phase=Planning with no latch (still pending). The gate was relaxed from full Ready=True to
+// phase>=Planned, then tightened to the recursive subtreePlanned latch, so this fixture keys on
 // that latch (the phase is kept for the pending descriptor).
 func domainChildReady(name string, planned bool) *unstructured.Unstructured {
 	phase := storagev1alpha1.SnapshotCapturePhasePlanned
@@ -155,9 +155,9 @@ func domainChildReady(name string, planned bool) *unstructured.Unstructured {
 }
 
 // readyVSChild builds a bound orphan CSI VolumeSnapshot domain child whose subtree finished planning
-// (phase=Planned + commonController.subtreePlanned=true). Under the content-single-writer model an orphan
+// (phase=Planned + commonController.subtreePlanned=true). An orphan
 // VolumeSnapshot is an ordinary domain child (no longer a skipped "visibility leaf"), so the final-wave
-// gate (Block 7b: recursive subtreePlanned) must treat it exactly like any other domain child.
+// gate (recursive subtreePlanned) must treat it exactly like any other domain child.
 func readyVSChild(name, ns string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": snapshotpkg.CSISnapshotAPIVersion,
@@ -242,7 +242,7 @@ func TestAllDeclaredDomainChildSnapshotsReady(t *testing.T) {
 		}
 	})
 
-	// Block 7b tightening: a direct child that reached its OWN barrier 1 (phase=Planned) but whose subtree
+	// Recursive-latch tightening: a direct child that reached its OWN barrier 1 (phase=Planned) but whose subtree
 	// is not planned yet (main has not latched commonController.subtreePlanned, e.g. a grandchild is still
 	// planning) must keep the gate closed — direct phase>=Planned is no longer sufficient.
 	t.Run("child Planned but subtree not planned keeps gate closed", func(t *testing.T) {

@@ -14,10 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package transition is a manual, developer-run Ginkgo suite that verifies the
-// snapshot-controller + storage-volume-data-manager (svdm) -> state-snapshotter +
-// storage-foundation consolidation on ONE dev cluster. See README.md for scope, phases and the
-// full list of environment variables.
+// Package transition is a manual, developer-run Ginkgo suite that brings state-snapshotter +
+// storage-foundation up on ONE dev cluster that is ALREADY running the legacy snapshot stack —
+// snapshot-controller plus the storage-volume-data-manager module (svdm below, an abbreviation of
+// that module name) — and asserts what each of the two arrangements owes the user. See README.md
+// for scope, phases and the full list of environment variables.
+//
+// The scenario is a transition onto the new stack, NOT a migration away from the data module.
+// storage-volume-data-manager stays enabled the whole way through: it keeps serving its own API
+// group, its own DataExport/DataImport resources and its own volume protection while
+// storage-foundation is live, and the flip must leave all of that untouched. snapshot-controller is
+// the one module the flip does supersede — its own Helm chart stops rendering workload once
+// storage-foundation is enabled, leaving only its deprecation alert.
 //
 // It is a SEPARATE suite (own cluster_config.yml, own bootstrap) because the main
 // state-snapshotter suite brings its cluster up with storage-foundation/state-snapshotter already
@@ -42,7 +50,12 @@ import (
 	"k8s.io/client-go/dynamic"
 	clientgokube "k8s.io/client-go/kubernetes"
 
-	"github.com/deckhouse/storage-e2e/pkg/cluster"
+	// storage-e2e/pkg/cluster is deprecated in favour of pkg/e2e (e2e.Connect), where the cluster
+	// lifecycle is driven by the framework's bootstrap/remove commands. The deprecation notice keeps
+	// the package supported for suites that already import it, and this scenario is one of them: it
+	// owns its cluster lifecycle here. Moving to pkg/e2e changes how the whole run is bootstrapped, so
+	// it is a standalone migration — that migration removes this suppression, no edit here can.
+	"github.com/deckhouse/storage-e2e/pkg/cluster" //nolint:staticcheck // deprecated package, see the note above
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
@@ -51,20 +64,23 @@ import (
 const (
 	envRunTransition = "E2E_RUN_TRANSITION"
 
-	// Scenario image-tag vars for the two modules that exist ONLY in this scenario (not in the
-	// main suite's cluster_config).
+	// Scenario-specific image-tag vars: snapshot-controller and svdm exist only in this scenario (not
+	// in the main suite's cluster_config), and sds-local-volume needs a phase-B image the main suite
+	// has no use for.
 	//   - snapshot-controller: ONE tag. Its single deprecated v0.2.0 build has no storage-foundation
 	//     requirement (only deckhouse >= 1.76), so it installs standalone in phase B and ships the
 	//     extended (storage-foundation) CRDs — no legacy/handoff split, no phase-C retag.
-	//   - svdm: two slots — the legacy old-group image (phase B) and the v0.2.0/D1 new-group image the
-	//     phase-C migration retags to.
-	//   - sds-local-volume: two slots as well. Its current build depends on storage-foundation (absent
+	//   - svdm: ONE tag as well, and the suite NEVER retags it. The module serves DataExport/DataImport
+	//     under storage.deckhouse.io — the group this suite calls the legacy one, hence the variable
+	//     name — and keeps serving it while the new stack runs beside it. Like every module here its
+	//     image is pinned explicitly rather than defaulted, so a run always records which build it
+	//     exercised.
+	//   - sds-local-volume: two slots. Its current build depends on storage-foundation (absent
 	//     in phase B), so phase B enables a LEGACY image that depends on snapshot-controller
 	//     (E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG) and phase C retags it to the storage-foundation-
 	//     integrated build (the standard SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE) after the flip.
 	envSnapshotControllerTag   = "E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG"
 	envSvdmLegacyTag           = "E2E_TRANSITION_SVDM_LEGACY_TAG"
-	envSvdmTag                 = "E2E_TRANSITION_SVDM_TAG"
 	envSdsLocalVolumeLegacyTag = "E2E_TRANSITION_SDS_LOCAL_VOLUME_LEGACY_TAG"
 
 	// Standard storage-e2e <MODULE>_MODULE_PULL_OVERRIDE vars for modules the test enables at
@@ -103,19 +119,21 @@ const (
 	envStorageClass = "E2E_TRANSITION_STORAGE_CLASS"
 	envVSClass      = "E2E_TRANSITION_VS_CLASS"
 
-	// legacy finalizer the pre-D1 svdm controller put on CRs and PVCs; the migration hook sweeps it.
+	// legacyFinalizer is the finalizer storage-volume-data-manager puts on the PVC it is exporting.
+	// It is ACTIVE volume protection, not bookkeeping: for the lifetime of the export the PVC's PV is
+	// detached and rebound into the exporter, so a PVC that loses this finalizer mid-export can be
+	// deleted out from under live data. Nothing the new stack does may sweep it — phase C asserts it
+	// is still on the exported PVC after the flip.
 	legacyFinalizer = "storage.deckhouse.io/storage-manager-controller"
 
 	workloadNS   = "transition-workload"
 	srcPVCName   = "src-data"
 	probePodName = "probe"
 
-	// two-owner migration-race fixtures (phase-C race leg; see the race section in helpers_test.go).
-	// raceImportName is the ACTIVE legacy DataImport re-seeded before the flip; raceImportPVCName is
-	// the target PVC its pvcTemplate names; racePVCName is the PVC seeded with the legacy finalizer.
-	raceImportName    = "race-import"
-	raceImportPVCName = "race-imported-data"
-	racePVCName       = "race-pvc"
+	// The legacy-group DataExport/DataImport created in phase B. Phase C reads them back around the
+	// flip: they belong to storage-volume-data-manager and must come through it as the same objects.
+	legacyExportName = "export-pvc"
+	legacyImportName = "import-di"
 )
 
 var markerPath = "/mnt/" + srcPVCName + "/marker"
@@ -137,24 +155,49 @@ var (
 	boundContent   string
 	vsUID          string
 
-	// Shared CRDs whose identity must survive the flip (updated in place during the ownership
-	// handoff, never delete+recreated). UIDs are captured just before storage-foundation is enabled
-	// and re-checked in phase D. CSI CRDs are installed by snapshot-controller (phase B); the unified
-	// DataExport/DataImport CRDs by svdm-D1 (phase-C retag) — sf then re-applies both byte-for-byte.
+	// legacyExportUID / legacyImportUID are the uids of the phase-B legacy-group CRs, read just
+	// before the flip so phase C can prove the very same objects came through it.
+	legacyExportUID string
+	legacyImportUID string
+
+	// CRDs whose identity the flip must preserve, for two different reasons.
+	//
+	// csiCRDNames are installed by snapshot-controller in phase B; storage-foundation re-applies the
+	// same manifests as it takes ownership, so the flip must UPDATE them in place. A changed UID means
+	// delete+recreate, which cascade-deletes every VolumeSnapshot in the cluster.
+	//
+	// legacyCRDNames belong to storage-volume-data-manager, which stays enabled: the new stack must
+	// not touch them at all. Their UID is the strongest available proof of that — deleting either CRD
+	// cascades away every DataExport/DataImport a user created through that module, and reinstalling
+	// the CRD afterwards brings none of them back.
+	//
+	// Both sets have their UIDs captured just before storage-foundation is enabled and re-checked in
+	// phase D.
 	csiCRDNames = []string{
 		"volumesnapshots.snapshot.storage.k8s.io",
 		"volumesnapshotcontents.snapshot.storage.k8s.io",
 		"volumesnapshotclasses.snapshot.storage.k8s.io",
 	}
+	legacyCRDNames = []string{
+		"dataexports." + legacyGroup,
+		"dataimports." + legacyGroup,
+	}
+	// unifiedCRDNames are storage-foundation's own DataExport/DataImport CRDs. Nothing installs them
+	// while only the legacy stack runs, so the FLIP is what creates them: no UID is captured
+	// beforehand, and phases C and D assert they appeared and are served. Their absence before the
+	// flip is deliberately NOT asserted — Deckhouse leaves a module's CRDs in the cluster when the
+	// module is disabled, so a re-run on a reused cluster legitimately starts with the previous run's
+	// copies.
 	unifiedCRDNames = []string{
-		"dataexports.storage-foundation.deckhouse.io",
-		"dataimports.storage-foundation.deckhouse.io",
+		"dataexports." + unifiedGroup,
+		"dataimports." + unifiedGroup,
 	}
 	crdUIDBeforeFlip = map[string]string{}
 )
 
-// trackedCRDs is every CRD whose identity the flip must preserve (CSI + unified).
-func trackedCRDs() []string { return append(append([]string{}, csiCRDNames...), unifiedCRDNames...) }
+// trackedCRDs is every CRD whose identity the flip must preserve: the CSI CRDs storage-foundation
+// takes over, and the legacy CRDs of the module that keeps running beside it.
+func trackedCRDs() []string { return append(append([]string{}, csiCRDNames...), legacyCRDNames...) }
 
 func probeImage() string {
 	if v := strings.TrimSpace(os.Getenv(envProbeImage)); v != "" {
@@ -197,7 +240,7 @@ func TestSnapshotterTransition(t *testing.T) {
 	suiteConfig, reporterConfig := GinkgoConfiguration()
 	suiteConfig.Timeout = 180 * time.Minute
 	// The scenario shares one dev cluster and carries a legacy workload across ordered phases
-	// (bootstrap -> legacy -> migrate+flip -> invariants), so spec randomization MUST stay OFF.
+	// (bootstrap -> legacy stack -> flip -> invariants), so spec randomization MUST stay OFF.
 	suiteConfig.RandomizeAllSpecs = false
 	reporterConfig.Verbose = true
 
@@ -216,7 +259,7 @@ var _ = BeforeSuite(func() {
 		Fail("TEST_CLUSTER_CREATE_MODE must be set: this suite only supports storage-e2e nested clusters")
 	}
 	// Fail fast before provisioning if any required image-tag var is missing.
-	requireEnv(envSnapshotControllerTag, envSvdmLegacyTag, envSvdmTag)
+	requireEnv(envSnapshotControllerTag, envSvdmLegacyTag)
 	// sds-local-volume is only enabled for the data-plane steps, and its phase-B legacy image has no
 	// safe default ("main" now depends on storage-foundation, which is disabled in phase B), so it is
 	// required only when the data plane is exercised.
@@ -281,7 +324,6 @@ var moduleTagPattern = regexp.MustCompile(`^(mr[0-9]+|pr[0-9]+|main)$`)
 var moduleTagEnvVars = []string{
 	envSnapshotControllerTag,
 	envSvdmLegacyTag,
-	envSvdmTag,
 	envSdsLocalVolumeLegacyTag,
 	envSdsLocalVolumeOverride,
 	envStateSnapshotterOverride,
@@ -335,10 +377,6 @@ func requireEnv(names ...string) {
 	}
 }
 
-// enableModule enables (or retags) a single module at runtime via storage-e2e's create-or-update
-// ModuleConfig + ModulePullOverride path, then waits for it to become Ready. Re-calling with a
-// different imageTag retags the live MPO — that is exactly how the svdm legacy->D1 migration is
-// triggered in phase C.
 // moduleSpec builds a ModuleSpec (enabled, chart version 1) with an image tag and optional
 // dependencies. IMPORTANT: a dependency name must refer to another module passed in the SAME
 // enableModules() call — the storage-e2e graph builder resolves dependencies only within the
@@ -370,8 +408,10 @@ func enableModules(specs ...storagekube.ModuleSpec) {
 	Expect(err).NotTo(HaveOccurred(), "enable/retag modules %v", names)
 }
 
-// enableModule enables (or retags) a single module with no cross-module dependency. To enable a
-// module together with a dependency, batch them via enableModules(moduleSpec(...), ...).
+// enableModule enables (or retags) a single module with no cross-module dependency, then waits for
+// it to become Ready. Re-calling it with a DIFFERENT image tag retags the live ModulePullOverride —
+// that is how phase C moves sds-local-volume onto its storage-foundation-integrated build. To enable
+// a module together with a dependency, batch them via enableModules(moduleSpec(...), ...).
 func enableModule(name, imageTag string) {
 	GinkgoHelper()
 	enableModules(moduleSpec(name, imageTag))
@@ -412,16 +452,16 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 	})
 
 	// ---- Phase B: legacy snapshot-controller + svdm ----
-	Context("Phase B: legacy stack (old group)", func() {
-		It("enables snapshot-controller, svdm(legacy) and sds-local-volume", func() {
+	Context("Phase B: legacy stack (snapshot-controller + storage-volume-data-manager)", func() {
+		It("enables snapshot-controller, svdm and sds-local-volume", func() {
 			// One batch: the framework brings snapshot-controller and svdm up concurrently (no
 			// interdependency) and sds-local-volume after snapshot-controller (its legacy dependency,
 			// declared in-batch so the graph resolves — a separate call would fail graph-build).
 			// snapshot-controller runs its single deprecated v0.2.0 build (E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG):
 			// no storage-foundation requirement, so it installs standalone here and ships the extended
 			// (storage-foundation) CRDs — the "vanilla controller + extended CRDs" combination the next
-			// spec verifies. svdm runs its legacy old-group image (E2E_TRANSITION_SVDM_LEGACY_TAG); the
-			// phase-C migration retags it to the D1 image.
+			// spec verifies. svdm runs the build pinned by E2E_TRANSITION_SVDM_LEGACY_TAG and is never
+			// retagged: it serves its own API group here and keeps serving it through the flip.
 			specs := []storagekube.ModuleSpec{
 				moduleSpec(modSnapshotController, tagFrom(envSnapshotControllerTag)),
 				moduleSpec(modSvdm, tagFrom(envSvdmLegacyTag)),
@@ -499,9 +539,11 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			// bound, so the source pod is no longer needed.
 			deletePodAndWait(ctx, workloadNS, probePodName, 2*time.Minute)
 
-			// DataExport the source PVC on the LEGACY group/schema; wait for status.url + status.ca.
-			Expect(createLegacyDataExport(ctx, workloadNS, "export-pvc", "PersistentVolumeClaim", srcPVCName)).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), "export-pvc")
+			// DataExport the source PVC on the legacy group/schema; wait for status.url + status.ca.
+			// This export deliberately STAYS live for the rest of the run: phase C reads it back after
+			// the flip and requires it to be the same object, still serving the same bytes.
+			Expect(createLegacyDataExport(ctx, workloadNS, legacyExportName, "PersistentVolumeClaim", srcPVCName)).To(Succeed())
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), legacyExportName)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(url).NotTo(BeEmpty())
 			Expect(caB64).NotTo(BeEmpty())
@@ -520,20 +562,20 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 
 			By("creating the legacy DataImport and waiting for the importer to publish status.url")
 			// DataImport (legacy schema, CreatePVC via targetRef.pvcTemplate) → importer publishes url.
-			Expect(createLegacyDataImport(ctx, workloadNS, "import-di", "imported-data", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), "import-di")
+			Expect(createLegacyDataImport(ctx, workloadNS, legacyImportName, "imported-data", os.Getenv(envStorageClass), "1Gi")).To(Succeed())
+			url, caB64, err := crStatusURLCA(ctx, dataImportGVR(legacyGroup), legacyImportName)
 			Expect(err).NotTo(HaveOccurred())
 
 			By("uploading the marker over the svdm HTTP API and signalling finished")
 			Expect(svdmUpload(ctx, workloadNS, url, caB64, "/tmp/marker", "marker")).To(Succeed())
-			logf("upload + POST finished done; DataImport conditions: %s", crConditions(ctx, dataImportGVR(legacyGroup), workloadNS, "import-di"))
+			logf("upload + POST finished done; DataImport conditions: %s", crConditions(ctx, dataImportGVR(legacyGroup), workloadNS, legacyImportName))
 
 			By("waiting for the populator to rebind the prime volume onto imported-data (PVC Bound)")
 			// Import completion = the target PVC becoming Bound: the DataImport Ready condition flips
 			// True early (server ready) and there is no Completed condition type, so the PVC phase is
 			// the real gate. waitImportComplete narrates DI conditions / prime PVC / pods every 15s so a
 			// stall is visible; podRunningTimeout() budgets the whole chain.
-			waitImportComplete(ctx, legacyGroup, workloadNS, "import-di", "imported-data", podRunningTimeout())
+			waitImportComplete(ctx, legacyGroup, workloadNS, legacyImportName, "imported-data", podRunningTimeout())
 
 			By("mounting imported-data and verifying the checksum")
 			createProbePod(ctx, "probe-imported", probeImage(), "imported-data")
@@ -554,118 +596,39 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 		})
 	})
 
-	// ---- Phase C: migrate svdm + flip to the new stack ----
-	Context("Phase C: migrate svdm and flip", func() {
-		It("retags svdm legacy->D1 and verifies the migration hook", func(ctx SpecContext) {
-			// Retagging the live svdm MPO to the D1 image runs the OnBeforeHelm migration hook.
-			enableModule(modSvdm, tagFrom(envSvdmTag))
-
-			// The legacy CRDs must be gone (the migration hook deletes them after migrating CRs),
-			// and nothing must be stuck Terminating.
-			Eventually(func(ctx SpecContext) bool {
-				return crdExists(ctx, "dataexports."+legacyGroup) || crdExists(ctx, "dataimports."+legacyGroup)
-			}).WithContext(ctx).WithTimeout(5*time.Minute).WithPolling(pollInterval).Should(BeFalse(),
-				"legacy CRDs dataexports/dataimports.%s must be removed by the migration hook", legacyGroup)
-
-			// The unified-group CRDs must be present (installed by the D1 svdm bundle).
-			Expect(crdExists(ctx, "dataexports."+unifiedGroup)).To(BeTrue())
-			Expect(crdExists(ctx, "dataimports."+unifiedGroup)).To(BeTrue())
-
-			// The legacy finalizer must be swept off every PVC (else deletes would hang forever).
-			leftover, err := pvcsWithFinalizer(ctx, legacyFinalizer)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
-
-			if !dataPlaneEnabled() {
-				return
-			}
-			// The in-flight legacy DataExport (export-pvc, still serving from phase B) must be MIGRATED
-			// onto the unified group with its spec mapped (targetRef kind+name preserved) — not dropped.
-			// Poll: migration runs OnBeforeHelm and the unified CR appears a moment after the retag.
-			expGVR := dataExportGVR(unifiedGroup)
-			pollUntil(ctx, "in-flight DataExport export-pvc migrated to the unified group", 3*time.Minute,
-				func() bool { _, e := getUnstr(ctx, expGVR, workloadNS, "export-pvc"); return e == nil },
-				func() string { return "not on unified group yet" })
-			migrated, err := getUnstr(ctx, expGVR, workloadNS, "export-pvc")
-			Expect(err).NotTo(HaveOccurred())
-			kind, _, _ := unstructured.NestedString(migrated.Object, "spec", "targetRef", "kind")
-			tname, _, _ := unstructured.NestedString(migrated.Object, "spec", "targetRef", "name")
-			Expect(kind).To(Equal("PersistentVolumeClaim"), "migrated DataExport must keep its targetRef.kind")
-			Expect(tname).To(Equal(srcPVCName), "migrated DataExport must keep its targetRef.name")
-		})
-
-		It("serves a fresh new-group DataExport standalone and cleans up the migrated one (before the flip)", func(ctx SpecContext) {
-			if !dataPlaneEnabled() {
-				Skip("data-plane steps skipped (see phase B)")
-			}
-			// (a) svdm-D1 STANDALONE (storage-foundation still OFF) must serve a brand-new export on
-			// the unified group — proving the D1 controller works on the new group, not only that the
-			// migration hook ran. Export restored-pvc (it holds the marker from the phase-B CSI restore
-			// and is unused later); free it first — svdm rejects exporting a mounted PVC.
-			deletePodAndWait(ctx, workloadNS, "probe-restored", 2*time.Minute)
-			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
-			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
-			Expect(createUnifiedDataExport(ctx, workloadNS, "export-d1", "PersistentVolumeClaim", "restored-pvc")).To(Succeed())
-			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(unifiedGroup), "export-d1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-d1")).To(Succeed())
-			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-d1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got).To(Equal(sourceChecksum), "svdm-D1 standalone must serve the new-group export")
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-d1")
-
-			// (b) Tear down the MIGRATED in-flight export under the D1 controller (still standalone), so
-			// no live export is carried across the flip. Deleting it must remove the CR (finalizer
-			// released) AND recover the source PVC: svdm restores the reassigned PV, so src-data must
-			// return from Lost to Bound. This is the clean-teardown proof, not a lingering artifact.
-			deleteCRAndWaitGone(ctx, dataExportGVR(unifiedGroup), "export-pvc")
-			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
-		})
-
-		It("re-seeds a legacy epoch (CRDs + active DataImport + PVC finalizer) to stage the two-owner migration race", func(ctx SpecContext) {
-			// The svdm-D1 025-migrate-legacy-crds hook is mirrored by an identical hook in
-			// storage-foundation (same OnBeforeHelm order, idempotent, gated on legacy-CRD presence):
-			// whichever module converges first migrates, the other must cleanly no-op. The first
-			// phase-C spec exercised the svdm hook alone; this leg re-creates the legacy epoch RIGHT
-			// BEFORE the flip, because enabling storage-foundation triggers a global converge that
-			// re-runs svdm's beforeHelm hooks too — so BOTH owners see the legacy CRDs in the same
-			// converge window. Which one wins varies per run; the next spec asserts the outcome
-			// winner-agnostically. Both hooks are transitional/expiring — drop this leg with them.
-			Expect(crdExists(ctx, "dataexports."+legacyGroup)).To(BeFalse(),
-				"the real legacy epoch must already be migrated before re-seeding the race one")
-			Expect(crdExists(ctx, "dataimports."+legacyGroup)).To(BeFalse(),
-				"the real legacy epoch must already be migrated before re-seeding the race one")
-
-			By("installing minimal legacy dataexports/dataimports CRDs (stand-ins for the pre-D1 svdm CRDs)")
-			createLegacyCRD(ctx, "DataExport", "dataexports")
-			createLegacyCRD(ctx, "DataImport", "dataimports")
-
-			// An ACTIVE legacy DataImport (no status yet => active): the winner must RE-CREATE it under
-			// the unified group with the spec mapped, not just delete it with the CRD. The legacy
-			// finalizer is seeded by hand — the pre-D1 controller that used to set it is gone.
-			By("creating an active legacy DataImport carrying the legacy finalizer")
-			ensureNamespace(ctx, workloadNS)
-			Expect(createLegacyDataImport(ctx, workloadNS, raceImportName, raceImportPVCName,
-				os.Getenv(envStorageClass), "1Gi")).To(Succeed())
-			addFinalizer(ctx, dataImportGVR(legacyGroup), workloadNS, raceImportName, legacyFinalizer)
-
-			// A PVC stuck with the legacy finalizer (storageClassName "" => stays Pending, so this leg
-			// runs with or without the data-plane env). The sweep must strip exactly the legacy
-			// finalizer; kubernetes.io/pvc-protection stays.
-			By("creating a PVC carrying the legacy finalizer")
-			createPVC(ctx, workloadNS, racePVCName, "", "1Gi")
-			addFinalizer(ctx, pvcGVR, workloadNS, racePVCName, legacyFinalizer)
-		})
-
-		It("enables state-snapshotter -> storage-foundation without disabling the legacy modules", func(ctx SpecContext) {
-			// Capture the shared CRD UIDs RIGHT BEFORE sf is enabled. sf re-applies the CSI and unified
-			// CRDs (byte-for-byte copies) as it takes ownership; the flip must UPDATE them in place, so
-			// their UIDs must be unchanged in phase D. A changed UID = delete+recreate = every
-			// VolumeSnapshot/DataExport instance cascade-deleted.
+	// ---- Phase C: bring the new stack up beside the running data module ----
+	Context("Phase C: flip to the new stack without disabling the data module", func() {
+		It("enables state-snapshotter -> storage-foundation while storage-volume-data-manager keeps running", func(ctx SpecContext) {
+			// Capture the tracked CRD UIDs RIGHT BEFORE storage-foundation is enabled: the CSI CRDs it
+			// re-applies as it takes ownership, and the legacy CRDs of the module that keeps running
+			// beside it. Both have to come through the flip as the SAME objects (see trackedCRDs).
 			for _, n := range trackedCRDs() {
 				u, err := crdUID(ctx, n)
 				Expect(err).NotTo(HaveOccurred(), "read CRD %s UID before the flip", n)
+				Expect(u).NotTo(BeEmpty(), "CRD %s must carry a uid before the flip", n)
 				crdUIDBeforeFlip[n] = u
+			}
+
+			if dataPlaneEnabled() {
+				// Record the live legacy epoch: the export still serving since phase B, the finished
+				// import, and the volume protection that export holds on the source PVC. Asserting the
+				// finalizer is present HERE is what keeps the post-flip check honest — "still carries
+				// it" would otherwise pass just as well on an epoch that never had one.
+				exp, err := getUnstr(ctx, dataExportGVR(legacyGroup), workloadNS, legacyExportName)
+				Expect(err).NotTo(HaveOccurred(), "the phase-B DataExport must be live before the flip")
+				legacyExportUID = string(exp.GetUID())
+				Expect(legacyExportUID).NotTo(BeEmpty())
+
+				imp, err := getUnstr(ctx, dataImportGVR(legacyGroup), workloadNS, legacyImportName)
+				Expect(err).NotTo(HaveOccurred(), "the phase-B DataImport must still exist before the flip")
+				legacyImportUID = string(imp.GetUID())
+				Expect(legacyImportUID).NotTo(BeEmpty())
+
+				finalizers, err := pvcFinalizers(ctx, workloadNS, srcPVCName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(finalizers).To(ContainElement(legacyFinalizer),
+					"while the export holds its PV, the exporting module protects PVC %s/%s with its own finalizer",
+					workloadNS, srcPVCName)
 			}
 
 			// One batch: state-snapshotter first, then storage-foundation (its state-snapshotter
@@ -676,117 +639,135 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				moduleSpec(modStorageFoundation, tagFrom(envStorageFoundationOverride), modStateSnapshotter),
 			)
 
-			// The legacy ModuleConfigs stay enabled:true — the test verifies Helm GUARDS, not
-			// uninstall. Once storage-foundation is enabled, snapshot-controller/svdm must render no
-			// workload (Deployments/Services): only their deprecation PrometheusRule may remain.
-			for _, m := range []string{modSnapshotController, modSvdm} {
-				ns := moduleNamespace[m]
-				Eventually(func(ctx SpecContext) (int, error) {
-					return workloadResourceCount(ctx, ns)
-				}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(Equal(0),
-					"module %s must render no Deployments/Services once storage-foundation is enabled (guard)", m)
-			}
+			// snapshot-controller's ModuleConfig stays enabled:true — what is checked here is its Helm
+			// GUARD, not uninstall. Its chart renders nothing but the deprecation PrometheusRule once
+			// storage-foundation is enabled, so its Deployments/Services must drain to zero.
+			//
+			// storage-volume-data-manager is deliberately NOT in this check, and must never be added to
+			// it: it is a supported module with its own data plane, it has no such guard, and the next
+			// spec asserts the OPPOSITE for it — its workload keeps running and its resources keep
+			// working.
+			guardedNS := moduleNamespace[modSnapshotController]
+			Eventually(func(ctx SpecContext) (int, error) {
+				return workloadResourceCount(ctx, guardedNS)
+			}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(Equal(0),
+				"module %s must render no Deployments/Services once storage-foundation is enabled (guard)",
+				modSnapshotController)
 		})
 
-		It("migrates the re-seeded legacy epoch through the two-owner race and stays converged", func(ctx SpecContext) {
-			// The flip in the previous spec ran the race: enabling storage-foundation triggered a
-			// global converge in which BOTH 025 hooks (svdm-D1 and storage-foundation) executed
-			// against the legacy epoch seeded two specs ago. Which hook won varies per run — every
-			// assertion below is winner-agnostic: it checks the shared migration contract's OUTCOME
-			// plus the loser's clean no-op (module health + outcome stability).
-			By("waiting for both legacy CRDs to be removed by whichever hook won the race")
-			pollUntil(ctx, "legacy CRDs removed by the migration race", 5*time.Minute,
-				func() bool {
-					return !crdExists(ctx, "dataexports."+legacyGroup) && !crdExists(ctx, "dataimports."+legacyGroup)
-				},
-				func() string {
-					return fmt.Sprintf("dataexports present=%v dataimports present=%v",
-						crdExists(ctx, "dataexports."+legacyGroup), crdExists(ctx, "dataimports."+legacyGroup))
-				})
+		It("leaves the legacy epoch of storage-volume-data-manager untouched by the flip", func(ctx SpecContext) {
+			// This is the point of the whole scenario: the new stack comes up beside a module that keeps
+			// serving its own API group, and takes nothing away from it. Every assertion below is about
+			// state the flip must NOT have changed — plus the two CRDs it must have added.
+			By("asserting both legacy CRDs are still the same objects")
+			for _, n := range legacyCRDNames {
+				Expect(crdExists(ctx, n)).To(BeTrue(), "CRD %s must still exist after the flip", n)
+				Expect(crdEstablished(ctx, n)).To(BeTrue(), "CRD %s must stay Established after the flip", n)
+				got, err := crdUID(ctx, n)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(Equal(crdUIDBeforeFlip[n]),
+					"CRD %s must not be deleted and reinstalled: the delete cascades away every DataExport/DataImport a user created through that module, and reinstalling the CRD brings none of them back", n)
+			}
 
-			By("asserting the active DataImport was re-created under the unified group with the mapped spec")
-			impGVR := dataImportGVR(unifiedGroup)
-			pollUntil(ctx, "race DataImport re-created under the unified group", 3*time.Minute,
-				func() bool { _, e := getUnstr(ctx, impGVR, workloadNS, raceImportName); return e == nil },
-				func() string { return "not on the unified group yet" })
-			migrated, err := getUnstr(ctx, impGVR, workloadNS, raceImportName)
-			Expect(err).NotTo(HaveOccurred())
-			mode, _, _ := unstructured.NestedString(migrated.Object, "spec", "mode")
-			Expect(mode).To(Equal("CreatePVC"), "migrated DataImport must get spec.mode=CreatePVC")
-			tmpl, found, _ := unstructured.NestedMap(migrated.Object, "spec", "pvcTemplate")
-			Expect(found).To(BeTrue(), "migrated DataImport must carry spec.pvcTemplate (hoisted out of targetRef)")
-			tmplName, _, _ := unstructured.NestedString(tmpl, "metadata", "name")
-			Expect(tmplName).To(Equal(raceImportPVCName), "pvcTemplate must be carried over verbatim")
-			_, found, _ = unstructured.NestedMap(migrated.Object, "spec", "targetRef")
-			Expect(found).To(BeFalse(), "migrated DataImport must not carry the legacy spec.targetRef")
-			Expect(migrated.GetFinalizers()).NotTo(ContainElement(legacyFinalizer),
-				"the unified counterpart must not inherit the legacy finalizer")
-			migratedUID := string(migrated.GetUID())
+			By("asserting the storage-foundation CRDs arrived with the flip")
+			for _, n := range unifiedCRDNames {
+				Expect(crdExists(ctx, n)).To(BeTrue(), "CRD %s must be installed by the flip", n)
+				Expect(crdEstablished(ctx, n)).To(BeTrue(), "CRD %s must be Established after the flip", n)
+			}
 
-			By("asserting the legacy finalizer was swept off every PVC")
-			leftover, err := pvcsWithFinalizer(ctx, legacyFinalizer)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(leftover).To(BeEmpty(), "legacy finalizer %s must be swept off all PVCs", legacyFinalizer)
+			By("asserting the data module still renders its own workload")
+			// The inverse of the snapshot-controller guard: this module has no "storage-foundation is
+			// enabled" guard and must not acquire one. A zero here would mean its controllers were
+			// switched off underneath the users who are still on its API group.
+			Eventually(func(ctx SpecContext) (int, error) {
+				return workloadResourceCount(ctx, moduleNamespace[modSvdm])
+			}).WithContext(ctx).WithTimeout(10*time.Minute).WithPolling(pollInterval).Should(BeNumerically(">", 0),
+				"module %s must keep running its own Deployments/Services while storage-foundation is enabled", modSvdm)
 
-			By("asserting both owners stayed Ready after the race (the loser's no-op must not error-loop)")
+			By("asserting both modules are Ready side by side")
 			for _, m := range []string{modSvdm, modStorageFoundation} {
-				Expect(storagekube.WaitForModuleReady(suiteCtx(), suiteRes.Kubeconfig, m, 3*time.Minute)).To(Succeed(),
-					"module %s must stay Ready after the migration race", m)
+				Expect(storagekube.WaitForModuleReady(suiteCtx(), suiteRes.Kubeconfig, m, 5*time.Minute)).To(Succeed(),
+					"module %s must be Ready with the other one enabled", m)
 			}
 
-			// Follow-up converges are no-ops. The flip itself already re-converged both modules
-			// several times after the migration (module Ready transitions, the Helm-guard re-render of
-			// the legacy modules) — each re-run saw no legacy CRDs and had to no-op. Hold the outcome
-			// stable for another window: the CRDs must stay gone and the migrated CR must keep its UID
-			// (a re-run that wrongly re-migrated would delete/recreate or duplicate it).
-			By("holding the migrated state stable (no-op on repeated converges)")
-			Consistently(func() bool {
-				if crdExists(ctx, "dataexports."+legacyGroup) || crdExists(ctx, "dataimports."+legacyGroup) {
-					return false
-				}
-				cur, gerr := getUnstr(ctx, impGVR, workloadNS, raceImportName)
-				return gerr == nil && string(cur.GetUID()) == migratedUID
-			}).WithTimeout(45*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
-				"legacy CRDs must stay gone and the migrated DataImport must keep its identity")
+			if !dataPlaneEnabled() {
+				return
+			}
 
-			By("deleting the swept PVC — it must go away cleanly, not hang in Terminating")
-			deletePVCAndWaitGone(ctx, workloadNS, racePVCName, 2*time.Minute)
+			By("asserting the phase-B DataExport and DataImport are the same objects")
+			exp, err := getUnstr(ctx, dataExportGVR(legacyGroup), workloadNS, legacyExportName)
+			Expect(err).NotTo(HaveOccurred(), "the phase-B DataExport must survive the flip")
+			Expect(string(exp.GetUID())).To(Equal(legacyExportUID),
+				"DataExport %s/%s must be the same object, not one re-created under a different owner", workloadNS, legacyExportName)
+			imp, err := getUnstr(ctx, dataImportGVR(legacyGroup), workloadNS, legacyImportName)
+			Expect(err).NotTo(HaveOccurred(), "the phase-B DataImport must survive the flip")
+			Expect(string(imp.GetUID())).To(Equal(legacyImportUID),
+				"DataImport %s/%s must be the same object", workloadNS, legacyImportName)
 
-			// Teardown so no in-flight import crosses into phase D: the CR first (the controller
-			// releases its finalizers), then the import target PVC the controller may have created
-			// from pvcTemplate (it survives the CR by design — it is the import's product).
-			By("tearing down the migrated DataImport and its target PVC")
-			deleteCRAndWaitGone(ctx, impGVR, raceImportName)
-			deletePVCAndWaitGone(ctx, workloadNS, raceImportPVCName, 2*time.Minute)
+			By("asserting the source PVC still carries the data module's finalizer")
+			finalizers, err := pvcFinalizers(ctx, workloadNS, srcPVCName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(finalizers).To(ContainElement(legacyFinalizer),
+				"the volume protection of the exporting module must not be swept by the new stack coming up")
+
+			By("downloading the marker through the still-live legacy export")
+			// Same export, same file, checksum compared against the phase-B source: the export does not
+			// merely still exist as an object, it still serves the volume's bytes. The download identity
+			// and curl pod are re-ensured (both are idempotent) so this spec does not depend on the
+			// phase-B pod having survived.
+			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
+			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)
+			url, caB64, err := crStatusURLCA(ctx, dataExportGVR(legacyGroup), legacyExportName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(svdmDownload(ctx, workloadNS, url, caB64, "marker", "/tmp/marker-postflip")).To(Succeed())
+			got, err := checksumFile(ctx, httpClientPod, "curl", "/tmp/marker-postflip")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(sourceChecksum),
+				"the export created before the flip must still serve the source bytes after it")
+
+			By("tearing the legacy export down under the new stack — the source PVC must recover to Bound")
+			// The teardown path has to keep working with storage-foundation live: deleting the CR must
+			// release its finalizers and hand the reassigned PV back, so src-data returns from Lost to
+			// Bound. It also leaves no in-flight export behind for phase D or for a kept cluster.
+			deleteCRAndWaitGone(ctx, dataExportGVR(legacyGroup), legacyExportName)
+			waitPVCPhase(ctx, workloadNS, srcPVCName, corev1.ClaimBound, 3*time.Minute)
 		})
 
-		It("fires the deprecation alerts for both legacy modules", func(ctx SpecContext) {
-			// Both legacy modules are now Deprecated: snapshot-controller since phase B (its single
-			// v0.2.0 build is Deprecated and needs no retag — it never required storage-foundation), and
-			// svdm since the phase-C retag. Deckhouse must surface, for EACH module, two firing
-			// ClusterAlerts:
-			//   - built-in ModuleIsDeprecated{module=<name>} — proves module.yaml stage=Deprecated took
-			//     effect;
-			//   - custom D8<Name>ModuleDeprecated (vector(1), severity 9) — proves the deprecation-alert
-			//     template renders (svdm's under the reverse "sf enabled" guard, snapc's always-on).
+		It("fires the deprecation alerts for snapshot-controller and none for the data module", func(ctx SpecContext) {
+			// snapshot-controller has been Deprecated since phase B (its single v0.2.0 build is, and it
+			// needs no retag — it never required storage-foundation). Deckhouse must surface two firing
+			// ClusterAlerts for it:
+			//   - built-in ModuleIsDeprecated{module=snapshot-controller} — proves module.yaml
+			//     stage=Deprecated took effect;
+			//   - custom D8SnapshotControllerModuleDeprecated (vector(1), severity 9) — proves that
+			//     module's always-on deprecation-alert template renders.
 			// Alert eval lags a scrape, so expectAlertFiring waits at the package-level alertTimeout.
 			expectAlertFiring(ctx, "ModuleIsDeprecated", modSnapshotController)
 			expectAlertFiring(ctx, "D8SnapshotControllerModuleDeprecated", "")
-			expectAlertFiring(ctx, "ModuleIsDeprecated", modSvdm)
-			expectAlertFiring(ctx, "D8StorageVolumeDataManagerModuleDeprecated", "")
+
+			// storage-volume-data-manager is NOT deprecated: it stays supported and runs beside
+			// storage-foundation, so nothing may announce it as going away. This negative check comes
+			// AFTER the two positive ones on purpose — they prove alert evaluation has caught up, and
+			// without that proof "no such alert" would pass on any cluster where Prometheus simply has
+			// not got there yet.
+			firing, err := clusterAlertFiring(ctx, "ModuleIsDeprecated", modSvdm)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(firing).To(BeFalse(),
+				"module %s is supported and must not be announced as deprecated — firing now: %s",
+				modSvdm, firingAlertNames(ctx))
 		})
 
-		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(ctx SpecContext) {
+		It("retags sds-local-volume to the storage-foundation-integrated build after the flip", func(_ SpecContext) {
 			if !dataPlaneEnabled() {
 				Skip("sds-local-volume is only enabled for the data-plane steps (see phase B)")
 			}
 			// In phase B sds-local-volume ran its legacy image (depends on snapshot-controller). Its
 			// current image depends on storage-foundation, now enabled by the flip, so retag the live
 			// MPO to the phase-C target (SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE, default "main") and wait
-			// Ready — the sds-local-volume analog of the svdm legacy->D1 retag. Do this LAST in phase C,
-			// after the migration race and alert assertions have observed the flip's converge, and
-			// before the phase-D data steps that exercise the storage-foundation-integrated CSI path
-			// (unified DataImport populator, VRR-based restore).
+			// Ready. It is the ONLY module this scenario retags. Do this LAST in phase C, after the
+			// legacy-epoch and alert assertions have observed the flip's converge, and before the
+			// phase-D data steps that exercise the storage-foundation-integrated CSI path (unified
+			// DataImport populator, VRR-based restore).
 			//
 			// Restore SDS_LOCAL_VOLUME_MODULE_PULL_OVERRIDE (repointed at the legacy tag in BeforeSuite
 			// so the phase-B testkit used it) back to the captured phase-C target before retagging.
@@ -798,9 +779,13 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 	// ---- Phase D: invariants after the flip ----
 	Context("Phase D: invariants after the flip", func() {
 		It("keeps every shared CRD Established, same-UID and correctly-shaped after the flip", func(ctx SpecContext) {
-			// (1) Identity: each CSI + unified CRD must still exist, stay Established, and keep the UID
-			// captured before the flip — proving the handoff re-applied them in place, never
-			// delete+recreated (which would cascade-delete every instance).
+			// (1) Identity: each CSI + legacy CRD must still exist, stay Established, and keep the UID
+			// captured before the flip. For the CSI CRDs that proves storage-foundation re-applied them
+			// in place as it took ownership, never delete+recreated (which would cascade-delete every
+			// instance); for the legacy CRDs it proves the new stack left the neighbouring module's own
+			// resources alone. This re-checks in phase D what phase C asserted right after the flip:
+			// everything the flip converged afterwards (the sds-local-volume retag, the module Ready
+			// transitions) had to leave the same identities in place.
 			for _, n := range trackedCRDs() {
 				Expect(crdExists(ctx, n)).To(BeTrue(), "CRD %s must still exist after the flip", n)
 				Expect(crdEstablished(ctx, n)).To(BeTrue(), "CRD %s must stay Established after the flip", n)
@@ -812,11 +797,19 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 				}
 			}
 
+			// The storage-foundation CRDs are the ones the flip CREATED, so there is no pre-flip UID to
+			// compare them against — they are held to existing and being served.
+			for _, n := range unifiedCRDNames {
+				Expect(crdExists(ctx, n)).To(BeTrue(), "CRD %s must exist after the flip installed it", n)
+				Expect(crdEstablished(ctx, n)).To(BeTrue(), "CRD %s must be Established after the flip", n)
+			}
+
 			// (2) Served-schema correctness: the CRDs served after the flip must be the
 			// storage-foundation (extended/unified) shapes, not a vanilla reinstall. Assert their
 			// marker fields. Full byte-for-byte manifest parity vs the repo YAML is verified separately
-			// by storage-foundation CI (hack/check-consumer-crds.sh) — it cannot be checked against the
-			// live CRD, which the API server augments (defaults/pruning/managedFields).
+			// by storage-foundation CI (hack/check-consumer-crds.sh, which diffs the CRDs it shares with
+			// its consumers) — it cannot be checked against the live CRD, which the API server augments
+			// (defaults/pruning/managedFields).
 			Expect(crdSchemaHasField(ctx, "volumesnapshots.snapshot.storage.k8s.io", "spec", "mode")).To(BeTrue(),
 				"served VolumeSnapshot CRD must carry the storage-foundation fork field spec.mode")
 			Expect(crdSchemaHasField(ctx, "dataexports.storage-foundation.deckhouse.io", "spec", "targetRef", "group")).To(BeTrue(),
@@ -841,10 +834,10 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			Expect(labels).NotTo(HaveKey("storage-foundation.deckhouse.io/processed"))
 
 			// NOTE: source-data integrity after the flip is asserted by the next spec — a post-flip CSI
-			// restore from the legacy VS whose checksum must equal sourceChecksum. We do NOT re-mount
-			// src-data here: it went through the svdm PVC export (its PV was reassigned to an export
-			// PVC and the probe pod removed), so re-mounting the live source is neither reliable nor
-			// meaningful; the snapshot restore is the robust proof the data survived.
+			// restore from the phase-B VS whose checksum must equal sourceChecksum. We do NOT re-mount
+			// src-data here: it spent the flip under an svdm export that held its PV (and lost its probe
+			// pod for that), and phase C already read its bytes back through that export. Restoring from
+			// the snapshot is the robust proof the data survived, and it is the one the new stack serves.
 		})
 
 		It("still CSI-restores from the legacy VolumeSnapshot after the flip", func(ctx SpecContext) {
@@ -884,9 +877,10 @@ var _ = Describe("state-snapshotter transition e2e", Ordered, func() {
 			if !dataPlaneEnabled() {
 				Skip("data-plane invariants skipped (no SC/VSC provided)")
 			}
-			// After the flip svdm renders nothing; the unified DataExport/DataImport path must be served
-			// by storage-foundation itself. Export new-pvc over the unified group, download+checksum,
-			// then import into a fresh PVC and checksum — the new-group data-plane end-to-end under sf.
+			// The two data planes are independent: svdm keeps serving its own group (phase C), and
+			// storage-foundation must serve ITS group on its own, on the same cluster. Export new-pvc over
+			// the unified group, download+checksum, then import into a fresh PVC and checksum — the
+			// storage-foundation data plane end-to-end, beside a live neighbour.
 			deletePodAndWait(ctx, workloadNS, "probe-new", 2*time.Minute)
 			ensureDownloadRBAC(ctx, workloadNS, httpClientSA)
 			createHTTPClientPod(ctx, workloadNS, httpClientPod, httpClientSA)

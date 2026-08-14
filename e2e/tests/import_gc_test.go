@@ -149,7 +149,7 @@ func importSpecs() {
 			Expect(waitSnapshotContentReady(ctx, content, suiteCfg.captureReadyTO)).To(Succeed())
 
 			By("Asserting the aggregator projected the import manifest leg and the reconstructed checkpoint is owned by the content (MCP durability)")
-			// content-single-writer design §10 (w8-block6b-1): the SnapshotContentController aggregator, not
+			// the SnapshotContentController aggregator, not
 			// the import orchestrator, is the single writer of status.manifestCheckpointName for imports.
 			co, err := getResource(ctx, snapshotContentGVR, "", content)
 			Expect(err).NotTo(HaveOccurred())

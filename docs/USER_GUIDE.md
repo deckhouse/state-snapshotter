@@ -53,66 +53,28 @@ The model is **default-include**: every namespaced object in the target namespac
 
 > There is no special "exclude objects managed by Deckhouse" rule. Deckhouse-managed objects are filtered out by the same generic signals (controller-owned, control-plane noise, or module machinery). Everything else in the namespace — including resources you merely *configured* on top of modules — is treated as desired-state and captured.
 
-For the full normative rules, see the design doc [`state-snapshotter-rework/design/snapshot-controller.md` §4.5](state-snapshotter-rework/design/snapshot-controller.md).
+## Excluding objects from a snapshot
 
-## Narrowing the capture with a label selector
+A `Snapshot` captures its whole namespace. To keep an object out of the capture, label it with `state-snapshotter.deckhouse.io/exclude` **before** creating the `Snapshot` — a capture is one-shot, so labeling an object later does not change an existing snapshot:
 
-By default a `Snapshot` captures every user object in its namespace. To restrict the capture to a subset, set `spec.resourceSelector` — a standard Kubernetes [label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors). It is applied to the dynamically discovered resources of the capture: namespace manifests, top-level/standalone domain resources expanded via `CustomSnapshotDefinition`, and `PersistentVolumeClaim`s (the volume-data leg).
-
-The selector is **layered on top of the built-in exclusions** (`matchLabels`/`matchExpressions` are ANDed with the rules in [What gets captured](#what-gets-captured)). It can only **narrow** the capture: it never force-captures objects that the built-in rules exclude (controller-owned derivatives, control-plane noise, module/snapshot machinery). When omitted, all resources are captured.
-
-**Include only matching objects** — `matchLabels` (and/or `In`/`Exists` expressions):
-
-```yaml
-spec:
-  resourceSelector:
-    matchLabels:
-      app: myapp
+```shell
+d8 k -n myns label configmap scratch-cache state-snapshotter.deckhouse.io/exclude=""
 ```
 
-**Exclude matching objects** — `matchExpressions` with `NotIn` / `DoesNotExist`:
+The label's **presence** is what excludes the object; the value is ignored (`""`, `true` — anything works).
 
-```yaml
-spec:
-  resourceSelector:
-    matchExpressions:
-      - key: temporary
-        operator: NotIn
-        values: ["true"]
-      - key: debug
-        operator: DoesNotExist
-```
+The exclusion works at every level of the snapshot tree:
 
-**Combine include and exclude in one field.** A single `LabelSelector` ANDs all of its conditions, so one selector can both include and exclude — e.g. capture `app=myapp` objects but drop any that also carry `temporary=true` or a `debug` label:
+- **A plain namespaced object** (`ConfigMap`, `Secret`, ...) is dropped from the captured namespace manifests.
+- **A domain resource** (for example a `VirtualMachine`) is not expanded into a child snapshot at all — its whole subtree is skipped.
+- **An object inside a domain subtree** (for example one `VirtualDisk` of a captured VM, or a companion `Secret`) is dropped alone; the owning node is still captured.
+- **A `PersistentVolumeClaim`** is not captured by the volume-data leg, and a user-created CSI `VolumeSnapshot` over an excluded PVC is left as a plain CSI snapshot — the module does not adopt it.
 
-```yaml
-spec:
-  resourceSelector:
-    matchLabels:
-      app: myapp
-    matchExpressions:
-      - key: temporary
-        operator: NotIn
-        values: ["true"]
-      - key: debug
-        operator: DoesNotExist
-```
+The exclusion is **not inherited**: excluding a domain resource removes its snapshot subtree, but objects the other capture legs see on their own — its `PersistentVolumeClaim`s, companion objects — keep being captured unless they carry the label themselves.
 
-Operator semantics:
+An excluded object is **recorded, not silently dropped**: the excluding snapshot node lists it in `status.captureState.domainSpecificController.excludedRefs` (exact `apiVersion`/`kind`/`name`), and the bound `SnapshotContent` aggregates the whole tree's exclusions in `status.excludedRefs`. Check there to confirm the exclusion took effect.
 
-- `In` / `Exists` (and `matchLabels`) **narrow** the set to objects that match.
-- `NotIn [v]` excludes only objects where the key is present **and** equals `v`; objects **without** the key still pass.
-- `DoesNotExist` excludes every object that has the key.
-
-> **AND-only, no OR.** A single `LabelSelector` is a pure conjunction (AND) of all its `matchLabels` and `matchExpressions`. OR semantics cannot be expressed in one selector — to capture the union of two disjoint label sets, create separate `Snapshot`s.
-
-> **Forbidden in Import mode.** `resourceSelector` only affects the default dynamic capture. An import `Snapshot` (`spec.mode: Import`) is materialized from an uploaded payload and never lists the live namespace, so a selector would be meaningless — the admission webhook rejects a `Snapshot` that sets both.
-
-### Scope boundary for nested domain resources
-
-The selector filters only the resources the **root** `Snapshot` expands itself: flat namespace manifests, PVCs, and **top-level/standalone** domain resources. **Nested domain children** created by a domain controller inside a sub-tree (for example, a `VirtualDisk` owned by a `VirtualMachine`) are **not** filtered by the root selector — the child snapshots carry only a source reference and never receive the root selector.
-
-A consequence worth noting: if a `VirtualMachine` is excluded by the selector but its disk passes the selector, the disk — no longer covered by the VM's sub-tree — may still be expanded by the root as a standalone domain resource.
+> Like the built-in exclusions above, the label can only **narrow** the capture. There is no per-snapshot include list: a capture is always "the namespace minus exclusions". To capture different subsets, use separate namespaces.
 
 ## Creating a Snapshot
 
@@ -173,8 +135,6 @@ A captured namespace is restored through the module's controlled read path — y
 - **Manifests** — read the captured objects via the `/manifests` endpoint above and apply them into the target namespace.
 - **State with data** — to restore objects together with their persistent data, the module exposes a data-restoration read path on the snapshot. The module materializes the data into the target namespace internally; you consume the result through the aggregated API, not by creating data-transfer objects yourself.
 
-For an end-to-end restore walkthrough, see the runbook [`state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md`](state-snapshotter-rework/testing/snapshot-tree-demo-runbook.md).
-
 ## Snapshot modes
 
 The capture source is selected by `spec.source` (immutable, exactly one member when set):
@@ -208,8 +168,6 @@ admission delete-guard. This closes an incident class where deleting a child obj
   regular users; the annotation is the only supported override and is reversible until the delete happens.
 - **Always enforced.** There is no module setting that disables or weakens the guard. Use the break-glass
   annotation above for an exceptional direct deletion.
-
-Normative contract: `state-snapshotter-rework/design/delete-protection-contract.md`.
 
 ## Notes and limitations
 

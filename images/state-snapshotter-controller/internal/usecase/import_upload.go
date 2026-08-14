@@ -37,8 +37,8 @@ import (
 
 // ReasonImportContentNotBound is the canonical status.reason of the 409 the NAMESPACED upload
 // (manifests-and-children-refs-upload) returns while the addressed import CR has no
-// status.boundSnapshotContentName yet (bind-first, ADR "HTTP / subresource API"). It is a transport
-// "wait for the binder" signal, NOT a Ready-condition reason (d8 waits/retries on it). Code, ADR, and
+// status.boundSnapshotContentName yet (bind-first). It is a transport
+// "wait for the binder" signal, NOT a Ready-condition reason (d8 waits/retries on it). Code and
 // clients (d8, domain facade) MUST match this string verbatim. The cluster-scoped
 // snapshotcontents/<name>/manifests-upload layer has NO bind-gate: a missing content is a 404 addressing
 // error, never ImportContentNotBound.
@@ -76,8 +76,7 @@ type UploadChildRef struct {
 	Name       string `json:"name"`
 }
 
-// ImportUploadService persists import uploads across two layers (content-single-writer design;
-// ADR "HTTP / subresource API"):
+// ImportUploadService persists import uploads across two layers:
 //
 //   - NAMESPACED, user-facing (Upload): validates the target CR (import mode), records the DIRECT children
 //     on status.childrenSnapshotRefs, then enforces bind-first — an unbound CR (empty
@@ -156,7 +155,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 		return "", err
 	}
 
-	// Bind-first (ADR): the binder creates + binds the SnapshotContent independently of upload. Until it
+	// Bind-first: the binder creates + binds the SnapshotContent independently of upload. Until it
 	// has, refuse the manifests write with the canonical 409 so the client waits/retries. Content-slug
 	// resolution and the MCP write are content-addressed (below); nothing is written pre-bind.
 	boundContentName, _, berr := unstructured.NestedString(cr.Object, "status", "boundSnapshotContentName")

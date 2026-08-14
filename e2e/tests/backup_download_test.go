@@ -674,7 +674,7 @@ func waitDataExportPhase(ctx context.Context, ns, name, wantPhase string, timeou
 	}
 }
 
-func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Duration) (url, ca string, err error) {
+func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Duration) (url string, err error) {
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {
@@ -683,14 +683,13 @@ func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Dura
 			st, reason, found := conditionStatus(obj, "Ready")
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
-				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
 				// New status model: a serving DataExport also reports status.phase=Ready (the controller
 				// writes Ready=True and phase=Ready in the same status update). The DataExport catalog is
 				// exactly {Ready} — no standalone Expired and no legacy/foreign condition type.
 				phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
 				catalogOK, extra := conditionsWithinCatalog(obj, "Ready")
 				if url != "" && phase == "Ready" && catalogOK {
-					return url, ca, nil
+					return url, nil
 				}
 				last = fmt.Sprintf("Ready=True but url=%q phase=%q extraConditions=%v", url, phase, extra)
 			} else {
@@ -700,10 +699,10 @@ func waitDataExportReady(ctx context.Context, ns, name string, timeout time.Dura
 			last = fmt.Sprintf("get err=%v", gerr)
 		}
 		if time.Now().After(deadline) {
-			return "", "", fmt.Errorf("timeout waiting for DataExport %s/%s Ready; last: %s", ns, name, last)
+			return "", fmt.Errorf("timeout waiting for DataExport %s/%s Ready; last: %s", ns, name, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
-			return "", "", ctx.Err()
+			return "", ctx.Err()
 		}
 	}
 }
@@ -887,7 +886,7 @@ func downloadAndPersistBlock(ctx context.Context, ns, exportURL, destFile string
 
 // backupDownloadSpecs registers the phase-4 backup-system download flow (env-gated by E2E_VOLUME_DATA):
 // capture a Block-volume demo tree, download manifests via the aggregated API and volume bytes via
-// SVDM DataExport from an in-cluster backup pod, then verify against live cluster state.
+// storage-foundation DataExport from an in-cluster backup pod, then verify against live cluster state.
 func backupDownloadSpecs() {
 	Context("Phase 4: backup-system HTTP download", func() {
 		var targets []dataExportTarget
@@ -1044,7 +1043,7 @@ func backupDownloadSpecs() {
 					}
 				}(target))
 
-				url, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
+				url, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
 				Expect(werr).NotTo(HaveOccurred(), "DataExport %s Ready", target.exportName)
 				GinkgoWriter.Printf("  DataExport %s url=%s\n", target.exportName, url)
 
@@ -1078,7 +1077,7 @@ func backupDownloadSpecs() {
 			// Distinct name so this idle export never collides with the download-spec exports (already
 			// deleted by the ordered download It above, but the rename is defensive).
 			target := tgts[0]
-			target.exportName = target.exportName + "-idle"
+			target.exportName += "-idle"
 
 			By(fmt.Sprintf("Creating DataExport %s with a short idle-TTL and never downloading from it", target.exportName))
 			Expect(createDataExportWithTTL(ctx, backup.srcNS, target, "30s")).To(Succeed())
@@ -1089,7 +1088,7 @@ func backupDownloadSpecs() {
 			})
 
 			By("Waiting for the DataExport server to become Ready (phase=Ready), then leaving it idle")
-			_, _, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
+			_, werr := waitDataExportReady(ctx, backup.srcNS, target.exportName, suiteCfg.dataTransferTO)
 			Expect(werr).NotTo(HaveOccurred(), "DataExport %s must serve before it can idle-expire", target.exportName)
 
 			By("Asserting the idle DataExport reaches the terminal Expired phase (idle-TTL enforced by the pod)")
@@ -1117,7 +1116,7 @@ func backupDownloadSpecs() {
 			})
 
 			By("Waiting for the importer server to become Ready, then leaving it idle")
-			_, _, werr := waitDataImportReady(ctx, backup.srcNS, diName, suiteCfg.dataTransferTO)
+			_, werr := waitDataImportReady(ctx, backup.srcNS, diName, suiteCfg.dataTransferTO)
 			Expect(werr).NotTo(HaveOccurred(), "importer server must serve before it can idle-expire")
 
 			// Anti-vacuum guard for the teardown assertion below: the server pod is guaranteed alive right

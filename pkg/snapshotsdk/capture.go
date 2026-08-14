@@ -39,10 +39,10 @@ import (
 // intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
 	// EnsureChildren creates/adopts the desired child snapshots (each under this snapshot) and ADDITIVELY
-	// publishes their refs into status.childrenSnapshotRefs — a union, never a replace (wave5): the freshly
+	// publishes their refs into status.childrenSnapshotRefs — a union, never a replace: the freshly
 	// derived refs are UNIONED into the currently published set, so refs contributed by a co-writer of the
-	// same field that this pass does not itself enumerate (the namespace root's orphan VolumeSnapshot wave,
-	// §6.2) are preserved. It performs create/adopt + publication only and never deletes children (SDK v1
+	// same field that this pass does not itself enumerate (the namespace root's orphan VolumeSnapshot
+	// wave) are preserved. It performs create/adopt + publication only and never deletes children (SDK v1
 	// is delete-free): a nil or empty desired set therefore publishes NO new refs and leaves the currently
 	// published set intact. A child no longer desired is simply not re-added by its emitter and is left in
 	// the cluster for ownerRef GC / a future cleanup component to reclaim.
@@ -98,7 +98,7 @@ type SourcePublisher interface {
 	PublishSnapshotSource(ctx context.Context, t SnapshotAdapter, src SnapshotSource) error
 }
 
-// ManifestExclude is the reusable exclude-ordering capability (wave5 §6.3) any aggregator uses to build
+// ManifestExclude is the reusable exclude-ordering capability any aggregator uses to build
 // its own manifest MCR as EnsureManifestCapture(base − exclude): the exclude set is everything its
 // descendant snapshots already captured. It is optional — only aggregators that own a manifest leg
 // spanning objects their children also capture need it (the namespace-root Snapshot; a VM whose disk
@@ -120,7 +120,7 @@ type ManifestExclude interface {
 }
 
 // CaptureInspection exposes read-only condition views the domain uses to build its own Finished/wait/stop
-// logic (Variant A): the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
+// logic: the core is the SOLE writer of the terminal Ready on both the SnapshotContent and its
 // owning snapshot, and it bubbles a failed leg up the content tree as ChildrenFailed. The domain never
 // turns a core-owned leg failure into a terminal itself — it only READS these to time its consistency
 // actions and to stop requeuing once the core has surfaced a terminal outcome. A snapshot's OWN Ready is
@@ -283,7 +283,7 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 		// Additive publication: union the freshly planned refs into the currently published set instead of
 		// overwriting it. StatusFromCurrent starts from the authoritative refresh above and re-reads on a
 		// conflict, so st here holds FRESH refs — the union therefore preserves refs published by a co-writer
-		// of the same field (the root's orphan VolumeSnapshot wave, §6.2) that this planning pass does not
+		// of the same field (the root's orphan VolumeSnapshot wave) that this planning pass does not
 		// enumerate.
 		mergedRefs := children.UnionRefs(st.ChildrenSnapshotRefs, newRefs)
 		refsGrew := !children.RefsEqualIgnoreOrder(st.ChildrenSnapshotRefs, mergedRefs)

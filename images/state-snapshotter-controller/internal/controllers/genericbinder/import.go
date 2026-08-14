@@ -39,13 +39,15 @@ import (
 // importContentPollInterval is the polling fallback cadence while an imported leaf's SnapshotContent is
 // being materialized (uploaded ManifestCheckpoint not yet present, DataImport artifact not yet produced,
 // or content not yet Ready). The binder takes no watch on DataImport, so this poll drives convergence.
+// It covers the CONVERGING import only: once the content carries a published data leg the import is
+// finished and the leaf stops polling, even though its DataImport is gone (see reconcileGenericImport).
 const importContentPollInterval = 5 * time.Second
 
 // snapshotIsImportMode reports whether a generic/domain snapshot leaf is in IMPORT mode. Our domain
 // snapshot CRDs signal it with the enum spec.mode: Import (parity with Snapshot.IsImportMode / domain
 // IsImportMode); the shared helper reads the same enum off the extended CSI VolumeSnapshot fork (its
 // CSI-shaped VolumeSnapshot fork. An import leaf is materialized from the uploaded payload and — for
-// data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.targetRef),
+// data-artifact kinds — the matching DataImport found by reverse-lookup (DataImport.spec.snapshotRef),
 // not from a name carried on the leaf.
 func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 	return usecase.IsUnstructuredImportMode(obj)
@@ -66,6 +68,16 @@ func snapshotIsImportMode(obj *unstructured.Unstructured) bool {
 //
 // The Step-1 domain-planning barrier is intentionally bypassed: an import leaf has no domain capture
 // planning (the domain controller skips it), so there is no PlanningReady to wait on.
+//
+// Steady state of a FINISHED import: the leaf's DataImport is reaped by its own idle TTL, so "no
+// DataImport" is the permanent end state of every imported data leaf, not a transient pre-creation
+// window. It is told apart from a genuinely pending import by the content itself — a published
+// content.status.data means the import produced its artifact — and only the pending case polls. The
+// leaf-facing work below (the status.data export mirror d8 reads, and the ContentMissing/Deleting
+// degradations plus the excludedRefs mirror in checkConsistencyAndSetReady) needs no DataImport at all:
+// the aggregator publishes the whole descriptor, including the import StorageClass, and the mirror
+// copies it verbatim. Steady-state Ready is NOT written here and must not be: the single post-bind Ready
+// writer is the aggregator (snapshotcontent/ready_mirror.go).
 func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	ctx context.Context,
 	obj *unstructured.Unstructured,
@@ -77,7 +89,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	// Content owner: a non-root imported leaf's SnapshotContent is owned by the parent's SnapshotContent
 	// (d8 sets child->parent ownerRefs); a ROOT import snapshot's content is owned by the root ObjectKeeper
 	// exactly like the capture root. Resolve the parent ownerRef first; a nil (non-pending) result means
-	// this is a root, which the binder now also creates (content-single-writer design §10, creator=binder).
+	// this is a root, which the binder now also creates (creator=binder).
 	ownerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -95,7 +107,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 				"snapshot", obj.GetName(), "gvk", gvk.String())
 			return ctrl.Result{}, nil
 		}
-		// Root import (content-single-writer design §10): the binder is the creator for import roots too,
+		// Root import: the binder is the creator for import roots too,
 		// not the namespace Snapshot orchestrator. Anchor the root content on the root ObjectKeeper (unified
 		// TTL GC) exactly like the capture root; the orchestrator (reconcileImport) mirrors Ready and the
 		// aggregator projects the manifest leg + children edges. The binder is the creator ONLY for the root
@@ -122,7 +134,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			},
 			Spec: importSnapshotContentSpec(obj),
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		// Durable tree node: stamp delete-protection into the CREATE payload.
 		storagev1alpha1.StampDeleteProtected(content)
 		if err := r.Create(ctx, content); err != nil && !errors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
@@ -136,8 +148,25 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 
 	// Keep the parent ownerRef aligned on the already-bound content (e.g. parent content recreated).
 	content := &storagev1alpha1.SnapshotContent{}
-	if err := r.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		return ctrl.Result{}, err
+	if gErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); gErr != nil {
+		if isRoot || !errors.IsNotFound(gErr) {
+			return ctrl.Result{}, gErr
+		}
+		// The bound content of an imported LEAF is gone (deleted out from under it). A deleted object
+		// produces no aggregator reconcile to mirror from, so erroring here only parks the leaf behind an
+		// exponential backoff while it still advertises a stale Ready=True — ContentMissing was
+		// unreachable for imports. Hand over to checkConsistencyAndSetReady, which co-writes the honest
+		// Ready=False/ContentMissing, exactly as the capture path already does (controller.go step 4/5).
+		// Only IsNotFound takes this route: a transient Get failure must stay an error so it is retried.
+		// No requeue afterwards — the content name is UID-stable and already bound, so nothing recreates
+		// it; if it ever reappears the bound-content watch (mapBoundContentToSnapshots) wakes the leaf.
+		//
+		// The ROOT is excluded on purpose. This Get sits BEFORE the isRoot early-return, and a root import
+		// snapshot's Ready belongs to the namespace Snapshot orchestrator, which holds exactly this case as
+		// ImportPending (snapshot/import.go, reconcileImportPending). Co-writing it here would put two
+		// writers on the root's Ready and flap the condition forever.
+		logger.V(1).Info("Bound import SnapshotContent is gone; surfacing the degradation on the leaf", "content", contentName)
+		return ctrl.Result{}, r.checkConsistencyAndSetReady(ctx, snapshotLike, obj)
 	}
 	if changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, *ownerRef); err != nil {
 		return ctrl.Result{}, err
@@ -155,8 +184,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, nil
 	}
 
-	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-	// content-single-writer design §10): the aggregator is the single writer of status.manifestCheckpointName
+	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+	// the aggregator is the single writer of status.manifestCheckpointName
 	// for import too, projecting the reconstructed checkpoint name (keyed to the leaf UID) once the upload
 	// endpoint has created it. The binder no longer publishes it; it only waits for the checkpoint to exist
 	// before proceeding to the data leg (the manifest must be uploaded before the leaf can be Ready anyway).
@@ -169,8 +198,8 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		return ctrl.Result{}, err
 	}
 
-	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1,
-	// content-single-writer design §3.1/§3.2): the aggregator projects childrenSnapshotContentRefs from the
+	// Children projection moved to the SnapshotContentController aggregator (INV-CONTENT-CHILDREN-1):
+	// the aggregator projects childrenSnapshotContentRefs from the
 	// uploaded status.childrenSnapshotRefs the same way for capture and import (an import owner has no domain
 	// phase, so the "planned" gate is exactly "every uploaded child snapshot has bound its content"). The
 	// binder no longer publishes the child edge set; the content's mirrored Ready (gated by the aggregator's
@@ -181,7 +210,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	// snapshot or root Snapshot) has only manifests + children, so it skips the data leg entirely —
 	// otherwise it would poll forever for a DataImport that never exists.
 	if r.GVKRegistry.RequiresDataArtifact(gvk.Kind) {
-		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.targetRef
+		// Reverse-lookup: the leaf carries no DataImport name; find the DataImport whose spec.snapshotRef
 		// points at this leaf (exactly one; >=2 is fail-closed).
 		di, treason, tmsg, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, obj)
 		if lErr != nil {
@@ -193,20 +222,27 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			}
 			return ctrl.Result{}, nil
 		}
-		if di == nil {
-			// d8 creates the DataImport alongside the leaf; it may not be visible yet. Pending, poll.
-			return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
-		}
-
-		// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1,
-		// content-single-writer design §10): the aggregator is the single writer of content.status.data for
+		// Data-leg CONTENT write moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):
+		// the aggregator is the single writer of content.status.data for
 		// import too (projectContentDataLegFromDataImport runs the same DataImport->VSC Retain+ownerRef
 		// handoff + publish). The binder keeps ONLY the two leaf-facing jobs the aggregator cannot: surface a
 		// non-retryable artifact terminal on the leaf, and mirror the aggregator-published content.status.data
 		// onto the leaf's top-level status.data for d8 export.
-		if _, _, dtreason, dtmsg := snapshotcontent.BuildImportDataBinding(di, obj); dtreason != "" {
+		if di == nil {
+			if content.Status.Data == nil {
+				// The import has not produced its artifact yet: d8 creates the DataImport alongside the
+				// leaf, so it may simply not be visible. Genuinely pending — poll (no DataImport watch).
+				return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
+			}
+			// Finished import whose DataImport was reaped by its idle TTL — the permanent end state of an
+			// imported leaf, not "still waiting". Fall through to the leaf-facing work below: it reads the
+			// content, never the DataImport. Returning here (as this branch used to, unconditionally) left
+			// the leaf polling ~12x/min forever while its status.data mirror and the
+			// ContentMissing/Deleting + excludedRefs mirrors never ran again.
+		} else if _, _, dtreason, dtmsg := snapshotcontent.BuildImportDataBinding(di, obj); dtreason != "" {
 			// Actionable import failure (e.g. unsupported artifact kind): the content stays pending (no
 			// dataRef), so the pure content mirror cannot express it — co-write Ready=False directly.
+			// Only checkable while the DataImport is alive; a reaped one has nothing left to validate.
 			if perr := r.patchSnapshotNotReadyFromContent(ctx, obj, snapshotLike, dtreason, dtmsg); perr != nil {
 				return ctrl.Result{}, perr
 			}
@@ -214,11 +250,12 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 		}
 		// Mirror the aggregator-published content.status.data onto the leaf for d8 export. It is a no-op
 		// until the aggregator publishes; the !Ready poll below drives convergence (a Ready content always
-		// has its data leg published, so a Ready leaf is always mirrored first). storageClassName is absent
-		// from the content data by design, so take it from DataImport.spec.storageClassName;
-		// source/artifact/size/volumeMode come from content.status.data.
-		scOverride, _, _ := unstructured.NestedString(di.Object, "spec", "storageClassName")
-		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName, scOverride); mErr != nil {
+		// has its data leg published, so a Ready leaf is always mirrored first), and it keeps running in
+		// the DataImport-less steady state, where it is the only thing that carries a later content-side
+		// correction onto the leaf that d8 actually reads. The copy is verbatim: the
+		// aggregator publishes the whole descriptor including storageClassName (which it takes from
+		// DataImport.spec.storageParams.storageClassName on import), so the binder adds nothing of its own.
+		if mErr := r.mirrorLeafDataFromContent(ctx, obj, contentName); mErr != nil {
 			// NotFound = the bound content is gone: do NOT error-requeue (that would wedge the leaf);
 			// the Ready mirror below drives the degradation. A real Get/Patch/schema failure on an
 			// existing content still requeues so wire-shape drift fails loud.

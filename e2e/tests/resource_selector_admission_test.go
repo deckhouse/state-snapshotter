@@ -26,25 +26,26 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// resourceSelectorAdmissionSpecs asserts the CEL contract that makes resourceSelector a Capture-only
-// input: an import-mode Snapshot that ALSO carries spec.resourceSelector MUST be rejected by admission.
-// resourceSelector is the root Snapshot's "what to capture" input; on Import there is no live namespace
-// to list, so the field is meaningless. This mirrors the sibling capture-input rules already enforced by
-// CEL — domain snapshots forbid spec.sourceRef on Import, the forked VolumeSnapshot forbids spec.source on
-// Import — making resourceSelector the last capture-input to move from "silently ignored" to "forbidden".
+// resourceSelectorAdmissionSpecs asserts that a Snapshot carrying spec.resourceSelector is REFUSED by the
+// cluster. Unlike the include/exclude specs in resource_selector_test.go — which cover a capture input that
+// no longer exists and are therefore parked behind envResourceSelector — this one covers behaviour the
+// module has today, so it runs by default: it is a single create against a real apiserver, with no capture.
 //
-// Skip-not-fail against an older CRD (same philosophy as resourceSelectorPersisted): the forbid-on-Import
-// rule ships on the Snapshot CRD's spec-level x-kubernetes-validations. If the deployed controller image
-// predates it, the create SUCCEEDS instead of being rejected. Rather than emit a misleading FAIL against a
-// build that never carried the rule, we delete the accepted object and SKIP. Once the CEL is deployed this
-// spec turns into a real create-rejection assertion with no further changes.
+// Why the field is still in the CRD at all: a field absent from the schema is PRUNED before validation, so
+// an outdated client (an old d8 with -l, a stale YAML manifest) would be answered "created" and would
+// silently receive a snapshot of the WHOLE namespace instead of the subset it asked for. The schema keeps
+// the field solely so admission can turn that silent widening into an error.
+//
+// Skip-not-fail against an older CRD: if the deployed Snapshot CRD predates the refusal, the create
+// SUCCEEDS. Rather than emit a misleading FAIL against a build that never carried the rule, the accepted
+// object is deleted and the spec SKIPs — the same philosophy the rest of this suite uses for version skew.
 func resourceSelectorAdmissionSpecs() {
-	Context("Phase 1c: resourceSelector admission (forbidden on Import)", func() {
-		It("rejects an import-mode Snapshot that also sets resourceSelector", func() {
+	Context("Phase 1c: spec.resourceSelector is refused by admission", func() {
+		It("rejects a Snapshot that carries spec.resourceSelector", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
-			ns := uniqueNS("p1b-selector-import-neg")
+			ns := uniqueNS("p1c-selector-refused")
 			Expect(ensureNamespace(ctx, ns)).To(Succeed())
 			DeferCleanup(func() { deleteNamespace(context.Background(), ns) })
 
@@ -52,27 +53,26 @@ func resourceSelectorAdmissionSpecs() {
 				"apiVersion": "state-snapshotter.deckhouse.io/v1alpha1",
 				"kind":       "Snapshot",
 				"metadata": map[string]interface{}{
-					"name":      "selector-on-import",
+					"name":      "selector-refused",
 					"namespace": ns,
 				},
 				"spec": map[string]interface{}{
-					"mode": "Import",
+					"mode": "Capture",
 					"resourceSelector": map[string]interface{}{
 						"matchLabels": map[string]interface{}{rsLabelKey: rsValueKeep},
 					},
 				},
 			}}
 
-			By("Creating a Snapshot with mode: Import AND spec.resourceSelector (must be rejected by CEL)")
+			By("Creating a Snapshot with spec.resourceSelector (must be rejected)")
 			created, err := suiteDyn.Resource(snapshotGVR).Namespace(ns).Create(ctx, snap, metav1.CreateOptions{})
 			if err == nil {
-				// Deployed Snapshot CRD lacks the forbid-on-Import CEL rule (image predates it). Drop the
-				// accepted object and skip rather than fail — see the func doc.
+				// Deployed Snapshot CRD predates the refusal. Drop the accepted object and skip — see the func doc.
 				_ = suiteDyn.Resource(snapshotGVR).Namespace(ns).Delete(context.Background(), created.GetName(), metav1.DeleteOptions{})
-				Skip("deployed Snapshot CRD has no forbid-on-Import CEL for spec.resourceSelector (controller image predates the rule); skipping")
+				Skip("deployed Snapshot CRD does not refuse spec.resourceSelector (controller image predates the rule); skipping")
 			}
 			Expect(err.Error()).To(ContainSubstring("resourceSelector"),
-				"an import-mode Snapshot carrying resourceSelector must be rejected by the CEL, and the message must name the offending field")
+				"the rejection must name the offending field so an operator can find it in their manifest")
 		})
 	})
 }

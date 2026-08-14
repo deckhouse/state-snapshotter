@@ -126,7 +126,7 @@ func ReconstructManifestCheckpoint(
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 	}
-	// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+	// Durable tree node: stamp delete-protection into the CREATE payload.
 	ssstoragev1alpha1.StampDeleteProtected(cp)
 	if err := c.Create(ctx, cp); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create ManifestCheckpoint %s: %w", checkpointName, err)
@@ -188,7 +188,7 @@ func writeReconstructedChunks(
 		encoded := base64.StdEncoding.EncodeToString(gz)
 		sum := sha256.Sum256(gz)
 		checksum := hex.EncodeToString(sum[:])
-		// Chunk name keyed by the reconstructed ManifestCheckpoint UID (unified wave4C scheme, see
+		// Chunk name keyed by the reconstructed ManifestCheckpoint UID (unified scheme, see
 		// api/names). Recorded in ChunkInfo.Name and read back from there.
 		chunkName := names.ChunkName(checkpointUID, index)
 
@@ -211,7 +211,7 @@ func writeReconstructedChunks(
 				Checksum:       checksum,
 			},
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload (delete-protection-contract.md §6.1).
+		// Durable tree node: stamp delete-protection into the CREATE payload.
 		ssstoragev1alpha1.StampDeleteProtected(chunk)
 		if err := c.Create(ctx, chunk); err != nil && !apierrors.IsAlreadyExists(err) {
 			return nil, 0, 0, fmt.Errorf("create chunk %s: %w", chunkName, err)

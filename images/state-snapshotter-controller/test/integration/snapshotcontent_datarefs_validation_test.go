@@ -26,7 +26,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
@@ -52,7 +54,7 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 	}
 
 	// Variant A (cardinality ≤1): a SnapshotContent carries at most one data binding (a singular object,
-	// not a list), so a duplicate-in-a-list validation is structurally impossible. The wave5 hard rename
+	// not a list), so a duplicate-in-a-list validation is structurally impossible. The hard rename
 	// dropped the standalone required targetUID; the volume identity is now data.sourceRef.uid (optional at
 	// the CRD level), so there is no longer a CRD-level "empty uid" rejection to assert here.
 	It("accepts a single status.data on Status().Update", func() {
@@ -66,9 +68,72 @@ var _ = Describe("SnapshotContent data CRD validation", func() {
 			_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}})
 		})
 
-		b := binding("pvc-a")
-		sc.Status = storagev1alpha1.SnapshotContentStatus{Data: &b}
-		Expect(k8sClient.Status().Update(ctx, sc)).To(Succeed())
+		// k8sClient is the manager's cached client, so the Get can miss a just-created object, and
+		// SnapshotContentController stamps its finalizer as soon as it sees one — retry through both.
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sc), sc)).To(Succeed())
+			b := binding("pvc-a")
+			sc.Status = storagev1alpha1.SnapshotContentStatus{Data: &b}
+			g.Expect(k8sClient.Status().Update(ctx, sc)).To(Succeed())
+		}).Should(Succeed())
+	})
+
+	// Dropping a field from the Go type is only half of removing it: while the generated CRD still declares the
+	// property, the apiserver keeps accepting and STORING the key, so a stale writer or a hand-written patch
+	// goes on publishing it and consumers go on reading it — the field is removed in the code and alive on the
+	// wire. accessModes is that field: it was dropped from SnapshotDataBinding before this schema was released
+	// (it round-trips through the captured PVC manifest, and the transient export volume defaults its own
+	// modes), and only the served schema can prove it is gone rather than orphaned.
+	//
+	// The write goes through unstructured because the typed client cannot express a key its Go type lacks, and
+	// the assertions run on the object the apiserver RETURNS from the status write — the persisted state — so
+	// the aggregator, which reconciles every SnapshotContent in this suite, cannot race them by rewriting the
+	// status afterwards. It can still invalidate the resourceVersion we hold, hence the re-Get-and-retry loop.
+	// The keys that survive are what makes the absence meaningful: they prove the write reached the schema, so
+	// accessModes is missing because it was pruned, not because the patch never landed.
+	It("prunes accessModes out of status.data: the field is gone from the served schema, not orphaned in it", func() {
+		name := "pruned-field-" + randomSuffix()
+		typed := &storagev1alpha1.SnapshotContent{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec:       retainContentSpec(),
+		}
+		Expect(k8sClient.Create(ctx, typed)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, &storagev1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: name}})
+		})
+
+		var stored map[string]interface{}
+		Eventually(func(g Gomega) {
+			live := &unstructured.Unstructured{}
+			live.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("SnapshotContent"))
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name}, live)).To(Succeed())
+			g.Expect(unstructured.SetNestedMap(live.Object, map[string]interface{}{
+				"sourceRef": map[string]interface{}{
+					"apiVersion": "v1", "kind": "PersistentVolumeClaim", "name": "pvc-a",
+					"namespace": "default", "uid": sourceUID,
+				},
+				"artifactRef": map[string]interface{}{
+					"apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshotContent", "name": "vsc-pvc-a",
+				},
+				"volumeMode":       "Filesystem",
+				"fsType":           "ext4",
+				"storageClassName": "sc-a",
+				"size":             "10Gi",
+				"accessModes":      []interface{}{"ReadWriteOnce"},
+			}, "status", "data")).To(Succeed())
+			g.Expect(k8sClient.Status().Update(ctx, live)).To(Succeed())
+
+			persisted, found, err := unstructured.NestedMap(live.Object, "status", "data")
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(found).To(BeTrue(), "status.data must be stored")
+			stored = persisted
+		}, 30*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		for _, key := range []string{"sourceRef", "artifactRef", "volumeMode", "fsType", "storageClassName", "size"} {
+			Expect(stored).To(HaveKey(key), "the schema must still serve %s; without the survivors the pruning assertion below proves nothing", key)
+		}
+		Expect(stored).NotTo(HaveKey("accessModes"),
+			"the CRD still declares status.data.accessModes, so the apiserver stored it: the field was removed from the type but left orphaned in the schema")
 	})
 })
 

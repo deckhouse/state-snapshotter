@@ -23,7 +23,6 @@ import (
 	"context"
 	"time"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
@@ -100,7 +100,7 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 
 		// Simulate domain controller: publish phase=Finished + the MCR name under
 		// captureState.domainSpecificController (the domain-written half of captureState). Finished (capture
-		// barrier 2), not just Planned: this TestSnapshot has no real domain controller, and wave7's post-bind
+		// barrier 2), not just Planned: this TestSnapshot has no real domain controller, and the post-bind
 		// Ready mirror (snapshotcontent.mirrorReadyToOwnerSnapshot) holds a domain-capture Snapshot's Ready=True
 		// until phase=Finished. Finished still clears the binder's >=Planned barrier 1 for the bind step below.
 		injectDomainFinished(snapshotObj)
@@ -202,8 +202,8 @@ var _ = Describe("Integration: GenericSnapshotBinderController - MCR linking", f
 			g.Expect(ready.Reason).To(Equal(storagev1alpha1.ManifestCaptureRequestConditionReasonCompleted))
 		}, "30s", "200ms").Should(Succeed(), "MCR should complete only after MCP ownerRef is handed off to SnapshotContent")
 
-		// Snapshot.Ready is an eventual mirror of the bound SnapshotContent.Ready. wave7 moved the post-bind
-		// Ready mirror out of the binder into the SnapshotContentController (mirrorReadyToOwnerSnapshot), so
+		// Snapshot.Ready is an eventual mirror of the bound SnapshotContent.Ready. The post-bind
+		// Ready mirror moved out of the binder into the SnapshotContentController (mirrorReadyToOwnerSnapshot), so
 		// drive the CONTENT controller to run the mirror; the binder reconcile is kept (it still owns
 		// pre-bind / content-missing degradation). phase=Finished was published above so barrier 2 is clear.
 		Eventually(func(g Gomega) {

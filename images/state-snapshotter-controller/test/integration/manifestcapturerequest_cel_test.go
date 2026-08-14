@@ -23,8 +23,10 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
@@ -99,11 +101,23 @@ var _ = Describe("Integration: ManifestCaptureRequest non-empty-targets CEL", fu
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, mcr) })
 
 		// The capture plan is frozen: any change to spec.targets is rejected by the CRD's CEL transition rule.
-		mcr.Spec.Targets = []ssv1alpha1.ManifestTarget{
-			{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-b"},
-		}
-		err := k8sClient.Update(ctx, mcr)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("spec.targets is immutable"))
+		//
+		// Getting to that rejection takes a retry loop and a precise assertion. k8sClient is the manager's
+		// cached client, so the Get can miss the object just created; and the MCR is reconciled
+		// concurrently, so an Update built on a stale resourceVersion comes back as "object has been
+		// modified". Both would satisfy a bare HaveOccurred() while the spec change never reached admission
+		// at all — the rule under test would go unexercised and the spec would still be green. So: loop
+		// until the update produces something other than a conflict, then pin that outcome to Invalid.
+		var updateErr error
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mcr), mcr)).To(Succeed())
+			mcr.Spec.Targets = []ssv1alpha1.ManifestTarget{
+				{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-b"},
+			}
+			updateErr = k8sClient.Update(ctx, mcr)
+			g.Expect(apierrors.IsConflict(updateErr)).To(BeFalse(), "lost the resourceVersion race, retrying")
+		}).Should(Succeed())
+		Expect(apierrors.IsInvalid(updateErr)).To(BeTrue(), "want the CEL rejection of the spec.targets change, got %v", updateErr)
+		Expect(updateErr.Error()).To(ContainSubstring("spec.targets is immutable"))
 	})
 })

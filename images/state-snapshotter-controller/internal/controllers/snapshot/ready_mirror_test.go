@@ -116,8 +116,8 @@ func TestMirrorSnapshotReadyFromBoundContentFallbackNoContentReady(t *testing.T)
 }
 
 // The root Snapshot's commonController.manifestCaptured leg latch is owned solely by main (the aggregator's
-// capture-leg lifecycle: eager-init false, monotonic latch true after the MCP handoff, then MCR reap —
-// decision #10). Its behavior is covered in snapshotcontent/capture_legs_test.go; the former
+// capture-leg lifecycle: eager-init false, monotonic latch true after the MCP handoff, then MCR reap).
+// Its behavior is covered in snapshotcontent/capture_legs_test.go; the former
 // SnapshotReconciler-side stampRootManifestCaptured duplicate writer was removed.
 
 // The bridge is the single non-mirror writer: Ready=False/ChildrenFailed.

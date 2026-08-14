@@ -49,9 +49,9 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 	@ns=$$(kubectl get ns -o name | grep -E '^namespace/snap-e2e' || true); \
 	if [ -n "$$ns" ]; then echo "$$ns" | xargs kubectl delete --wait=false; else echo "  none found"; fi
 	@echo "==> Deleting ObjectKeepers tracking 'snap-e2e' objects (matched by spec.followObjectRef.namespace, waiting)..."
-	@# ObjectKeepers are cluster-scoped and UID-named (nss-ok-<h16(uid)> / nss-import-ok-<h16(uid)> since
-	@# wave4C), so there is no namespace slug in the name to grep. Select by the namespaced object each one
-	@# follows (spec.followObjectRef.namespace) — this catches every test keeper regardless of its name prefix.
+	@# ObjectKeepers are cluster-scoped and UID-named (nss-ok-<h16(uid)> / nss-import-ok-<h16(uid)>), so
+	@# there is no namespace slug in the name to grep. Select by the namespaced object each one follows
+	@# (spec.followObjectRef.namespace) — this catches every test keeper regardless of its name prefix.
 	@oks=$$(kubectl get objectkeepers.deckhouse.io \
 		-o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.followObjectRef.namespace}{"\n"}{end}' \
 		| awk -F'\t' '$$2 ~ /^snap-e2e/ {print $$1}' || true); \
@@ -71,18 +71,28 @@ clean-env: ## Delete leftover e2e resources: Snapshots (wait) -> namespaces (sna
 # falls back to the ambient kubeconfig when it is unset.
 KUBECTL ?= kubectl$(if $(KUBE_CONFIG_PATH), --kubeconfig $(KUBE_CONFIG_PATH),)
 
-# The four snapshot-stack modules the transition suite drives at runtime, and their namespaces.
+# The four snapshot-stack modules the transition suite drives at runtime, and their namespaces. The
+# scenario itself never disables any of them (storage-volume-data-manager in particular stays enabled
+# and serving from phase B on) — only the reset below does, to return the cluster to the phase-A start
+# state where all four are off.
 TRANSITION_MODULES       := snapshot-controller storage-volume-data-manager state-snapshotter storage-foundation
 TRANSITION_NS            := d8-snapshot-controller d8-storage-volume-data-manager d8-state-snapshotter d8-storage-foundation
 TRANSITION_WORKLOAD_NS   ?= transition-workload
 TRANSITION_CLEAN_TIMEOUT ?= 300
-# The non-gated (legacy) snapshot-controller tag to un-freeze it back to before cleanup disables it.
-# A completed run leaves snapshot-controller on the v0.2.0 handoff build (requires storage-foundation);
-# disabling it while frozen there would make the NEXT phase-B enable webhook-denied. Retag it to this
-# (main) while it is still enabled so it re-registers non-gated. Match E2E_TRANSITION_SNAPSHOT_CONTROLLER_LEGACY_TAG.
+# The snapshot-controller tag to re-register the module on before the cleanup disables it. It matters
+# only for a cluster still REGISTERED on an OLDER snapshot-controller build that required
+# storage-foundation: the v0.2.0 build this suite installs has no such requirement, but a cluster
+# reused from before that change stays frozen on the gated registration (Deckhouse ignores a
+# ModulePullOverride while the module is disabled), and the NEXT phase-B enable is then
+# webhook-denied. Retagging while the module is still enabled lets it re-register non-gated; on a
+# cluster that is not gated at all reset-cluster.sh detects that and no-ops.
+# Keep this a plain, non-gated build — main is the sensible default: there is no reason to leave the
+# module parked on the deprecated build the run installs via E2E_TRANSITION_SNAPSHOT_CONTROLLER_TAG
+# between runs.
 TRANSITION_SNAPC_LEGACY_TAG ?= main
-# DataExport/DataImport live under the legacy group (svdm pre-D1) and the unified group (svdm D1);
-# the workload may carry either depending on how far a run got.
+# DataExport/DataImport are served under the legacy group by storage-volume-data-manager and under the
+# unified group by storage-foundation; after the flip both groups are live at once, and the workload
+# may carry resources on either depending on how far a run got.
 TRANSITION_DEDI          := dataexports.storage.deckhouse.io dataimports.storage.deckhouse.io dataexports.storage-foundation.deckhouse.io dataimports.storage-foundation.deckhouse.io
 TRANSITION_VS            := volumesnapshots.snapshot.storage.k8s.io
 
@@ -92,7 +102,7 @@ test-transition: ## Run the transition e2e suite (manual: needs E2E_RUN_TRANSITI
 
 .PHONY: transition-clean
 transition-clean: ## Reset the cluster to the transition phase-A start state: FIRST delete the workload (DataExports/DataImports, VolumeSnapshots, pods, PVCs, namespace) while the controllers are still up so finalizers clear and child resources (prime PVC / importer Deployment) are reaped, THEN disable the 4 snapshot modules, drain their namespaces, and sweep leftover domain RBAC + legacy CRDs
-	@echo "==> [1/4] Deleting the workload in '$(TRANSITION_WORKLOAD_NS)' while the controllers are still up (so finalizers clear)..."
+	@echo "==> [1/5] Deleting the workload in '$(TRANSITION_WORKLOAD_NS)' while the controllers are still up (so finalizers clear)..."
 	@if $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; then \
 		echo "  DataExports/DataImports (controllers reap the export/import PVCs + Deployments)..."; \
 		for gr in $(TRANSITION_DEDI); do \
@@ -107,7 +117,7 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		echo "  Namespace..."; \
 		$(KUBECTL) delete ns $(TRANSITION_WORKLOAD_NS) --timeout=120s 2>/dev/null || true; \
 	else echo "  namespace absent"; fi
-	@echo "==> [2/4] Waiting for '$(TRANSITION_WORKLOAD_NS)' to be FULLY deleted before touching the modules (force-clearing finalizers while it lingers)..."
+	@echo "==> [2/5] Waiting for '$(TRANSITION_WORKLOAD_NS)' to be FULLY deleted before touching the modules (force-clearing finalizers while it lingers)..."
 	@deadline=$$(( $$(date +%s) + $(TRANSITION_CLEAN_TIMEOUT) )); \
 	while $(KUBECTL) get ns $(TRANSITION_WORKLOAD_NS) >/dev/null 2>&1; do \
 		for res in $$($(KUBECTL) -n $(TRANSITION_WORKLOAD_NS) get $(TRANSITION_VS),pvc,$$(echo '$(TRANSITION_DEDI)' | tr ' ' ',') -o name 2>/dev/null); do \
@@ -121,9 +131,9 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		sleep 3; \
 	done; \
 	echo "  $(TRANSITION_WORKLOAD_NS): gone"
-	@echo "==> [3/4] Un-freezing snapshot-controller if it is registered on the gated v0.2.0 handoff build (else the next phase-B enable is webhook-denied). Handles both the still-enabled case and the disabled+frozen case (briefly enabling the dependency chain so the MPO can re-pull) — see tests/transition/reset-cluster.sh..."
+	@echo "==> [3/5] Un-freezing snapshot-controller if it is registered on an older, storage-foundation-gated build (else the next phase-B enable is webhook-denied); a no-op when it is not gated. Handles both the still-enabled case and the disabled+frozen case (briefly enabling the dependency chain so the MPO can re-pull) — see tests/transition/reset-cluster.sh..."
 	@KUBECTL="$(KUBECTL)" TRANSITION_SNAPC_LEGACY_TAG="$(TRANSITION_SNAPC_LEGACY_TAG)" TRANSITION_CLEAN_TIMEOUT="$(TRANSITION_CLEAN_TIMEOUT)" sh tests/transition/reset-cluster.sh
-	@echo "==> [3/4] Disabling the snapshot-stack modules (ModuleConfig enabled=false) + dropping their ModulePullOverrides..."
+	@echo "==> [4/5] Disabling the snapshot-stack modules (ModuleConfig enabled=false) + dropping their ModulePullOverrides..."
 	@for m in $(TRANSITION_MODULES); do \
 		if $(KUBECTL) get moduleconfig $$m >/dev/null 2>&1; then \
 			$(KUBECTL) patch moduleconfig $$m --type merge -p '{"spec":{"enabled":false}}' >/dev/null && echo "  moduleconfig/$$m -> enabled=false"; \
@@ -139,14 +149,14 @@ transition-clean: ## Reset the cluster to the transition phase-A start state: FI
 		done; \
 		$(KUBECTL) get ns $$ns >/dev/null 2>&1 || echo "  $$ns: gone"; \
 	done
-	@echo "==> [4/4] Sweeping leftover hook-created domain RBAC (state-snapshotter ClusterRoles/Bindings survive module disable — see docs/backlog.md #2)..."
+	@echo "==> [5/5] Sweeping leftover hook-created domain RBAC: the ClusterRoles/Bindings the state-snapshotter hooks create are cluster-scoped and survive the module being disabled, so nothing else removes them..."
 	@$(KUBECTL) delete clusterrole,clusterrolebinding -l heritage=deckhouse,module=state-snapshotter --ignore-not-found >/dev/null 2>&1 || true
-	@echo "     Sweeping leftover LEGACY CRDs (re-seeded by the phase-C two-owner race leg; on a successful run the migration hooks already removed them, and phase B reinstalls the real ones)..."
+	@echo "     Sweeping leftover LEGACY-group CRDs: nothing in the run removes them (they belong to storage-volume-data-manager, which stays enabled), and Deckhouse keeps a module's CRDs after the module is disabled — so drop them here and let phase B reinstall them with the module..."
 	@$(KUBECTL) delete crd dataexports.storage.deckhouse.io dataimports.storage.deckhouse.io --ignore-not-found >/dev/null 2>&1 || true
 	@echo "==> Done. Re-check: none of [$(TRANSITION_NS)] and no '$(TRANSITION_WORKLOAD_NS)' should exist before re-running 'make test-transition'."
 
 .PHONY: transition-reset-snapc
-transition-reset-snapc: ## Un-freeze snapshot-controller if it is stuck on the gated v0.2.0 handoff build (fixes the 'depends on disabled module(s): storage-foundation' phase-B denial). If it is DISABLED+frozen the dependency chain must be redeployed, so export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE + STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE (the run's tags) first. Safe to run standalone
+transition-reset-snapc: ## Un-freeze snapshot-controller if it is stuck on an older, storage-foundation-gated build (fixes the 'depends on disabled module(s): storage-foundation' phase-B denial); a no-op when it is not gated. If it is DISABLED+frozen the dependency chain must be redeployed, so export STATE_SNAPSHOTTER_MODULE_PULL_OVERRIDE + STORAGE_FOUNDATION_MODULE_PULL_OVERRIDE (the run's tags) first. Safe to run standalone
 	@KUBECTL="$(KUBECTL)" TRANSITION_SNAPC_LEGACY_TAG="$(TRANSITION_SNAPC_LEGACY_TAG)" TRANSITION_CLEAN_TIMEOUT="$(TRANSITION_CLEAN_TIMEOUT)" sh tests/transition/reset-cluster.sh
 
 .PHONY: vet

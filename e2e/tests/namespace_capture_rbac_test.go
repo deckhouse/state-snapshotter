@@ -116,20 +116,20 @@ func namespaceCaptureReworkSpecs() {
 	rawSecretsSpecs()         // E4
 	inclusionRuleSpecs()      // E5 (self-contained: generic + RBAC + domain object inclusion/exclusion)
 	specImmutabilitySpecs()   // E6
-	eagerShellDeletionSpecs() // Block 0 (eager shell / pre-Planned deletion no-wedge)
+	eagerShellDeletionSpecs() // eager shell / pre-Planned deletion no-wedge
 	arbitraryCRSpecs()        // E2 (default on; opt-out: E2E_NS_CAPTURE_REWORK=false)
 	childDegradationSpecs()   // E3 (default on; opt-out: E2E_NS_CAPTURE_REWORK=false)
 }
 
-// Block 0 — eager content shell / pre-Planned deletion. With the eager-shell fix (content-single-writer
-// design §9) the SnapshotContent object is created AND bound as soon as the Snapshot exists, decoupled from
+// Eager content shell / pre-Planned deletion. With the eager-shell fix the SnapshotContent object
+// is created AND bound as soon as the Snapshot exists, decoupled from
 // the domain phase>=Planned barrier. A Snapshot deleted while still pre-Planned must NOT wedge on the
 // eager shell's parent-protect finalizer: the binder deletion path removes it regardless of capture phase.
 // The deterministic pre-Planned timing is pinned by the controller integration test
 // (test/integration/snapshot_deletion_test.go); on a live cluster the Planned transition is too fast to
 // pin, so this spec asserts the timing-robust no-wedge invariant (create -> immediate delete -> fully GC'd).
 func eagerShellDeletionSpecs() {
-	Context("Block 0: eager content shell / pre-Planned deletion", func() {
+	Context("Eager content shell / pre-Planned deletion", func() {
 		It("does not wedge a root Snapshot deleted immediately after creation (no finalizer wedge)", func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
@@ -494,11 +494,11 @@ func specImmutabilitySpecs() {
 
 			Expect(createRootSnapshot(ctx, ns, "e6-snap")).To(Succeed())
 
-			By("Attempting to mutate spec.resourceSelector -> rejected by the CEL immutability rule")
+			By("Attempting to mutate spec.mode -> rejected by the CEL immutability rule")
 			Eventually(func(g Gomega) {
 				cur, err := getResource(ctx, snapshotGVR, ns, "e6-snap")
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(unstructured.SetNestedStringMap(cur.Object, map[string]string{"app": "mutated"}, "spec", "resourceSelector", "matchLabels")).To(Succeed())
+				g.Expect(unstructured.SetNestedField(cur.Object, "Import", "spec", "mode")).To(Succeed())
 				_, updErr := suiteDyn.Resource(snapshotGVR).Namespace(ns).Update(ctx, cur, metav1.UpdateOptions{})
 				g.Expect(updErr).To(HaveOccurred(), "spec update must be rejected (immutable)")
 			}).WithTimeout(30 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
@@ -612,7 +612,7 @@ func childDegradationSpecs() {
 			By("Degrading the tree by deleting a child snapshot's bound SnapshotContent")
 			nodes, err := walkSnapshotTree(ctx, ns, "e3-snap")
 			Expect(err).NotTo(HaveOccurred())
-			childNode, ok := firstNodeOfKind(nodes, "DemoVirtualMachineSnapshot")
+			childNode, ok := firstVMSnapshotNode(nodes)
 			Expect(ok).To(BeTrue(), "expected a DemoVirtualMachineSnapshot child")
 			childObj, err := getResource(ctx, demoVMSnapshotGVR, ns, childNode.name)
 			Expect(err).NotTo(HaveOccurred())

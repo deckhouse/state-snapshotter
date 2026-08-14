@@ -39,7 +39,12 @@ import (
 	"sigs.k8s.io/yaml"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/storage-e2e/pkg/cluster"
+	// storage-e2e/pkg/cluster is deprecated in favour of pkg/e2e (e2e.Connect), where the cluster
+	// lifecycle is driven by the framework's bootstrap/remove commands. The deprecation notice keeps
+	// the package supported for suites that already import it, and this suite is one of them: it owns
+	// its cluster lifecycle here. Moving to pkg/e2e changes how the whole run is bootstrapped, so it
+	// is a standalone migration — that migration removes this suppression, no edit here can.
+	"github.com/deckhouse/storage-e2e/pkg/cluster" //nolint:staticcheck // deprecated package, see the note above
 	storagekube "github.com/deckhouse/storage-e2e/pkg/kubernetes"
 )
 
@@ -55,6 +60,7 @@ const (
 	envVolumeData           = "E2E_VOLUME_DATA"
 	envGetLoad              = "E2E_GET_LOAD"
 	envPublish              = "E2E_PUBLISH"
+	envCoexistence          = "E2E_COEXISTENCE"
 	envStorageClass         = "E2E_STORAGE_CLASS"
 	envProbeImage           = "E2E_PROBE_IMAGE"
 	envBackupClientImage    = "E2E_BACKUP_CLIENT_IMAGE"
@@ -103,14 +109,24 @@ const (
 	storageFoundationModuleName   = "storage-foundation"
 	sdsNodeConfiguratorModuleName = "sds-node-configurator"
 	sdsLocalVolumeModuleName      = "sds-local-volume"
+	// storage-volume-data-manager ships its own DataExport/DataImport data plane under its own API group and
+	// runs PERMANENTLY alongside storage-foundation (see coexistence_test.go). The suite enables it by
+	// default so the coexistence specs exercise a cluster where both are live; E2E_COEXISTENCE=false takes
+	// BOTH the module and those specs out of the run.
+	volumeDataManagerModuleName = "storage-volume-data-manager"
 	// The demo domain (from the PoC module) ships two flat CSDs (one snapshot kind per object): the
 	// structural VM snapshot and the data-backed disk snapshot. Both must reach AccessGranted before specs run.
 	demoVMCSDName   = "demo-virtual-machine"
 	demoDiskCSDName = "demo-virtual-disk"
 	d8ModuleNS      = "d8-state-snapshotter"
-	// d8DataManagerNS is the namespace of the DataExport/DataImport controller. The feature was absorbed
-	// from the former storage-volume-data-manager module into storage-foundation (d8-storage-foundation).
+	// d8DataManagerNS is the namespace of the storage-foundation DataExport/DataImport controller — the data
+	// plane this suite captures and restores through. It is NOT where storage-volume-data-manager runs: that
+	// module serves its own DataExport/DataImport resources, under its own API group, from its own namespace
+	// (d8VolumeDataManagerNS), and both modules are enabled at the same time.
 	d8DataManagerNS = "d8-storage-foundation"
+	// d8VolumeDataManagerNS is the storage-volume-data-manager controller namespace. Its controller logs are
+	// what a failing coexistence spec needs, so diagnostics dump them alongside the two above.
+	d8VolumeDataManagerNS = "d8-storage-volume-data-manager"
 )
 
 // demoCRDNames are the PoC-group CRDs the suite applies against. Module Ready + CSD AccessGranted can
@@ -135,9 +151,9 @@ var captureLatchSchemaCRDNames = []string{
 // phase5ImportNS is set by the phase-5 restore spec while it runs; diagnostics use it on failure.
 var phase5ImportNS string
 
-// Aggregated subresource API groups (C8/C9). The core group serves the generic and core-Snapshot
-// subresources; the demo group is the domain controller's own aggregated apiserver; the VS connector
-// group is the generic-PVC extended VolumeSnapshot read surface.
+// Aggregated subresource API groups. The core group serves the generic and core-Snapshot subresources; the
+// demo group is the domain controller's own aggregated apiserver; the VS connector group is the generic-PVC
+// extended VolumeSnapshot read surface.
 const (
 	coreSubresGroup   = "subresources.state-snapshotter.deckhouse.io"
 	coreSubresVersion = "v1alpha1"
@@ -151,7 +167,7 @@ const (
 	subManifestsUpload   = "manifests-and-children-refs-upload"
 	// subManifestsIdentities is the cluster-scoped SnapshotContent subresource returning the flat,
 	// de-duplicated set of object identities captured across a content's ENTIRE subtree (its own
-	// ManifestCheckpoint plus every descendant). Block 7 Part C (content-single-writer design §8.3): the
+	// ManifestCheckpoint plus every descendant). The
 	// root manifest-exclude is computed from this endpoint (sdk.SubtreeManifestIdentities) instead of an
 	// in-reconciler archive read. It is fail-closed (HTTP 409 while any subtree MCP is not Ready or an
 	// object is double-captured across nodes).
@@ -203,7 +219,7 @@ var (
 		Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcheckpoints",
 	}
 	// manifestCaptureRequestGVR is the transient MCR a domain node creates for its own-scope manifest
-	// capture. Block 7 (main-owned commonController, decision #10): the aggregator latches
+	// capture. The capture legs are main-owned (commonController): the aggregator latches
 	// commonController.manifestCaptured on the xxxSnapshot then REAPS the MCR in the SAME pass, so at
 	// steady state no MCR remains and none is re-created (latch-before-reap => no churn).
 	manifestCaptureRequestGVR = schema.GroupVersionResource{
@@ -224,8 +240,8 @@ var (
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshots",
 	}
 	// volumeSnapshotContentGVR is the cluster-scoped CSI VolumeSnapshotContent — the durable data
-	// artifact a captured node's SnapshotContent.status.data points at. Block 3 moved the ownership
-	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) onto the aggregator, so the e2e
+	// artifact a captured node's SnapshotContent.status.data points at. The ownership
+	// handoff (deletionPolicy=Retain + ownerRef -> SnapshotContent) moved onto the aggregator, so the e2e
 	// asserts it via this GVR.
 	volumeSnapshotContentGVR = schema.GroupVersionResource{
 		Group: "snapshot.storage.k8s.io", Version: "v1", Resource: "volumesnapshotcontents",
@@ -299,7 +315,15 @@ type e2eConfig struct {
 	// publish opts into the publish (ingress + tokens) specs. It is a BeforeSuite sanity-check gate
 	// (mirrors volumeData): the infra is provisioned by the storage-e2e bootstrap, so this flag only
 	// asserts it is present and records the discovered ingress facts in suitePublishInfra.
-	publish           bool
+	publish bool
+	// coexistence opts into the storage-volume-data-manager coexistence specs AND into enabling that module
+	// at all. It has to gate both: gating only the specs would still leave the suite waiting for the module
+	// to become Ready, so the knob would not actually take it out of the run. Its LIMIT: on an
+	// alwaysCreateNew cluster the committed tests/cluster_config.yml also declares the module, and
+	// storage-e2e applies that file at bring-up, before any suite code runs — so this knob removes the
+	// suite's dependency on the module and its specs, it does not keep the module off a freshly built
+	// cluster.
+	coexistence       bool
 	storageClass      string
 	probeImage        string
 	backupClientImage string
@@ -330,6 +354,7 @@ func loadConfig() e2eConfig {
 		volumeData:        envEnabledByDefault(os.Getenv(envVolumeData)),
 		getLoad:           envEnabledByDefault(os.Getenv(envGetLoad)),
 		publish:           envEnabledByDefault(os.Getenv(envPublish)),
+		coexistence:       envEnabledByDefault(os.Getenv(envCoexistence)),
 		keepOnFailure:     envBool(os.Getenv(envKeepClusterOnFailure)),
 		keepAlways:        envBool(os.Getenv(envKeepCluster)),
 		vmNamespace:       strings.TrimSpace(os.Getenv("TEST_CLUSTER_NAMESPACE")),
@@ -516,7 +541,9 @@ func ensureModulesEnabled(ctx context.Context) error {
 	// tests/cluster_config.yml (EnableModulesWithSpecs topologically sorts by Dependencies, so the
 	// ModuleConfigs are created in an order Deckhouse accepts instead of one being "turned off:
 	// dependency '...' is disabled"). Each ModulePullOverride comes from <MODULE>_MODULE_PULL_OVERRIDE
-	// (defaulting to "main"), matching the alwaysCreateNew path.
+	// (defaulting to "main"), matching the alwaysCreateNew path. The one entry that is conditional
+	// (storage-volume-data-manager, below) is declared in cluster_config.yml too; E2E_COEXISTENCE=false only
+	// stops this runtime path from enabling and waiting for it.
 	specs := []storagekube.ModuleSpec{
 		{Name: moduleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(moduleName)},
 		// storage-foundation requires state-snapshotter (module.yaml).
@@ -531,6 +558,16 @@ func ensureModulesEnabled(ctx context.Context) error {
 		// and storage-foundation (module.yaml) — both must be listed or SLV stays "turned off".
 		{Name: sdsLocalVolumeModuleName, Version: 1, Enabled: true, ModulePullOverride: moduleTagFromEnv(sdsLocalVolumeModuleName), Dependencies: []string{sdsNodeConfiguratorModuleName, storageFoundationModuleName}},
 	}
+	if suiteCfg.coexistence {
+		// storage-volume-data-manager has no module requirements of its own and is NOT a dependency of
+		// anything here: it is a second, independent DataExport/DataImport data plane that must keep working
+		// with storage-foundation live (coexistence_test.go). Its tag follows the same
+		// <MODULE>_MODULE_PULL_OVERRIDE convention as every other module, defaulting to "main".
+		specs = append(specs, storagekube.ModuleSpec{
+			Name: volumeDataManagerModuleName, Version: 1, Enabled: true,
+			ModulePullOverride: moduleTagFromEnv(volumeDataManagerModuleName),
+		})
+	}
 	if err := storagekube.EnableModulesWithSpecs(ctx, suiteClusterResources.Kubeconfig, suiteClusterResources.SSHClient, suiteClusterResources.ClusterDefinition, specs); err != nil {
 		return fmt.Errorf("ensure required modules enabled: %w", err)
 	}
@@ -540,12 +577,23 @@ func ensureModulesEnabled(ctx context.Context) error {
 // requiredModulesInReadyOrder lists every module the suite depends on, ordered so a module never appears
 // before a module it depends on — WaitForModuleReady is then called in an order that observes each
 // dependency level as it converges (a dependent cannot become Ready before its dependencies anyway).
-var requiredModulesInReadyOrder = []string{
-	moduleName,                    // state-snapshotter (base)
-	sdsNodeConfiguratorModuleName, // base (LVM node backend)
-	storageFoundationModuleName,   // needs state-snapshotter
-	pocModuleName,                 // needs state-snapshotter
-	sdsLocalVolumeModuleName,      // needs sds-node-configurator + storage-foundation
+//
+// It is a function, not a var, because the set is not fixed: with E2E_COEXISTENCE=false the suite neither
+// enables storage-volume-data-manager nor waits for it. A knob that left the module in this list would not
+// switch anything off — the run would still sit in WaitForModuleReady on a module nobody installed.
+func requiredModulesInReadyOrder() []string {
+	modules := []string{
+		moduleName,                    // state-snapshotter (base)
+		sdsNodeConfiguratorModuleName, // base (LVM node backend)
+		storageFoundationModuleName,   // needs state-snapshotter
+		pocModuleName,                 // needs state-snapshotter
+		sdsLocalVolumeModuleName,      // needs sds-node-configurator + storage-foundation
+	}
+	if suiteCfg.coexistence {
+		// No requirements, no dependents: an independent second data plane, waited for last.
+		modules = append(modules, volumeDataManagerModuleName)
+	}
+	return modules
 }
 
 // moduleTagFromEnv returns a module's image tag from its <MODULE>_MODULE_PULL_OVERRIDE env var (the
@@ -587,7 +635,7 @@ func waitModuleAndCSDReady(ctx context.Context) error {
 	// Note: WaitForModuleReady returns immediately on an already-Ready phase, so an MPO tag change
 	// can leave the suite seeing a stale Ready while Helm still rolls CRDs/pods. Established=True also
 	// remains latched during an in-place CRD update; the schema-field wait below closes both races.
-	for _, m := range requiredModulesInReadyOrder {
+	for _, m := range requiredModulesInReadyOrder() {
 		if err := storagekube.WaitForModuleReady(ctx, suiteRestCfg, m, suiteCfg.moduleReadyTO); err != nil {
 			return fmt.Errorf("module %s not Ready: %w", m, err)
 		}
@@ -846,8 +894,8 @@ func truncate(b []byte, n int) string {
 }
 
 // snapshotCommonControllerLatch reads a core-owned capture-leg latch
-// status.captureState.commonController.<leg> from an xxxSnapshot object. Block 7 (main-owned
-// commonController, decision #10): every commonController latch — manifestCaptured, dataCaptured,
+// status.captureState.commonController.<leg> from an xxxSnapshot object. Every
+// commonController latch — manifestCaptured, dataCaptured,
 // childSubtreesManifestsPersisted, subtreePlanned — is written by the SnapshotContentController (main)
 // SIDEWAYS onto the xxxSnapshot. It is snapshot-native: the same read against a SnapshotContent returns
 // found=false for these latches (the aggregator never writes them onto its own content). Returns
@@ -1346,7 +1394,7 @@ func startAppearWatch(ctx context.Context, gvr schema.GroupVersionResource, ns, 
 
 const (
 	// breakGlassAnnotation is the persistent/reversible override that lets an operator delete a
-	// delete-protected object directly (design/delete-protection-contract.md §6.4). It matches the
+	// delete-protected object directly. It matches the
 	// deckhouse-controller literal/polarity.
 	breakGlassAnnotation = "deckhouse.io/allow-delete"
 	// deleteProtectedLabel is the authoritative delete-protection marker (api/storage/v1alpha1).
@@ -1449,4 +1497,300 @@ func assertResourceGone(ctx context.Context, gvr schema.GroupVersionResource, ns
 		}
 		return err
 	}).WithContext(ctx).WithTimeout(timeout).WithPolling(5*time.Second).Should(Succeed(), "%s %s should be GC'd", gvr.Resource, name)
+}
+
+// importedLeafVolumeData is the import-only volume metadata an imported leaf must carry: the StorageClass the
+// bytes were staged into, the volumeMode of the volume they were staged onto, and the filesystem they were
+// actually written onto. None of the three can be re-derived after the import — the scratch volume is destroyed
+// right after capture, the durable VolumeSnapshotContent records neither mode nor filesystem, and the
+// DataImport itself is reaped by its idle TTL.
+type importedLeafVolumeData struct {
+	StorageClassName string
+	VolumeMode       string
+	// FsType may legitimately be empty: a Block import has no filesystem, and a CSI driver may record none on
+	// the volume. It is compared for EQUALITY either way, so an empty expectation asserts the leaf publishes
+	// none either, rather than asserting nothing.
+	FsType string
+}
+
+// importedLeafVolumeDataFromDataImport reads the expectation off the DataImport that staged the bytes, which is
+// the authority for all three values (spec.storageParams.storageClassName, status.volumeMode,
+// status.data.fsType). Deriving it from the cluster rather than hard-coding it keeps the assertion exact
+// without assuming how the target StorageClass formats a volume — while still failing when the projection
+// drops a value the DataImport did publish.
+//
+// wantClass is what the test asked the import to stage into; a mismatch means the fixture and the DataImport
+// have drifted apart, which would make everything below assert the wrong thing.
+func importedLeafVolumeDataFromDataImport(ctx context.Context, ns, name, wantClass string) (importedLeafVolumeData, error) {
+	di, err := suiteDyn.Resource(dataImportGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return importedLeafVolumeData{}, fmt.Errorf("get DataImport %s/%s for the imported volume metadata: %w", ns, name, err)
+	}
+	class, _, _ := unstructured.NestedString(di.Object, "spec", "storageParams", "storageClassName")
+	volumeMode, _, _ := unstructured.NestedString(di.Object, "status", "volumeMode")
+	fsType, _, _ := unstructured.NestedString(di.Object, "status", "data", "fsType")
+	if wantClass != "" && class != wantClass {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s stages into %q, but the test expects %q", ns, name, class, wantClass)
+	}
+	if class == "" {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s carries no spec.storageParams.storageClassName; the assertion would be vacuous", ns, name)
+	}
+	// storage-foundation republishes the scratch volume's mode for every import, so an empty one here is a
+	// producer-side defect rather than an accepted state — and it would make the leaf assertion vacuous.
+	if volumeMode == "" {
+		return importedLeafVolumeData{}, fmt.Errorf("DataImport %s/%s published no status.volumeMode; downstream export fails closed on an empty volumeMode", ns, name)
+	}
+	GinkgoWriter.Printf("  DataImport %s/%s attests storageClassName=%q volumeMode=%q fsType=%q\n", ns, name, class, volumeMode, fsType)
+	return importedLeafVolumeData{StorageClassName: class, VolumeMode: volumeMode, FsType: fsType}, nil
+}
+
+// waitImportedLeafVolumeData waits until the import-only volume metadata is visible on BOTH halves of the
+// imported leaf: the aggregator-owned SnapshotContent.status.data and the leaf's own mirrored status.data.
+//
+// It pins the import round-trip contract d8 depends on: `d8 snapshot download` copies the LEAF's status.data
+// into snapshot.yaml verbatim, and reading that archive back fails closed on an empty storageClassName — so an
+// empty field here silently breaks import -> download -> import. volumeMode matters just as much on the export
+// side: storage-foundation treats an empty one as "not populated yet" and waits forever rather than guessing
+// Filesystem, so an imported snapshot that never receives it can never be exported. fsType decides the
+// filesystem the restored volume is created with. The content half is asserted too because it is the durable
+// copy; the leaf is only its mirror.
+func waitImportedLeafVolumeData(ctx context.Context, ns, kind, leafName string, want importedLeafVolumeData, timeout time.Duration) error {
+	if want.StorageClassName == "" || want.VolumeMode == "" {
+		return fmt.Errorf("waitImportedLeafVolumeData: expected storageClassName/volumeMode are empty; the assertion would be vacuous")
+	}
+	gvr, ok := gvrForSnapshotKind(kind)
+	if !ok {
+		return fmt.Errorf("waitImportedLeafVolumeData: unknown snapshot kind %q (%s)", kind, leafName)
+	}
+	read := func(obj *unstructured.Unstructured) importedLeafVolumeData {
+		class, _, _ := unstructured.NestedString(obj.Object, "status", "data", "storageClassName")
+		volumeMode, _, _ := unstructured.NestedString(obj.Object, "status", "data", "volumeMode")
+		fsType, _, _ := unstructured.NestedString(obj.Object, "status", "data", "fsType")
+		return importedLeafVolumeData{StorageClassName: class, VolumeMode: volumeMode, FsType: fsType}
+	}
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		leaf, err := getResource(ctx, gvr, ns, leafName)
+		if err != nil {
+			last = fmt.Sprintf("get %s/%s: %v", kind, leafName, err)
+		} else {
+			leafData := read(leaf)
+			contentName, _, _ := unstructured.NestedString(leaf.Object, "status", "boundSnapshotContentName")
+			contentData := importedLeafVolumeData{}
+			contentErr := ""
+			if contentName == "" {
+				contentErr = "leaf has no status.boundSnapshotContentName"
+			} else if content, cErr := getResource(ctx, snapshotContentGVR, "", contentName); cErr != nil {
+				contentErr = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+			} else {
+				contentData = read(content)
+			}
+			if contentErr == "" && leafData == want && contentData == want {
+				return nil
+			}
+			last = fmt.Sprintf("%s/%s leaf status.data=%+v, content %s status.data=%+v, want %+v%s",
+				kind, leafName, leafData, contentName, contentData, want, func() string {
+					if contentErr == "" {
+						return ""
+					}
+					return " (" + contentErr + ")"
+				}())
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for the imported volume metadata to reach the leaf and its content; last: %s", last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// setSnapshotContentStorageClass rewrites SnapshotContent.status.data.storageClassName under a bounded
+// read-modify-write retry (the aggregator writes the same status). It exists only for the mirror probe
+// below; nothing in production writes this field from outside the aggregator.
+func setSnapshotContentStorageClass(ctx context.Context, contentName, class string) error {
+	var last error
+	for i := 0; i < 5; i++ {
+		content, err := getResource(ctx, snapshotContentGVR, "", contentName)
+		if err != nil {
+			return fmt.Errorf("get SnapshotContent %s: %w", contentName, err)
+		}
+		if _, found, _ := unstructured.NestedMap(content.Object, "status", "data"); !found {
+			return fmt.Errorf("SnapshotContent %s has no status.data to rewrite", contentName)
+		}
+		if err := unstructured.SetNestedField(content.Object, class, "status", "data", "storageClassName"); err != nil {
+			return fmt.Errorf("set status.data.storageClassName on %s: %w", contentName, err)
+		}
+		_, uErr := suiteDyn.Resource(snapshotContentGVR).UpdateStatus(ctx, content, metav1.UpdateOptions{})
+		if uErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(uErr) {
+			return fmt.Errorf("update SnapshotContent %s status: %w", contentName, uErr)
+		}
+		last = uErr
+	}
+	return fmt.Errorf("update SnapshotContent %s status: %w", contentName, last)
+}
+
+// assertImportedLeafMirrorsAfterDataImportGone pins the steady state of a FINISHED import: the DataImport
+// is reaped by its own idle TTL, and from then on the leaf's status.data — the descriptor d8 reads on
+// export — must keep tracking its SnapshotContent. The binder used to read "no DataImport" as "the import
+// has not started yet" and return a 5s requeue before the mirror, freezing the leaf forever.
+//
+// The probe drives a CHANGE through on purpose. Asserting "the leaf is still Ready" or "its class did not
+// disappear" would pass without the fix too (Ready is written by the aggregator, and the mirror had already
+// run while the DataImport was alive), so it would prove nothing. Rewriting the class on the content and
+// waiting for it on the leaf is red before the fix and green after. The probe survives: once the aggregator
+// sees no DataImport, its import projection returns before publishing and leaves the latched status.data
+// alone.
+//
+// The real class is put back (and re-observed on the leaf) before returning, so the rest of the round trip
+// — restore, export, re-import — sees the truth.
+//
+// The probe is (re)asserted from inside the wait loop, not written once up front: the DataImport is
+// confirmed gone by a LIVE read, while the aggregator resolves it through its informer cache, and the
+// content event from the probe write can reach the aggregator before the DataImport delete event does
+// (separate watch streams order nothing between resources). Seeing a stale di != nil it would find the
+// latch mismatched on the class and re-publish realSC over the probe. A one-shot probe would then never
+// be re-written and the wait would hang to its full timeout instead of failing with a reason.
+func assertImportedLeafMirrorsAfterDataImportGone(ctx context.Context, ns, kind, leafName, dataImportName string, realData importedLeafVolumeData, timeout time.Duration) error {
+	realSC := realData.StorageClassName
+	gvr, ok := gvrForSnapshotKind(kind)
+	if !ok {
+		return fmt.Errorf("assertImportedLeafMirrorsAfterDataImportGone: unknown snapshot kind %q (%s)", kind, leafName)
+	}
+	leaf, err := getResource(ctx, gvr, ns, leafName)
+	if err != nil {
+		return fmt.Errorf("get %s/%s: %w", kind, leafName, err)
+	}
+	contentName, _, _ := unstructured.NestedString(leaf.Object, "status", "boundSnapshotContentName")
+	if contentName == "" {
+		return fmt.Errorf("%s/%s has no status.boundSnapshotContentName", kind, leafName)
+	}
+
+	deleteDataImport(ctx, ns, dataImportName)
+	deadline := time.Now().Add(timeout)
+	for {
+		_, gErr := getResource(ctx, dataImportGVR, ns, dataImportName)
+		if apierrors.IsNotFound(gErr) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for DataImport %s/%s to go away (last: %v)", ns, dataImportName, gErr)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+
+	probeSC := realSC + "-mirror-probe"
+	if err := waitImportedLeafMirrorsProbeClass(ctx, gvr, ns, kind, leafName, contentName, probeSC, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s stopped mirroring its SnapshotContent after the DataImport was gone: %w", kind, leafName, err)
+	}
+	// Putting the real class back needs no re-assertion: by now the aggregator has observed the delete
+	// (it stopped overwriting the probe), and even a late re-publish would write exactly realSC.
+	if err := setSnapshotContentStorageClass(ctx, contentName, realSC); err != nil {
+		return fmt.Errorf("restore the real StorageClass on %s: %w", contentName, err)
+	}
+	// The whole descriptor is re-asserted, not just the class. The probe itself only ever rewrites
+	// status.data.storageClassName and leaves the other fields alone — but the probe window is a window in
+	// which the aggregator may re-publish the data leg (it starts from a stale cached DataImport and later
+	// observes the delete), and a re-publish rebuilds the binding from {sourceRef, artifactRef}. So this is
+	// where a volumeMode/fsType lost to any such re-publish surfaces, instead of travelling on into the
+	// restore/export legs unnoticed.
+	if err := waitImportedLeafVolumeData(ctx, ns, kind, leafName, realData, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s did not converge back to its real volume metadata: %w", kind, leafName, err)
+	}
+	// The durable size is the fourth field the reap window can freeze, and the three metadata fields
+	// above cannot see that freeze: they are published together with the artifact, while the size lands
+	// only when the driver reports restoreSize — a DataImport reaped in between must not latch the gap
+	// shut (restore/export size the target PVC from this field). Asserted on both sides of the mirror.
+	if err := waitImportedLeafDurableSize(ctx, gvr, ns, kind, leafName, contentName, timeout); err != nil {
+		return fmt.Errorf("imported leaf %s/%s: %w", kind, leafName, err)
+	}
+	return nil
+}
+
+// waitImportedLeafDurableSize waits until both the SnapshotContent and the leaf mirror publish a
+// non-empty status.data.size. An empty size surviving here is the reap-window freeze: the data leg
+// published as soon as the artifact appeared, the DataImport was reaped before the driver reported
+// restoreSize, and nothing ever backfilled the field.
+func waitImportedLeafDurableSize(ctx context.Context, gvr schema.GroupVersionResource, ns, kind, leafName, contentName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		content, cErr := getResource(ctx, snapshotContentGVR, "", contentName)
+		leaf, lErr := getResource(ctx, gvr, ns, leafName)
+		switch {
+		case cErr != nil:
+			last = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+		case lErr != nil:
+			last = fmt.Sprintf("get %s/%s: %v", kind, leafName, lErr)
+		default:
+			contentSize, _, _ := unstructured.NestedString(content.Object, "status", "data", "size")
+			leafSize, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "size")
+			if contentSize != "" && leafSize != "" {
+				return nil
+			}
+			last = fmt.Sprintf("status.data.size is empty (content=%q, leaf=%q) — the durable size was never backfilled after the DataImport reap", contentSize, leafSize)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for a non-empty durable status.data.size: %s", last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// waitImportedLeafMirrorsProbeClass drives probeSC through the leaf's SnapshotContent and waits for it to
+// arrive on the leaf, re-asserting the probe on every poll instead of trusting a single write.
+//
+// It converges on its own because the two ways the probe can be lost are both transient and both re-probed
+// here: the aggregator may still hold a stale cached DataImport (it then re-publishes the real class over
+// the probe — the loop writes the probe again on the next poll), and a write may lose a conflict race.
+// Once the DataImport delete lands in the aggregator's cache its import projection returns before
+// publishing, so the probe sticks and the binder's mirror carries it to the leaf. A leaf that genuinely
+// stopped mirroring fails on the deadline with the last observed content/leaf pair, not with a bare hang.
+func waitImportedLeafMirrorsProbeClass(ctx context.Context, gvr schema.GroupVersionResource, ns, kind, leafName, contentName, probeSC string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	rewrites := 0
+	var last string
+	for {
+		content, cErr := getResource(ctx, snapshotContentGVR, "", contentName)
+		switch {
+		case cErr != nil:
+			last = fmt.Sprintf("get SnapshotContent %s: %v", contentName, cErr)
+		default:
+			contentSC, _, _ := unstructured.NestedString(content.Object, "status", "data", "storageClassName")
+			if contentSC != probeSC {
+				if sErr := setSnapshotContentStorageClass(ctx, contentName, probeSC); sErr != nil {
+					return sErr
+				}
+				rewrites++
+				last = fmt.Sprintf("SnapshotContent %s carried storageClassName=%q; probe (re)asserted (%d write(s) so far)",
+					contentName, contentSC, rewrites)
+				break
+			}
+			leaf, lErr := getResource(ctx, gvr, ns, leafName)
+			if lErr != nil {
+				last = fmt.Sprintf("get %s/%s: %v", kind, leafName, lErr)
+				break
+			}
+			leafSC, _, _ := unstructured.NestedString(leaf.Object, "status", "data", "storageClassName")
+			if leafSC == probeSC {
+				return nil
+			}
+			last = fmt.Sprintf("SnapshotContent %s carries the probe but %s/%s status.data.storageClassName=%q, want %q",
+				contentName, kind, leafName, leafSC, probeSC)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for the probe StorageClass %q to reach the leaf; last: %s", probeSC, last)
+		}
+		if !sleepCtx(ctx, pollInterval) {
+			return ctx.Err()
+		}
+	}
 }

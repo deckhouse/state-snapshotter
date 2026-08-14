@@ -11,8 +11,7 @@
 #                           VolumeSnapshotClass machinery the data leg captures and
 #                           restores through, AND the volume data-transport engine
 #                           (DataImport / DataExport, secure HTTP export/import of PVC
-#                           contents) — absorbed from the former
-#                           storage-volume-data-manager module. The upstream
+#                           contents) this suite exercises. The upstream
 #                           snapshot-controller module is NOT enabled here
 #                           (state-snapshotter consumes this "extended-VS fork").
 #                           Listed first (always on): the CRDs + controllers are cheap
@@ -41,6 +40,20 @@
 #                           Its module.yaml requires BOTH sds-node-configurator and
 #                           storage-foundation, so it is listed as depending on both
 #                           (storage-e2e enables it last, after they are Ready).
+#   - storage-volume-data-manager: a SECOND, independent DataExport/DataImport data
+#                           plane, serving its own API group from its own namespace
+#                           (d8-storage-volume-data-manager). It is enabled here
+#                           because both modules are meant to run permanently side by
+#                           side, and the coexistence specs check exactly that: its
+#                           exports keep serving, and its CRDs, resources and PVC
+#                           finalizers survive a storage-foundation converge. It
+#                           requires no other module and nothing requires it. Override
+#                           its tag with
+#                           STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE.
+#                           NOTE: E2E_COEXISTENCE=false drops this module from the
+#                           suite's RUNTIME enable/ready set and skips its specs, but
+#                           it does not remove this entry — storage-e2e applies this
+#                           file at bring-up, before any suite code runs.
 # NOTE: enabling the two SDS backends at bring-up only deploys the modules (they
 # reach Ready with no StorageClass yet). The actual storage provisioning (node
 # labels, LVMVolumeGroups, LocalStorageClass, the wired VolumeSnapshotClass) still
@@ -127,6 +140,17 @@ clusterDefinition:
         # SDS_NODE_CONFIGURATOR_MODULE_PULL_OVERRIDE=pr<N>/mr<N>.
         modulePullOverride: "main"
         # No module requirements (module.yaml: only a deckhouse version floor).
+        dependencies: []
+      - name: "storage-volume-data-manager"
+        version: 1
+        enabled: true
+        # Static default tag; CI overrides WITHOUT editing this file by exporting
+        # STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE=pr<N>/mr<N>. The module's CI
+        # publishes "main" to the same dev registry as every other module here.
+        modulePullOverride: "main"
+        # No module requirements (module.yaml: only a deckhouse version floor), and no
+        # other module here depends on it: it is a self-contained second data plane
+        # that must keep working while storage-foundation is live.
         dependencies: []
       - name: "sds-local-volume"
         version: 1

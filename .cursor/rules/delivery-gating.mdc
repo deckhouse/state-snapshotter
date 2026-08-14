@@ -4,7 +4,7 @@ alwaysApply: true
 ---
 
 - Stage-driven development (MUST):
-  - Implement features strictly within the **currently agreed stage model** documented in `docs/internal/state-snapshotter-rework/operations/project-status.md`. Do not hardcode a fixed stage range in rules. Stage list is defined by current project-status and spec.
+  - Implement features strictly within the **currently agreed stage model** recorded in the internal project-status doc. Do not hardcode a fixed stage range in rules. The stage list is defined by the current project status and spec.
   - Each change MUST declare which stage it belongs to (in PR/commit/description).
   - Do NOT pull features from a later stage into the current change.
 
@@ -13,5 +13,5 @@ alwaysApply: true
   - Do NOT start implementing the next stage if any current-stage tests fail.
 
 - Regression guarantee (MUST):
-  - When working on Stage N, all tests from stages 0..N (per project-status) MUST pass (not only new ones).
+  - When working on Stage N, all tests from stages 0..N (per the project status) MUST pass (not only new ones).
   - Fix regressions in the same change set; no “fix later”.

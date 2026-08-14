@@ -160,17 +160,21 @@ func bumpManifestCheckpoint(ctx context.Context, mcpName string) error {
 	return err
 }
 
-// waitNodeReadyFalseReason polls any snapshot tree node (root Snapshot or a demo child snapshot) until its
-// Ready condition is False with wantReason. It is the generic counterpart of waitSnapshotReadyFalseReason
-// (which is pinned to the root snapshotGVR).
-func waitNodeReadyFalseReason(ctx context.Context, gvr schema.GroupVersionResource, ns, name, wantReason string, timeout time.Duration) error {
+// reasonManifestCheckpointFailed is the terminal Ready=False reason a node carries once its manifest
+// artifact is gone for good.
+const reasonManifestCheckpointFailed = "ManifestCheckpointFailed"
+
+// waitNodeManifestCheckpointFailed polls any snapshot tree node (root Snapshot or a demo child snapshot)
+// until its Ready condition is False with the terminal manifest-loss reason. It is the generic counterpart
+// of waitSnapshotReadyFalseReason (which is pinned to the root snapshotGVR).
+func waitNodeManifestCheckpointFailed(ctx context.Context, gvr schema.GroupVersionResource, ns, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last string
 	for {
 		obj, err := getResource(ctx, gvr, ns, name)
 		if err == nil {
 			st, reason, found := conditionStatus(obj, condReady)
-			if found && st == "False" && reason == wantReason {
+			if found && st == "False" && reason == reasonManifestCheckpointFailed {
 				return nil
 			}
 			last = fmt.Sprintf("found=%v status=%q reason=%q", found, st, reason)
@@ -178,7 +182,8 @@ func waitNodeReadyFalseReason(ctx context.Context, gvr schema.GroupVersionResour
 			last = fmt.Sprintf("get err=%v", err)
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for %s %s/%s Ready=False/%s; last: %s", gvr.Resource, ns, name, wantReason, last)
+			return fmt.Errorf("timeout waiting for %s %s/%s Ready=False/%s; last: %s",
+				gvr.Resource, ns, name, reasonManifestCheckpointFailed, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
 			return ctx.Err()
@@ -282,7 +287,7 @@ func manifestCheckpointLossSpecs() {
 			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the root Snapshot fails closed on its OWN manifest leg (Ready=False/ManifestCheckpointFailed)")
-			Expect(waitNodeReadyFalseReason(ctx, snapshotGVR, ns, mcpLossRootSnapshotName, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
+			Expect(waitNodeManifestCheckpointFailed(ctx, snapshotGVR, ns, mcpLossRootSnapshotName, 2*suiteCfg.captureReadyTO+5*time.Minute)).
 				To(Succeed(), "deleting the root's own published ManifestCheckpoint after capture must be terminal, not pending")
 		})
 
@@ -305,7 +310,7 @@ func manifestCheckpointLossSpecs() {
 			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the child DemoVirtualMachineSnapshot fails closed (Ready=False/ManifestCheckpointFailed)")
-			Expect(waitNodeReadyFalseReason(ctx, demoVMSnapshotGVR, ns, vmSnap, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
+			Expect(waitNodeManifestCheckpointFailed(ctx, demoVMSnapshotGVR, ns, vmSnap, 2*suiteCfg.captureReadyTO+5*time.Minute)).
 				To(Succeed(), "the child node must go terminal on its own lost manifest artifact")
 
 			By("Asserting the failure propagates up: root Snapshot Ready=False/ChildrenFailed")
@@ -332,7 +337,7 @@ func manifestCheckpointLossSpecs() {
 			Expect(deleteWithAllowDelete(ctx, manifestCheckpointGVR, "", mcpName)).To(Succeed())
 
 			By("Asserting the grandchild DemoVirtualDiskSnapshot fails closed (Ready=False/ManifestCheckpointFailed)")
-			Expect(waitNodeReadyFalseReason(ctx, demoDiskSnapshotGVR, ns, diskSnap, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
+			Expect(waitNodeManifestCheckpointFailed(ctx, demoDiskSnapshotGVR, ns, diskSnap, 2*suiteCfg.captureReadyTO+5*time.Minute)).
 				To(Succeed(), "the grandchild node must go terminal on its own lost manifest artifact")
 
 			By("Asserting the failure propagates all the way up: root Snapshot Ready=False/ChildrenFailed")
@@ -362,7 +367,7 @@ func manifestCheckpointLossSpecs() {
 			Expect(bumpManifestCheckpoint(ctx, mcpName)).To(Succeed())
 
 			By("Asserting the grandchild fails closed on the missing chunk (Ready=False/ManifestCheckpointFailed)")
-			Expect(waitNodeReadyFalseReason(ctx, demoDiskSnapshotGVR, ns, diskSnap, "ManifestCheckpointFailed", 2*suiteCfg.captureReadyTO+5*time.Minute)).
+			Expect(waitNodeManifestCheckpointFailed(ctx, demoDiskSnapshotGVR, ns, diskSnap, 2*suiteCfg.captureReadyTO+5*time.Minute)).
 				To(Succeed(), "a missing chunk is a terminal integrity loss of the checkpoint")
 
 			By("Asserting the failure propagates up: root Snapshot Ready=False/ChildrenFailed")

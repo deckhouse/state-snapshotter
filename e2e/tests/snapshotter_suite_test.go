@@ -100,6 +100,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		namespaceCaptureReworkSpecs()   // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
 		namespaceManifestCaptureSpecs() // namespace_manifest_capture_test.go: Namespace object capture + MCR admission
 		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
+		restoreFidelitySpecs()          // restore_fidelity_test.go: restore leg fidelity on its own RBAC/secret capture — cross-object namespace references, secret payloads, read stability
 		importSpecs()                   // import_gc_test.go: export -> import round-trip
 		gcSpecs()                       // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
 
@@ -114,12 +115,12 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 			deleteNamespace(ctx, captured.namespace)
 		})
 	})
-	resourceSelectorSpecs()          // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (own namespaces; phase 1b + env-gated 3b)
-	vetoSelectorSpecs()              // veto_selector_test.go: exclude-veto + resourceSelector across all tree levels (root object, VM child, disk grandchild, VM companion Secret, PVC/orphan, veto+selector combo) (default on; opt-out: E2E_VETO_SELECTOR=false; data fixture also needs E2E_VOLUME_DATA)
-	resourceSelectorAdmissionSpecs() // resource_selector_admission_test.go: CEL forbids spec.resourceSelector on mode: Import (admission rejection; skip-not-fail on an older CRD)
+	resourceSelectorSpecs()          // resource_selector_test.go: spec.resourceSelector include/exclude across manifests, CSD, PVC (parked — the field left the API; opt-in: E2E_RESOURCE_SELECTOR=true)
+	vetoSelectorSpecs()              // veto_selector_test.go: exclude-veto across all tree levels (root object, VM child, disk grandchild, VM companion Secret, PVC/orphan) (default on; opt-out: E2E_VETO_SELECTOR=false; data fixture also needs E2E_VOLUME_DATA; its selector root is parked behind E2E_RESOURCE_SELECTOR)
+	resourceSelectorAdmissionSpecs() // resource_selector_admission_test.go: admission REFUSES spec.resourceSelector outright (runs by default; skip-not-fail on a CRD predating the rule)
 	volumeDataSpecs()                // volumedata_test.go: full volume-data flow (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
 	volumeDataGcSpecs()              // volumedata_gc_test.go: durable data-bearing tree survives ns deletion, then ObjectKeeper deletion reclaims the whole tree incl. llvs (phase 3; default on; opt-out: E2E_VOLUME_DATA=false)
-	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: Block 3d VS domain — user + vetoed VolumeSnapshot (default on; opt-out: E2E_VOLUME_DATA=false)
+	volumeSnapshotDomainSpecs()      // volumesnapshot_domain_test.go: VS domain — user + vetoed VolumeSnapshot (default on; opt-out: E2E_VOLUME_DATA=false)
 	childBridgeFailureSpecs()        // child_bridge_failure_test.go: domain-disk terminal volume capture -> parent Ready=False/ChildrenFailed (default on; opt-out: E2E_CHILD_BRIDGE_FAILURE=false)
 	manifestCheckpointLossSpecs()    // manifest_checkpoint_loss_test.go: root/child/grandchild MCP (or chunk) deleted after capture -> node ManifestCheckpointFailed + root ChildrenFailed (default on; opt-out: E2E_MANIFEST_CHECKPOINT_LOSS=false)
 	freezeDeadlineSpecs()            // freeze_deadline_test.go: hung child disk snapshot (thick-vol CSI error, non-terminal VCR) -> VM self-Fail ConsistencyDeadlineExceeded + freeze marker cleared (default on; opt-out: E2E_FREEZE_DEADLINE=false)
@@ -130,7 +131,13 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
-	deleteGuardSpecs()               // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
+	controllerRestartSpecs()         // controller_restart_test.go: the controller Pod is killed mid-capture on its own data tree — the capture finishes by itself, the tree does not duplicate and Ready never regresses (opt-in E2E_CONTROLLER_RESTART; also needs E2E_VOLUME_DATA)
+	// The coexistence specs are registered LAST of the non-destructive set, because one of them forces
+	// storage-foundation through a converge: that restarts the data-plane controllers every earlier phase
+	// depends on, so it must not run in the middle of them.
+	coexistenceSpecs()              // coexistence_test.go: storage-volume-data-manager exports a live PVC next to storage-foundation, and a forced storage-foundation converge leaves its CRDs, its DataExport and its PVC finalizer untouched (default on; opt-out: E2E_COEXISTENCE=false)
+	publicAddressSchemeGuardSpecs() // coexistence_test.go: guard on the documented limitation — sequentially, both modules publish one live PVC under the SAME public address (default on; opt-out: E2E_COEXISTENCE=false; also needs E2E_PUBLISH)
+	deleteGuardSpecs()              // delete_guard_test.go: destructive delete-protection assertions (opt-in E2E_DELETE_GUARD)
 })
 
 func prepareSuite() {
@@ -148,7 +155,10 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  volume-data phase enabled:  %v  (default on; E2E_VOLUME_DATA=false to disable)\n", suiteCfg.volumeData)
 	GinkgoWriter.Printf("  GET-load measurement:       %v  (default on; E2E_GET_LOAD=false to disable)\n", suiteCfg.getLoad)
 	GinkgoWriter.Printf("  namespace-capture extended: %v  (default on; E2E_NS_CAPTURE_REWORK=false to disable)\n", envEnabledByDefault(os.Getenv(envNSCaptureRework)))
+	GinkgoWriter.Printf("  resourceSelector specs:     %v  (default OFF — the field left the Snapshot API; E2E_RESOURCE_SELECTOR=true to enable)\n", envBool(os.Getenv(envResourceSelector)))
+	GinkgoWriter.Printf("  controller-restart spec:    %v  (default OFF — it kills the running controller Pod; E2E_CONTROLLER_RESTART=true to enable)\n", envBool(os.Getenv(envControllerRestart)))
 	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
+	GinkgoWriter.Printf("  coexistence module+specs:   %v  (default on; E2E_COEXISTENCE=false drops the %s module AND its specs)\n", suiteCfg.coexistence, volumeDataManagerModuleName)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)
 	GinkgoWriter.Printf("  probe image:                %q\n", suiteCfg.probeImage)
 	GinkgoWriter.Printf("  backup client image:        %q\n", suiteCfg.backupClientImage)
@@ -179,11 +189,11 @@ func prepareSuite() {
 		checkPublishInfra()
 	}
 
-	// waitModuleAndCSDReady enables + waits for the whole module stack (five modules across three
-	// dependency levels: state-snapshotter/sds-node-configurator -> storage-foundation/poc ->
-	// sds-local-volume), then the demo CSD. Each wait is bounded by moduleReadyTO; convergence is largely
-	// serial along the dependency chain, so the parent context budgets for a few of them plus a buffer for
-	// the (retrying) enable step.
+	// waitModuleAndCSDReady enables + waits for the whole module stack (state-snapshotter and
+	// sds-node-configurator -> storage-foundation and the PoC domain -> sds-local-volume, plus the
+	// dependency-free storage-volume-data-manager when E2E_COEXISTENCE is on), then the demo CSD. Each wait
+	// is bounded by moduleReadyTO; convergence is largely serial along the dependency chain, so the parent
+	// context budgets for a few of them plus a buffer for the (retrying) enable step.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*suiteCfg.moduleReadyTO+10*time.Minute)
 	defer cancel()
 

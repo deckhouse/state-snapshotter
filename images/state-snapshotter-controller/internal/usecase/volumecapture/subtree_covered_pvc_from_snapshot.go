@@ -35,7 +35,7 @@ import (
 // nodes, discovering the descendants through the Snapshot child graph (status.childrenSnapshotRefs) rather
 // than the ROOT's bound SnapshotContent tree — hence "root-content-free".
 //
-// wave7 ("late Planned"): residual/orphan-PVC coverage (and the root manifest-exclude set derived from it)
+// ("late Planned"): residual/orphan-PVC coverage (and the root manifest-exclude set derived from it)
 // must be computable BEFORE the ROOT SnapshotContent is bound, so coverage cannot start from the root
 // content's childrenSnapshotContentRefs. The Snapshot child graph is populated at planning time (before the
 // root content bind), and every descendant node exposes its OWN already-bound content via
@@ -43,18 +43,18 @@ import (
 // coveredPVCUIDsForContent so the covered-UID semantics stay identical to the content-tree variant
 // (CollectSubtreeCoveredPVCUIDs): the data-bearing decision comes AUTHORITATIVELY from the CSD (dataBearing
 // / RequiresDataArtifact keyed on the owning snapshot kind), and a data-bearing node whose status.data is
-// not published yet is covered via the owner fallback (in-flight VCR name / native-CSI snapshotSource.uid,
-// design §8.5/§11.7).
+// not published yet is covered via the owner fallback (in-flight VCR name / native-CSI
+// snapshotSource.uid).
 //
 // Invariants mirrored from the content-tree variant:
 //   - the root itself is excluded (only its descendants count);
-//   - orphan/residual-PVC VolumeSnapshot children are ordinary domain descendants now (content-single-writer
-//     design §11.6): they are recursed into and cover their own PVC UID like every other data-bearing node —
+//   - orphan/residual-PVC VolumeSnapshot children are ordinary domain descendants now: they are
+//     recursed into and cover their own PVC UID like every other data-bearing node —
 //     there is no visibility-leaf carve-out;
 //   - claiming the same PVC UID in two descendants is fail-closed (ErrDuplicateCoveredPVCUID);
 //   - a descendant not yet bound (or a manifest-only node) contributes no covered UID. Callers gate the
 //     residual wave on all domain children reaching capture barrier 1 (allDeclaredDomainChildSnapshotsReady,
-//     relaxed to phase>=Planned in Block 5) so each child's VCR/snapshotSource — the owner-fallback inputs —
+//     relaxed to phase>=Planned) so each child's VCR/snapshotSource — the owner-fallback inputs —
 //     exists before coverage matters, without waiting for its full status.data (milestone B). A referenced
 //     child object (or its named bound content) that cannot be read is a hard error (fail-closed): silently
 //     under-covering would let an already-captured PVC be re-captured by the residual wave. The ONE exception

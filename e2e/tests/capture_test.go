@@ -18,6 +18,7 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -130,10 +131,10 @@ func captureSpecs() {
 		})
 
 		It("captures the demo snapshot tree (root Snapshot + SnapshotContent Ready)", func() {
-			// This is the regression guard for the pre-Planned orphan-wave deadlock (content-single-writer
-			// design §9.2): before the eager-shell fix the root Snapshot never reached Ready on this exact
+			// This is the regression guard for the pre-Planned orphan-wave deadlock: before the
+			// eager-shell fix the root Snapshot never reached Ready on this exact
 			// demo tree (root content <- root Planned <- children Ready <- child content bound <- root content).
-			// If Block 0 regresses, this wait times out.
+			// If the eager shell regresses, this wait times out.
 			//
 			// Snapshot creation (capture) must complete quickly, so both waits below are bounded by the
 			// short captureReadyTO (fail fast) instead of the generous restore-path snapshotReadyTO.
@@ -153,52 +154,25 @@ func captureSpecs() {
 		})
 
 		It("writes childrenSnapshotContentRefs equal to the declared children exactly (single-writer edges)", func() {
-			// Block 1 (content-single-writer design §3.1/§3.2, INV-CONTENT-CHILDREN-1): the
+			// INV-CONTENT-CHILDREN-1: the
 			// SnapshotContentController is the single writer of status.childrenSnapshotContentRefs, projected
 			// from the owning snapshot's status.childrenSnapshotRefs. For every snapshot node in the tree its
 			// bound content's childrenSnapshotContentRefs must equal EXACTLY the set of bound-content names of
 			// its declared NON-LEAF children — no missing edge, no duplicate. CSI VolumeSnapshot visibility
 			// leaves are skipped (they have no backing SnapshotContent; their orphan edge is linked by the
-			// snapshot path until Block 3, and the manifest-only tree has no orphan PVCs anyway).
+			// snapshot path, and the manifest-only tree has no orphan PVCs anyway).
 			ctx, cancel := context.WithTimeout(context.Background(), 2*suiteCfg.captureReadyTO+time.Minute)
 			defer cancel()
 			Expect(captured.rootContent).NotTo(BeEmpty(), "the capture spec must run first and record the root content")
 
-			ns := captured.namespace
-
-			By("Collecting every snapshot node in the tree (root + descendants)")
-			nodes := []childRef{{kind: "Snapshot", name: captured.rootSnap}}
-			descendants, err := walkSnapshotTree(ctx, ns, captured.rootSnap)
-			Expect(err).NotTo(HaveOccurred())
-			nodes = append(nodes, descendants...)
-
 			By("Asserting each node's content edges equal its declared non-leaf children exactly")
-			for _, node := range nodes {
-				if node.kind == "VolumeSnapshot" {
-					continue // CSI visibility leaf: no backing content of its own
-				}
-				gvr, ok := gvrForSnapshotKind(node.kind)
-				Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
-				// capture for the closure
-				Eventually(func(g Gomega) {
-					expected, contentName, err := declaredChildContentNames(ctx, gvr, ns, node.name)
-					g.Expect(err).NotTo(HaveOccurred())
-					g.Expect(contentName).NotTo(BeEmpty(), "node %s/%s must be bound to a content", node.kind, node.name)
-
-					actual, err := contentChildEdgeNames(ctx, contentName)
-					g.Expect(err).NotTo(HaveOccurred())
-
-					for edge, count := range actual {
-						g.Expect(count).To(Equal(1), "duplicate edge %q in content %s (childrenSnapshotContentRefs must be a set)", edge, contentName)
-					}
-					g.Expect(actual).To(Equal(expected),
-						"content %s childrenSnapshotContentRefs must equal its declared non-leaf children exactly (node %s/%s)", contentName, node.kind, node.name)
-				}).WithTimeout(suiteCfg.captureReadyTO).WithPolling(pollInterval).Should(Succeed())
-			}
+			checked := assertContentChildEdgesExact(ctx, captured.namespace, captured.rootSnap, suiteCfg.captureReadyTO)
+			GinkgoWriter.Printf("content child edges checked on %d snapshot node(s)\n", checked)
+			Expect(checked).To(BeNumerically(">=", 1), "the walk must compare at least the root node")
 		})
 
 		It("publishes each node's manifestCheckpointName pointing at a Ready ManifestCheckpoint owned by its content (single-writer manifest leg)", func() {
-			// Block 2 (content-single-writer design §3.1/§3.2, INV-CONTENT-WRITER-1): the
+			// INV-CONTENT-WRITER-1: the
 			// SnapshotContentController aggregator is the single writer of status.manifestCheckpointName,
 			// projected from the owning snapshot's ManifestCaptureRequest (MCR -> mcr.status.checkpointName).
 			// For every snapshot node in the tree its bound content must publish a manifestCheckpointName that
@@ -296,7 +270,7 @@ func captureSpecs() {
 		})
 
 		It("stamps the delete-protected marker on system-created children and every SnapshotContent, but never on the user-created root", func() {
-			// Delete-protection write-path (design/delete-protection-contract.md, spec/system-spec.md):
+			// Delete-protection write-path:
 			// the authoritative marker state-snapshotter.deckhouse.io/delete-protected="true" must be present
 			// on every object the system creates as part of the tree (child domain snapshots + all bound
 			// SnapshotContents), and MUST be absent on the user-created root Snapshot so the operator can
@@ -349,6 +323,65 @@ func captureSpecs() {
 			Expect(childContents).To(BeNumerically(">=", 1), "expected at least one system-created child snapshot node")
 		})
 	})
+}
+
+// assertContentChildEdgesExact asserts INV-CONTENT-CHILDREN-1 over a whole captured tree: the
+// SnapshotContentController is the single writer of status.childrenSnapshotContentRefs, projected from the
+// owning snapshot's status.childrenSnapshotRefs, so for EVERY snapshot node reachable from rootSnapshot the
+// bound content's childrenSnapshotContentRefs must equal EXACTLY the set of bound-content names of its
+// declared NON-LEAF children — no missing edge, no duplicate. CSI VolumeSnapshot visibility leaves are
+// skipped: they have no backing SnapshotContent of their own (their orphan edge is linked by the snapshot
+// path).
+//
+// Each node is polled up to timeout, because the aggregator publishes the edge asynchronously. The return
+// value is the number of nodes actually compared, so a caller can show the walk was not vacuous — a tree
+// that came back smaller than it should be would otherwise satisfy every per-node comparison.
+func assertContentChildEdgesExact(ctx context.Context, ns, rootSnapshot string, timeout time.Duration) int {
+	GinkgoHelper()
+	nodes := []childRef{{kind: "Snapshot", name: rootSnapshot}}
+	descendants, err := walkSnapshotTree(ctx, ns, rootSnapshot)
+	Expect(err).NotTo(HaveOccurred(), "walk the snapshot tree from %s/%s", ns, rootSnapshot)
+	nodes = append(nodes, descendants...)
+
+	checked := 0
+	for _, node := range nodes {
+		if node.kind == "VolumeSnapshot" {
+			continue // CSI visibility leaf: no backing content of its own
+		}
+		gvr, ok := gvrForSnapshotKind(node.kind)
+		Expect(ok).To(BeTrue(), "unknown snapshot kind %q for %s", node.kind, node.name)
+		Eventually(func(g Gomega) {
+			expected, contentName, err := declaredChildContentNames(ctx, gvr, ns, node.name)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(contentName).NotTo(BeEmpty(), "node %s/%s must be bound to a content", node.kind, node.name)
+
+			actual, err := contentChildEdgeNames(ctx, contentName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			for edge, count := range actual {
+				g.Expect(count).To(Equal(1),
+					"duplicate edge %q in content %s (childrenSnapshotContentRefs must be a set)\ncontent edges=%s",
+					edge, contentName, prettyEdgeSet(actual))
+			}
+			g.Expect(actual).To(Equal(expected),
+				"content %s childrenSnapshotContentRefs must equal its declared non-leaf children exactly (node %s/%s)\ndeclared children (expected)=%s\ncontent edges (actual)=%s",
+				contentName, node.kind, node.name, prettyEdgeSet(expected), prettyEdgeSet(actual))
+		}).WithContext(ctx).WithTimeout(timeout).WithPolling(pollInterval).Should(Succeed())
+		checked++
+	}
+	return checked
+}
+
+// prettyEdgeSet renders a childrenSnapshotContentRefs multiset (edge name -> occurrences) as pretty JSON,
+// truncated the way the raw manifest comparator truncates its two sides. Both sides of a failing edge
+// comparison go through it, so the run log — the only place a nested-cluster failure gets diagnosed — shows
+// what was expected next to what was found.
+func prettyEdgeSet(m map[string]int) string {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Sprintf("<marshal failed: %v>", err)
+	}
+	return truncate(prettyManifestJSON(raw), 2048)
 }
 
 // declaredChildContentNames resolves a snapshot node's bound content name (status.boundSnapshotContentName)

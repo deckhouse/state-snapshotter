@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -37,7 +36,7 @@ import (
 )
 
 // namespaceChildrenOutcome is the planning verdict planNamespaceChildren returns for the reconciler to map
-// onto the SDK recipe (wave5 design §4.2): AllPlanned → MarkPlanned/Finished gate; Pending/Forbidden →
+// onto the SDK recipe: AllPlanned → MarkPlanned/Finished gate; Pending/Forbidden →
 // requeue (non-terminal); Terminal → sdk.Fail. It replaces the bespoke reconcileParentOwnedChildGraph's
 // (changed, ready, err) tri-return once the root is content-free.
 type namespaceChildrenOutcome int
@@ -70,8 +69,8 @@ type namespaceChildrenPlan struct {
 }
 
 // planNamespaceChildren reproduces the bespoke reconcileParentOwnedChildGraph enumeration as a pure
-// planner (wave5 design §6.2): CSD-eligible resource mappings, ascending weight layers, resourceSelector
-// narrowing, exclude-label veto, and cross-layer coverage dedup — but it BUILDS []ChildSpec instead of
+// planner: CSD-eligible resource mappings, ascending weight layers, exclude-label veto, and cross-layer
+// coverage dedup — but it BUILDS []ChildSpec instead of
 // creating child snapshots, and returns the planning outcome instead of patching status. The reconciler
 // then calls sdk.EnsureChildren(desired, excluded) to create/adopt + publish, and maps the outcome onto
 // the barrier (MarkPlanned / Fail / requeue).
@@ -90,13 +89,6 @@ func (r *SnapshotReconciler) planNamespaceChildren(ctx context.Context, nsSnap *
 		return namespaceChildrenPlan{outcome: namespaceChildrenAllPlanned}, nil
 	}
 
-	// resourceSelector narrows which top-level domain source objects the root expands into child snapshots
-	// (nil = expand all). Resolved once and threaded into every layer, keeping the manifest leg consistent.
-	selector, err := nsSnap.ResolveResourceSelector()
-	if err != nil {
-		return namespaceChildrenPlan{}, fmt.Errorf("resolve spec.resourceSelector: %w", err)
-	}
-
 	var desired []snapshotsdk.ChildSpec
 	var desiredRefs []storagev1alpha1.SnapshotChildRef
 	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
@@ -112,7 +104,7 @@ func (r *SnapshotReconciler) planNamespaceChildren(ctx context.Context, nsSnap *
 		var layerSpecs []snapshotsdk.ChildSpec
 		var layerRefs []storagev1alpha1.SnapshotChildRef
 		for _, mapping := range mappings[layerStart:layerEnd] {
-			specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage, selector)
+			specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
 			if err != nil {
 				var forbidden *sourceListForbiddenError
 				if stderrors.As(err, &forbidden) {
@@ -142,7 +134,7 @@ func (r *SnapshotReconciler) planNamespaceChildren(ctx context.Context, nsSnap *
 			// Ready mirror already surface ChildrenFailed, so this pre-Planned weight-gate catch must agree —
 			// otherwise the root's terminal reason would depend on the race between the child failure and
 			// MarkPlanned. GraphPlanningFailed stays reserved for the root's OWN planning faults
-			// (resourceSelector/list/coverage errors); terminalMessage here comes exclusively from
+			// (source list/coverage errors); terminalMessage here comes exclusively from
 			// snapshotChildTerminalFailure, i.e. always a child.
 			return namespaceChildrenPlan{
 				desired:  desired,
@@ -253,13 +245,13 @@ func (r *SnapshotReconciler) detectLostDomainChildrenPrePlanned(
 }
 
 // planParentOwnedChildGraphLayer is the build-spec (create-free) counterpart of
-// ensureParentOwnedChildGraphLayer: it lists a mapping's source objects, applies the exclude-label veto
-// and resourceSelector, dedups against coverage, and BUILDS one SDK ChildSpec per kept object (via
+// ensureParentOwnedChildGraphLayer: it lists a mapping's source objects, applies the exclude-label veto,
+// dedups against coverage, and BUILDS one SDK ChildSpec per kept object (via
 // buildNamespaceChildSpec) instead of creating the child snapshot. It returns the specs, their refs (for
 // the weight-layer readiness gate + coverage seeding), and the top-level drops. Owner-reference stamping
 // and create/adopt are the SDK's job (sdk.EnsureChildren), so the spec carries no owner ref.
 //
-// NOTE (wave5 PR-B, transitional): this duplicates the enumeration loop of ensureParentOwnedChildGraphLayer
+// NOTE (transitional): this duplicates the enumeration loop of ensureParentOwnedChildGraphLayer
 // deliberately, so the bespoke create path keeps working until the atomic content-free flip wires the SDK
 // recipe. The bespoke ensureParentOwnedChildGraphLayer/reconcileParentOwnedChildGraph are removed in the
 // same flip, retiring this duplication.
@@ -268,7 +260,6 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	nsSnap *storagev1alpha1.Snapshot,
 	mapping csdregistry.EligibleResourceSnapshotMapping,
 	coverage snapshotCoverageChecker,
-	selector labels.Selector,
 ) ([]snapshotsdk.ChildSpec, []storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
 	var specs []snapshotsdk.ChildSpec
 	var refs []storagev1alpha1.SnapshotChildRef
@@ -276,7 +267,7 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	// A CSD that maps a source (a PVC) directly onto the NATIVE CSI VolumeSnapshot kind is NOT expanded into
 	// a domain child here. PVC volume capture is owned end-to-end by the root's residual/orphan wave
 	// (ensureOrphanVolumeSnapshotsPrePlanned -> ensureOrphanPVCVolumeSnapshots), which builds the correct
-	// spec.source.persistentVolumeClaimName, resolves the VolumeSnapshotClass, and honors resourceSelector.
+	// spec.source.persistentVolumeClaimName, resolves the VolumeSnapshotClass, and honors the exclude veto.
 	// buildNamespaceChildSpec only emits the unified spec.sourceRef shape, so expanding a native VolumeSnapshot
 	// mapping would POST an invalid VolumeSnapshot ("spec.source: Required value") and wedge the root capture
 	// (the child never gets conditions). We still enumerate the source objects below so a veto-labeled PVC is
@@ -309,24 +300,20 @@ func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	})
 	for i := range items {
 		resource := &items[i]
-		// Absolute exclude veto (wave4A): a top-level source object carrying the exclude label is dropped
-		// from every leg (it also fails selector.Matches below, since ResolveResourceSelector folds the veto
-		// in) and recorded as an explicit top-level drop — the root node's OWN direct exclusion.
+		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped from every
+		// leg — never expanded into a child here, and dropped from the root manifest leg by the same veto —
+		// and recorded as an explicit top-level drop, the root node's OWN direct exclusion.
 		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
 			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
 				APIVersion: mapping.SourceGVK.GroupVersion().String(),
 				Kind:       mapping.SourceGVK.Kind,
 				Name:       resource.GetName(),
 			})
+			continue
 		}
 		// Native CSI VolumeSnapshot mapping: the veto above is still recorded, but the source object is NOT
 		// expanded into a child (nor marked covered) — the residual/orphan wave owns its VolumeSnapshot.
 		if expandsToOrphanWave {
-			continue
-		}
-		// User-provided resourceSelector narrows expansion: a source object whose labels do not match is not
-		// expanded into a child snapshot (nil selector = expand all).
-		if selector != nil && !selector.Matches(labels.Set(resource.GetLabels())) {
 			continue
 		}
 		covered, err := coverage.IsCovered(ctx, resource)

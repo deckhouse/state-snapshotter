@@ -80,15 +80,23 @@ func aggregatedManifestsIntegrationMustInstallReadyMCP(ctx context.Context, cl c
 	}
 	Expect(cl.Create(ctx, ch)).To(Succeed())
 	Expect(cl.Create(ctx, mcp)).To(Succeed())
-	mcp.Status = ssv1alpha1.ManifestCheckpointStatus{
-		Chunks:       []ssv1alpha1.ChunkInfo{{Name: chName, Index: 0, Checksum: cs}},
-		TotalObjects: len(objects),
-	}
-	meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
-		Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
-		Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
-	})
-	Expect(cl.Status().Update(ctx, mcp)).To(Succeed())
+	// Read-modify-write in a retry loop, because BOTH halves can legitimately fail on the first try:
+	// cl is the manager's CACHED client, so a Get right after Create can still miss the object, and the
+	// suite's real controllers touch it (finalizers, mirrors) between Create and this status write, which
+	// invalidates the resourceVersion. Either one would otherwise fail the calling spec with an error that
+	// says nothing about what that spec asserts.
+	Eventually(func(g Gomega) {
+		g.Expect(cl.Get(ctx, client.ObjectKeyFromObject(mcp), mcp)).To(Succeed())
+		mcp.Status = ssv1alpha1.ManifestCheckpointStatus{
+			Chunks:       []ssv1alpha1.ChunkInfo{{Name: chName, Index: 0, Checksum: cs}},
+			TotalObjects: len(objects),
+		}
+		meta.SetStatusCondition(&mcp.Status.Conditions, metav1.Condition{
+			Type: ssv1alpha1.ManifestCheckpointConditionTypeReady, Status: metav1.ConditionTrue,
+			Reason: ssv1alpha1.ManifestCheckpointConditionReasonCompleted,
+		})
+		g.Expect(cl.Status().Update(ctx, mcp)).To(Succeed())
+	}).Should(Succeed())
 	return mcp
 }
 
@@ -103,12 +111,17 @@ func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context
 		Spec:       retainContentSpec(),
 	}
 	Expect(cl.Create(ctx, content)).To(Succeed())
-	content.Status.ManifestCheckpointName = mcpName
-	content.Status.ChildrenSnapshotContentRefs = refs
-	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
-	})
-	Expect(cl.Status().Update(ctx, content)).To(Succeed())
+	// Same two hazards as the checkpoint helper above: the cached client may not see the object yet, and
+	// SnapshotContentController stamps its finalizer as soon as it does appear.
+	Eventually(func(g Gomega) {
+		g.Expect(cl.Get(ctx, client.ObjectKeyFromObject(content), content)).To(Succeed())
+		content.Status.ManifestCheckpointName = mcpName
+		content.Status.ChildrenSnapshotContentRefs = refs
+		meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
+			Type: snapshot.ConditionReady, Status: metav1.ConditionTrue, Reason: "Completed",
+		})
+		g.Expect(cl.Status().Update(ctx, content)).To(Succeed())
+	}).Should(Succeed())
 }
 
 func aggregatedManifestsIntegrationStartServer() *httptest.Server {

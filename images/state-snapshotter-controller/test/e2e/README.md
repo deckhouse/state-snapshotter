@@ -2,7 +2,8 @@
 
 ## Overview
 
-This directory contains end-to-end tests for the state-snapshotter controller, verifying all critical aspects of the ADR.
+This directory contains end-to-end tests for the state-snapshotter controller, covering the
+ManifestCaptureRequest -> ManifestCheckpoint capture chain and its ObjectKeeper-driven GC.
 
 ## Quick Start
 

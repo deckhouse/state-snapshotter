@@ -315,7 +315,7 @@ func countDataManagerServerPods(ctx context.Context, storageManagerName string) 
 	return n, nil
 }
 
-func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Duration) (url, ca string, err error) {
+func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Duration) (url string, err error) {
 	deadline := time.Now().Add(timeout)
 	var last string
 	var polls int
@@ -326,9 +326,11 @@ func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Dura
 			volMode, _, _ := unstructured.NestedString(obj.Object, "status", "volumeMode")
 			if found && st == "True" {
 				url, _, _ = unstructured.NestedString(obj.Object, "status", "url")
-				ca, _, _ = unstructured.NestedString(obj.Object, "status", "ca")
+				// The CA is not returned (the uploader trusts it through the pod's mounted bundle), but a
+				// Ready DataImport must publish one — an empty status.ca means the endpoint is not servable yet.
+				ca, _, _ := unstructured.NestedString(obj.Object, "status", "ca")
 				if url != "" && volMode == "Block" && ca != "" {
-					return url, ca, nil
+					return url, nil
 				}
 				last = fmt.Sprintf("Ready=True but url/volumeMode/ca incomplete (url=%q volumeMode=%q ca=%t)", url, volMode, ca != "")
 			} else {
@@ -345,10 +347,10 @@ func waitDataImportReady(ctx context.Context, ns, name string, timeout time.Dura
 			dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			dumpStuckDataImportDiagnostics(dctx, ns, name)
 			dcancel()
-			return "", "", fmt.Errorf("timeout waiting for DataImport %s/%s Ready; last: %s", ns, name, last)
+			return "", fmt.Errorf("timeout waiting for DataImport %s/%s Ready; last: %s", ns, name, last)
 		}
 		if !sleepCtx(ctx, pollInterval) {
-			return "", "", ctx.Err()
+			return "", ctx.Err()
 		}
 	}
 }
@@ -743,7 +745,7 @@ func collectDataLeaves(nodes []*importNode) []*importNode {
 
 func uploadDataLeaves(ctx context.Context, importNS string, leaves []*importNode) error {
 	for _, leaf := range leaves {
-		url, _, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
+		url, werr := waitDataImportReady(ctx, importNS, leaf.name, suiteCfg.dataTransferTO)
 		if werr != nil {
 			return fmt.Errorf("DataImport %s Ready: %w", leaf.name, werr)
 		}
@@ -864,6 +866,43 @@ func runImportVariant(ctx context.Context, label, importNS string, rootManifests
 		return fmt.Errorf("import children Ready: %w", err)
 	}
 	logf("import-root Snapshot + bound content %s Ready; all %d tree node(s) Ready", content, len(nodes))
+	// The volume metadata the bytes were staged with must be durable on the imported tree: the aggregator
+	// publishes it into the leaf's SnapshotContent and the leaf mirrors it. Without the class `d8 snapshot
+	// download` writes storageClassName: "" into snapshot.yaml and every later read of that archive (resumed
+	// download, localscan, re-import) fails validation; without volumeMode the imported snapshot can never be
+	// exported (an empty one fails closed instead of defaulting to Filesystem); without fsType the volume a
+	// restore creates gets no filesystem type at all. None of the three can be recovered afterwards — the
+	// scratch volume is destroyed at capture and the DataImport is reaped by its idle TTL.
+	for _, leaf := range leaves {
+		wantSC, _, _, perr := sourcePVCScratchParams(ctx, backup.srcNS, leaf.pvcName)
+		if perr != nil {
+			return fmt.Errorf("read expected storageClassName for %s: %w", leaf.name, perr)
+		}
+		// The DataImport of a data leaf is named after the leaf (see uploadDataLeaves) and is still alive here,
+		// so it can state what the import actually staged.
+		wantLeafData, werr := importedLeafVolumeDataFromDataImport(ctx, importNS, leaf.name, wantSC)
+		if werr != nil {
+			return werr
+		}
+		if err := waitImportedLeafVolumeData(ctx, importNS, leaf.kind, leaf.name, wantLeafData, suiteCfg.snapshotReadyTO); err != nil {
+			return err
+		}
+		logf("imported leaf %s/%s carries %+v on both the leaf and its content", leaf.kind, leaf.name, wantLeafData)
+		// The three fields above are the ones this flow knows to ask for. The completeness matrix asks for
+		// EVERY field of status.data that this leaf's data-leg path is required to publish, so a field added
+		// later — or one silently dropped on this path — does not depend on somebody remembering to extend the
+		// assertion above.
+		if err := assertLeafSnapshotContentDataComplete(ctx, importNS, leaf.kind, leaf.name); err != nil {
+			return err
+		}
+		// A finished import outlives its DataImport (idle-TTL reaped), and that must NOT freeze the leaf:
+		// the DataImport is deleted here to reach the steady state deterministically instead of waiting out
+		// the TTL, and the leaf is then required to still track its SnapshotContent.
+		if err := assertImportedLeafMirrorsAfterDataImportGone(ctx, importNS, leaf.kind, leaf.name, leaf.name, wantLeafData, suiteCfg.snapshotReadyTO); err != nil {
+			return err
+		}
+		logf("imported leaf %s/%s still mirrors its SnapshotContent with no DataImport in the namespace", leaf.kind, leaf.name)
+	}
 	restorePath := coreSnapshotSubPath(importNS, bkImportRootName, subManifestsRestore)
 	body, err := aggGet(ctx, restorePath, map[string]string{"targetNamespace": importNS})
 	if err != nil {

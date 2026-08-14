@@ -34,16 +34,13 @@ import (
 //
 // IMPORTANT: Interface Stability Contract
 //
-// This interface is a formal contract defined in unified-snapshots-test-plan.md.
-// The public methods (Register*, Resolve*) MUST NOT be changed without updating:
-//   - unified-snapshots-test-plan.md (PACKAGE INTERFACES section)
+// The public methods (Register*, Resolve*) are consumed by out-of-process domain controllers, so a
+// signature or behaviour change here breaks implementors outside this repository.
 //
 // Contract Rules:
 //   - Registration MUST be idempotent
 //   - Resolution MUST be deterministic
 //   - Errors MUST be informative
-//
-// See: unified-snapshots-test-plan.md (INTERFACE: pkg/snapshot.GVKRegistry)
 type GVKRegistry struct {
 	// snapshotGVKs maps snapshot Kind -> GVK (Kind must be globally unique across groups/versions)
 	// This is a strict contract of the unified snapshot mechanism.
@@ -77,7 +74,7 @@ func NewGVKRegistry() *GVKRegistry {
 // Contract: Idempotent - registering the same GVK twice is allowed and has no effect.
 // Example: RegisterSnapshotGVK("VirtualMachineSnapshot", "virtualization.deckhouse.io/v1alpha1")
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: RegisterSnapshotGVK - Idempotency)
+// Pinned by TestRegisterSnapshotGVK_Idempotency.
 func (r *GVKRegistry) RegisterSnapshotGVK(kind string, apiVersion string) error {
 	gvk := parseGVK(kind, apiVersion)
 	if existing, ok := r.snapshotGVKs[kind]; ok {
@@ -188,7 +185,7 @@ func (r *GVKRegistry) RequiresDataArtifact(snapshotKind string) bool {
 // Contract: Deterministic - same Kind always returns same GVK (if registered).
 // Returns error if not found.
 //
-// See: unified-snapshots-test-plan.md (TEST CASE: ResolveSnapshotGVK - Unknown Kind Returns Error)
+// Pinned by TestResolveSnapshotGVK_UnknownKindReturnsError.
 func (r *GVKRegistry) ResolveSnapshotGVK(kind string) (schema.GroupVersionKind, error) {
 	gvk, ok := r.snapshotGVKs[kind]
 	if !ok {

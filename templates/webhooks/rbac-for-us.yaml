@@ -27,17 +27,9 @@ rules:
   # Arbitrary (non-allowlisted) namespaced CR targets are NOT covered by this static allowlist; instead the
   # 040-namespace-capture-rbac hook adds this SA to the transient, namespace-scoped capture RoleBinding for
   # the duration of capture, so the webhook can Get them without a standing wildcard grant.
-  # Demo inventory (Track D0/D1): MCR validation resolves targets via dynamic client Get().
-  # get/list/watch — admission paths beyond a single named Get.
-  - apiGroups:
-      - sds-unified-snapshots-poc.deckhouse.io
-    resources:
-      - demovirtualmachines
-      - demovirtualdisks
-    verbs:
-      - get
-      - list
-      - watch
+  # Domain (CSD-registered) source CRs are intentionally NOT listed here: their resource names are
+  # domain-specific, so they cannot live in this static, domain-agnostic allowlist. The 030-domain-rbac hook
+  # binds this SA to d8:state-snapshotter:webhooks:domain-read with a standing `get` on the CSD source GVRs.
   - apiGroups:
       - ""
     resources:
