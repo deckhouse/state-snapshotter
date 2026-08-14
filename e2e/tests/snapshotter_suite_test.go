@@ -100,6 +100,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 		namespaceCaptureReworkSpecs()   // namespace_capture_rbac_test.go: RBAC hook, discovery inclusion, raw secrets, immutability
 		namespaceManifestCaptureSpecs() // namespace_manifest_capture_test.go: Namespace object capture + MCR admission
 		restoreSpecs()                  // restore_test.go: manifest-level restore into a fresh namespace
+		restoreFidelitySpecs()          // restore_fidelity_test.go: restore leg fidelity on its own RBAC/secret capture — cross-object namespace references, secret payloads, read stability
 		importSpecs()                   // import_gc_test.go: export -> import round-trip
 		gcSpecs()                       // import_gc_test.go: TTL/GC cascade (own short-TTL sub-tree)
 

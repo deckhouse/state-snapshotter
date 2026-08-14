@@ -30,17 +30,27 @@ namespace and is meant to run permanently alongside `storage-foundation`.
 The specs run inside a single ordered `Describe`, registered by builder
 functions in dependency order:
 
-1. **Phase 1 & 2 - manifest-only flow** (`captureSpecs`, `aggregatedApiSpecs`,
-   `namespaceCaptureReworkSpecs`, `restoreSpecs`, `importSpecs`, `gcSpecs`): apply
+1. **Phase 1 & 2 - manifest-only flow** (`captureSpecs`, `aggregatedAPISpecs`,
+   `namespaceCaptureReworkSpecs`, `namespaceManifestCaptureSpecs`, `restoreSpecs`,
+   `restoreFidelitySpecs`, `importSpecs`, `gcSpecs`): apply
    the manifest-only source (an ownerless ConfigMap plus a single manifest-only
    `DemoVirtualMachine`), create a root `Snapshot`, assert the `Snapshot` /
    `SnapshotContent` and the demo child snapshot reach Ready, read the aggregated
    APIs, restore the manifests into a fresh namespace, run the export -> import
    round-trip, and exercise the root TTL/GC cascade. Generic-object discovery
    (RBAC/Service/Deployment/etc.) is covered by `namespaceCaptureReworkSpecs`, not
-   the capture fixture. All these cheap specs share one `captured` tree (gc uses
-   its own short-TTL sub-tree) and need only `state-snapshotter` (no volume-data
-   leg).
+   the capture fixture. `restoreFidelitySpecs` captures a small RBAC/secret fixture
+   of its own and asserts what the restore happy path cannot see: cross-object
+   namespace references (a `RoleBinding` subject), secret payloads, and that a
+   repeated read serves the captured state — the source object is changed in
+   between — instead of following the live source. Registration order matters only
+   for the specs that READ the shared `captured` tree — `aggregatedAPISpecs`,
+   `restoreSpecs`, `importSpecs` and the archived-latch spec of
+   `namespaceCaptureReworkSpecs` — which must stay after the `captureSpecs` that
+   creates it. The rest build their own namespaces and trees:
+   `namespaceManifestCaptureSpecs`, `restoreFidelitySpecs`, `gcSpecs` (own
+   short-TTL sub-tree) and the remaining rework specs. The whole phase is cheap and
+   needs only `state-snapshotter` (no volume-data leg).
 2. **Phase 3 - full volume-data flow** (`volumeDataSpecs`, env-gated by
    `E2E_VOLUME_DATA`): provision a thin, snapshot-capable StorageClass via
    `storage-e2e/pkg/testkit.EnsureDefaultStorageClass` (which auto-enables
@@ -56,7 +66,7 @@ functions in dependency order:
   `storage-foundation` `DataExport` from an in-cluster backup-client pod (Bearer
   auth + `GET /api/v1/block`, sha256 compared to source). Needs
   `storage-foundation` (enabled in `tests/cluster_config.yml`).
-4. **Phase 5 - backup-system restore import** (`backupRestoreSpecs`, env-gated by
+4. **Phase 5 - backup-system restore import** (`importVariantsSpecs`, env-gated by
    `E2E_VOLUME_DATA`, chained from phase 4): reshape the captured tree for the
    import upload path (VM manifest folded into root; three data leaves), POST
    manifests via `manifests-and-children-refs-upload`, upload volume bytes via
