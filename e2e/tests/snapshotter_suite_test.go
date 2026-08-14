@@ -131,6 +131,7 @@ var _ = Describe("state-snapshotter e2e", Ordered, ContinueOnFailure, func() {
 	publishDataExportSpecs()         // publish_de_test.go: DataExport publish:true — internal (status.url) + external (ingress) token auth, checksums, teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishDataImportSpecs()         // publish_di_test.go: DataImport publish:true — external (ingress) block upload via publicURL, terminal state, restore checksum, no-token negative, infra teardown (default on; opt-out: E2E_PUBLISH=false)
 	publishManifestsSpecs()          // publish_manifests_test.go: aggregated manifests-download reachable externally through the SAME kubernetes-api ingress — internal==external + live match, 403 without RBAC (proves no separate APIService ingress; default on; opt-out: E2E_PUBLISH=false)
+	controllerRestartSpecs()         // controller_restart_test.go: the controller Pod is killed mid-capture on its own data tree — the capture finishes by itself, the tree does not duplicate and Ready never regresses (opt-in E2E_CONTROLLER_RESTART; also needs E2E_VOLUME_DATA)
 	// The coexistence specs are registered LAST of the non-destructive set, because one of them forces
 	// storage-foundation through a converge: that restarts the data-plane controllers every earlier phase
 	// depends on, so it must not run in the middle of them.
@@ -155,6 +156,7 @@ func prepareSuite() {
 	GinkgoWriter.Printf("  GET-load measurement:       %v  (default on; E2E_GET_LOAD=false to disable)\n", suiteCfg.getLoad)
 	GinkgoWriter.Printf("  namespace-capture extended: %v  (default on; E2E_NS_CAPTURE_REWORK=false to disable)\n", envEnabledByDefault(os.Getenv(envNSCaptureRework)))
 	GinkgoWriter.Printf("  resourceSelector specs:     %v  (default OFF — the field left the Snapshot API; E2E_RESOURCE_SELECTOR=true to enable)\n", envBool(os.Getenv(envResourceSelector)))
+	GinkgoWriter.Printf("  controller-restart spec:    %v  (default OFF — it kills the running controller Pod; E2E_CONTROLLER_RESTART=true to enable)\n", envBool(os.Getenv(envControllerRestart)))
 	GinkgoWriter.Printf("  publish sanity-check:       %v  (default on; E2E_PUBLISH=false to disable)\n", suiteCfg.publish)
 	GinkgoWriter.Printf("  coexistence module+specs:   %v  (default on; E2E_COEXISTENCE=false drops the %s module AND its specs)\n", suiteCfg.coexistence, volumeDataManagerModuleName)
 	GinkgoWriter.Printf("  phase-3 storage class:      %q\n", suiteCfg.storageClass)

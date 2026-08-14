@@ -246,9 +246,12 @@ pseudo-version. `state-snapshotter/api` is always consumed via
 - `E2E_MODULE_READY_TIMEOUT`: Go duration bounding module + demo CSD readiness.
   Defaults to `15m`.
 - `E2E_GC_TTL`: `snapshotTtlAfterDelete` applied for the GC spec. Defaults to `60s`.
-All feature flags below are **opt-out**: they are **ON by default** so a plain run on a
-full cluster exercises the entire suite. Disable what your environment cannot support by
-setting the flag to a falsey value (`false`/`0`/`no`/`off`).
+The spec gates listed below are **opt-out** with one exception: they are **ON by default** so a
+plain run on a full cluster exercises the entire suite, and you disable what your environment
+cannot support by setting the gate to a falsey value (`false`/`0`/`no`/`off`). The exception is
+`E2E_CONTROLLER_RESTART`, which is **opt-in** and marked as such where it is listed. The
+non-gate knobs further down — images, timeouts, `E2E_KEEP_CLUSTER_ON_FAILURE`,
+`E2E_KEEP_CLUSTER` — follow their own defaults, stated per entry.
 
 - `E2E_VOLUME_DATA`: **on by default** — runs phases 3-5 (full volume-data flow, backup
   download, and backup restore). Set `E2E_VOLUME_DATA=false` to run phases 1-2 only (no
@@ -327,6 +330,18 @@ setting the flag to a falsey value (`false`/`0`/`no`/`off`).
   infrastructure and is skipped when `E2E_PUBLISH=false` (the address it compares is
   `status.publicURL`). The module's image tag follows the usual convention:
   `STORAGE_VOLUME_DATA_MANAGER_MODULE_PULL_OVERRIDE` (default `main`).
+- `E2E_CONTROLLER_RESTART`: **OFF by default — opt-in** (`E2E_CONTROLLER_RESTART=true`, and it
+  also needs the volume-data flow, so keep `E2E_VOLUME_DATA` on). Controller liveness: it
+  captures its own three-level data-backed tree in its own namespace and **kills the running
+  controller Pod** (grace period 0) in the middle of that capture — after the root froze its
+  plan, before the tree went terminal, decided from the object's own state and never from a
+  timer. The capture must then finish **by itself**: nothing is patched, annotated or
+  re-created afterwards. It asserts that the tree did not duplicate (every node's
+  `childrenSnapshotContentRefs` still equals its declared children exactly, and no
+  `ManifestCaptureRequest` / `VolumeCaptureRequest` was issued a second time for a node whose
+  leg had already latched) and that `Ready` never regressed once given. It is opt-in because
+  the controller Deployment is a single replica: while it restarts, nothing in the cluster
+  reconciles. The spec waits for the controller to lead again before it finishes.
 - `E2E_PUBLISH_INGRESS_INLET`: inlet for the `IngressNginxController` the publish step
   provisions when a cluster has no ingress class. Defaults to `HostPort` (the only inlet
   that works on the static nested cluster, whose publish domain is the master IP). Only
