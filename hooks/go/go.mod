@@ -3,9 +3,9 @@ module github.com/deckhouse/state-snapshotter/hooks/go
 go 1.26.5
 
 require (
+	github.com/deckhouse/state-snapshotter/api v0.0.0
 	github.com/deckhouse/deckhouse/pkg/log v0.0.0-20250814094423-e9f108b41a1a
 	github.com/deckhouse/module-sdk v0.5.0
-	github.com/deckhouse/state-snapshotter/api v0.0.0
 	k8s.io/api v0.32.10
 	k8s.io/apimachinery v0.32.10
 	k8s.io/client-go v0.32.10
