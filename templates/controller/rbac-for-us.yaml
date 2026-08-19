@@ -178,6 +178,14 @@ rules:
   resources: ["storageclasses"]
   verbs: ["get"]
 
+# Events on Snapshot roots. The EventRecorder attaches the event to the object being reconciled, and a
+# Snapshot is namespaced — it lives in the user's namespace, not in d8-state-snapshotter — so the
+# leader-election Role does not cover it and the grant has to be cluster-wide. create+patch mirrors what
+# client-go does: Create the first time, Patch on every repeat inside the aggregation window.
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth, the controller SA's static RBAC stays domain-agnostic. The
 # 030-domain-rbac hook grants the core controller SA and DataExport SA access to CSD-registered GVRs and
