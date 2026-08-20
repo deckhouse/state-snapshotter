@@ -33,6 +33,7 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
 // RootObjectKeeperName returns the deterministic root ObjectKeeper name for a snapshot object, keyed by
@@ -106,8 +107,6 @@ func EnsureRootObjectKeeperWithTTL(
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec:       want,
 	}
-	// Our ObjectKeeper is a protocol node: stamp delete-protection into the CREATE payload
-	storagev1alpha1.StampDeleteProtected(ok)
 	if err := c.Create(ctx, ok); err != nil {
 		return nil, ctrl.Result{}, err
 	}
@@ -216,8 +215,16 @@ func lifecycleOwnerRefs(existing []metav1.OwnerReference, desired metav1.OwnerRe
 	return out, !OwnerReferencesEqual(existing, out), nil
 }
 
+// isLifecycleOwnerRef reports whether a reference is one of the kinds that own an object's lifetime, as
+// opposed to the unrelated references this module preserves untouched. It decides two things at once: which
+// existing reference a new lifecycle owner replaces, and which one conflicts with it.
+//
+// KindVolumeSnapshotContent is on the list because the content of a snapshot this module did not create is
+// owned by that snapshot's artifact (genericbinder.isArtifactOwnedRoot). Leaving it off would not merely
+// misclassify it — the reference would be read as unrelated and kept, and the next lifecycle owner would be
+// appended beside it, giving the object two references with controller=true, which the API server rejects.
 func isLifecycleOwnerRef(ref metav1.OwnerReference) bool {
-	if ref.Kind == KindObjectKeeper || ref.Kind == "SnapshotContent" {
+	if ref.Kind == KindObjectKeeper || ref.Kind == "SnapshotContent" || ref.Kind == snapshot.KindVolumeSnapshotContent {
 		return true
 	}
 	return strings.HasSuffix(ref.Kind, "Snapshot")

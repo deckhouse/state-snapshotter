@@ -22,25 +22,6 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// unionExcludedObjectRefs returns the deduplicated, sorted union of two excluded-ref sets. Used for the
-// monotonic accumulation of the root Snapshot's own top-level exclude-veto drops and for the top-level
-// mirror of the durable SnapshotContent aggregate.
-func unionExcludedObjectRefs(a, b []storagev1alpha1.ExcludedObjectRef) []storagev1alpha1.ExcludedObjectRef {
-	set := make(map[storagev1alpha1.ExcludedObjectRef]struct{}, len(a)+len(b))
-	for _, ref := range a {
-		set[ref] = struct{}{}
-	}
-	for _, ref := range b {
-		set[ref] = struct{}{}
-	}
-	out := make([]storagev1alpha1.ExcludedObjectRef, 0, len(set))
-	for ref := range set {
-		out = append(out, ref)
-	}
-	sortExcludedObjectRefs(out)
-	return out
-}
-
 func sortExcludedObjectRefs(refs []storagev1alpha1.ExcludedObjectRef) {
 	sort.Slice(refs, func(i, j int) bool {
 		if refs[i].APIVersion != refs[j].APIVersion {

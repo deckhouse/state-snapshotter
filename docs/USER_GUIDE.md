@@ -157,12 +157,14 @@ The internal objects that make up a snapshot tree are protected from accidental 
 admission delete-guard. This closes an incident class where deleting a child object (e.g. a managed CSI
 `VolumeSnapshot`) from a UI silently degrades the root `Snapshot` while the durable data still exists.
 
-- **What is protected.** Internal tree nodes only: child `Snapshot`s, `SnapshotContent`,
-  `ManifestCheckpoint` and its chunks, `ObjectKeeper`, and the managed CSI `VolumeSnapshot` /
-  `VolumeSnapshotContent`. They carry the marker `state-snapshotter.deckhouse.io/delete-protected: "true"`.
+- **What is protected.** The namespaced nodes inside a tree: child `Snapshot`s and the managed CSI
+  `VolumeSnapshot`. They carry the marker `state-snapshotter.deckhouse.io/delete-protected: "true"`.
 - **What is NOT protected.** The **root `Snapshot`** is not marked — deleting it is the normal way to tear
-  down the whole tree (the controllers then remove the internal objects for you). Objects that are not part
-  of a snapshot tree are never affected.
+  down the whole tree (the controllers then remove the internal objects for you). The cluster-scoped
+  objects of a tree (`SnapshotContent`, `ManifestCheckpoint` and its chunks, `ObjectKeeper`, the managed CSI
+  `VolumeSnapshotContent`) are not marked either: they are not reachable from a namespace, and damage there
+  surfaces as a degraded tree rather than being blocked by admission. Objects that are not part of a snapshot
+  tree are never affected.
 - **Force-delete (break-glass).** To delete a protected object directly, set the annotation
   `deckhouse.io/allow-delete: "true"` on it, then delete. The marker itself cannot be removed or changed by
   regular users; the annotation is the only supported override and is reversible until the delete happens.

@@ -1699,8 +1699,9 @@ func (r *SnapshotContentController) ensureManifestCheckpointOwnedByContent(ctx c
 	})
 }
 
-// selfHealDataArtifactOwnerRefs re-asserts the SnapshotContent ownerRef on every VolumeSnapshotContent
-// referenced by status.dataRefs[] (truth). This keeps ownerRef-only wake-up reliable without using
+// selfHealDataArtifactOwnerRefs re-asserts the handoff state — SnapshotContent ownerRef, durable
+// deletionPolicy and delete protection — on every VolumeSnapshotContent referenced by status.dataRefs[]
+// (truth). This keeps ownerRef-only wake-up reliable without using
 // dataRefs as a wake-up routing index (INV-OWNCHAIN). It reuses the same handoff owner-ref shape as the
 // snapshot-side publisher (Controller=true, kind SnapshotContent) so the two writers converge and never
 // flip-flop. It is best-effort: missing VSC is left to data readiness (ArtifactMissing), a deleting VSC
@@ -1714,6 +1715,10 @@ func (r *SnapshotContentController) selfHealDataArtifactOwnerRefs(ctx context.Co
 	content := &storagev1alpha1.SnapshotContent{}
 	content.Name = obj.GetName()
 	content.UID = obj.GetUID()
+	// The owner references travel with it: they are how the handoff recognises the content that merely
+	// wraps somebody else's artifact and must leave that artifact alone. Dropping them here would make
+	// this path re-parent an artifact the publish path deliberately did not touch.
+	content.OwnerReferences = obj.GetOwnerReferences()
 	for _, binding := range contentLike.GetStatusDataRefs() {
 		art := binding.Artifact
 		if art.Kind != kindVolumeSnapshotContent || art.Name == "" {

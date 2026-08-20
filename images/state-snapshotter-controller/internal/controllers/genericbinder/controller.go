@@ -34,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
@@ -292,7 +291,28 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 	// Step 1: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
 	var contentOwnerRef *metav1.OwnerReference
-	if snapshot.IsRootSnapshot(obj) {
+	switch {
+	case isArtifactOwnedRoot(obj):
+		// A snapshot this module did not create is captured like any other, but its data belongs to
+		// whoever made it. Its content is a wrapper over that artifact and is owned BY the artifact, so it
+		// lives exactly as long as the thing it describes: a Delete-policy artifact goes away with the
+		// snapshot and takes the wrapper with it, a Retain-policy one keeps both until its owner removes it.
+		// No ObjectKeeper is created — a TTL here would mean this module reclaiming somebody else's data at
+		// a moment they never chose.
+		ref, pending, err := r.resolveBoundArtifactOwnerRef(ctx, obj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if pending {
+			// Unlike the tree, this root cannot get an eager content shell: its owner does not exist until
+			// CSI binds the snapshot. Waiting is safe precisely because it is a root without children —
+			// nothing is waiting below it, so there is no convergence cycle to break.
+			logger.V(1).Info("waiting for the CSI binding before creating the content of a snapshot this module did not create")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		contentOwnerRef = ref
+
+	case snapshot.IsRootSnapshot(obj):
 		var result ctrl.Result
 		var err error
 		objectKeeper, result, err := controllercommon.EnsureRootObjectKeeperWithTTL(ctx, r.Client, r.APIReader, r.Config, obj, obj.GetObjectKind().GroupVersionKind())
@@ -304,7 +324,8 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		ref := controllercommon.RootObjectKeeperOwnerReference(objectKeeper)
 		contentOwnerRef = &ref
-	} else {
+
+	default:
 		ref, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -377,9 +398,6 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		contentObj.SetOwnerReferences([]metav1.OwnerReference{*contentOwnerRef})
-		// Stamp the authoritative delete-protection state into the CREATE payload: SnapshotContent is a
-		// durable tree node and must appear in the API already protected.
-		storagev1alpha1.StampDeleteProtected(contentObj)
 
 		if err := r.Create(ctx, contentObj); err != nil {
 			if !errors.IsAlreadyExists(err) {
@@ -574,9 +592,6 @@ func (r *GenericSnapshotBinderController) ensureObjectKeeper(
 			},
 			Spec: wantSpec,
 		}
-		// Our ObjectKeeper is a protocol node (retention link of the tree): stamp delete-protection into
-		// the CREATE payload.
-		storagev1alpha1.StampDeleteProtected(objectKeeper)
 
 		if err := r.Create(ctx, objectKeeper); err != nil {
 			return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)

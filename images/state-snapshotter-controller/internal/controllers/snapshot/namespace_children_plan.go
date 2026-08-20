@@ -37,8 +37,7 @@ import (
 
 // namespaceChildrenOutcome is the planning verdict planNamespaceChildren returns for the reconciler to map
 // onto the SDK recipe: AllPlanned → MarkPlanned/Finished gate; Pending/Forbidden →
-// requeue (non-terminal); Terminal → sdk.Fail. It replaces the bespoke reconcileParentOwnedChildGraph's
-// (changed, ready, err) tri-return once the root is content-free.
+// requeue (non-terminal); Terminal → sdk.Fail.
 type namespaceChildrenOutcome int
 
 const (
@@ -57,7 +56,7 @@ const (
 )
 
 // namespaceChildrenPlan is the result of planning the root's domain child graph: the desired child
-// snapshots as SDK ChildSpecs (fed to sdk.EnsureChildren, which creates/adopts + publishes refs), the
+// snapshots as SDK ChildSpecs (fed to sdk.EnsureChildren, which creates + publishes refs), the
 // root's own top-level exclude-veto drops (published as domainSpecificController.excludedRefs), and the
 // planning outcome. It never creates objects or writes status — that is the reconciler's job via the SDK.
 type namespaceChildrenPlan struct {
@@ -68,12 +67,11 @@ type namespaceChildrenPlan struct {
 	message  string
 }
 
-// planNamespaceChildren reproduces the bespoke reconcileParentOwnedChildGraph enumeration as a pure
-// planner: CSD-eligible resource mappings, ascending weight layers, exclude-label veto, and cross-layer
-// coverage dedup — but it BUILDS []ChildSpec instead of
-// creating child snapshots, and returns the planning outcome instead of patching status. The reconciler
-// then calls sdk.EnsureChildren(desired, excluded) to create/adopt + publish, and maps the outcome onto
-// the barrier (MarkPlanned / Fail / requeue).
+// planNamespaceChildren enumerates the root's domain child graph as a pure planner: CSD-eligible resource
+// mappings, ascending weight layers, exclude-label veto, and cross-layer coverage dedup — but it BUILDS
+// []ChildSpec instead of creating child snapshots, and returns the planning outcome instead of patching
+// status. The reconciler then calls sdk.EnsureChildren(desired, excluded) to create + publish, and maps
+// the outcome onto the barrier (MarkPlanned / Fail / requeue).
 //
 // Weight-layer gating is preserved exactly: a higher layer's coverage depends on lower layers having
 // reached capture barrier 1, so the loop stops at the first layer not yet phase>=Planned and returns
@@ -244,17 +242,11 @@ func (r *SnapshotReconciler) detectLostDomainChildrenPrePlanned(
 	return "", "", nil
 }
 
-// planParentOwnedChildGraphLayer is the build-spec (create-free) counterpart of
-// ensureParentOwnedChildGraphLayer: it lists a mapping's source objects, applies the exclude-label veto,
-// dedups against coverage, and BUILDS one SDK ChildSpec per kept object (via
-// buildNamespaceChildSpec) instead of creating the child snapshot. It returns the specs, their refs (for
-// the weight-layer readiness gate + coverage seeding), and the top-level drops. Owner-reference stamping
-// and create/adopt are the SDK's job (sdk.EnsureChildren), so the spec carries no owner ref.
-//
-// NOTE (transitional): this duplicates the enumeration loop of ensureParentOwnedChildGraphLayer
-// deliberately, so the bespoke create path keeps working until the atomic content-free flip wires the SDK
-// recipe. The bespoke ensureParentOwnedChildGraphLayer/reconcileParentOwnedChildGraph are removed in the
-// same flip, retiring this duplication.
+// planParentOwnedChildGraphLayer is create-free: it lists a mapping's source objects, applies the
+// exclude-label veto, dedups against coverage, and BUILDS one SDK ChildSpec per kept object (via
+// buildNamespaceChildSpec). It returns the specs, their refs (for the weight-layer readiness gate +
+// coverage seeding), and the top-level drops. Creating the child is the SDK's job (sdk.EnsureChildren),
+// which is also what stamps the owner reference and the markers — so the spec carries neither.
 func (r *SnapshotReconciler) planParentOwnedChildGraphLayer(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,

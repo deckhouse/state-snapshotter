@@ -283,9 +283,9 @@ func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
 	ctx := context.Background()
 	scheme := aggScheme(t)
 	vsc := volumeSnapshotContentObject("vsc-owned", true)
-	// Already-correct means BOTH the controller ownerRef AND the durable deletionPolicy=Retain are in
-	// place (the handoff/self-heal enforces Retain, see EnsureVolumeSnapshotContentsOwnedByContent), so a
-	// steady-state reconcile must not patch.
+	// Already-correct means everything the handoff delivers is in place: the controller ownerRef and the
+	// durable deletionPolicy=Retain (see EnsureVolumeSnapshotContentsOwnedByContent). Either one missing is
+	// a reason to patch, so a steady-state reconcile only stays silent when both are present.
 	if err := unstructured.SetNestedField(vsc.Object, "Retain", "spec", "deletionPolicy"); err != nil {
 		t.Fatalf("set deletionPolicy: %v", err)
 	}
@@ -313,6 +313,56 @@ func TestSelfHealVSCAlreadyOwnedNoUpdate(t *testing.T) {
 
 	if patchCalls != 0 {
 		t.Fatalf("self-heal must not patch an already-correctly-owned VSC; patchCalls=%d", patchCalls)
+	}
+}
+
+// Self-heal re-asserts the handoff, so it has to refuse in exactly the case the handoff refuses: the
+// artifact that OWNS the content, which is the shape of a snapshot this module did not create. Patching it
+// here would flip the user's Delete policy to Retain and close an ownership cycle between two
+// cluster-scoped objects — and it would do so behind the publish path's back, which already declined.
+func TestSelfHealLeavesTheArtifactThatOwnsTheContent(t *testing.T) {
+	ctx := context.Background()
+	scheme := aggScheme(t)
+	vsc := volumeSnapshotContentObject("vsc-user", true)
+	if err := unstructured.SetNestedField(vsc.Object, "Delete", "spec", "deletionPolicy"); err != nil {
+		t.Fatalf("set deletionPolicy: %v", err)
+	}
+	vsc.SetUID(types.UID("vsc-user-uid"))
+	var patchCalls int
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
+
+	ctrlTrue := true
+	content := commonContentReadyWithMCPAndDataRefs("user-vs-content", "vsc-user")
+	content.SetUID(types.UID("content-uid-user"))
+	content.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       kindVolumeSnapshotContent,
+		Name:       "vsc-user",
+		UID:        types.UID("vsc-user-uid"),
+		Controller: &ctrlTrue,
+	}})
+	r.selfHealDataArtifactOwnerRefs(ctx, content)
+
+	if patchCalls != 0 {
+		t.Fatalf("the artifact that owns the content must not be written; patchCalls=%d", patchCalls)
+	}
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(volumeSnapshotContentGVK())
+	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-user"}, got); err != nil {
+		t.Fatalf("get VolumeSnapshotContent: %v", err)
+	}
+	if policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy"); policy != "Delete" {
+		t.Fatalf("deletionPolicy = %q, want the user's own Delete", policy)
+	}
+	if owners := got.GetOwnerReferences(); len(owners) != 0 {
+		t.Fatalf("ownerReferences = %+v, want none: owning it back would close a cycle", owners)
 	}
 }
 

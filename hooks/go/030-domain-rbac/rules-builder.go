@@ -35,10 +35,10 @@ import (
 
 // buildCoreReadRules builds rules for the CORE SA on the dynamic demo snapshot GVRs:
 //   - get/list/watch + create + patch on the snapshot resource. The core SnapshotReconciler is the
-//     parent-graph planner: it CREATES one parent-owned child snapshot per source object
-//     (parent_graph.go:ensureParentOwnedChildSnapshot → r.Client.Create) and PATCHes it to maintain the
-//     ownerRef back to the root Snapshot. Without create the planner fails with
-//     PlanningReady=False/GraphPlanningFailed ("cannot create demovirtualmachinesnapshots …").
+//     parent-graph planner: it declares one root-owned child snapshot per source object, and the SDK
+//     child seam CREATES it and PATCHes an existing one of its own to restore the markers. Without create
+//     the planner fails with PlanningReady=False/GraphPlanningFailed ("cannot create
+//     demovirtualmachinesnapshots …").
 //     The ownerRef does not set blockOwnerDeletion, so no /finalizers permission is required on the owner.
 //   - status-write (get/update/patch on /status): binding BoundSnapshotContentName + volume-metadata
 //     projection (status fields there are split between core and domain by the single-writer model).

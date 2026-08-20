@@ -260,11 +260,22 @@ func SnapshotDataBindingToUnstructuredMap(d *storagev1alpha1.SnapshotDataBinding
 const volumeSnapshotContentRetainPolicy = "Retain"
 
 // EnsureVolumeSnapshotContentsOwnedByContent performs the durable-artifact handoff for each bound VSC:
-// it re-parents the VSC ownerReference to the bound SnapshotContent AND forces spec.deletionPolicy to
-// Retain so the artifact survives deletion of the per-run VolumeSnapshot/VCR. This mirrors the orphan
-// PVC path (ensureVolumeSnapshotContentRetain): without the Retain step a class-default Delete policy
-// would let the underlying snapshot be garbage-collected, breaking durability (the domain VCR path
-// previously left the VSC at deletionPolicy=Delete).
+// it re-parents the VSC ownerReference to the bound SnapshotContent and forces spec.deletionPolicy to
+// Retain so the artifact survives deletion of the per-run VolumeSnapshot/VCR. This mirrors the orphan PVC
+// path (ensureVolumeSnapshotContentRetain): without the Retain step a class-default Delete policy would let
+// the underlying snapshot be garbage-collected, breaking durability (the domain VCR path previously left the
+// VSC at deletionPolicy=Delete).
+//
+// It is deliberately blind to what an object says about itself: it acts on the VSC named by the caller, and
+// that name reaches it only through an already established relationship — the owner VolumeSnapshot's
+// status.boundVolumeSnapshotContentName, or a VolumeCaptureRequest's published dataRefs. Adding a second
+// opinion here about whether a VSC is "ours" would be a classifier competing with the ownership graph.
+//
+// The one artifact it leaves untouched is the one that owns the content itself. That inversion is the shape
+// of a snapshot this module did not create: the artifact is somebody else's and the content merely wraps it
+// (genericbinder.isArtifactOwnedRoot). Handing it off would do two harmful things at once — pin a
+// deletionPolicy its owner did not ask for, and close an ownership cycle between two cluster-scoped objects
+// that garbage collection never resolves, leaving both behind forever.
 func EnsureVolumeSnapshotContentsOwnedByContent(
 	ctx context.Context,
 	c client.Client,
@@ -285,12 +296,31 @@ func EnsureVolumeSnapshotContentsOwnedByContent(
 	return nil
 }
 
+// contentOwnedByArtifact reports whether the named VolumeSnapshotContent is the controller owner of the
+// SnapshotContent whose references these are — that is, whether the content is a wrapper over an artifact it
+// does not own. It reads only the owner references already in hand, so every caller (the handoff writer
+// below and the teardown reclaim) answers the question from the same fact and they cannot drift apart.
+func contentOwnedByArtifact(ownerRefs []metav1.OwnerReference, vscName string) bool {
+	for _, ref := range ownerRefs {
+		if ref.Controller != nil && *ref.Controller && ref.Kind == kindVolumeSnapshotContent && ref.Name == vscName {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureVolumeSnapshotContentOwnedByContent is the single writer of the handoff. The artifact that owns the
+// content is refused here rather than in one of the callers so that no path can reach the write without the
+// question being asked: the caller must hand over a content carrying its real owner references.
 func ensureVolumeSnapshotContentOwnedByContent(
 	ctx context.Context,
 	c client.Client,
 	vscName string,
 	content *storagev1alpha1.SnapshotContent,
 ) error {
+	if contentOwnedByArtifact(content.OwnerReferences, vscName) {
+		return nil
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		obj := &unstructured.Unstructured{}
 		obj.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})

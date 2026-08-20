@@ -47,10 +47,9 @@ func namespaceManifestSpec(targets []namespacemanifest.ManifestTarget) snapshots
 
 // buildNamespaceChildSpec builds one root-owned domain child snapshot as an SDK ChildSpec: the child
 // object carries only kind/name/namespace and the immutable spec.sourceRef (the single source-of-truth
-// for what it captures). It deliberately does NOT stamp the owner reference — the SDK owns adoption
-// (owner reference), create-or-validate, and SnapshotChildRef derivation (see snapshotsdk.ChildSpec), so
-// the planner mirrors what parent_graph.go's ensureParentOwnedChildSnapshot builds at CREATE time, minus
-// the owner ref the SDK now stamps.
+// for what it captures). It deliberately stamps neither the owner reference nor the markers — the SDK
+// owns the owner reference, the provenance and protection markers, create-or-validate, and
+// SnapshotChildRef derivation (see snapshotsdk.ChildSpec).
 //
 // Pure planner: extracted so the child-object shape is unit-testable in
 // isolation and later emitted via sdk.EnsureChildren.

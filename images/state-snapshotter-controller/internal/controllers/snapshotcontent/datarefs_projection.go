@@ -413,7 +413,13 @@ func (r *SnapshotContentController) publishDataBindings(ctx context.Context, con
 		return false, cErr
 	}
 	if handoffErr := EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
-		// Retryable handoff; coverage still holds via the pending source until dataRefs are published.
+		// Retryable handoff; coverage still holds via the pending source until dataRefs are published. It is
+		// logged rather than returned because a requeue is the right response, but it MUST be logged: a
+		// handoff that keeps failing leaves the leg unpublished forever, and an unpublished leg is only
+		// visible as DataCapturePending on the content — the same state a leg that is merely still working
+		// shows. Without this line the two are indistinguishable in the logs.
+		logf.FromContext(ctx).Error(handoffErr, "durable-artifact handoff failed; the data leg stays unpublished until it succeeds",
+			"content", contentName)
 		return true, nil
 	}
 	if pubErr := PublishSnapshotContentDataRefs(ctx, r.Client, contentName, bindings); pubErr != nil {

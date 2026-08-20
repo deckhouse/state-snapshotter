@@ -18,7 +18,6 @@ package snapshot
 
 import (
 	"context"
-	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -37,209 +36,8 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/csdregistry"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
-
-func (r *SnapshotReconciler) reconcileParentOwnedChildGraph(
-	ctx context.Context,
-	nsSnap *storagev1alpha1.Snapshot,
-	content *storagev1alpha1.SnapshotContent,
-) (bool, bool, error) {
-	mappings, err := csdregistry.EligibleResourceSnapshotMappings(ctx, r.snapshotReader(), r.Mgr.GetRESTMapper())
-	if err != nil {
-		return false, false, err
-	}
-	if len(mappings) == 0 {
-		changed, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, nil)
-		return changed, err == nil, err
-	}
-
-	var desiredRefs []storagev1alpha1.SnapshotChildRef
-	var topLevelDrops []storagev1alpha1.ExcludedObjectRef
-	coverage := newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, nil)
-	for layerStart := 0; layerStart < len(mappings); {
-		// Mappings are ordered ascending by CSD spec.weight; a weight layer is the run of equal-weight
-		// mappings processed together before the next (higher) layer.
-		weight := mappings[layerStart].Weight
-		layerEnd := layerStart + 1
-		for layerEnd < len(mappings) && mappings[layerEnd].Weight == weight {
-			layerEnd++
-		}
-		var layerRefs []storagev1alpha1.SnapshotChildRef
-		for _, mapping := range mappings[layerStart:layerEnd] {
-			refs, excluded, err := r.ensureParentOwnedChildGraphLayer(ctx, nsSnap, mapping, coverage)
-			if err != nil {
-				var forbidden *sourceListForbiddenError
-				if stderrors.As(err, &forbidden) {
-					sortSnapshotChildRefs(desiredRefs)
-					changed, perr := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonSourceListForbidden, forbidden.Error())
-					return changed, false, perr
-				}
-				return false, false, err
-			}
-			layerRefs = append(layerRefs, refs...)
-			topLevelDrops = append(topLevelDrops, excluded...)
-		}
-		desiredRefs = append(desiredRefs, layerRefs...)
-		ready, terminalMessage, pending, err := r.weightLayerCaptureReady(ctx, nsSnap.Namespace, layerRefs)
-		if err != nil {
-			return false, false, err
-		}
-		if terminalMessage != "" {
-			// Canonical child-failure reason is ChildrenFailed (a terminal CHILD, not the root's own planning
-			// fault) — kept in sync with the active planner path (planNamespaceChildren).
-			sortSnapshotChildRefs(desiredRefs)
-			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonChildrenFailed, terminalMessage)
-			return changed, false, err
-		}
-		if !ready {
-			// Unbounded by design: a child snapshot (e.g. large-storage capture) may stay pending for
-			// hours. Hold Ready=False/ChildrenPending listing the pending children for diagnosability;
-			// never fail by duration. Capture stays gated until the weight layer is ready.
-			sortSnapshotChildRefs(desiredRefs)
-			message := fmt.Sprintf("waiting for weight %d child snapshots to reach capture phase Planned; %s", weight, summarizePendingChildren(pending))
-			changed, err := r.patchSnapshotChildrenRefsWithReady(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs, metav1.ConditionFalse, snapshotpkg.ReasonChildrenPending, message)
-			return changed, false, err
-		}
-		coverage = newSnapshotCoverageChecker(r.Client, nsSnap.Namespace, coverageRootsForNextWave(desiredRefs))
-		layerStart = layerEnd
-	}
-	sortSnapshotChildRefs(desiredRefs)
-
-	statusChanged, err := r.patchSnapshotChildrenRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, desiredRefs)
-	if err != nil {
-		return false, false, err
-	}
-
-	// Publish the root's OWN top-level exclude-veto drops. Recorded on the root Snapshot's
-	// captureState.domainSpecificController.excludedRefs — the uniform "own direct exclusions" input the
-	// SnapshotContent aggregator reads for every node (domain CRs get theirs from the domain SDK; the root
-	// gets its top-level drops from here). Monotonic and only published once the full graph is enumerated.
-	dropsChanged, err := r.publishSnapshotTopLevelExcludedRefs(ctx, types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}, topLevelDrops)
-	if err != nil {
-		return false, false, err
-	}
-
-	_ = content
-	return statusChanged || dropsChanged, true, nil
-}
-
-// publishSnapshotTopLevelExcludedRefs records the root Snapshot's own top-level exclude-veto drops into
-// status.captureState.domainSpecificController.excludedRefs. This is the root's "own direct exclusions"
-// input to the durable SnapshotContent.status.excludedRefs aggregate (the SnapshotContent controller reads
-// this field for every owning snapshot uniformly). The set is monotonic: an object vetoed out of an
-// immutable snapshot stays vetoed, so a partial pass (an early-returning higher weight layer) never
-// subtracts a previously-recorded drop.
-func (r *SnapshotReconciler) publishSnapshotTopLevelExcludedRefs(
-	ctx context.Context,
-	parent types.NamespacedName,
-	drops []storagev1alpha1.ExcludedObjectRef,
-) (bool, error) {
-	if len(drops) == 0 {
-		return false, nil
-	}
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, parent, cur); err != nil {
-			return err
-		}
-		var existing []storagev1alpha1.ExcludedObjectRef
-		if cs := cur.Status.CaptureState; cs != nil && cs.DomainSpecificController != nil {
-			existing = cs.DomainSpecificController.ExcludedRefs
-		}
-		merged := unionExcludedObjectRefs(existing, drops)
-		if excludedObjectRefsEqualIgnoreOrder(existing, merged) {
-			return nil
-		}
-		if cur.Status.CaptureState == nil {
-			cur.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
-		}
-		if cur.Status.CaptureState.DomainSpecificController == nil {
-			cur.Status.CaptureState.DomainSpecificController = &storagev1alpha1.DomainSpecificControllerCaptureState{}
-		}
-		cur.Status.CaptureState.DomainSpecificController.ExcludedRefs = merged
-		changed = true
-		return r.Client.Status().Update(ctx, cur)
-	})
-	return changed, err
-}
-
-func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
-	ctx context.Context,
-	nsSnap *storagev1alpha1.Snapshot,
-	mapping csdregistry.EligibleResourceSnapshotMapping,
-	coverage snapshotCoverageChecker,
-) ([]storagev1alpha1.SnapshotChildRef, []storagev1alpha1.ExcludedObjectRef, error) {
-	var refs []storagev1alpha1.SnapshotChildRef
-	var excluded []storagev1alpha1.ExcludedObjectRef
-	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(mapping.SourceGVK)
-	list.SetKind(mapping.SourceGVK.Kind + "List")
-	resources, err := r.Dynamic.Resource(mapping.SourceGVR).Namespace(nsSnap.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		// NotFound: the mapped source kind is not (yet) served by the API; legitimately empty for now.
-		if errors.IsNotFound(err) {
-			return nil, nil, nil
-		}
-		// Forbidden is RBAC-driven (granted externally via CSD AccessGranted). Treating it as "no objects"
-		// would silently drop coverage, so degrade the graph instead of returning empty (fail-closed).
-		if errors.IsForbidden(err) {
-			return nil, nil, &sourceListForbiddenError{msg: fmt.Sprintf("list source %s: %v", mapping.SourceGVK.String(), err)}
-		}
-		return nil, nil, err
-	}
-	list.Items = resources.Items
-	sort.Slice(list.Items, func(i, j int) bool {
-		a, b := list.Items[i], list.Items[j]
-		if a.GetNamespace() != b.GetNamespace() {
-			return a.GetNamespace() < b.GetNamespace()
-		}
-		if a.GetName() != b.GetName() {
-			return a.GetName() < b.GetName()
-		}
-		return string(a.GetUID()) < string(b.GetUID())
-	})
-	for i := range list.Items {
-		resource := &list.Items[i]
-		// Absolute exclude veto: a top-level source object carrying the exclude label is dropped from EVERY
-		// leg — not expanded into a child here, and dropped from the root manifest leg by the same veto —
-		// and is recorded as an explicit top-level drop. This is the root node's OWN direct exclusion,
-		// published into status.captureState.domainSpecificController.excludedRefs so the SnapshotContent
-		// aggregator folds it into the durable excludedRefs aggregate.
-		if _, vetoed := resource.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
-			excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{
-				APIVersion: mapping.SourceGVK.GroupVersion().String(),
-				Kind:       mapping.SourceGVK.Kind,
-				Name:       resource.GetName(),
-			})
-			continue
-		}
-		covered, err := coverage.IsCovered(ctx, resource)
-		if err != nil {
-			return nil, nil, err
-		}
-		if covered {
-			continue
-		}
-		childName := snapshotChildSnapshotName(nsSnap.UID, resource.GetUID())
-		if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, mapping.SnapshotGVK, resource); err != nil {
-			return nil, nil, err
-		}
-		ref := storagev1alpha1.SnapshotChildRef{
-			APIVersion: mapping.SnapshotGVK.GroupVersion().String(),
-			Kind:       mapping.SnapshotGVK.Kind,
-			Name:       childName,
-		}
-		refs = append(refs, ref)
-		if err := coverage.ObservePlannedSnapshot(ctx, resource, ref, nil); err != nil {
-			return nil, nil, err
-		}
-	}
-	sortSnapshotChildRefs(refs)
-	return refs, excluded, nil
-}
 
 // snapshotChildSnapshotName is the name of a root-owned domain child snapshot CR, keyed by the parent
 // Snapshot UID and the captured source object UID (unified scheme, see api/names). The child
@@ -247,60 +45,6 @@ func (r *SnapshotReconciler) ensureParentOwnedChildGraphLayer(
 // CustomSnapshotDefinition); connectivity is carried by ownerRefs/childRefs, not the name.
 func snapshotChildSnapshotName(parentSnapshotUID, sourceUID types.UID) string {
 	return names.ChildSnapshotName(parentSnapshotUID, sourceUID)
-}
-
-func (r *SnapshotReconciler) ensureParentOwnedChildSnapshot(
-	ctx context.Context,
-	nsSnap *storagev1alpha1.Snapshot,
-	name string,
-	gvk schema.GroupVersionKind,
-	source *unstructured.Unstructured,
-) error {
-	sourceIdentity, err := controllercommon.SnapshotSourceIdentityFromObject(source)
-	if err != nil {
-		return fmt.Errorf("source identity for %s/%s: %w", source.GroupVersionKind().String(), source.GetName(), err)
-	}
-	key := client.ObjectKey{Namespace: nsSnap.Namespace, Name: name}
-	child := &unstructured.Unstructured{}
-	child.SetGroupVersionKind(gvk)
-	if err := r.Client.Get(ctx, key, child); err != nil {
-		if !errors.IsNotFound(err) {
-			return err
-		}
-		// spec.sourceRef is the single source-of-truth for what this child snapshot captures; the CRD
-		// enforces its immutability (CEL self == oldSelf), so the planner sets it once at creation and
-		// never rewrites it.
-		child = &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"apiVersion": gvk.GroupVersion().String(),
-				"kind":       gvk.Kind,
-				"metadata": map[string]interface{}{
-					"name":      name,
-					"namespace": nsSnap.Namespace,
-				},
-				"spec": map[string]interface{}{
-					"sourceRef": map[string]interface{}{
-						"apiVersion": sourceIdentity.APIVersion,
-						"kind":       sourceIdentity.Kind,
-						"name":       sourceIdentity.Name,
-					},
-				},
-			},
-		}
-		child.SetGroupVersionKind(gvk)
-		child.SetOwnerReferences([]metav1.OwnerReference{controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)})
-		// Child snapshot node introduced into the tree: stamp delete-protection into the CREATE payload
-		storagev1alpha1.StampDeleteProtected(child)
-		return r.Client.Create(ctx, child)
-	}
-	base := child.DeepCopy()
-	if err := controllercommon.EnsureSnapshotOwnerRef(child, controllercommon.SnapshotOwnerReference(storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", nsSnap.Name, nsSnap.UID)); err != nil {
-		return err
-	}
-	if controllercommon.OwnerReferencesEqual(base.GetOwnerReferences(), child.GetOwnerReferences()) {
-		return nil
-	}
-	return r.Client.Patch(ctx, child, client.MergeFrom(base))
 }
 
 // sourceListForbiddenError signals that listing a mapped source kind was rejected with Forbidden.
@@ -626,74 +370,6 @@ func readyConditionIsCurrentTerminal(child *unstructured.Unstructured) bool {
 	return rc != nil && rc.ObservedGeneration == child.GetGeneration()
 }
 
-// patchSnapshotChildrenRefs publishes the planned child refs onto the root Snapshot without touching any
-// condition. The root no longer carries a PlanningReady condition; planning success is observable via the
-// refs alone, and the user-facing Ready is later mirrored from the bound SnapshotContent during capture.
-func (r *SnapshotReconciler) patchSnapshotChildrenRefs(
-	ctx context.Context,
-	parent types.NamespacedName,
-	desired []storagev1alpha1.SnapshotChildRef,
-) (bool, error) {
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, parent, cur); err != nil {
-			return err
-		}
-		effective := mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) {
-			return nil
-		}
-		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
-		changed = true
-		return r.Client.Status().Update(ctx, cur)
-	})
-	return changed, err
-}
-
-// patchSnapshotChildrenRefsWithReady publishes the planned child refs AND a local Ready condition on the
-// root Snapshot. It is used during planning to surface a graph-planning failure or a pending weight layer
-// (the root has no bound-content Ready to mirror yet): terminal reasons (GraphPlanningFailed) or
-// non-terminal ones (ChildrenPending / SourceListForbidden). Once planning completes and capture proceeds,
-// the content->Snapshot Ready mirror takes over.
-func (r *SnapshotReconciler) patchSnapshotChildrenRefsWithReady(
-	ctx context.Context,
-	parent types.NamespacedName,
-	desired []storagev1alpha1.SnapshotChildRef,
-	status metav1.ConditionStatus,
-	reason string,
-	message string,
-) (bool, error) {
-	changed := false
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cur := &storagev1alpha1.Snapshot{}
-		if err := r.Client.Get(ctx, parent, cur); err != nil {
-			return err
-		}
-		effective := mergeSnapshotManagedChildRefs(cur.Status.ChildrenSnapshotRefs, desired)
-		readyCond := meta.FindStatusCondition(cur.Status.Conditions, snapshotpkg.ConditionReady)
-		readyCurrent := readyCond != nil &&
-			readyCond.Status == status &&
-			readyCond.Reason == reason &&
-			readyCond.Message == message &&
-			readyCond.ObservedGeneration == cur.Generation
-		if snapshotChildRefsEqualIgnoreOrder(cur.Status.ChildrenSnapshotRefs, effective) && readyCurrent {
-			return nil
-		}
-		cur.Status.ChildrenSnapshotRefs = append([]storagev1alpha1.SnapshotChildRef(nil), effective...)
-		meta.SetStatusCondition(&cur.Status.Conditions, metav1.Condition{
-			Type:               snapshotpkg.ConditionReady,
-			Status:             status,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: cur.Generation,
-		})
-		changed = true
-		return r.Client.Status().Update(ctx, cur)
-	})
-	return changed, err
-}
-
 // patchSnapshotNotReadyLocal writes a local (non-mirror) Ready=False condition on the root Snapshot. It is
 // used for planning-time failures that cannot yet be represented by the bound SnapshotContent (e.g. a graph
 // planning error before any content Ready exists); the Ready=True path is always driven by the mirror from
@@ -729,23 +405,6 @@ func (r *SnapshotReconciler) patchSnapshotNotReadyLocal(
 	})
 }
 
-func mergeSnapshotManagedChildRefs(current, desired []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
-	merged := make([]storagev1alpha1.SnapshotChildRef, 0, len(current)+len(desired))
-	for _, ref := range current {
-		if snapshotOwnsGeneratedChildRef(ref) {
-			continue
-		}
-		merged = append(merged, ref)
-	}
-	merged = append(merged, desired...)
-	sortSnapshotChildRefs(merged)
-	return merged
-}
-
-func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
-	return strings.HasPrefix(ref.Name, "nss-child-")
-}
-
 // coverageRootsForNextWave returns the snapshot refs used to seed the coverage checker for the next
 // (higher-numeric) weight wave during child-graph recompute. It intentionally returns ONLY the refs
 // planned/confirmed in the current recompute pass and NEVER the parent's own
@@ -753,10 +412,10 @@ func snapshotOwnsGeneratedChildRef(ref storagev1alpha1.SnapshotChildRef) bool {
 //
 // Seeding from parent status is the self-coverage idempotency bug: a generated child from another
 // wave carried in status would be visited by the coverage checker, which reads its own spec.sourceRef
-// and marks that source covered. The same source is then skipped this pass, omitted from
-// desiredRefs, and finally stripped by mergeSnapshotManagedChildRefs — so the standalone child ref
-// silently disappears from the root on every subsequent reconcile. Planning must be a full recompute:
-// coverage between waves flows only from earlier (lower-numeric-weight) subtrees planned in this pass.
+// and marks that source covered. The same source is then skipped this pass and omitted from the
+// declared set, so the root stops re-declaring a child it still owns — and a subsequent pass reads the
+// gap as a lost child. Planning must be a full recompute: coverage between waves flows only from
+// earlier (lower-numeric-weight) subtrees planned in this pass.
 func coverageRootsForNextWave(plannedThisPass []storagev1alpha1.SnapshotChildRef) []storagev1alpha1.SnapshotChildRef {
 	return append([]storagev1alpha1.SnapshotChildRef{}, plannedThisPass...)
 }

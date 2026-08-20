@@ -170,6 +170,68 @@ func TestReclaimVolumeSnapshotContent_NoOpWhenAlreadyDeleteAndAnnotated(t *testi
 	}
 }
 
+// The teardown of a content that WRAPS somebody else's artifact reclaims nothing. Such a content is owned
+// by the artifact (the shape of a snapshot this module did not create), so it is being torn down BECAUSE the
+// artifact is going away — under the user's own policy. Reclaiming here would flip a Retain the user asked
+// for into a physical delete of data this module never created.
+func TestReclaimDataArtifacts_SkipsTheArtifactThatOwnsTheContent(t *testing.T) {
+	var patchCalls, deleteCalls int
+	vsc := vscWithDeletionPolicy("vsc-user", volumeSnapshotContentRetainPolicy)
+	vsc.SetUID("vsc-user-uid")
+	vsc.SetFinalizers([]string{vscBoundProtectionFinalizer})
+	r := reclaimTestClient(t, &patchCalls, &deleteCalls, vsc)
+
+	ctrlTrue := true
+	content := &storagev1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "user-vs-content",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "snapshot.storage.k8s.io/v1",
+				Kind:       kindVolumeSnapshotContent,
+				Name:       "vsc-user",
+				UID:        "vsc-user-uid",
+				Controller: &ctrlTrue,
+			}},
+		},
+		Status: storagev1alpha1.SnapshotContentStatus{
+			Data: &storagev1alpha1.SnapshotDataBinding{
+				ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       kindVolumeSnapshotContent,
+					Name:       "vsc-user",
+				},
+			},
+		},
+	}
+
+	if err := r.reclaimDataArtifactsFromContentObj(context.Background(), contentAsUnstructured(t, content)); err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if patchCalls != 0 || deleteCalls != 0 {
+		t.Fatalf("patchCalls=%d deleteCalls=%d, want zero writes on an artifact this module does not own", patchCalls, deleteCalls)
+	}
+
+	got := getReclaimedVSC(t, r, "vsc-user")
+	if policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy"); policy != volumeSnapshotContentRetainPolicy {
+		t.Fatalf("deletionPolicy = %q, want the owner's own Retain", policy)
+	}
+	if !got.GetDeletionTimestamp().IsZero() {
+		t.Fatalf("the artifact must not be deleted by this module")
+	}
+}
+
+// contentAsUnstructured renders a typed SnapshotContent the way the teardown path sees it.
+func contentAsUnstructured(t *testing.T, content *storagev1alpha1.SnapshotContent) *unstructured.Unstructured {
+	t.Helper()
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(content)
+	if err != nil {
+		t.Fatalf("convert SnapshotContent: %v", err)
+	}
+	obj := &unstructured.Unstructured{Object: raw}
+	obj.SetGroupVersionKind(storagev1alpha1.SchemeGroupVersion.WithKind("SnapshotContent"))
+	return obj
+}
+
 // The actual wedge shape: a VSC already terminating (deletionTimestamp + bound-protection finalizer),
 // already Delete-policy, but missing the being-deleted annotation. The stamp patch must still succeed so the
 // sidecar can complete the physical reclaim and drop its finalizer.

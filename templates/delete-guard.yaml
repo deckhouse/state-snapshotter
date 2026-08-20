@@ -15,6 +15,13 @@ followObjectRef and never branches on Kind. Two invariants:
 The guard always enforces these invariants. There is no module setting that weakens enforcement; operators
 use the explicit break-glass annotation for exceptional direct deletion. Backfill converges legacy objects
 into the marker-protected set, while admission continues to decide solely from the marker.
+
+What carries the marker: the namespaced snapshot nodes a parent introduces into the tree — child snapshot
+CRs and the CSI VolumeSnapshots a domain captures. The cluster-scoped part of a tree (SnapshotContent,
+ManifestCheckpoint and its chunks, ObjectKeeper, CSI VolumeSnapshotContent) is not marked: it is not
+user-facing, and a tree damaged there fails its own readiness instead of being guarded by admission. The
+resource rules below still list those kinds, so an object marked by an earlier build keeps the guarantee and
+re-marking a kind needs no policy change.
 */ -}}
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -28,7 +35,7 @@ spec:
   failurePolicy: Fail
   matchConstraints:
     resourceRules:
-      # CSI snapshot objects that our tree adopts/owns (managed VS / managed VSC).
+      # CSI snapshot objects of our tree (only a domain-captured VolumeSnapshot is marked today).
       - apiGroups: ["snapshot.storage.k8s.io"]
         apiVersions: ["*"]
         operations: ["DELETE", "UPDATE"]
@@ -45,7 +52,7 @@ spec:
         apiVersions: ["*"]
         operations: ["DELETE", "UPDATE"]
         resources: ["*"]
-      # Our durable keeper (shared deckhouse.io group; only marked keepers are protected).
+      # Our durable keeper (shared deckhouse.io group; only marked keepers are protected — none today).
       - apiGroups: ["deckhouse.io"]
         apiVersions: ["*"]
         operations: ["DELETE", "UPDATE"]

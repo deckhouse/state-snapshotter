@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package ownerref implements safe, idempotent controller-owner adoption for child snapshot objects.
+// Package ownerref writes and reads the controller owner reference that ties a child snapshot object to its
+// parent: Ensure stamps it on an object being created, ControlledBy asks whether a parent already holds one.
 package ownerref
 
 import (
@@ -54,6 +55,24 @@ func Ensure(obj client.Object, desired metav1.OwnerReference) error {
 
 // Matches reports whether ref identifies the same owner as desired (apiVersion/kind/name).
 func Matches(ref, desired metav1.OwnerReference) bool { return matches(ref, desired) }
+
+// ControlledBy reports whether obj is ALREADY controlled by exactly desired: same apiVersion, kind, name
+// and UID, with Controller=true. It is the eligibility question — "did this parent already take this object
+// in?" — and unlike Ensure it never writes.
+//
+// The UID is part of the comparison on purpose. A reference that names the same parent by name but a
+// different UID belongs to a previous incarnation of it, and its dependent is already condemned: garbage
+// collection removes an object whose owner UID no longer exists. Treating that as "ours" would race the
+// collector for an object about to disappear, so the caller fails closed and lets the collection finish.
+func ControlledBy(obj client.Object, desired metav1.OwnerReference) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.Controller == nil || !*ref.Controller {
+			continue
+		}
+		return matches(ref, desired) && ref.UID == desired.UID
+	}
+	return false
+}
 
 func matches(ref, desired metav1.OwnerReference) bool {
 	return ref.APIVersion == desired.APIVersion && ref.Kind == desired.Kind && ref.Name == desired.Name

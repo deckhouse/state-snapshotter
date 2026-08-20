@@ -31,7 +31,7 @@ limitations under the License.
 // snapshots. The domain expresses intent; the SDK makes the cluster match it, idempotently and
 // crash/restart-safely.
 //
-// SDK v1 is delete-free and publication is ADDITIVE (union): EnsureChildren creates/adopts the desired
+// SDK v1 is delete-free and publication is ADDITIVE (union): EnsureChildren creates the desired
 // children and unions their refs into status.childrenSnapshotRefs, never removing a ref. A child no longer
 // enumerated by its emitter is therefore NOT dropped from the published set — its ref stays; only the
 // leftover child OBJECT is reclaimed, by ownerRef garbage collection (the parent owns each child, so it is

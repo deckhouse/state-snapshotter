@@ -43,10 +43,37 @@ func vscWithDeletionPolicy(name, policy string) *unstructured.Unstructured {
 	return obj
 }
 
+// contentControllerRef is the ownerReference the handoff installs, i.e. what an already handed-off VSC
+// carries.
+func contentControllerRef(content *storagev1alpha1.SnapshotContent) metav1.OwnerReference {
+	ctrlTrue := true
+	return metav1.OwnerReference{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "SnapshotContent",
+		Name:       content.Name,
+		UID:        content.UID,
+		Controller: &ctrlTrue,
+	}
+}
+
+func getVSC(ctx context.Context, t *testing.T, cl client.Client, name string) *unstructured.Unstructured {
+	t.Helper()
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
+	if err := cl.Get(ctx, client.ObjectKey{Name: name}, got); err != nil {
+		t.Fatalf("get VSC %s: %v", name, err)
+	}
+	return got
+}
+
 // The durable-artifact handoff MUST force the bound VSC to deletionPolicy=Retain (so a class-default
-// Delete policy cannot drop the artifact when the per-run VolumeSnapshot/VCR is GC'd) AND re-parent the
+// Delete policy cannot drop the artifact when the per-run VolumeSnapshot/VCR is GC'd) and re-parent the
 // ownerReference to the SnapshotContent. This is the regression guard for the domain VCR path, which
 // previously left the VSC at Delete.
+//
+// Both land in ONE patch, which the test asserts by counting patches. The VSC is cluster-scoped, so the
+// handoff must leave it WITHOUT the delete-protection marker: its lifecycle is held by the owning
+// SnapshotContent, not by admission.
 func TestEnsureVolumeSnapshotContentsOwnedByContent_ForcesRetainAndOwner(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -55,7 +82,13 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_ForcesRetainAndOwner(t *test
 	}
 
 	vsc := vscWithDeletionPolicy("vsc-domain", "Delete")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).Build()
+	var patchCalls int
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patchCalls++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}).Build()
 
 	content := &storagev1alpha1.SnapshotContent{}
 	content.SetName("demodiskc-1")
@@ -69,12 +102,11 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_ForcesRetainAndOwner(t *test
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
 		t.Fatalf("handoff: %v", err)
 	}
-
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
-	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-domain"}, got); err != nil {
-		t.Fatalf("get VSC: %v", err)
+	if patchCalls != 1 {
+		t.Fatalf("handoff must deliver owner and Retain in one patch; patchCalls=%d", patchCalls)
 	}
+
+	got := getVSC(ctx, t, cl, "vsc-domain")
 
 	policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy")
 	if policy != "Retain" {
@@ -85,10 +117,68 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_ForcesRetainAndOwner(t *test
 		owners[0].Controller == nil || !*owners[0].Controller {
 		t.Fatalf("ownerReferences = %+v, want single controller SnapshotContent/demodiskc-1", owners)
 	}
+	if storagev1alpha1.IsDeleteProtected(got) {
+		t.Fatalf("handed-off VSC must stay unmarked; labels = %v", got.GetLabels())
+	}
 }
 
-// Idempotency: a VSC already owned by the content and already Retain stays Retain and singly-owned.
-func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOwned(t *testing.T) {
+// An artifact that OWNS the content is left completely alone: it belongs to a snapshot this module did not
+// create, and the content merely wraps it. Two things would go wrong otherwise, and the test pins both —
+// the user's Delete policy would be silently changed into Retain, and the two cluster-scoped objects would
+// end up owning each other, a cycle garbage collection never resolves.
+func TestEnsureVolumeSnapshotContentsOwnedByContent_LeavesTheArtifactThatOwnsTheContent(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add storage scheme: %v", err)
+	}
+
+	vsc := vscWithDeletionPolicy("vsc-user", "Delete")
+	vsc.SetUID(types.UID("vsc-user-uid"))
+	var patchCalls int
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patchCalls++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}).Build()
+
+	ctrlTrue := true
+	content := &storagev1alpha1.SnapshotContent{}
+	content.SetName("user-vs-content")
+	content.SetUID(types.UID("content-uid-user"))
+	content.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshotContent",
+		Name:       "vsc-user",
+		UID:        types.UID("vsc-user-uid"),
+		Controller: &ctrlTrue,
+	}})
+
+	bindings := []storagev1alpha1.SnapshotDataBinding{{
+		SourceRef:   storagev1alpha1.SnapshotSubjectRef{UID: "pvc-uid-user"},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-user"},
+	}}
+
+	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	if patchCalls != 0 {
+		t.Fatalf("the artifact that owns the content must not be written; patchCalls=%d", patchCalls)
+	}
+
+	got := getVSC(ctx, t, cl, "vsc-user")
+	if policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy"); policy != "Delete" {
+		t.Fatalf("deletionPolicy = %q, want the user's own Delete", policy)
+	}
+	if owners := got.GetOwnerReferences(); len(owners) != 0 {
+		t.Fatalf("ownerReferences = %+v, want none: owning it back would close a cycle", owners)
+	}
+}
+
+// Idempotency: a VSC that already carries everything the handoff delivers — Retain and the content owner —
+// is not written at all.
+func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyHandedOff(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
@@ -99,16 +189,15 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOw
 	content.SetName("demodiskc-1")
 	content.SetUID(types.UID("content-uid-1"))
 
-	ctrlTrue := true
 	vsc := vscWithDeletionPolicy("vsc-domain", "Retain")
-	vsc.SetOwnerReferences([]metav1.OwnerReference{{
-		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
-		Kind:       "SnapshotContent",
-		Name:       "demodiskc-1",
-		UID:        types.UID("content-uid-1"),
-		Controller: &ctrlTrue,
-	}})
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).Build()
+	vsc.SetOwnerReferences([]metav1.OwnerReference{contentControllerRef(content)})
+	var patchCalls int
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vsc).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patchCalls++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}).Build()
 
 	bindings := []storagev1alpha1.SnapshotDataBinding{{
 		SourceRef:   storagev1alpha1.SnapshotSubjectRef{UID: "pvc-uid-1"},
@@ -117,12 +206,11 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOw
 	if err := EnsureVolumeSnapshotContentsOwnedByContent(ctx, cl, content, bindings); err != nil {
 		t.Fatalf("handoff: %v", err)
 	}
-
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
-	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-domain"}, got); err != nil {
-		t.Fatalf("get VSC: %v", err)
+	if patchCalls != 0 {
+		t.Fatalf("a conforming VSC must not be written; patchCalls=%d", patchCalls)
 	}
+
+	got := getVSC(ctx, t, cl, "vsc-domain")
 	if policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy"); policy != "Retain" {
 		t.Fatalf("deletionPolicy = %q, want Retain", policy)
 	}
@@ -131,8 +219,9 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_StableWhenAlreadyRetainAndOw
 	}
 }
 
-// A VSC that is being deleted MUST NOT be patched, even though its ownerRef is wrong and
-// its deletionPolicy is not Retain: the handoff must skip it (data readiness reports ArtifactMissing).
+// A VSC that is being deleted MUST NOT be patched, even though its ownerRef is wrong, its deletionPolicy is
+// not Retain and it carries no marker: the handoff must skip it (data readiness reports ArtifactMissing).
+// Protecting an object that is already going away would only race its finalizers.
 func TestEnsureVolumeSnapshotContentsOwnedByContent_SkipsDeletingVSC(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -170,13 +259,12 @@ func TestEnsureVolumeSnapshotContentsOwnedByContent_SkipsDeletingVSC(t *testing.
 		t.Fatalf("deleting VSC must not be patched; patchCalls=%d", patchCalls)
 	}
 
-	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent"})
-	if err := cl.Get(ctx, client.ObjectKey{Name: "vsc-deleting"}, got); err != nil {
-		t.Fatalf("get VSC: %v", err)
-	}
+	got := getVSC(ctx, t, cl, "vsc-deleting")
 	if policy, _, _ := unstructured.NestedString(got.Object, "spec", "deletionPolicy"); policy != "Delete" {
 		t.Fatalf("deleting VSC deletionPolicy = %q, want unchanged Delete", policy)
+	}
+	if storagev1alpha1.IsDeleteProtected(got) {
+		t.Fatalf("deleting VSC must not be marked delete-protected; labels=%v", got.GetLabels())
 	}
 	for _, ref := range got.GetOwnerReferences() {
 		if ref.Kind == "SnapshotContent" {

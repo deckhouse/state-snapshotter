@@ -27,59 +27,31 @@ import (
 )
 
 const (
-	// groupStorage is the state-snapshotter API group (Snapshot / SnapshotContent).
+	// groupStorage is the state-snapshotter API group (Snapshot).
 	groupStorage = storagev1alpha1.APIGroup
-	// groupManifest is the manifest-checkpoint API group (same group string, different Go package).
-	groupManifest = storagev1alpha1.APIGroup
-	// groupDeckhouse hosts ObjectKeeper.
-	groupDeckhouse = "deckhouse.io"
 	// groupCSI is the external-snapshotter API group.
 	groupCSI = "snapshot.storage.k8s.io"
-
-	// labelManaged latches the adoption veto outcome on a CSI VolumeSnapshot ("true" => domain-captured).
-	// It is set by storage-foundation; the backfill reads it ONLY as a migration provenance signal.
-	labelManaged = storagev1alpha1.APIGroup + "/managed"
-
-	// kindObjectKeeper is the ownerRef kind a freshly created managed CSI VolumeSnapshotContent carries
-	// (storage-foundation stamps ObjectKeeper as the initial durable retention controller-owner).
-	kindObjectKeeper = "ObjectKeeper"
-	// kindSnapshotContent is our EXCLUSIVE CRD and the steady-state controller-owner of a managed CSI
-	// VolumeSnapshotContent AFTER the SnapshotContent ownership handoff (EnsureVolumeSnapshotContentsOwnedByContent
-	// re-parents the VSC, REPLACING the ObjectKeeper controller-owner with a SnapshotContent one). A retained
-	// durable VSC therefore ends up owned by SnapshotContent, not ObjectKeeper, so the classifier MUST match
-	// both — otherwise every already-handed-off legacy VSC is missed and legacy marker coverage is incomplete.
-	kindSnapshotContent = "SnapshotContent"
 )
 
 // DefaultTargets is the canonical set of protected kinds and their migration classifiers. Kinds whose CRD
 // is not installed are tolerated (skipped) at list time. Demo/PoC domain snapshot kinds are intentionally
 // omitted: they live outside the core module and their legacy children already follow the nss-snap- name
 // scheme, so a cluster that runs them can extend this set.
+//
+// Only namespaced snapshot nodes are listed. The cluster-scoped part of a tree — SnapshotContent,
+// ManifestCheckpoint and its chunks, ObjectKeeper, the CSI VolumeSnapshotContent — carries no marker at all
+// now, so there is nothing there to backfill.
 func DefaultTargets() []Target {
 	return []Target{
 		// Root Snapshot is NOT protected (user-deletable). A CHILD Snapshot carries the deterministic
 		// nss-snap- name; that prefix cleanly separates children (ours) from the user-named root.
 		{GVK: gvk(groupStorage, "Snapshot"), IsOurs: hasNamePrefix(apinames.PrefixChildSnapshot)},
 
-		// SnapshotContent / ManifestCheckpoint / ManifestCheckpointContentChunk are our EXCLUSIVE CRDs:
-		// nothing else creates them, so the whole kind is ours.
-		{GVK: gvk(groupStorage, "SnapshotContent"), IsOurs: always},
-		{GVK: gvk(groupManifest, "ManifestCheckpoint"), IsOurs: always},
-		{GVK: gvk(groupManifest, "ManifestCheckpointContentChunk"), IsOurs: always},
-
-		// ObjectKeeper is a SHARED deckhouse.io CRD: only OUR keepers (deterministic nss-ok- / nss-import-ok-
-		// names) are protected. Fail closed on anything else.
-		{GVK: gvk(groupDeckhouse, kindObjectKeeper), IsOurs: hasNamePrefix(apinames.PrefixObjectKeeper, apinames.PrefixImportKeeper)},
-
-		// CSI VolumeSnapshot is SHARED: ours iff domain-managed (managed=true) or carrying our orphan-VS
-		// name. A vetoed (managed=false) or foreign VolumeSnapshot is left untouched.
-		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshot"), IsOurs: anyOf(managedIsTrue, hasNamePrefix(apinames.PrefixOrphanVS))},
-
-		// CSI VolumeSnapshotContent is SHARED: ours iff owned by one of our ObjectKeepers (the owner a
-		// freshly created managed VSC carries) OR by one of our SnapshotContents (the owner it carries at
-		// steady state after the ownership handoff). Both owner kinds are ours-exclusive, so a foreign VSC —
-		// owned by neither — is left untouched (fail closed).
-		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshotContent"), IsOurs: anyOf(ownedByKind(kindObjectKeeper), ownedByKind(kindSnapshotContent))},
+		// CSI VolumeSnapshot is SHARED, and being managed says nothing about which side of the share an
+		// object is on: a snapshot a user took by hand is captured too, and carries managed=true like any
+		// other. What separates them is origin — the provenance its creator stamped — plus the deterministic
+		// orphan-VS name, which is the same fact for a node made before that label existed.
+		{GVK: gvkV(groupCSI, "v1", "VolumeSnapshot"), IsOurs: anyOf(hasProvenance, hasNamePrefix(apinames.PrefixOrphanVS))},
 	}
 }
 
@@ -90,9 +62,6 @@ func gvk(group, kind string) schema.GroupVersionKind {
 func gvkV(group, version, kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: group, Version: version, Kind: kind}
 }
-
-// always classifies every object of the kind as ours (used for our exclusive CRDs).
-func always(*unstructured.Unstructured) bool { return true }
 
 // hasNamePrefix matches any of the given deterministic name prefixes.
 func hasNamePrefix(prefixes ...string) Classifier {
@@ -119,20 +88,7 @@ func anyOf(classifiers ...Classifier) Classifier {
 	}
 }
 
-// managedIsTrue matches a CSI VolumeSnapshot latched as domain-managed.
-func managedIsTrue(obj *unstructured.Unstructured) bool {
-	return obj.GetLabels()[labelManaged] == "true"
-}
-
-// ownedByKind matches an object carrying an ownerReference to the given kind (used to recognize our CSI
-// VolumeSnapshotContent by its ObjectKeeper owner).
-func ownedByKind(kind string) Classifier {
-	return func(obj *unstructured.Unstructured) bool {
-		for _, ref := range obj.GetOwnerReferences() {
-			if ref.Kind == kind {
-				return true
-			}
-		}
-		return false
-	}
+// hasProvenance matches an object its creator stamped as made by this module.
+func hasProvenance(obj *unstructured.Unstructured) bool {
+	return storagev1alpha1.HasProvenance(obj)
 }

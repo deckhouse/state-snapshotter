@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/api/names"
-	ssstoragev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 )
@@ -126,8 +125,6 @@ func ReconstructManifestCheckpoint(
 		},
 		Spec: storagev1alpha1.ManifestCheckpointSpec{},
 	}
-	// Durable tree node: stamp delete-protection into the CREATE payload.
-	ssstoragev1alpha1.StampDeleteProtected(cp)
 	if err := c.Create(ctx, cp); err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create ManifestCheckpoint %s: %w", checkpointName, err)
 	}
@@ -211,8 +208,6 @@ func writeReconstructedChunks(
 				Checksum:       checksum,
 			},
 		}
-		// Durable tree node: stamp delete-protection into the CREATE payload.
-		ssstoragev1alpha1.StampDeleteProtected(chunk)
 		if err := c.Create(ctx, chunk); err != nil && !apierrors.IsAlreadyExists(err) {
 			return nil, 0, 0, fmt.Errorf("create chunk %s: %w", chunkName, err)
 		}

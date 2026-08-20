@@ -72,6 +72,10 @@ func snapGVK(kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: groupStorage, Version: "v1alpha1", Kind: kind}
 }
 
+func csiGVK(kind string) schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: kind}
+}
+
 func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 	ctx := context.Background()
 	root := obj(snapGVK("Snapshot"), "my-app-backup", nil)           // user-named root → NOT ours
@@ -110,12 +114,14 @@ func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 func TestApplyIsIdempotentAndGateBecomesMet(t *testing.T) {
 	ctx := context.Background()
 	child := obj(snapGVK("Snapshot"), "nss-snap-a-b", nil)
-	content := obj(snapGVK("SnapshotContent"), "nss-content-x", nil)
+	ourVS := obj(csiGVK("VolumeSnapshot"), "nss-vs-a-b", map[string]string{
+		storagev1alpha1.LabelProvenance: storagev1alpha1.LabelProvenanceUnifiedSnapshot,
+	})
 
-	cl := newClient(child, content)
+	cl := newClient(child, ourVS)
 	targets := []Target{
 		{GVK: snapGVK("Snapshot"), IsOurs: hasNamePrefix("nss-snap-")},
-		{GVK: snapGVK("SnapshotContent"), IsOurs: always},
+		{GVK: csiGVK("VolumeSnapshot"), IsOurs: hasProvenance},
 	}
 
 	// Gate is NOT met before backfill.
@@ -156,13 +162,13 @@ func TestApplyIsIdempotentAndGateBecomesMet(t *testing.T) {
 
 func TestApplyToleratesUninstalledKind(t *testing.T) {
 	ctx := context.Background()
-	// Client serves only Snapshot; the SnapshotContent kind is not installed on this cluster. Apply must
+	// Client serves only Snapshot; the CSI VolumeSnapshot kind is not installed on this cluster. Apply must
 	// not fail — a protected Kind with no objects to migrate is a no-op, not an error.
 	child := obj(snapGVK("Snapshot"), "nss-snap-a-b", nil)
 	cl := newClient(child)
 	targets := []Target{
 		{GVK: snapGVK("Snapshot"), IsOurs: hasNamePrefix("nss-snap-")},
-		{GVK: snapGVK("SnapshotContent"), IsOurs: always},
+		{GVK: csiGVK("VolumeSnapshot"), IsOurs: hasProvenance},
 	}
 
 	rep, err := Apply(ctx, cl, targets)
@@ -175,53 +181,44 @@ func TestApplyToleratesUninstalledKind(t *testing.T) {
 	}
 	// The uninstalled kind contributes nothing to the gate.
 	for _, k := range rep.Kinds {
-		if k.GVK.Kind == "SnapshotContent" && (k.Total != 0 || k.OursUnmarked != 0 || k.Patched != 0) {
-			t.Fatalf("uninstalled SnapshotContent must contribute nothing, got %+v", k)
+		if k.GVK.Kind == "VolumeSnapshot" && (k.Total != 0 || k.OursUnmarked != 0 || k.Patched != 0) {
+			t.Fatalf("uninstalled VolumeSnapshot must contribute nothing, got %+v", k)
 		}
 	}
 }
 
+// VolumeSnapshot is the one shared kind left to migrate, and the label that separates the two sides of the
+// share is provenance. Being MANAGED is not that label: a snapshot a user took by hand is captured like any
+// other and carries managed=true, while nothing about it belongs to this module — stamping protection onto
+// it is precisely the defect this classifier must not reintroduce, because its owner could then no longer
+// delete their own snapshot.
 func TestClassifierFailsClosedForSharedKinds(t *testing.T) {
-	// ObjectKeeper: only our deterministic names are ours; a foreign keeper is left alone.
-	okOurs := obj(schema.GroupVersionKind{Group: groupDeckhouse, Version: "v1alpha1", Kind: kindObjectKeeper}, "nss-ok-123", nil)
-	okForeign := obj(schema.GroupVersionKind{Group: groupDeckhouse, Version: "v1alpha1", Kind: kindObjectKeeper}, "some-other-keeper", nil)
+	const labelManaged = storagev1alpha1.APIGroup + "/managed"
 
-	c := hasNamePrefix("nss-ok-", "nss-import-ok-")
-	if !c(okOurs) {
-		t.Fatalf("our ObjectKeeper must classify as ours")
-	}
-	if c(okForeign) {
-		t.Fatalf("foreign ObjectKeeper must NOT classify as ours (fail closed)")
-	}
+	ourVS := obj(csiGVK("VolumeSnapshot"), "some-vs", map[string]string{
+		storagev1alpha1.LabelProvenance: storagev1alpha1.LabelProvenanceUnifiedSnapshot,
+	})
+	legacyOrphanVS := obj(csiGVK("VolumeSnapshot"), "nss-vs-a-b", nil)
+	capturedUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs", map[string]string{labelManaged: "true"})
+	vetoedUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs2", map[string]string{labelManaged: "false"})
+	plainUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs3", nil)
 
-	// VolumeSnapshotContent: ours iff owned by an ObjectKeeper (fresh managed VSC) OR a SnapshotContent
-	// (durable VSC after the ownership handoff re-parents it). Both must classify as ours; anything else foreign.
-	vscOursKeeper := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapshot-x", nil, kindObjectKeeper)
-	vscOursContent := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapshot-y", nil, kindSnapshotContent)
-	vscForeign := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshotContent"}, "snapcontent-user", nil, "VolumeSnapshot")
-	oc := anyOf(ownedByKind(kindObjectKeeper), ownedByKind(kindSnapshotContent))
-	if !oc(vscOursKeeper) {
-		t.Fatalf("VSC owned by ObjectKeeper must classify as ours")
-	}
-	if !oc(vscOursContent) {
-		t.Fatalf("durable VSC owned by SnapshotContent (post-handoff) must classify as ours")
-	}
-	if oc(vscForeign) {
-		t.Fatalf("VSC not owned by our ObjectKeeper/SnapshotContent must NOT classify as ours (fail closed)")
-	}
-
-	// VolumeSnapshot: ours iff managed=true or orphan-VS name.
-	vsManaged := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshot"}, "user-vs", map[string]string{labelManaged: "true"})
-	vsVetoed := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshot"}, "user-vs2", map[string]string{labelManaged: "false"})
-	vsPlain := obj(schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshot"}, "user-vs3", nil)
-	vc := anyOf(managedIsTrue, hasNamePrefix("nss-vs-"))
-	if !vc(vsManaged) {
-		t.Fatalf("managed=true VS must classify as ours")
-	}
-	if vc(vsVetoed) {
-		t.Fatalf("vetoed VS must NOT classify as ours")
-	}
-	if vc(vsPlain) {
-		t.Fatalf("plain user VS must NOT classify as ours")
+	vc := anyOf(hasProvenance, hasNamePrefix("nss-vs-"))
+	for _, tc := range []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want bool
+	}{
+		{"a snapshot this module created says so itself", ourVS, true},
+		{"a node made before the origin label existed still carries its deterministic name", legacyOrphanVS, true},
+		{"a user's own snapshot is captured, which is not the same as ours", capturedUserVS, false},
+		{"a snapshot another controller owns is vetoed and stays untouched", vetoedUserVS, false},
+		{"a plain user snapshot carries no signal at all", plainUserVS, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := vc(tc.obj); got != tc.want {
+				t.Fatalf("classifier = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

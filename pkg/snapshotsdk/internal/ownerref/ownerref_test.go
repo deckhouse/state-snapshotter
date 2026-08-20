@@ -78,6 +78,41 @@ func TestEnsureFailsClosedOnForeignController(t *testing.T) {
 	}
 }
 
+// TestControlledByRequiresExactControllerIncludingUID pins the eligibility predicate callers use to decide
+// whether an existing object is already theirs. Only an exact controller reference counts: a non-controller
+// reference is a co-owner, not a parent; the same parent name with another UID is a previous incarnation whose
+// dependents the collector is already removing; and an unowned object was never taken in at all.
+func TestControlledByRequiresExactControllerIncludingUID(t *testing.T) {
+	noController := desiredOwner()
+	noController.Controller = nil
+	staleUID := desiredOwner()
+	staleUID.UID = "p-uid-previous"
+	otherController := func() metav1.OwnerReference {
+		controller := true
+		return metav1.OwnerReference{APIVersion: "other/v1", Kind: "Boss", Name: "boss", UID: "b-uid", Controller: &controller}
+	}()
+
+	for _, tc := range []struct {
+		name string
+		refs []metav1.OwnerReference
+		want bool
+	}{
+		{name: "exact controller", refs: []metav1.OwnerReference{desiredOwner()}, want: true},
+		{name: "exact controller alongside a co-owner", refs: []metav1.OwnerReference{noController, desiredOwner()}, want: true},
+		{name: "unowned", refs: nil, want: false},
+		{name: "same parent as non-controller owner only", refs: []metav1.OwnerReference{noController}, want: false},
+		{name: "same parent name, previous UID", refs: []metav1.OwnerReference{staleUID}, want: false},
+		{name: "foreign controller", refs: []metav1.OwnerReference{otherController}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns", OwnerReferences: tc.refs}}
+			if got := ControlledBy(obj, desiredOwner()); got != tc.want {
+				t.Fatalf("ControlledBy = %v, want %v for %#v", got, tc.want, tc.refs)
+			}
+		})
+	}
+}
+
 func hasRef(refs []metav1.OwnerReference, apiVersion, kind, name string) bool {
 	for _, r := range refs {
 		if r.APIVersion == apiVersion && r.Kind == kind && r.Name == name {

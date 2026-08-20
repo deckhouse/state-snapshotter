@@ -38,14 +38,19 @@ import (
 // data-leg volume capture, and its manifest capture. Each method reconciles the cluster toward the desired
 // intent and publishes the resulting names/refs into the snapshot status.
 type Planning interface {
-	// EnsureChildren creates/adopts the desired child snapshots (each under this snapshot) and ADDITIVELY
+	// EnsureChildren creates the desired child snapshots (each under this snapshot) and ADDITIVELY
 	// publishes their refs into status.childrenSnapshotRefs — a union, never a replace: the freshly
 	// derived refs are UNIONED into the currently published set, so refs contributed by a co-writer of the
 	// same field that this pass does not itself enumerate (the namespace root's orphan VolumeSnapshot
-	// wave) are preserved. It performs create/adopt + publication only and never deletes children (SDK v1
+	// wave) are preserved. It performs creation + publication only and never deletes children (SDK v1
 	// is delete-free): a nil or empty desired set therefore publishes NO new refs and leaves the currently
 	// published set intact. A child no longer desired is simply not re-added by its emitter and is left in
 	// the cluster for ownerRef GC / a future cleanup component to reclaim.
+	//
+	// A child already controlled by this snapshot (created on an earlier pass) is served idempotently, and
+	// its markers repaired if absent. Anything ELSE occupying a child's name — another parent's child, a
+	// foreign-controlled or an unowned object — fails closed and is left untouched: a child is ours because
+	// this write-path created it, never because it matches a name or a spec.
 	//
 	// The declared set is FROZEN once the node declares barrier 1: at phase>=Planned (and at the terminal
 	// Failed) EnsureChildren rejects any GROWTH of the set (or change of the excluded set) with
@@ -238,7 +243,7 @@ func ManifestCaptureNeeded(t SnapshotAdapter) bool {
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
 	obj := t.Object()
 
-	// Fail-closed freeze pre-check, run BEFORE children.Reconcile creates/adopts anything. Reconcile
+	// Fail-closed freeze pre-check, run BEFORE children.Reconcile creates anything. Reconcile
 	// writes to the cluster first and publishes refs later, so a reject AFTER it ran would leave a freshly
 	// created child CR orphaned. The refs the specs WOULD publish are derivable without a cluster write
 	// (GVK + name), and the authoritative phase/published-set come from an uncached re-read (apiReader,
@@ -308,7 +313,7 @@ func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []C
 
 // childRefsForSpecs derives the SnapshotChildRefs the given specs WOULD publish, without any cluster write
 // — the same (apiVersion, kind, name) derivation children.Reconcile performs — so the freeze pre-check can
-// detect declared-set growth before Reconcile creates/adopts anything.
+// detect declared-set growth before Reconcile creates anything.
 func (s *sdk) childRefsForSpecs(desired []ChildSpec) ([]storagev1alpha1.SnapshotChildRef, error) {
 	refs := make([]storagev1alpha1.SnapshotChildRef, 0, len(desired))
 	for _, d := range desired {

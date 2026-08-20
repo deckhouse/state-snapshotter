@@ -25,6 +25,12 @@ import (
 const (
 	APIGroup   = "state-snapshotter.deckhouse.io"
 	APIVersion = "v1alpha1"
+
+	// SnapshotKind is the kind of the snapshot a child object of a snapshot tree is created under: the
+	// write-path stamps that owner reference and the provenance label in one payload, so a consumer that
+	// must recognise "created by us, under a snapshot of ours" matches an owner reference against this
+	// constant plus APIGroup rather than against a string literal of its own.
+	SnapshotKind = "Snapshot"
 )
 
 var (

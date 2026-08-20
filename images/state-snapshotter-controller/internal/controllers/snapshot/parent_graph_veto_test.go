@@ -33,10 +33,10 @@ import (
 )
 
 // recordingCoverage is a snapshotCoverageChecker stub that records every source object that reaches the
-// coverage check. Because ensureParentOwnedChildGraphLayer applies the exclude veto BEFORE calling
+// coverage check. Because planParentOwnedChildGraphLayer applies the exclude veto BEFORE calling
 // coverage.IsCovered, the recorded set equals the set of objects that survived the veto. Returning
-// covered=true short-circuits before child creation, isolating the veto gate from the child-snapshot
-// plumbing (which is unrelated to this feature and covered elsewhere).
+// covered=true short-circuits before the child spec is built, isolating the veto gate from the
+// child-snapshot plumbing (which is unrelated to this feature and covered elsewhere).
 type recordingCoverage struct {
 	checked []string
 }
@@ -50,12 +50,12 @@ func (c *recordingCoverage) ObservePlannedSnapshot(context.Context, *unstructure
 	return nil
 }
 
-// TestEnsureParentOwnedChildGraphLayer_ExcludeVeto verifies the two halves of the top-level veto, which are
+// TestPlanParentOwnedChildGraphLayer_ExcludeVeto verifies the two halves of the top-level veto, which are
 // one decision and must never drift apart: a source object carrying the exclude label is (1) NOT expanded
 // into a child snapshot — it never even reaches the coverage check — and (2) recorded as an explicit
 // top-level drop in the returned excludedRefs, with its exact {apiVersion, kind, name} identity. Unlabeled
 // siblings must be unaffected, and the veto must ignore the label's value.
-func TestEnsureParentOwnedChildGraphLayer_ExcludeVeto(t *testing.T) {
+func TestPlanParentOwnedChildGraphLayer_ExcludeVeto(t *testing.T) {
 	ns := "ns1"
 	sourceGVK := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoThing"}
 	sourceGVR := schema.GroupVersionResource{Group: "demo.example.com", Version: "v1", Resource: "demothings"}
@@ -95,9 +95,9 @@ func TestEnsureParentOwnedChildGraphLayer_ExcludeVeto(t *testing.T) {
 	}
 
 	cov := &recordingCoverage{}
-	refs, excluded, err := r.ensureParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov)
+	specs, refs, excluded, err := r.planParentOwnedChildGraphLayer(context.Background(), nsSnap, mapping, cov)
 	if err != nil {
-		t.Fatalf("ensureParentOwnedChildGraphLayer: %v", err)
+		t.Fatalf("planParentOwnedChildGraphLayer: %v", err)
 	}
 
 	// The unlabeled object passes the veto and reaches coverage (recorded, then short-circuited as covered).
@@ -105,8 +105,8 @@ func TestEnsureParentOwnedChildGraphLayer_ExcludeVeto(t *testing.T) {
 	if len(cov.checked) != 1 || cov.checked[0] != "thing-keep" {
 		t.Fatalf("coverage reached %v, want only [thing-keep]", cov.checked)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("expanded refs = %v, want none (coverage short-circuits)", refs)
+	if len(specs) != 0 || len(refs) != 0 {
+		t.Fatalf("expanded specs/refs = %v/%v, want none (coverage short-circuits)", specs, refs)
 	}
 
 	gotNames := make([]string, 0, len(excluded))

@@ -57,6 +57,55 @@ func TestIsDeleteProtectedRejectsOtherValues(t *testing.T) {
 	}
 }
 
+// TestProvenanceKeyValue pins the wire literals. The key and the value are read by other repositories and
+// by objects already in a cluster, so a rename here is a silent contract break: an object created by an
+// older build would stop being recognised as ours, and one created by a newer build would stop being
+// recognised by an older observer.
+func TestProvenanceKeyValue(t *testing.T) {
+	if LabelProvenance != "state-snapshotter.deckhouse.io/provenance" {
+		t.Fatalf("unexpected key: %s", LabelProvenance)
+	}
+	if LabelProvenanceUnifiedSnapshot != "unified-snapshot" {
+		t.Fatalf("unexpected value: %s", LabelProvenanceUnifiedSnapshot)
+	}
+	if SnapshotKind != "Snapshot" {
+		t.Fatalf("unexpected kind: %s", SnapshotKind)
+	}
+}
+
+func TestStampProvenanceAllocatesAndIsIdempotent(t *testing.T) {
+	obj := &metav1.ObjectMeta{} // nil labels
+	StampProvenance(obj)
+	if !HasProvenance(obj) {
+		t.Fatalf("expected provenance after stamp, labels=%#v", obj.GetLabels())
+	}
+	obj.Labels["foo"] = "bar"
+	StampProvenance(obj)
+	if !HasProvenance(obj) || obj.Labels["foo"] != "bar" {
+		t.Fatalf("stamp must be idempotent and preserve other labels, got %#v", obj.GetLabels())
+	}
+}
+
+// TestHasProvenanceRejectsOtherValues guards the keyed nature of the value: provenance answers "which
+// write-path created this", so a truthy-looking value that is not an origin this module stamps must not be
+// read as its own. Protection is a separate label on purpose and cannot stand in for origin either.
+func TestHasProvenanceRejectsOtherValues(t *testing.T) {
+	for _, value := range []string{"true", "", "some-other-module"} {
+		obj := &metav1.ObjectMeta{Labels: map[string]string{LabelProvenance: value}}
+		if HasProvenance(obj) {
+			t.Fatalf("value %q must not count as our provenance", value)
+		}
+	}
+	if HasProvenance(&metav1.ObjectMeta{}) {
+		t.Fatalf("absent label must not count as our provenance")
+	}
+	protectedOnly := &metav1.ObjectMeta{}
+	StampDeleteProtected(protectedOnly)
+	if HasProvenance(protectedOnly) {
+		t.Fatalf("protection must not imply provenance, labels=%#v", protectedOnly.GetLabels())
+	}
+}
+
 // TestExcludeVetoSelectorMatches pins the whole truth table of the selector the list-based capture legs
 // filter with. The regression it guards is the selector degenerating into "match everything" (an empty
 // selector), which would silently capture every vetoed object: hence the explicit Empty() assertion

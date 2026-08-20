@@ -167,8 +167,9 @@ func (c CoreCaptureState) AllLegsCaptured() bool {
 }
 
 // ChildSpec is the child-builder seam: the domain constructs the fully-formed child snapshot object
-// (kind, name, spec.sourceRef, labels) and hands it to the SDK, which owns adoption (owner reference),
-// create-or-validate, and SnapshotChildRef derivation. The SDK never authors domain child spec fields.
+// (kind, name, spec.sourceRef, labels) and hands it to the SDK, which owns the tree membership (owner
+// reference and markers), create-or-validate, and SnapshotChildRef derivation. The SDK never authors domain
+// child spec fields.
 type ChildSpec struct {
 	// Object is the desired child snapshot object, built by the domain. The SDK derives its
 	// SnapshotChildRef from the object's GVK and name and stamps the parent owner reference on it.

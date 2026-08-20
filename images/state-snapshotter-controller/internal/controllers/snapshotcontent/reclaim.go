@@ -49,6 +49,13 @@ func (r *SnapshotContentController) reclaimDataArtifactsFromContentObj(ctx conte
 		if art.Kind != kindVolumeSnapshotContent || art.Name == "" {
 			continue
 		}
+		if contentOwnedByArtifact(contentObj.GetOwnerReferences(), art.Name) {
+			// The artifact owns this content, not the other way round: the content is a wrapper over a
+			// snapshot somebody else made (genericbinder.isArtifactOwnedRoot), and it is being torn down
+			// BECAUSE that artifact is going away. Reclaiming here would turn its owner's Retain into a
+			// physical delete of data this module never created.
+			continue
+		}
 		if err := r.reclaimVolumeSnapshotContent(ctx, art.Name); err != nil {
 			return err
 		}

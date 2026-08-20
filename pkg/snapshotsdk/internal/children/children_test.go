@@ -70,10 +70,29 @@ func TestReconcileCreatesAndDerivesRefs(t *testing.T) {
 	}
 }
 
-// TestReconcileStampsDeleteProtectedInCreatePayload asserts the child snapshot node is born already
-// carrying the authoritative delete-protection label — it must be in the CREATE payload, not a follow-up
-// patch. It also asserts the caller's template is left untouched.
-func TestReconcileStampsDeleteProtectedInCreatePayload(t *testing.T) {
+// assertChildPostcondition asserts the one state a child is left in by the time Reconcile returns it as
+// ours: owned by the parent, recognisable as created by this module, and protected. It holds for BOTH
+// branches — a caller cannot tell whether its child was created on this pass or an earlier one, so the create
+// spec and the repair spec assert it through this helper and the branches cannot drift apart.
+func assertChildPostcondition(t *testing.T, got client.Object) {
+	t.Helper()
+	if refs := got.GetOwnerReferences(); len(refs) != 1 || refs[0].Name != "p" {
+		t.Fatalf("expected child owned by parent, got %#v", refs)
+	}
+	if !storagev1alpha1.HasProvenance(got) {
+		t.Fatalf("expected child to carry %s=%s, got labels %#v",
+			storagev1alpha1.LabelProvenance, storagev1alpha1.LabelProvenanceUnifiedSnapshot, got.GetLabels())
+	}
+	if !storagev1alpha1.IsDeleteProtected(got) {
+		t.Fatalf("expected child to carry %s=%s, got labels %#v",
+			storagev1alpha1.LabelDeleteProtected, storagev1alpha1.LabelDeleteProtectedValue, got.GetLabels())
+	}
+}
+
+// TestReconcileStampsMarkersInCreatePayload asserts the child snapshot node is born already carrying its
+// origin and the authoritative delete-protection label — both must be in the CREATE payload, not a
+// follow-up patch. It also asserts the caller's template is left untouched.
+func TestReconcileStampsMarkersInCreatePayload(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -86,13 +105,10 @@ func TestReconcileStampsDeleteProtectedInCreatePayload(t *testing.T) {
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, got); err != nil {
 		t.Fatalf("expected child created: %v", err)
 	}
-	if !storagev1alpha1.IsDeleteProtected(got) {
-		t.Fatalf("expected created child to carry %s=%s, got labels %#v",
-			storagev1alpha1.LabelDeleteProtected, storagev1alpha1.LabelDeleteProtectedValue, got.GetLabels())
-	}
-	// The label is stamped on a deep copy; the caller-owned template must not be mutated.
-	if _, ok := template.GetLabels()[storagev1alpha1.LabelDeleteProtected]; ok {
-		t.Fatalf("caller template must not be mutated with the protection label, got %#v", template.GetLabels())
+	assertChildPostcondition(t, got)
+	// The labels are stamped on a deep copy; the caller-owned template must not be mutated.
+	if len(template.GetLabels()) != 0 {
+		t.Fatalf("caller template must not be mutated with our markers, got %#v", template.GetLabels())
 	}
 }
 
@@ -142,7 +158,7 @@ func TestReconcileFailsClosedOnConflictingOwner(t *testing.T) {
 		Build()
 
 	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err == nil {
-		t.Fatal("expected conflict error when adopting a child owned by another parent")
+		t.Fatal("expected conflict error on an object owned by another parent")
 	}
 	got := &corev1.ConfigMap{}
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, got); err != nil {
@@ -183,10 +199,132 @@ func TestUnionRefsPreservesExistingWhenNothingAdded(t *testing.T) {
 	}
 }
 
-func TestReconcileAdoptsUnownedChild(t *testing.T) {
+// TestReconcileRefusesUnownedChild is the negative half of the origin contract, on the shape that is easiest
+// to get wrong: an object already in the API, owned by nobody, matching the child's name exactly. It is NOT
+// taken over. The name is deterministic and a label is writable by anyone who can create the object, so
+// nothing observable here distinguishes our own leftover from a foreign object someone put at that name;
+// only having created it does, and this branch did not. Owning it would be the harmful mutation — it links a
+// stranger's object into this tree's garbage-collection graph — so the object must come out of a failed pass
+// byte-identical.
+func TestReconcileRefusesUnownedChild(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: childNS}}).
+		Build()
+
+	before := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, before); err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err == nil {
+		t.Fatal("expected an error instead of taking over an existing unowned object at the child's name")
+	}
+	assertChildUntouched(t, cl, before)
+}
+
+// TestReconcileRefusesChildOwnedByAPreviousParentIncarnation pins that the owner comparison includes the UID.
+// A reference naming this parent by name but carrying another UID belongs to a previous object of that name,
+// and its dependent is already condemned: the collector removes an object whose owner UID is gone. Serving it
+// would race that collection for something about to disappear — and, in the same-name-root-recreate case,
+// would attach a stale child to a fresh run.
+func TestReconcileRefusesChildOwnedByAPreviousParentIncarnation(t *testing.T) {
+	scheme := testScheme(t)
+	stale := owner()
+	stale.UID = "p-uid-previous"
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:            "a",
+			Namespace:       childNS,
+			OwnerReferences: []metav1.OwnerReference{stale},
+		}}).
+		Build()
+
+	before := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, before); err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err == nil {
+		t.Fatal("expected an error instead of serving a child owned by a previous incarnation of the parent")
+	}
+	assertChildUntouched(t, cl, before)
+}
+
+// assertChildUntouched asserts a refused pass wrote nothing at all: same resourceVersion, and neither marker
+// delivered. Checking the markers as well as the version states the intent directly — a future change that
+// starts stamping before deciding eligibility fails here with the reason, not just with a version mismatch.
+func assertChildUntouched(t *testing.T, cl client.Client, before *corev1.ConfigMap) {
+	t.Helper()
+	after := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: before.Namespace, Name: before.Name}, after); err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("refused child must not be written: resourceVersion %q -> %q", before.ResourceVersion, after.ResourceVersion)
+	}
+	if !equalOwnerRefs(after.OwnerReferences, before.OwnerReferences) {
+		t.Fatalf("refused child must keep its owner references: %#v -> %#v", before.OwnerReferences, after.OwnerReferences)
+	}
+	if storagev1alpha1.HasProvenance(after) || storagev1alpha1.IsDeleteProtected(after) {
+		t.Fatalf("refused child must carry neither marker, got labels %#v", after.GetLabels())
+	}
+}
+
+func equalOwnerRefs(left, right []metav1.OwnerReference) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Kind != right[i].Kind || left[i].Name != right[i].Name || left[i].UID != right[i].UID {
+			return false
+		}
+	}
+	return true
+}
+
+// TestReconcileDoesNotRewriteConformingChild pins that delivering the markers idempotently costs no write:
+// a child that already satisfies the postcondition is not patched at all. Reconcile runs on every wake-up
+// of every snapshot, so a patch per pass would be a write amplification the API server pays for.
+func TestReconcileDoesNotRewriteConformingChild(t *testing.T) {
+	scheme := testScheme(t)
+	conforming := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:            "a",
+		Namespace:       childNS,
+		OwnerReferences: []metav1.OwnerReference{owner()},
+	}}
+	storagev1alpha1.StampProvenance(conforming)
+	storagev1alpha1.StampDeleteProtected(conforming)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(conforming).Build()
+
+	before := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, before); err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	after := &corev1.ConfigMap{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, after); err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if after.ResourceVersion != before.ResourceVersion {
+		t.Fatalf("conforming child must not be written: resourceVersion %q -> %q", before.ResourceVersion, after.ResourceVersion)
+	}
+	assertChildPostcondition(t, after)
+}
+
+// TestReconcileRepairsOwnedChildMissingMarkers is the positive spec for an existing child, and the only one:
+// the owner reference proves this parent created it, so absent markers mean a build that predates them or a
+// label someone stripped, and both are repaired instead of leaving our own child half-inside the tree —
+// unrecognisable to consumers that decide by origin, and freely deletable. Everything without that owner
+// reference is refused above; repair is not a second way in.
+func TestReconcileRepairsOwnedChildMissingMarkers(t *testing.T) {
+	scheme := testScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name:            "a",
+			Namespace:       childNS,
+			OwnerReferences: []metav1.OwnerReference{owner()},
+		}}).
 		Build()
 
 	if _, err := Reconcile(context.Background(), cl, scheme, owner(), []client.Object{childCM()}); err != nil {
@@ -196,7 +334,5 @@ func TestReconcileAdoptsUnownedChild(t *testing.T) {
 	if err := cl.Get(context.Background(), client.ObjectKey{Namespace: childNS, Name: "a"}, got); err != nil {
 		t.Fatalf("get child: %v", err)
 	}
-	if len(got.OwnerReferences) != 1 || got.OwnerReferences[0].Name != "p" {
-		t.Fatalf("expected child adopted by parent, got %#v", got.OwnerReferences)
-	}
+	assertChildPostcondition(t, got)
 }

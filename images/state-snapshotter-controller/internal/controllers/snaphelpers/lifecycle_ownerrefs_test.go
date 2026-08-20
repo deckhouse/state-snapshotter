@@ -126,6 +126,33 @@ func TestLifecycleOwnerRefsRejectsConflictingParentSnapshotContent(t *testing.T)
 	}
 }
 
+// The content of a snapshot this module did not create is owned by that snapshot's CSI artifact, so a
+// VolumeSnapshotContent reference counts as a lifecycle owner like any other. Were it read as unrelated, it
+// would be kept and the next lifecycle owner appended beside it — two controller references on one object,
+// which the API server rejects. Instead it is idempotent against itself and conflicts with a keeper.
+func TestLifecycleOwnerRefsTreatsTheBoundArtifactAsALifecycleOwner(t *testing.T) {
+	artifact := metav1.OwnerReference{
+		APIVersion: "snapshot.storage.k8s.io/v1",
+		Kind:       "VolumeSnapshotContent",
+		Name:       "snapcontent-1",
+		UID:        "snapcontent-1-uid",
+		Controller: boolPtr(true),
+	}
+
+	got, changed, err := lifecycleOwnerRefs([]metav1.OwnerReference{artifact}, artifact)
+	if err != nil {
+		t.Fatalf("lifecycleOwnerRefs failed: %v", err)
+	}
+	if changed || len(got) != 1 {
+		t.Fatalf("re-applying the artifact owner must be a no-op; changed=%v refs=%#v", changed, got)
+	}
+
+	keeper := metav1.OwnerReference{APIVersion: DeckhouseAPIVersion, Kind: KindObjectKeeper, Name: "ret-snap", UID: "ok-uid", Controller: boolPtr(true)}
+	if _, _, err := lifecycleOwnerRefs([]metav1.OwnerReference{artifact}, keeper); err == nil {
+		t.Fatal("expected a keeper over an artifact-owned content to fail closed rather than add a second controller ref")
+	}
+}
+
 func TestLifecycleOwnerRefsAllowsSameOwnerUIDCompletion(t *testing.T) {
 	existing := []metav1.OwnerReference{{
 		APIVersion: DeckhouseAPIVersion,

@@ -157,11 +157,13 @@ d8 k get --raw \
 Это закрывает класс инцидентов, когда удаление дочернего объекта (например, managed CSI `VolumeSnapshot`)
 из UI тихо деградирует корневой `Snapshot`, хотя долговечные данные ещё существуют.
 
-- **Что защищено.** Только внутренние узлы дерева: дочерние `Snapshot`, `SnapshotContent`,
-  `ManifestCheckpoint` и его чанки, `ObjectKeeper`, managed CSI `VolumeSnapshot` / `VolumeSnapshotContent`.
+- **Что защищено.** Namespaced-узлы внутри дерева: дочерние `Snapshot` и managed CSI `VolumeSnapshot`.
   Они несут marker `state-snapshotter.deckhouse.io/delete-protected: "true"`.
 - **Что НЕ защищено.** Корневой `Snapshot` marker'а не имеет — его удаление это штатный способ снести всё
-  дерево (контроллеры сами удалят внутренние объекты). Объекты вне дерева снимка защита не затрагивает.
+  дерево (контроллеры сами удалят внутренние объекты). Cluster-scoped объекты дерева (`SnapshotContent`,
+  `ManifestCheckpoint` и его чанки, `ObjectKeeper`, managed CSI `VolumeSnapshotContent`) marker'а тоже не
+  несут: из namespace они недостижимы, а повреждение там проявляется деградацией дерева, а не отказом
+  admission. Объекты вне дерева снимка защита не затрагивает.
 - **Принудительное удаление (break-glass).** Чтобы удалить защищённый объект напрямую, поставьте на него
   аннотацию `deckhouse.io/allow-delete: "true"` и удаляйте. Сам marker обычный пользователь снять/изменить
   не может; аннотация — единственный поддерживаемый обход, обратима до момента удаления.

@@ -25,8 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -325,41 +323,23 @@ func TestSnapshotCoverageCheckerUsesSpecSourceRef(t *testing.T) {
 	}
 }
 
-// TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef pins the WRITE side of the source-of-truth
-// flip: the planner must persist spec.sourceRef {apiVersion,kind,name} (derived from the live source)
-// on the child it creates, and that written value must round-trip back through the coverage checker so
-// the same source reads as covered. Without this, a regression that drops/mis-maps the spec block would
-// still pass every coverage test (which fabricate the field independently).
-func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
+// TestPlannedChildSpecSourceRefRoundTripsThroughCoverage pins the write->read round trip of
+// spec.sourceRef without going through a create path: the planner builds the field (asserted in
+// TestPlanParentOwnedChildGraphLayerBuildsSpecs), the SDK writes the spec verbatim, and a child carrying
+// that exact block must read back as coverage for the same source. A regression that mis-maps the block
+// would otherwise pass every coverage test, since those fabricate the field independently.
+func TestPlannedChildSpecSourceRefRoundTripsThroughCoverage(t *testing.T) {
 	ctx := context.Background()
-	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
-	r := &SnapshotReconciler{Client: cl}
-
-	nsSnap := &storagev1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "ns1", Name: "root", UID: "root-uid"},
-	}
-	gvk := schema.GroupVersionKind{Group: "demo.test", Version: "v1", Kind: "DemoSnapshot"}
 	source := demoSourceObject("vm-1", "uid-a")
+	identity, err := controllercommon.SnapshotSourceIdentityFromObject(source)
+	if err != nil {
+		t.Fatalf("source identity: %v", err)
+	}
 
 	const childName = "nss-child-vm-1"
-	if err := r.ensureParentOwnedChildSnapshot(ctx, nsSnap, childName, gvk, source); err != nil {
-		t.Fatalf("ensureParentOwnedChildSnapshot: %v", err)
-	}
+	child := demoSnapshotChildWithSource(childName, identity)
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithObjects(child).Build()
 
-	created := &unstructured.Unstructured{}
-	created.SetGroupVersionKind(gvk)
-	if err := cl.Get(ctx, client.ObjectKey{Namespace: "ns1", Name: childName}, created); err != nil {
-		t.Fatalf("get created child: %v", err)
-	}
-	srcRef, found, err := unstructured.NestedStringMap(created.Object, "spec", "sourceRef")
-	if err != nil || !found {
-		t.Fatalf("created child must carry spec.sourceRef (found=%v err=%v)", found, err)
-	}
-	if srcRef["apiVersion"] != "demo.test/v1" || srcRef["kind"] != "DemoSource" || srcRef["name"] != "vm-1" {
-		t.Fatalf("spec.sourceRef mismatch: %+v", srcRef)
-	}
-
-	// Round-trip: the coverage checker reading the just-created child must consider the source covered.
 	checker := newSnapshotCoverageChecker(cl, "ns1", []storagev1alpha1.SnapshotChildRef{{
 		APIVersion: "demo.test/v1",
 		Kind:       "DemoSnapshot",
@@ -370,7 +350,7 @@ func TestEnsureParentOwnedChildSnapshotWritesSpecSourceRef(t *testing.T) {
 		t.Fatalf("IsCovered: %v", err)
 	}
 	if !covered {
-		t.Fatalf("source must be covered by the child the planner just created (write->read round-trip)")
+		t.Fatalf("source must be covered by a child carrying the planned spec.sourceRef (write->read round-trip)")
 	}
 }
 
@@ -438,10 +418,11 @@ func TestParentStatusSeedWouldSelfCoverStandalone(t *testing.T) {
 }
 
 // TestRecomputeChildGraphKeepsLowerPriorityStandalone reconstructs a two-wave recompute
-// (VM priority 10 -> Disk priority 100) using the production coverage checker and merge, and proves
-// the deterministic idempotency invariant: on a repeated reconcile where the root status already
-// carries both generated refs, the lower-priority standalone disk ref survives, the disk-vm covered
-// by the VM subtree is not re-added (no duplicate), and the VM ref is kept.
+// (VM priority 10 -> Disk priority 100) using the production coverage checker, and proves the
+// deterministic idempotency invariant on a repeated reconcile where the root status already carries both
+// generated refs: the disk covered by the VM subtree is not re-planned into a duplicate direct child,
+// while the lower-priority standalone disk is re-planned because a stale status ref must not self-cover
+// it. Publishing the resulting refs is the SDK's union, tested with the seam.
 func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 	ctx := context.Background()
 
@@ -484,21 +465,18 @@ func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 		t.Fatalf("disk-standalone must NOT be covered: a stale parent status ref must not self-cover it")
 	}
 
-	// disk-vm skipped (covered); disk-standalone re-planned this pass.
+	// disk-vm skipped (covered); disk-standalone re-planned this pass. The pass therefore declares exactly
+	// the VM and the standalone disk — the set the SDK unions into the already-published refs.
 	desiredRefs = append(desiredRefs, childRef("nss-child-disk-standalone"))
 
-	// Merge against the parent's previous status, which already carried both generated refs.
-	currentStatus := []storagev1alpha1.SnapshotChildRef{vmRef, childRef("nss-child-disk-standalone")}
-	merged := mergeSnapshotManagedChildRefs(currentStatus, desiredRefs)
-
-	if countSnapshotChildRefName(merged, "nss-child-vm") != 1 {
-		t.Fatalf("merged must keep exactly one VM ref: %+v", merged)
+	if countSnapshotChildRefName(desiredRefs, "nss-child-vm") != 1 {
+		t.Fatalf("pass must declare exactly one VM ref: %+v", desiredRefs)
 	}
-	if countSnapshotChildRefName(merged, "nss-child-disk-standalone") != 1 {
-		t.Fatalf("merged must keep exactly one standalone disk ref (regression): %+v", merged)
+	if countSnapshotChildRefName(desiredRefs, "nss-child-disk-standalone") != 1 {
+		t.Fatalf("pass must re-declare exactly one standalone disk ref (regression): %+v", desiredRefs)
 	}
-	if countSnapshotChildRefName(merged, "nss-child-disk-vm") != 0 {
-		t.Fatalf("merged must NOT add a duplicate direct ref for the VM-covered disk: %+v", merged)
+	if countSnapshotChildRefName(desiredRefs, "nss-child-disk-vm") != 0 {
+		t.Fatalf("pass must NOT declare a duplicate direct ref for the VM-covered disk: %+v", desiredRefs)
 	}
 }
 

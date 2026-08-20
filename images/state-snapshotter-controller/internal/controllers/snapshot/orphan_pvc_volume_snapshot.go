@@ -51,7 +51,7 @@ var (
 // ensureOrphanPVCVolumeSnapshots creates a standard CSI VolumeSnapshot for each root residual (orphan) PVC
 // target and declares them as REGULAR domain children via the SDK EnsureChildren.
 // From here on the orphan VolumeSnapshot is an ordinary domain snapshot: the
-// storage-foundation VolumeSnapshot domain controller adopts + plans it, the generic binder creates + binds
+// storage-foundation VolumeSnapshot domain controller takes it into management + plans it, the generic binder creates + binds
 // its SnapshotContent, and the aggregator projects ALL of that content's status (data from the bound VSC,
 // manifestCheckpointName from the VS domain's MCR, childrenSnapshotContentRefs, Ready). The namespace
 // domain therefore writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT) and does NOT prune the orphan
@@ -83,13 +83,14 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 			// root content to carry it, so the terminal is written on the Snapshot's own Ready.
 			return r.failOrphanCaptureTerminal(ctx, nsSnap, treason, tmsg)
 		}
-		// Guard adoption: EnsureChildren create/adopts BY NAME and its adopt path only stamps the ownerRef —
-		// it never rewrites spec (a CSI VolumeSnapshot spec is immutable anyway). So a pre-existing object at
-		// the deterministic name (a stale/legacy VolumeSnapshot, a bare shell, or a pre-provisioned VS) would
-		// be adopted + published as a domain child WITH ITS OWN spec, capturing the wrong volume / wrong class
-		// / nothing at all. The name keys on (rootUID, pvcUID) so this is practically unreachable, but validate
-		// the desired source PVC AND resolved class against any existing object and fail closed on a mismatch
-		// (restores the pre-dismantling validateExistingOrphanPVCVolumeSnapshot guard).
+		// Guard the object we already own: EnsureChildren works BY NAME and never rewrites spec (a CSI
+		// VolumeSnapshot spec is immutable anyway). A stranger's object at the deterministic name is refused by
+		// the SDK, but one this root created on an earlier pass is served — so a shell created against a class
+		// that never binds, or one sourcing another PVC, would be published as a domain child with its own
+		// spec, capturing the wrong volume / wrong class / nothing at all. The name keys on (rootUID, pvcUID)
+		// so this is practically unreachable, but validate the desired source PVC AND resolved class against
+		// any existing object and fail closed on a mismatch, with a terminal the operator can read instead of
+		// a requeue loop (restores the pre-dismantling validateExistingOrphanPVCVolumeSnapshot guard).
 		if treason, tmsg, err := r.orphanPVCVolumeSnapshotSpecMismatch(ctx, nsSnap.Namespace, name, target.Name, className); err != nil {
 			return err
 		} else if treason != "" {
@@ -100,15 +101,16 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 	if len(specs) == 0 {
 		return nil
 	}
-	// EnsureChildren create/adopts each orphan VolumeSnapshot (stamping the controller ownerRef to the root
-	// Snapshot) and UNIONS their refs into status.childrenSnapshotRefs. Re-passing the planning excluded set
+	// EnsureChildren creates each orphan VolumeSnapshot (stamping the controller ownerRef to the root Snapshot,
+	// its origin and its protection) and UNIONS their refs into status.childrenSnapshotRefs. Re-passing the planning excluded set
 	// keeps status.excludedRefs intact (EnsureChildren rewrites that field on every call).
 	return sdk.EnsureChildren(ctx, adapter, specs, excluded)
 }
 
 // orphanPVCVolumeSnapshotSpecMismatch validates a pre-existing orphan VolumeSnapshot at the deterministic
-// name against the DESIRED capture spec, so the caller fails closed instead of adopting (via EnsureChildren,
-// whose adopt path never rewrites spec) an object that would capture the wrong volume or capture nothing.
+// name against the DESIRED capture spec, so the caller fails closed instead of publishing (via EnsureChildren,
+// which never rewrites the spec of a child it already owns) an object that would capture the wrong volume or
+// capture nothing.
 // It returns a terminal (reason, message) when an object exists whose
 // spec.source.persistentVolumeClaimName != wantPVCName (including empty/shell/pre-provisioned). NotFound —
 // the common case, the object will be created with the correct spec — returns "".
@@ -143,7 +145,7 @@ func (r *SnapshotReconciler) orphanPVCVolumeSnapshotSpecMismatch(
 	}
 	// A bound VolumeSnapshot is a durable, valid capture regardless of the class currently resolved — do
 	// not re-validate its class (see the doc comment). Only an unbound handle's class is checked, so a
-	// genuinely mis-created (wrong-class, never-binding) shell still fails closed before adoption.
+	// genuinely mis-created (wrong-class, never-binding) shell still fails closed before it is published.
 	boundContent, _, gerr := unstructured.NestedString(existing.Object, "status", "boundVolumeSnapshotContentName")
 	if gerr != nil {
 		return "", "", fmt.Errorf("read orphan VolumeSnapshot %s/%s status.boundVolumeSnapshotContentName: %w", namespace, name, gerr)
