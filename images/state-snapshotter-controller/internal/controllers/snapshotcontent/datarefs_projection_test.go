@@ -210,7 +210,7 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -219,6 +219,11 @@ func TestReconcileDataLegProjection_VCRDomainPublishesAndHandsOff(t *testing.T) 
 	}
 	if !requeue {
 		t.Fatalf("a fresh publish must requeue so the next pass re-reads the content with data")
+	}
+	// A VCR capture leg runs no import logic, so it can carry no import cause: only the generic-import route
+	// fills the pending detail, and anything leaking out here would land in this content's DataReady message.
+	if pendingDetail != "" {
+		t.Fatalf("a capture data leg must report no pending detail, got %q", pendingDetail)
 	}
 	projAssertPublishedAndHandedOff(t, cl)
 }
@@ -254,12 +259,17 @@ func TestReconcileDataLegProjection_VCRFailedIsContentTerminal(t *testing.T) {
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, termReason, termMsg, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, termMsg, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
 	if termReason != snapshot.ReasonVolumeCaptureFailed {
 		t.Fatalf("termReason = %q, want %q", termReason, snapshot.ReasonVolumeCaptureFailed)
+	}
+	// A terminal leg states its cause as a reason, never as a pending detail: the two must not both be set,
+	// or the aggregation would have a cause for a state it is not in.
+	if pendingDetail != "" {
+		t.Fatalf("a terminal data leg must report no pending detail, got %q", pendingDetail)
 	}
 	if termMsg == "" {
 		t.Fatalf("a terminal data-leg failure must carry a diagnostic message")
@@ -305,7 +315,7 @@ func TestReconcileDataLegProjection_NativeCSIPublishesFromBoundVSC(t *testing.T)
 		Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -352,7 +362,7 @@ func TestReconcileDataLegProjection_NativeCSIBackfillsSizeThenLatches(t *testing
 
 	reconcile := func() bool {
 		t.Helper()
-		requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+		requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 		if err != nil {
 			t.Fatalf("reconcileDataLegProjection: %v", err)
 		}
@@ -554,7 +564,7 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesStorageClassFromDataI
 		projSourcePVC(), projContentTyped(), projVSCWithRestoreSize(), projDataImportForVS("di-1"))
 	owner := projBoundVSCOwner(true)
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 	}
@@ -570,12 +580,17 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesStorageClassFromDataI
 	}
 	rv := projContentResourceVersion(t, cl)
 
-	requeue, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, _, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
 	}
 	if requeue {
 		t.Fatalf("the second pass must latch on the published import storageClassName (no requeue)")
+	}
+	// The native-CSI route explains no pending leg: only the generic-import route can read a stalled
+	// DataImport's phase, and a detail leaking out here would end up in this content's DataReady message.
+	if pendingDetail != "" {
+		t.Fatalf("the native-CSI data leg must report no pending detail, got %q", pendingDetail)
 	}
 	if got := projContentResourceVersion(t, cl); got != rv {
 		t.Fatalf("a latched pass must not write the content: resourceVersion %q -> %q", rv, got)
@@ -605,7 +620,7 @@ func TestReconcileDataLegProjection_BoundVSCImportBackfillsStorageClassOnStaleCo
 	r, cl := projBoundVSCFixture(t, &lists,
 		content, projVSCWithRestoreSize(), projDataImportForVS("di-1"))
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -643,7 +658,7 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesWithUnresolvedDataImp
 			r, cl := projBoundVSCFixture(t, &lists, objs...)
 			owner := projBoundVSCOwner(true)
 
-			requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 			if err != nil {
 				t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 			}
@@ -662,7 +677,7 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesWithUnresolvedDataImp
 			}
 			rv := projContentResourceVersion(t, cl)
 
-			requeue, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			requeue, _, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 			if err != nil {
 				t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
 			}
@@ -698,12 +713,15 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedClassAfterDataIm
 	// The DataImport is gone (TTL) and so is the imported leaf's source PVC — nothing left to re-derive from.
 	r, cl := projBoundVSCFixture(t, &lists, content, projVSCWithRestoreSize())
 
-	requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
+	requeue, _, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
 	if requeue {
 		t.Fatalf("a reaped DataImport must not un-latch an already published import content")
+	}
+	if pendingDetail != "" {
+		t.Fatalf("a latched leg is not waiting for anything and must report no pending detail, got %q", pendingDetail)
 	}
 	d := projContentData(t, cl)
 	if d.StorageClassName != importScratchStorageClass || d.VolumeMode != string(corev1.PersistentVolumeFilesystem) ||
@@ -725,7 +743,7 @@ func TestReconcileDataLegProjection_BoundVSCCaptureSkipsDataImportLookupAndLatch
 		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeBlock), "ext4"))
 	owner := projBoundVSCOwner(false)
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 	}
@@ -739,12 +757,16 @@ func TestReconcileDataLegProjection_BoundVSCCaptureSkipsDataImportLookupAndLatch
 	}
 	rv := projContentResourceVersion(t, cl)
 
-	requeue, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, _, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
 	}
 	if requeue {
 		t.Fatalf("a capture leg with size captured must latch on the second pass (no requeue)")
+	}
+	// A capture leg runs no import logic at all, so it can never carry an import cause.
+	if pendingDetail != "" {
+		t.Fatalf("a capture data leg must report no pending detail, got %q", pendingDetail)
 	}
 	if got := projContentResourceVersion(t, cl); got != rv {
 		t.Fatalf("a latched capture pass must not write the content: resourceVersion %q -> %q", rv, got)
@@ -764,7 +786,7 @@ func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDe
 	r, cl := projBoundVSCFixture(t, &lists, projSourcePVC(), projContentTyped(), projVSCWithRestoreSize())
 	owner := projBoundVSCOwner(false)
 
-	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
+	if requeue, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
 		t.Fatalf("first publish: requeue=%v err=%v", requeue, err)
 	}
 	before := projContentData(t, cl)
@@ -777,12 +799,16 @@ func TestReconcileDataLegProjection_BoundVSCCaptureKeepsMetadataAfterSourcePVCDe
 		t.Fatalf("delete source PVC: %v", err)
 	}
 
-	requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, _, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection after PVC deletion: %v", err)
 	}
 	if requeue {
 		t.Fatalf("a deleted source PVC must not un-latch a published capture content")
+	}
+	// A capture leg runs no import logic at all, so it can never carry an import cause.
+	if pendingDetail != "" {
+		t.Fatalf("a capture data leg must report no pending detail, got %q", pendingDetail)
 	}
 	if got := projContentResourceVersion(t, cl); got != rv {
 		t.Fatalf("nothing must be written after the source PVC is gone: resourceVersion %q -> %q", rv, got)
@@ -821,7 +847,7 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesVolumeFieldsFromDataI
 				projDataImportForVSWithVolumeData(tt.volumeMode, tt.fsType))
 			owner := projBoundVSCOwner(true)
 
-			requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 			if err != nil {
 				t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 			}
@@ -839,7 +865,7 @@ func TestReconcileDataLegProjection_BoundVSCImportPublishesVolumeFieldsFromDataI
 
 			// The latch must CONVERGE on the fields it just published. A latch term for a field that is never
 			// published (or a published field with no term) leaves the leg re-publishing on every pass forever.
-			requeue, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+			requeue, _, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 			if err != nil {
 				t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
 			}
@@ -890,7 +916,7 @@ func TestReconcileDataLegProjection_BoundVSCImportForeignPVCDoesNotSubstituteVol
 			objs := append([]client.Object{projContentTyped(), projVSCWithRestoreSize(), projForeignPVCOnPV(), projSourcePV()}, tt.dataImports...)
 			r, cl := projBoundVSCFixture(t, &lists, objs...)
 
-			if _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true); err != nil {
+			if _, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true); err != nil {
 				t.Fatalf("reconcileDataLegProjection: %v", err)
 			}
 			d := projContentData(t, cl)
@@ -929,7 +955,7 @@ func TestReconcileDataLegProjection_BoundVSCImportBackfillsVolumeFieldsOnStaleCo
 	r, cl := projBoundVSCFixture(t, &lists, content, projVSCWithRestoreSize(),
 		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeFilesystem), "ext4"))
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), projBoundVSCOwner(true), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -972,12 +998,16 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedVolumeFieldsAfte
 	r, cl := projBoundVSCFixture(t, &lists, content, projVSCUnowned())
 	owner := projBoundVSCOwner(true)
 
-	requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, _, _, pendingDetail, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 	}
 	if !requeue {
 		t.Fatalf("with size still missing the leg must keep re-publishing (that is what makes the wipe possible)")
+	}
+	// Pending on a missing size is not a stalled import: the native-CSI route reports no cause of its own.
+	if pendingDetail != "" {
+		t.Fatalf("the native-CSI data leg must report no pending detail, got %q", pendingDetail)
 	}
 	d := projContentData(t, cl)
 	if d.VolumeMode != string(corev1.PersistentVolumeFilesystem) || d.FsType != "ext4" || d.StorageClassName != importScratchStorageClass {
@@ -997,10 +1027,10 @@ func TestReconcileDataLegProjection_BoundVSCImportKeepsPublishedVolumeFieldsAfte
 	if err := cl.Update(ctx, liveVSC); err != nil {
 		t.Fatalf("update VSC restoreSize: %v", err)
 	}
-	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
+	if requeue, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
 		t.Fatalf("the size-backfill publish must requeue: requeue=%v err=%v", requeue, err)
 	}
-	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
+	if requeue, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
 		t.Fatalf("once size is captured the leg must latch: requeue=%v err=%v", requeue, err)
 	}
 	d = projContentData(t, cl)
@@ -1036,7 +1066,7 @@ func TestReconcileDataLegProjection_BoundVSCImportResolvedDataImportClearsUnatte
 		projDataImportForVSWithVolumeData(string(corev1.PersistentVolumeBlock), ""))
 	owner := projBoundVSCOwner(true)
 
-	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
+	if requeue, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || !requeue {
 		t.Fatalf("a content contradicting the DataImport must be re-published: requeue=%v err=%v", requeue, err)
 	}
 	d := projContentData(t, cl)
@@ -1046,7 +1076,7 @@ func TestReconcileDataLegProjection_BoundVSCImportResolvedDataImportClearsUnatte
 	if d.FsType != "" {
 		t.Fatalf("fsType = %q: the DataImport attests a Block volume, which has no filesystem", d.FsType)
 	}
-	if requeue, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
+	if requeue, _, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true); err != nil || requeue {
 		t.Fatalf("the corrected content must latch on the next pass: requeue=%v err=%v", requeue, err)
 	}
 }

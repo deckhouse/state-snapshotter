@@ -34,10 +34,13 @@ import (
 
 type Resolver struct {
 	client client.Client
-	// isDomainKind reports whether a snapshot kind is owned by an out-of-process domain controller.
-	// When it returns true for a node, the resolver marks that node as a domain boundary and does NOT
-	// descend into it (the domain apiserver resolves the subtree). Nil means "no domain kinds": every
-	// node is resolved generically (the default for focused tests and the per-resource view).
+	// isDomainKind reports whether the restore of a snapshot kind is served by another module's
+	// aggregated apiserver. When it returns true for a node, the resolver marks that node as a
+	// delegation boundary and does NOT descend into it (the owner resolves the subtree). In the running
+	// controller it says yes for every registered kind except the namespace-root Snapshot — the CSI
+	// VolumeSnapshot included, whose capture is this module's business while its restore is not. Nil
+	// means "delegate nothing": every node is resolved generically, which is the shape focused tests and
+	// the per-resource view use.
 	isDomainKind func(kind string) bool
 }
 
@@ -213,9 +216,10 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 		if ref.Name == "" {
 			continue
 		}
-		// Domain boundary: a child owned by an out-of-process domain controller is delegated. Mark it
-		// and do NOT Get it — core stays domain-free (no demo RBAC, no extra round-trip) and does not
-		// descend; the domain apiserver resolves and restores the whole subtree. compileNode delegates.
+		// Delegation boundary: a child whose kind is served by another module is delegated. Mark it and
+		// do NOT Get it — core stays free of other modules' CRs (no extra RBAC, no extra round-trip) and
+		// does not descend; the owner resolves and restores the whole subtree. compileNode delegates.
+		// A volume node reaches this branch too, so the branch below is not its production path.
 		if r.isDomainKind != nil && r.isDomainKind(ref.Kind) {
 			node.Children = append(node.Children, domainRestoreNode(ref.APIVersion, ref.Kind, ref.Name, namespace))
 			continue
@@ -225,6 +229,11 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 			// standalone child volume node. Its PVC manifest + dataRef live on that child SnapshotContent
 			// (own MCP), not on this node, so resolve it into a child RestoreNode the generic per-node
 			// compile path emits (PVC bound to its VolumeSnapshot dataSourceRef).
+			//
+			// This is the resolution a resolver with NO delegation predicate performs. The running
+			// controller delegates the volume leg one branch above; here it stays because the compilation
+			// of a volume node is the same whichever side runs it, and this is the side the per-node
+			// compile tests read.
 			childNode, err := r.resolveOrphanVolumeChildNode(ctx, namespace, ref.Name)
 			if err != nil {
 				return nil, err
@@ -247,28 +256,6 @@ func (r *Resolver) buildRestoreNode(ctx context.Context, snapshotObj *unstructur
 		node.Children = append(node.Children, childNode)
 	}
 	return node, nil
-}
-
-// ResolveVolumeSnapshotRestoreNode resolves a generic-PVC extended VolumeSnapshot leaf — the entrypoint
-// of the subresources.snapshot.storage.k8s.io connector (C8) — into the standalone child volume
-// RestoreNode behind it (PVC manifest + dataRef + VSC->VS mapping). It reuses the orphan-PVC volume-leaf
-// resolution: the VolumeSnapshot is itself the leaf and carries no snapshot children, so there is no
-// recursion. The compile path then emits the PVC bound to its VolumeSnapshot dataSourceRef.
-//
-// Unlike resolveOrphanVolumeChildNode (reached from a trusted childrenSnapshotRefs tree-walk, where a
-// missing leaf is a contract violation), this is a top-level user-addressed entrypoint: a missing
-// VolumeSnapshot is a plain NotFound (404), matching the manifests-download sibling. The existence
-// precheck maps that case to ErrNotFound before delegating to the shared (409-on-missing) resolver.
-func (r *Resolver) ResolveVolumeSnapshotRestoreNode(ctx context.Context, namespace, vsName string) (*RestoreNode, error) {
-	vs := &unstructured.Unstructured{}
-	vs.SetGroupVersionKind(schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot})
-	if err := r.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: vsName}, vs); err != nil {
-		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("%w: VolumeSnapshot %s/%s", ErrNotFound, namespace, vsName)
-		}
-		return nil, fmt.Errorf("failed to get VolumeSnapshot %s/%s: %w", namespace, vsName, err)
-	}
-	return r.resolveOrphanVolumeChildNode(ctx, namespace, vsName)
 }
 
 // resolveOrphanVolumeChildNode builds the child RestoreNode behind an orphan-PVC CSI VolumeSnapshot

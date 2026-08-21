@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,6 +35,8 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -406,5 +409,204 @@ func TestBuildManifestsWithDataRestoration_RootNotReadyFailsClosed(t *testing.T)
 	}
 	if !errors.Is(err, ErrNotReady) {
 		t.Fatalf("expected ErrNotReady, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The volume leg of a tree
+// ---------------------------------------------------------------------------
+
+// The cases below are about the node the delegation boundary moved to last: a volume node. It is a CSI
+// VolumeSnapshot handle hanging off the root's childrenSnapshotRefs, and its restore is served by the
+// module that owns the kind, not compiled here. They sit in this file rather than a new one because they
+// belong to the SAME set of delegation cases as everything above — the delegate stub, the fixtures and the
+// post-order assertions are shared, and splitting one set of cases across two test frameworks costs more
+// than the local departure from Ginkgo.
+
+// errDelegateUnavailable stands for "the owner did not answer". It is a sentinel rather than a fresh error so
+// a case can assert that THIS error is what failed the request.
+var errDelegateUnavailable = errors.New("volume node owner unavailable")
+
+// missingDelegateMessage is the fragment compileDomainNode writes when no delegate is wired at all. It is
+// matched as text because the refusal shares its wrapped sentinel (ErrContractViolation) with every other
+// contract failure of the compiler, and it is exactly the neighbouring failures this case must not be
+// satisfied by.
+const missingDelegateMessage = "requires the domain restore delegate"
+
+// isOutOfProcessRestoreKind is the predicate the running controller passes to the compiler, built over a
+// registry as it looks with the CSI CRD installed and one CustomSnapshotDefinition domain registered.
+//
+// It is used instead of a hand-written closure on purpose: whether a volume node is delegated is decided
+// by that predicate, and a local "kind == VolumeSnapshot" stand-in would keep these cases green after the
+// predicate stopped saying so — which is the exact regression that would silently bring the compilation of
+// a volume node back in-process.
+func isOutOfProcessRestoreKind(t *testing.T) func(kind string) bool {
+	t.Helper()
+
+	reg := snapshot.NewGVKRegistry()
+	for kind, groupVersion := range map[string]string{
+		"Snapshot":                   "state-snapshotter.deckhouse.io/v1alpha1",
+		"VolumeSnapshot":             "snapshot.storage.k8s.io/v1",
+		"DemoVirtualMachineSnapshot": demoGroupV,
+		"DemoVirtualDiskSnapshot":    demoGroupV,
+	} {
+		if err := reg.RegisterSnapshotGVK(kind, groupVersion); err != nil {
+			t.Fatalf("register %s: %v", kind, err)
+		}
+	}
+	return func(kind string) bool {
+		return unifiedbootstrap.IsOutOfProcessDomainSnapshotKind(reg, kind)
+	}
+}
+
+// materializeRootWithDelegatedVolumeNodes builds the generic root with childrenSnapshotRefs pointing at CSI
+// VolumeSnapshot handles, and seeds NOTHING behind them — no VolumeSnapshot object, no child
+// SnapshotContent, no checkpoint.
+//
+// That omission is the assertion: a delegated node is one core never reads. Every fixture the local
+// orphan-PVC resolution needs is absent, so a regression that resolves the volume leg here instead of
+// delegating it fails with a NotFound rather than quietly producing the same-looking output from the other
+// implementation.
+func materializeRootWithDelegatedVolumeNodes(t *testing.T, manifests []map[string]interface{}, vsNames []string) []client.Object {
+	t.Helper()
+	const rootName = "app"
+	content := rootName + "-content"
+	mcp := "mcp-" + rootName
+
+	objs := materializeMCP(mcp, manifests)
+	objs = append(objs, rootBoundContent(content, mcp, rootName))
+
+	var childRefs []storagev1alpha1.SnapshotChildRef
+	for _, vsName := range vsNames {
+		childRefs = append(childRefs, storagev1alpha1.SnapshotChildRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: vsName,
+		})
+	}
+	objs = append(objs, rootSnapshotObj(rootName, content, childRefs))
+	return objs
+}
+
+// TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes proves the volume leg of a tree is answered by
+// the module that owns the kind and spliced in, exactly like any other delegated subtree: the delegate is
+// called with the CSI VolumeSnapshot identity, its objects reach the output in the target namespace, and
+// they precede the root's own objects (post-order).
+func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
+	objs := materializeRootWithDelegatedVolumeNodes(t, []map[string]interface{}{cmManifest("config")}, []string{"vs-shared"})
+
+	delegate := &recordingDelegate{byName: map[string][]map[string]interface{}{
+		// What the owner returns is already apply-ready: the PVC bound to its VolumeSnapshot. The name
+		// differs from anything the local resolution would produce, so the output identifies which side
+		// compiled it.
+		"vs-shared": {{
+			"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+			"metadata": map[string]interface{}{"name": "delegated-pvc"},
+			"spec": map[string]interface{}{
+				"dataSourceRef": map[string]interface{}{"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": "vs-shared"},
+			},
+		}},
+	}}
+
+	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
+	log, _ := logger.NewLogger("error")
+	arch := usecase.NewArchiveService(cl, cl, log)
+	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
+
+	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
+		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+	})
+	if err != nil {
+		t.Fatalf("BuildManifestsWithDataRestoration: %v", err)
+	}
+	objects := decodeObjects(t, out)
+
+	if len(delegate.calls) != 1 {
+		t.Fatalf("expected the volume node to be delegated exactly once, got %d call(s)", len(delegate.calls))
+	}
+	call := delegate.calls[0]
+	wantGVK := schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"}
+	if call.gvk != wantGVK {
+		t.Fatalf("delegated identity = %v, want %v", call.gvk, wantGVK)
+	}
+	if call.namespace != "source-ns" || call.name != "vs-shared" || call.targetNamespace != "restore-ns" {
+		t.Fatalf("delegated call = %s/%s -> %s, want source-ns/vs-shared -> restore-ns", call.namespace, call.name, call.targetNamespace)
+	}
+
+	if !hasObj(objects, "PersistentVolumeClaim", "delegated-pvc") {
+		t.Fatalf("the owner's answer is missing from the output: %v", objects)
+	}
+	if !hasObj(objects, "ConfigMap", "config") {
+		t.Fatal("root ConfigMap missing")
+	}
+	for _, o := range objects {
+		u := unstructured.Unstructured{Object: o}
+		if u.GetNamespace() != "restore-ns" {
+			t.Fatalf("%s/%s namespace = %q, want restore-ns", u.GetKind(), u.GetName(), u.GetNamespace())
+		}
+	}
+	// Post-order is unchanged by which side compiled the node: the volume node's objects come before the
+	// objects of the parent that depends on them.
+	if pvc, cm := idxOf(objects, "PersistentVolumeClaim", "delegated-pvc"), idxOf(objects, "ConfigMap", "config"); pvc >= cm {
+		t.Fatalf("post-order violation: delegated PVC (idx %d) must precede the root's ConfigMap (idx %d)", pvc, cm)
+	}
+}
+
+// TestBuildManifestsWithDataRestoration_VolumeNodeDelegateErrorFailsClosed proves the volume leg fails the
+// WHOLE request when its owner cannot answer, with the same error as any other delegated subtree. A
+// partial tree would be the worst possible outcome here: the objects that survived would apply, and the
+// volume they need would silently not be there.
+func TestBuildManifestsWithDataRestoration_VolumeNodeDelegateErrorFailsClosed(t *testing.T) {
+	objs := materializeRootWithDelegatedVolumeNodes(t, []map[string]interface{}{cmManifest("config")}, []string{"vs-shared"})
+
+	delegate := &recordingDelegate{err: errDelegateUnavailable}
+	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
+	log, _ := logger.NewLogger("error")
+	arch := usecase.NewArchiveService(cl, cl, log)
+	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
+
+	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
+		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+	})
+	if err == nil {
+		t.Fatalf("expected the unavailable owner to fail the whole restore, got output %s", out)
+	}
+	if out != nil {
+		t.Fatalf("expected no output alongside the error, got %s", out)
+	}
+	// The owner's own message must be what failed the request. Merely asserting "an error" would also be
+	// satisfied by a compiler that never delegated and tripped over the fixtures this tree deliberately
+	// omits — the failure would then be the local resolution's, and this case would prove nothing.
+	if !errors.Is(err, errDelegateUnavailable) {
+		t.Fatalf("expected the owner's error to fail the request, got %v", err)
+	}
+	if len(delegate.calls) != 1 {
+		t.Fatalf("expected the volume node to be delegated once before failing, got %d call(s)", len(delegate.calls))
+	}
+}
+
+// TestBuildManifestsWithDataRestoration_VolumeNodeNoDelegateFailsClosed proves a volume leg with no
+// delegate wired is refused as a contract violation rather than dropped — the same answer the compiler
+// gives for any other node whose owner it cannot reach.
+func TestBuildManifestsWithDataRestoration_VolumeNodeNoDelegateFailsClosed(t *testing.T) {
+	objs := materializeRootWithDelegatedVolumeNodes(t, []map[string]interface{}{cmManifest("config")}, []string{"vs-shared"})
+
+	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
+	log, _ := logger.NewLogger("error")
+	arch := usecase.NewArchiveService(cl, cl, log)
+	svc := NewService(cl, arch, nil, isOutOfProcessRestoreKind(t))
+
+	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
+		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+	})
+	if err == nil {
+		t.Fatal("expected fail-closed when the volume node has no delegate configured")
+	}
+	if !errors.Is(err, ErrContractViolation) {
+		t.Fatalf("expected ErrContractViolation, got %v", err)
+	}
+	// Which refusal it is matters: this tree omits the fixtures the local resolution needs, so a compiler
+	// that stopped delegating the volume leg would also fail here — with a contract violation of its own.
+	// The message is what tells the two apart.
+	if !strings.Contains(err.Error(), missingDelegateMessage) {
+		t.Fatalf("expected the refusal to name the missing delegate (%q), got %v", missingDelegateMessage, err)
 	}
 }

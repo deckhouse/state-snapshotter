@@ -74,8 +74,6 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 	mux := http.NewServeMux()
 	archiveHandler.SetupRoutes(mux)
 	restoreHandler.SetupRoutes(mux)
-	// subresources.snapshot.storage.k8s.io connector over the generic-PVC extended VolumeSnapshot (C8).
-	restoreHandler.SetupVolumeSnapshotConnectorRoutes(mux)
 
 	return &Server{
 		addr:           addr,
@@ -98,13 +96,11 @@ func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Ha
 		// Call the next handler
 		next.ServeHTTP(wrapped, r)
 
-		// Skip logging for health check endpoints and API discovery endpoints
-		// /openapi/v2, /openapi/v3, /apis are normal discovery requests from kube-apiserver
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/livez" ||
-			r.URL.Path == "/openapi/v2" || r.URL.Path == "/openapi/v3" || r.URL.Path == "/apis" {
-			return
-		}
-
+		// Nothing is filtered out here: genericapiserver answers /healthz, /readyz, /livez, /version,
+		// the /apis discovery and the /openapi documents itself and never delegates them (see
+		// newAggregatedServer). What reaches this handler is our own group discovery and subresource
+		// routes — plus any unmatched path, since the delegate is mounted as the NotFoundHandler.
+		//
 		// Log the request (Debug level to reduce log noise, only log errors at Info level)
 		duration := time.Since(start)
 		if wrapped.statusCode >= 400 {

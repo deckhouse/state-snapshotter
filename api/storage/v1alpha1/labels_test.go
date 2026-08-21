@@ -68,6 +68,9 @@ func TestProvenanceKeyValue(t *testing.T) {
 	if LabelProvenanceUnifiedSnapshot != "unified-snapshot" {
 		t.Fatalf("unexpected value: %s", LabelProvenanceUnifiedSnapshot)
 	}
+	if LabelProvenanceUserInCluster != "user-in-cluster" {
+		t.Fatalf("unexpected value: %s", LabelProvenanceUserInCluster)
+	}
 	if SnapshotKind != "Snapshot" {
 		t.Fatalf("unexpected kind: %s", SnapshotKind)
 	}
@@ -89,8 +92,12 @@ func TestStampProvenanceAllocatesAndIsIdempotent(t *testing.T) {
 // TestHasProvenanceRejectsOtherValues guards the keyed nature of the value: provenance answers "which
 // write-path created this", so a truthy-looking value that is not an origin this module stamps must not be
 // read as its own. Protection is a separate label on purpose and cannot stand in for origin either.
+//
+// LabelProvenanceUserInCluster is in the list because it is the one value that is BOTH stamped by this
+// stack and not ours — the moment it started reading as our own, the data of every snapshot a user takes
+// would be pulled into this module's lifecycle.
 func TestHasProvenanceRejectsOtherValues(t *testing.T) {
-	for _, value := range []string{"true", "", "some-other-module"} {
+	for _, value := range []string{"true", "", "some-other-module", LabelProvenanceUserInCluster} {
 		obj := &metav1.ObjectMeta{Labels: map[string]string{LabelProvenance: value}}
 		if HasProvenance(obj) {
 			t.Fatalf("value %q must not count as our provenance", value)

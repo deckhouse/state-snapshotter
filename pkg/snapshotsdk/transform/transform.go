@@ -14,9 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package transform is the domain restore extension point of the snapshot SDK. A domain package implements
-// Transformer next to its domain types; the generic restore compiler never references domain kinds or
-// field names.
+// Package transform is the restore seam of the snapshot SDK: the generic compilation of one snapshot
+// node's captured manifests into apply-ready objects (SanitizeForRestore, CompileNodeManifests,
+// FilterSingleObject, the shared failure vocabulary and the request Options they read), plus the domain
+// extension point on top of it. A domain package implements Transformer next to its domain types; the
+// generic compilation never references domain kinds or field names, and its single domain input is the
+// set of PVCs a domain object recreates itself.
+//
+// The compilation is shared rather than per-server because a client applies the concatenated output of
+// the core compiler and of every domain facade that compiled a delegated subtree: a second implementation
+// of these rules diverges silently, and the first thing it loses is the refusal to emit a PVC with no
+// data source — which restores as an empty volume. The transport half of the same contract (query
+// parsing, error-to-status mapping) is package snapshotsdk/restoreapi.
 //
 // # Sanctioned unstructured boundary
 //
@@ -41,8 +50,9 @@ import (
 // RestoreNode is the domain-facing view of one node in the restore run tree: the snapshot CR that owns
 // the object being made restore-ready. It is deliberately minimal — a domain Transformer needs only the
 // owning snapshot's identity (e.g. to point a restored object at its own snapshot via spec.dataSource).
-// The core compiler's richer internal node (MCP, dataRefs, VSC->VS leaves, children, domain-boundary
-// marker) is NOT part of this public contract.
+// What the generic compilation needs about a node is a different, equally narrow view (NodeRestoreInput);
+// how a server resolves either of them — checkpoints, children, the domain boundary marker — stays that
+// server's own model and is NOT part of this public contract.
 type RestoreNode struct {
 	// SnapshotRef is the snapshot CR that owns this node. Namespace is the run-tree namespace.
 	SnapshotRef storagev1alpha1.ObjectRef

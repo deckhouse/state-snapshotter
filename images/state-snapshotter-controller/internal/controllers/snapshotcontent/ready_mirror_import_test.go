@@ -133,6 +133,7 @@ func TestMirrorReadyToOwnerSnapshot_DomainImportCRAfterBind(t *testing.T) {
 	cond := ownerReady()
 	if cond == nil {
 		t.Fatalf("post-bind domain import-CR must carry the mirrored Ready condition")
+		return
 	}
 	if cond.Status != metav1.ConditionTrue || cond.Reason != snapshot.ReasonCompleted {
 		t.Fatalf("post-bind Ready = %s/%s, want %s/%s", cond.Status, cond.Reason, metav1.ConditionTrue, snapshot.ReasonCompleted)

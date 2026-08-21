@@ -20,14 +20,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
 )
 
 type Service struct {
@@ -64,35 +63,12 @@ func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService
 // compiles ONLY the root node (children are not read). An object filter (opts.FilterKind/Name) further
 // narrows the output to a single object (valid only with ScopeNode; enforced by the handler).
 func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Options) ([]byte, error) {
-	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
-		if opts.Scope == ScopeNode {
-			return s.resolver.ResolveRestoreNodeOnlyRoot(ctx, opts.SnapshotNamespace, opts.SnapshotName)
-		}
-		return s.resolver.ResolveRestoreTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
-	})
-}
-
-// BuildManifestsWithDataRestorationForVolumeSnapshot compiles the restore output for a single
-// generic-PVC extended VolumeSnapshot leaf addressed by namespace/name — the
-// subresources.snapshot.storage.k8s.io connector (C8). The VolumeSnapshot is a namespaced handle to a
-// standalone child volume SnapshotContent (its own PVC manifest + dataRef); the result is the apply-ready
-// PVC bound to the VolumeSnapshot dataSourceRef. A VolumeSnapshot leaf has no snapshot children, so there
-// is no recursion. opts.SnapshotName is unused (the VS name is passed explicitly); opts carries the
-// namespace, targetNamespace and (optionally) an object filter. opts.Scope is irrelevant here — a leaf
-// has no children, so scope=node and scope=subtree are equivalent — but an object filter still applies.
-func (s *Service) BuildManifestsWithDataRestorationForVolumeSnapshot(ctx context.Context, namespace, vsName string, opts Options) ([]byte, error) {
-	return s.buildRestore(ctx, opts, func() (*RestoreNode, error) {
-		return s.resolver.ResolveVolumeSnapshotRestoreNode(ctx, namespace, vsName)
-	})
-}
-
-func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot func() (*RestoreNode, error)) ([]byte, error) {
 	targetNamespace := opts.TargetNamespace
 	if targetNamespace == "" {
 		targetNamespace = opts.SnapshotNamespace
 	}
 
-	root, err := resolveRoot()
+	root, err := s.resolveRoot(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +80,7 @@ func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot fu
 
 	objects := result.Objects
 	if opts.FilterKind != "" {
-		objects, err = filterSingleObject(objects, opts, root)
+		objects, err = transform.FilterSingleObject(objects, opts, restoreSubject(root))
 		if err != nil {
 			return nil, err
 		}
@@ -113,87 +89,18 @@ func (s *Service) buildRestore(ctx context.Context, opts Options, resolveRoot fu
 	return marshalObjects(objects)
 }
 
-// filterSingleObject narrows the compiled node output to the single object addressed by the object
-// filter (opts.FilterKind/FilterName, optionally FilterAPIVersion). It runs AFTER compilation, on the
-// already sanitized/namespace-rewritten objects, so an object dropped by the restore-safe sanitizer is
-// simply absent (a 404, not restorable). Outcomes: exactly one match -> that object; zero matches ->
-// ErrNotFound (404); more than one match -> ErrBadRequest (400, fail-closed) — the contract guarantees a
-// single object, so an ambiguous filter is never served.
-func filterSingleObject(objects []unstructured.Unstructured, opts Options, root *RestoreNode) ([]unstructured.Unstructured, error) {
-	matches := make([]unstructured.Unstructured, 0, 1)
-	for i := range objects {
-		if objects[i].GetKind() != opts.FilterKind || objects[i].GetName() != opts.FilterName {
-			continue
-		}
-		if opts.FilterAPIVersion != "" && !apiVersionMatches(objects[i].GetAPIVersion(), opts.FilterAPIVersion) {
-			continue
-		}
-		matches = append(matches, objects[i])
+// resolveRoot resolves the addressed root node at the depth opts.Scope asks for: ScopeNode reads the
+// addressed node alone, anything else walks the whole run tree.
+func (s *Service) resolveRoot(ctx context.Context, opts Options) (*RestoreNode, error) {
+	if opts.Scope == ScopeNode {
+		return s.resolver.ResolveRestoreNodeOnlyRoot(ctx, opts.SnapshotNamespace, opts.SnapshotName)
 	}
-
-	switch len(matches) {
-	case 1:
-		return matches[:1:1], nil
-	case 0:
-		return nil, fmt.Errorf("%w: object %s not found in node manifests of %s", ErrNotFound, filterIdentity(opts), restoreSubject(root))
-	default:
-		return nil, ambiguousFilterError(matches, opts)
-	}
-}
-
-// apiVersionMatches reports whether an object's apiVersion satisfies the FilterAPIVersion, which may be a
-// full "group/version" (exact match, e.g. "apps/v1" or the core "v1") or a bare "group" (matches any
-// version in that group, e.g. "apps" matches "apps/v1").
-func apiVersionMatches(objAPIVersion, filterAPIVersion string) bool {
-	if objAPIVersion == filterAPIVersion {
-		return true
-	}
-	gv, err := schema.ParseGroupVersion(objAPIVersion)
-	if err != nil {
-		return false
-	}
-	return gv.Group != "" && gv.Group == filterAPIVersion
-}
-
-// filterIdentity renders the requested object identity for the not-found message: "<apiVersion>/<Kind>/
-// <name>" when an apiVersion was given, otherwise "<Kind>/<name>".
-func filterIdentity(opts Options) string {
-	if opts.FilterAPIVersion != "" {
-		return fmt.Sprintf("%s/%s/%s", opts.FilterAPIVersion, opts.FilterKind, opts.FilterName)
-	}
-	return fmt.Sprintf("%s/%s", opts.FilterKind, opts.FilterName)
+	return s.resolver.ResolveRestoreTree(ctx, opts.SnapshotNamespace, opts.SnapshotName)
 }
 
 // restoreSubject renders the addressed node identity ("<namespace>/<name>") for filter error messages.
 func restoreSubject(root *RestoreNode) string {
 	return fmt.Sprintf("%s/%s", root.SnapshotRef.Namespace, root.SnapshotRef.Name)
-}
-
-// ambiguousFilterError builds the fail-closed 400 for a kind+name filter that matched more than one
-// object. Without an apiVersion it lists the competing apiVersions and asks the caller to disambiguate;
-// with an apiVersion still ambiguous, it reports that the filter cannot narrow to a single object.
-func ambiguousFilterError(matches []unstructured.Unstructured, opts Options) error {
-	seen := make(map[string]struct{}, len(matches))
-	apiVersions := make([]string, 0, len(matches))
-	for i := range matches {
-		av := matches[i].GetAPIVersion()
-		if _, ok := seen[av]; ok {
-			continue
-		}
-		seen[av] = struct{}{}
-		apiVersions = append(apiVersions, av)
-	}
-	sort.Strings(apiVersions)
-	if opts.FilterAPIVersion == "" {
-		return fmt.Errorf(
-			"%w: object filter kind=%s name=%s is ambiguous: it matches %d objects across apiVersions [%s]; specify apiVersion to disambiguate",
-			ErrBadRequest, opts.FilterKind, opts.FilterName, len(matches), strings.Join(apiVersions, ", "),
-		)
-	}
-	return fmt.Errorf(
-		"%w: object filter kind=%s name=%s apiVersion=%s still matches %d objects [%s]; cannot narrow to a single object",
-		ErrBadRequest, opts.FilterKind, opts.FilterName, opts.FilterAPIVersion, len(matches), strings.Join(apiVersions, ", "),
-	)
 }
 
 // compileNode compiles a RestoreNode in post-order: children are compiled first so their objects are

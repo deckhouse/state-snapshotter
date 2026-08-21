@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package restore
+package transform
 
 import (
 	"strings"
@@ -27,6 +27,11 @@ import (
 // The restore compiler emits apply-ready manifests, so it MUST strip runtime/server-managed
 // fields that block `kubectl apply` and rewrite the namespace to the restore target. Sanitization
 // happens on the read path; capture stores raw manifests as-is.
+//
+// It lives in the SDK because the guarantee it carries is a property of the WHOLE compiled tree, not of
+// one server: a client applies the concatenated output of the core compiler and of every domain facade
+// that compiled a delegated subtree. A facade sanitizing by its own copy of these rules is how a subtree
+// silently gains a field that blocks apply, or loses one that had to be stripped.
 
 // controlPlaneExactKinds are control-plane / snapshot-machinery kinds that MUST NOT appear in
 // restore output. VS/VSC and snapshot tree nodes are transferred separately (data + tree); the
@@ -53,7 +58,7 @@ func isControlPlaneKind(kind string) bool {
 	return strings.HasSuffix(kind, "Snapshot") || strings.HasSuffix(kind, "SnapshotContent")
 }
 
-// sanitizeForRestore returns a restore-safe copy of obj and whether it should be emitted.
+// SanitizeForRestore returns a restore-safe copy of obj and whether it should be emitted.
 //
 // keep=false when the object must be dropped from restore output:
 //   - cluster-scoped objects (no namespace) — namespace restore compiler is namespaced-only (MVP);
@@ -61,7 +66,17 @@ func isControlPlaneKind(kind string) bool {
 //
 // For kept (namespaced) objects it removes runtime metadata, status, kind-specific server fields,
 // and rewrites metadata.namespace to targetNamespace.
-func sanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (unstructured.Unstructured, bool) {
+//
+// sourceNamespace is the namespace obj was CAPTURED in. It is load-bearing because in-body namespace
+// references are rewritten SELECTIVELY: it is what separates a reference that moves along with the
+// content from one that points at an identity living elsewhere (see rewriteInSpecNamespaces). Passing ""
+// means "take it from obj.metadata.namespace", which is correct for manifests read straight out of a
+// checkpoint — capture stamps each namespaced object with its namespace, so the value is there by
+// construction. A caller whose manifests do NOT carry it — a facade that attaches the target namespace
+// to namespace-relative manifests before compiling — MUST pass it explicitly: with source == target
+// nothing is recognised as moved, and references that were supposed to follow the content silently stop
+// following it.
+func SanitizeForRestore(obj unstructured.Unstructured, sourceNamespace, targetNamespace string) (unstructured.Unstructured, bool) {
 	if isControlPlaneKind(obj.GetKind()) {
 		return unstructured.Unstructured{}, false
 	}
@@ -71,13 +86,20 @@ func sanitizeForRestore(obj unstructured.Unstructured, targetNamespace string) (
 		return unstructured.Unstructured{}, false
 	}
 
+	// Default to the object's own namespace: read straight out of a checkpoint that IS the captured
+	// namespace, and the guard above guarantees it is non-empty. An explicit argument wins, for callers
+	// whose manifests no longer carry it.
+	if sourceNamespace == "" {
+		sourceNamespace = obj.GetNamespace()
+	}
+
 	out := obj.DeepCopy()
 	stripRuntimeMetadata(out)
 	stripRestoreBreakingAnnotations(out)
 	unstructured.RemoveNestedField(out.Object, "status")
 	out.SetNamespace(targetNamespace)
 	stripKindSpecificFields(out)
-	rewriteInSpecNamespaces(out, targetNamespace)
+	rewriteInSpecNamespaces(out, sourceNamespace, targetNamespace)
 	return *out, true
 }
 
@@ -139,7 +161,7 @@ func stripRestoreBreakingAnnotations(out *unstructured.Unstructured) {
 func stripKindSpecificFields(out *unstructured.Unstructured) {
 	switch out.GetKind() {
 	case pvcKind:
-		if out.GetAPIVersion() == "v1" {
+		if out.GetAPIVersion() == corePVCVersion {
 			unstructured.RemoveNestedField(out.Object, "spec", "volumeName")
 			// dataSource/dataSourceRef are re-set by the orphan-PVC restore transform; drop any
 			// captured value first so a stale binding cannot leak into the output.
@@ -174,11 +196,19 @@ func stripServiceNodePorts(out *unstructured.Unstructured) {
 	_ = unstructured.SetNestedSlice(out.Object, ports, "spec", "ports")
 }
 
-// rewriteInSpecNamespaces rewrites namespace references that live inside spec/subjects (not
+// rewriteInSpecNamespaces rewrites namespace references that live inside subjects (not
 // metadata.namespace, which is already rewritten). For a namespace-wholesale restore, a RoleBinding's
 // ServiceAccount subjects must follow the moved namespace, otherwise RBAC keeps pointing at the
-// source namespace.
-func rewriteInSpecNamespaces(out *unstructured.Unstructured, targetNamespace string) {
+// source namespace and the restored ServiceAccount is granted nothing.
+//
+// It rewrites ONLY subjects whose namespace is the source namespace — the ones that moved along with
+// the content. A subject in any other namespace is an identity that lives elsewhere and was merely
+// granted access into the source namespace; it does not move, and rewriting it retargets the grant at
+// a DIFFERENT ServiceAccount (an RBAC ServiceAccount subject is identified by the namespace/name pair).
+// That retarget is silent in both directions: the API server accepts a subject that does not resolve,
+// so the intended grantee loses access without any error, and if the target namespace happens to hold
+// a same-named ServiceAccount, that unrelated identity silently gains the role instead.
+func rewriteInSpecNamespaces(out *unstructured.Unstructured, sourceNamespace, targetNamespace string) {
 	if out.GetKind() != "RoleBinding" {
 		return
 	}
@@ -196,7 +226,8 @@ func rewriteInSpecNamespaces(out *unstructured.Unstructured, targetNamespace str
 		if kind != "ServiceAccount" {
 			continue
 		}
-		if _, has := s["namespace"]; !has {
+		ns, has := s["namespace"].(string)
+		if !has || ns != sourceNamespace {
 			continue
 		}
 		s["namespace"] = targetNamespace

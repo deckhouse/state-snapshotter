@@ -123,29 +123,31 @@ func IsDomainCaptureSnapshotKind(kind string) bool {
 	return false
 }
 
-// IsOutOfProcessDomainSnapshotKind reports whether kind is owned by a SEPARATE, out-of-process domain
-// controller that serves its own aggregated restore apiserver, so the core restore compiler must
-// DELEGATE that node's subtree to the domain apiserver instead of compiling it in-process.
+// IsOutOfProcessDomainSnapshotKind reports whether the restore of kind is served by a SEPARATE,
+// out-of-process aggregated apiserver, so the core restore compiler must DELEGATE that node's subtree to
+// the owner instead of compiling it in-process.
 //
-// The rule is CSD-ORIGIN driven, not a hardcoded kind list: a kind that is registered in the live GVK
-// registry (reg) but is NOT one of the built-in in-process pairs (DefaultGraphRegistryBuiltInPairs: the
-// namespace-root "Snapshot" and the CSI "VolumeSnapshot") can only have entered discovery through an
-// eligible CustomSnapshotDefinition. Such a kind is an external domain that serves its own restore
-// apiserver, so it must be delegated. This treats the PoC demo domain and a real virtualization domain
-// identically — the core carries no domain-specific kind names.
+// The rule is "everything registered except what THIS apiserver serves": a kind present in the live GVK
+// registry (reg) is delegated unless it is the namespace-root "Snapshot". That covers two populations
+// with one sentence, which is the point — the core carries no domain-specific kind names:
 //
-// The built-in kinds are excluded on purpose: the namespace-root "Snapshot" is a domain-CAPTURE kind but
-// its RESTORE is served by THIS core apiserver (delegating it back would be an unbounded self-call → 500),
-// and the built-in CSI "VolumeSnapshot" restore is core behavior too. A nil reg (registry not yet
-// populated) and unregistered kinds return false — never delegate an unknown kind.
+//   - kinds that entered discovery through an eligible CustomSnapshotDefinition (the PoC demo domain, a
+//     real virtualization domain): their own module serves their restore;
+//   - the built-in CSI "VolumeSnapshot": its capture is core behavior (the root's residual/orphan wave),
+//     but its planning controller and its restore subresource belong to the module that owns the kind, so
+//     a volume node inside a tree is answered by that module's aggregated group and spliced in. Being a
+//     built-in pair says where capture happens, not who compiles the restore.
+//
+// The namespace-root "Snapshot" is the only exclusion, and it is not a policy but an arithmetic one: its
+// restore IS this apiserver's own endpoint, so delegating it would call back into the caller (unbounded
+// self-call → 500). A nil reg (registry not yet populated) and unregistered kinds return false — never
+// delegate an unknown kind.
 func IsOutOfProcessDomainSnapshotKind(reg *snapshot.GVKRegistry, kind string) bool {
 	if reg == nil {
 		return false
 	}
-	for _, p := range DefaultGraphRegistryBuiltInPairs() {
-		if p.Snapshot.Kind == kind {
-			return false
-		}
+	if kind == DefaultSnapshotPair().Snapshot.Kind {
+		return false
 	}
 	_, err := reg.ResolveSnapshotGVK(kind)
 	return err == nil

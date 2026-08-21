@@ -49,10 +49,17 @@ import (
 // import branch never surfaces a terminal reason yet: it publishes, or requeues while pending, and the
 // import binder still owns the terminal Ready=False for import faults (cardinality, unsupported artifact).
 // The termReason/termMessage returns exist only for signature parity with the capture path.
-func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, termReason string, termMessage string, err error) {
+//
+// It is, however, the branch that knows WHY a pending import is not progressing, so it returns pendingDetail
+// — the non-terminal counterpart of termMessage. A DataImport that reached Expired or Failed without
+// producing an artifact never will (controllercommon.ImportStalledMessage), and without that detail the leaf
+// sits at the generic "waiting for the data leg" text while the actual cause is only visible on the
+// DataImport itself. It stays a DETAIL rather than a reason on purpose: the client may create another
+// DataImport for the same node, so nothing here may become terminal.
+func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx context.Context, contentObj, owner *unstructured.Unstructured) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	if !r.GVKRegistry.RequiresDataArtifact(owner.GetObjectKind().GroupVersionKind().Kind) {
 		// Structural import node (root Snapshot, VM snapshot, ...): manifests + children only, no data leg.
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	contentName := contentObj.GetName()
 
@@ -60,7 +67,7 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// name). >=2 is a fail-closed fault the binder surfaces terminally; none means d8 has not created it yet.
 	di, treason, _, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, owner)
 	if lErr != nil {
-		return false, "", "", lErr
+		return false, "", "", "", lErr
 	}
 	if treason != "" {
 		// Fail-closed cardinality fault: the binder surfaces the terminal Ready=False; the aggregator never
@@ -79,16 +86,23 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	if dtreason != "" {
 		// Non-retryable import fault (e.g. a non-VolumeSnapshotContent artifact): the binder surfaces it
 		// terminally on the leaf; the aggregator declines to publish (holds pending).
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		return !r.contentHasData(ctx, contentName), "", "", "", nil
 	}
 	if !ready {
-		// DataImport has not produced its artifact yet -> pending.
-		return !r.contentHasData(ctx, contentName), "", "", nil
+		// DataImport has not produced its artifact yet -> pending. Report WHY only while this leg actually
+		// holds the content back: a leaf whose data leg is already published is not waiting on this import
+		// (its own artifact is durable), so it gets no cause and keeps its readiness.
+		pending := !r.contentHasData(ctx, contentName)
+		detail := ""
+		if pending {
+			detail = controllercommon.ImportStalledMessage(di)
+		}
+		return pending, "", "", detail, nil
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
+		return false, "", "", "", cErr
 	}
 	// The volume metadata of an imported volume is carried only by the DataImport (its StorageClass in the
 	// spec, its volumeMode and the filesystem it was written onto in the status); the aggregator is the single
@@ -116,10 +130,10 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 		content.Status.Data.ArtifactRef == binding.ArtifactRef &&
 		content.Status.Data.Size != "" &&
 		importMeta.matchesPublished(content.Status.Data) {
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{*binding}, importMeta)
-	return requeue, "", "", err
+	return requeue, "", "", "", err
 }
 
 // completeOrKeepPublishedImportLeg handles the generic-import data leg when no single live DataImport
@@ -136,20 +150,22 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 // import volume metadata (the same contract importVolumeMetadataFromPublished states), and rebuilding
 // the binding from {sourceRef, artifactRef} of the published copy preserves the artifact identity —
 // including the uid an earlier publish already enriched — instead of re-deriving it from anything live.
-func (r *SnapshotContentController) completeOrKeepPublishedImportLeg(ctx context.Context, contentName string) (requeue bool, termReason string, termMessage string, err error) {
+// It reports no pendingDetail: with no single live DataImport there is no phase to read a cause off, and the
+// pre-publish wait here is the ordinary "the client has not created it yet" state, not a stall.
+func (r *SnapshotContentController) completeOrKeepPublishedImportLeg(ctx context.Context, contentName string) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
+		return false, "", "", "", cErr
 	}
 	published := content.Status.Data
 	if published == nil {
 		// Pre-publish: nothing recorded yet -> requeue until a DataImport becomes visible.
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 	if published.Size != "" {
 		// Post-publish and complete: keep the latched status.data (a reaped DataImport with published
 		// data is the normal steady state of a finished import, not a fault).
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	binding := storagev1alpha1.SnapshotDataBinding{
 		SourceRef:   published.SourceRef,
@@ -157,7 +173,7 @@ func (r *SnapshotContentController) completeOrKeepPublishedImportLeg(ctx context
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName,
 		[]storagev1alpha1.SnapshotDataBinding{binding}, importVolumeMetadataFromPublished(published))
-	return requeue, "", "", err
+	return requeue, "", "", "", err
 }
 
 // BuildImportDataBinding maps a DataImport's produced artifact (status.data.artifactRef) into the single

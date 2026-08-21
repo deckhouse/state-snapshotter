@@ -39,6 +39,8 @@ import (
 	stderrors "errors"
 	"fmt"
 	"reflect"
+	"regexp"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -264,6 +266,42 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 	if !ready {
+		// The artifact is not there yet — but the DataImport's own status may already say it never will
+		// (its spec.ttl idle window elapsed, or it failed). Surface that cause on the VolumeSnapshot the
+		// operator is looking at, instead of leaving it silently pending while the explanation sits on
+		// another object. status.error is free-form text, not a reason, so this adds no state.
+		//
+		// UNLIKE the terminal branches above, keep polling: a stalled import does not close this node —
+		// the client may create another DataImport for the same VolumeSnapshot, and nothing here watches
+		// DataImport, so stopping would leave the retry unnoticed until an unrelated event arrives.
+		//
+		// Being recoverable is also what makes this cause the only one here that must be TAKEN BACK, and
+		// what bounds when it may be stated at all:
+		//   - a leaf whose content already carries its data leg is not waiting for an import at all — its
+		//     artifact is durable — so no import may describe it as stuck. Same gate as the aggregator's
+		//     (projectContentDataLegFromDataImport reports its cause only while the content has no data);
+		//   - with nothing to report, whatever stands there is stale and is removed. Nothing else would remove
+		//     it: the path that succeeds does not touch status.error, so a leaf that recovered through a fresh
+		//     DataImport would keep advising the operator to create the DataImport they have just created. And
+		//     it is not only this controller's own cause that arriving here refutes — the ambiguity and
+		//     unsupported-artifact faults are both decided ABOVE, so being here disproves them too. The one
+		//     diagnosis kept is the checkpoint-manifest fault, decided below; see clearRefutedImportError.
+		//
+		// Exactly one of the two writes runs per pass, and each writes only when it changes something, so a
+		// steady state — stalled or recovered — is not patched again.
+		stalled := ""
+		if content.Status.Data == nil {
+			stalled = controllercommon.ImportStalledMessage(di)
+		}
+		if stalled == "" {
+			if cErr := r.clearRefutedImportError(ctx, req.NamespacedName); cErr != nil {
+				return ctrl.Result{}, cErr
+			}
+			return ctrl.Result{RequeueAfter: importPollInterval}, nil
+		}
+		if sErr := r.setVolumeSnapshotError(ctx, req.NamespacedName, stalled); sErr != nil {
+			return ctrl.Result{}, sErr
+		}
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
 	if rErr := r.forceVolumeSnapshotContentRetain(ctx, vscName); rErr != nil {
@@ -345,6 +383,16 @@ func (r *Controller) mirrorPublishedContentData(ctx context.Context, key client.
 	if content.Status.Data == nil {
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
+	// The leaf owns its durable artifact now, so an import complaint standing on it is spent: an idle-TTL
+	// message survived the attempt it described, and the attempt that replaced it succeeded. This is the exit
+	// the recovering leaf actually takes — a retry that WORKS never comes back through the pending branch
+	// that could otherwise take the message back — and it is also where the DataImport-less steady state
+	// lands, so a leaf whose stalled import was retried and reaped is cleaned up too. The removal keeps a
+	// checkpoint-manifest fault (see clearRefutedImportError) and writes only when there is something to
+	// remove, so neither that diagnosis nor the settled leaf below is written again.
+	if cErr := r.clearRefutedImportError(ctx, key); cErr != nil {
+		return ctrl.Result{}, cErr
+	}
 	if mErr := r.mirrorDataToImportVolumeSnapshot(ctx, key, *content.Status.Data); mErr != nil {
 		// The content was already confirmed present above, so mirrorDataToImportVolumeSnapshot's own
 		// NotFound can only be the reconciled VolumeSnapshot itself vanishing mid-reconcile: swallow it
@@ -411,9 +459,14 @@ func (r *Controller) mirrorDataToImportVolumeSnapshot(ctx context.Context, key c
 	})
 }
 
-// setVolumeSnapshotError records a terminal import fault on the VolumeSnapshot status.error
-// (message + time) under an optimistic-lock merge patch (D4a). These VS are skipped by the forked
-// snapshot-controller, so status.error is ours to own.
+// setVolumeSnapshotError records an import fault on the VolumeSnapshot status.error (message + time) under
+// an optimistic-lock merge patch (D4a). These VS are skipped by the forked snapshot-controller, so
+// status.error is ours to own. Most callers report a terminal fault; the stalled-DataImport caller reports a
+// cause that can still be retried — status.error is free-form operator-facing text, so it carries either
+// without claiming a state.
+//
+// It writes only when the message actually changes, which is what keeps the timestamp it stamps from turning
+// a repeated cause into a status rewrite on every poll.
 func (r *Controller) setVolumeSnapshotError(ctx context.Context, key client.ObjectKey, message string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		vs := &unstructured.Unstructured{}
@@ -436,11 +489,60 @@ func (r *Controller) setVolumeSnapshotError(ctx context.Context, key client.Obje
 	})
 }
 
+// clearRefutedImportError removes a status.error message that the state observed on THIS pass has refuted.
+// It is what makes the diagnoses this controller writes correctable at all: nothing else ever removed one,
+// while status.error is defined as cleared once the error is resolved, and the console shows its text to the
+// user — a message outliving its cause has an operator repairing something that already works.
+//
+// Both callers sit past the point where three of the four causes are decided, so reaching either one is
+// itself the refutation:
+//   - the ambiguity fault (two DataImports claiming this leaf) is decided above; getting here means exactly
+//     one was resolved;
+//   - the unsupported-artifact fault (a produced artifact the legacy binding cannot represent) is decided
+//     above; getting here means the artifact is absent or bound;
+//   - this controller's own stalled-import cause is recomputed by the caller, which calls this only when
+//     there is no such cause to state — a replacement import is under way, or the leaf is already published.
+//
+// The exception is the checkpoint-manifest fault, which is decided BELOW the pending branch: while a
+// replacement import converges — the whole length of a transfer — control keeps passing through that branch
+// with such a message standing and nothing in scope that could re-derive it. Wiping it there would leave the
+// leaf reading healthy-but-waiting and let an operator spend an entire upload to be told the same thing
+// again, since a new import cannot mend a checkpoint.
+//
+// The published-leg caller keeps that same exception rather than clearing unconditionally. A published data
+// leg does prove the manifests resolved ONCE — it is built from the recovered PVC this controller publishes
+// after the resolve — but the message may describe the checkpoint as it is NOW: chunks can be lost after
+// publication, and the restore path still needs those manifests. One rule for both callers, and it errs
+// towards keeping a diagnosis that may still be true rather than towards silence.
+//
+// It is also a no-op when there is nothing to remove, and that is not an optimization: both callers run on
+// every polling pass, so patching unconditionally would rewrite the status of a settled leaf forever. A
+// VolumeSnapshot that disappeared mid-reconcile is likewise nothing to clean up.
+func (r *Controller) clearRefutedImportError(ctx context.Context, key client.ObjectKey) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vs := &unstructured.Unstructured{}
+		vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
+		if err := r.Get(ctx, key, vs); err != nil {
+			if errors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		current, found, _ := unstructured.NestedString(vs.Object, "status", "error", "message")
+		if !found || current == "" || isCheckpointManifestFault(current) {
+			return nil
+		}
+		base := vs.DeepCopy()
+		unstructured.RemoveNestedField(vs.Object, "status", "error")
+		return r.Status().Patch(ctx, vs, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 // importSnapshotSourceRef builds the captured-source ref for the imported orphan-PVC leaf. It targets the
 // orphan PVC the leaf carries (recovered from the reconstructed ManifestCheckpoint), NOT the VolumeSnapshot
 // handle: the restore compiler matches a captured PVC manifest to its dataRef by the PVC identity/UID
-// (findDataBindingForPVC), so a VolumeSnapshot-targeted source would never match and the PVC would be
-// emitted data-less (contract violation). It is published as the VS status.sourceRef, from which the
+// (transform.FindDataBindingForPVC), so a VolumeSnapshot-targeted source would never match and the PVC
+// would be emitted data-less (contract violation). It is published as the VS status.sourceRef, from which the
 // aggregator's native-CSI data-leg projection (volumeSnapshotOwnerSource) builds the {source PVC, bound VSC}
 // binding — mirroring the capture path (the foundation domain reconciler's snapshotSource), keeping both
 // paths' dataRef source identical.
@@ -502,7 +604,7 @@ func (r *Controller) resolveImportedOrphanPVC(ctx context.Context, mcp *ssv1alph
 	if lErr != nil {
 		if stderrors.Is(lErr, usecase.ErrCorruptManifestChunk) {
 			// Bad stored bytes (base64/gzip/JSON/checksum): retrying the same chunk cannot succeed.
-			return nil, fmt.Sprintf("imported orphan-PVC leaf checkpoint %s is unreadable: %v", mcp.GetName(), lErr), nil
+			return nil, fmt.Sprintf(checkpointManifestUnreadableFormat, mcp.GetName(), lErr), nil
 		}
 		// Chunk fetch failure (any API/network error): transient, requeue.
 		return nil, "", fmt.Errorf("load imported leaf manifests from %s: %w", mcp.GetName(), lErr)
@@ -512,16 +614,62 @@ func (r *Controller) resolveImportedOrphanPVC(ctx context.Context, mcp *ssv1alph
 			continue
 		}
 		if pvc != nil {
-			return nil, fmt.Sprintf("imported orphan-PVC leaf checkpoint %s carries more than one PersistentVolumeClaim", mcp.GetName()), nil
+			return nil, fmt.Sprintf(checkpointManifestMultiplePVCFormat, mcp.GetName()), nil
 		}
 		obj := objects[i]
 		pvc = &obj
 	}
 	if pvc == nil {
-		return nil, fmt.Sprintf("imported orphan-PVC leaf checkpoint %s carries no PersistentVolumeClaim manifest", mcp.GetName()), nil
+		return nil, fmt.Sprintf(checkpointManifestNoPVCFormat, mcp.GetName()), nil
 	}
 	return pvc, "", nil
 }
+
+// The three faults of the reconstructed checkpoint's MANIFESTS, each stated exactly once here so that the
+// producer above and the recogniser below cannot describe different sentences. They are the only diagnoses
+// this controller writes that reaching a later polling pass does NOT refute — see clearRefutedImportError.
+const (
+	checkpointManifestUnreadableFormat  = "imported orphan-PVC leaf checkpoint %s is unreadable: %v"
+	checkpointManifestMultiplePVCFormat = "imported orphan-PVC leaf checkpoint %s carries more than one PersistentVolumeClaim"
+	checkpointManifestNoPVCFormat       = "imported orphan-PVC leaf checkpoint %s carries no PersistentVolumeClaim manifest"
+)
+
+// checkpointManifestFaultREs recognise exactly what the three formats above produce.
+var checkpointManifestFaultREs = []*regexp.Regexp{
+	literalFormatRE(checkpointManifestUnreadableFormat),
+	literalFormatRE(checkpointManifestMultiplePVCFormat),
+	literalFormatRE(checkpointManifestNoPVCFormat),
+}
+
+// isCheckpointManifestFault reports whether a status.error message is one of the checkpoint-manifest faults.
+// It is decided from the message because that is the only thing a later pass has: the fault is diagnosed
+// further down Reconcile than the branch that revisits status.error, so by the time that branch runs the
+// object states the diagnosis and nothing else does.
+func isCheckpointManifestFault(message string) bool {
+	for _, re := range checkpointManifestFaultREs {
+		if re.MatchString(message) {
+			return true
+		}
+	}
+	return false
+}
+
+// literalFormatRE turns a printf format into a pattern that accepts what that format produces and nothing
+// else: every literal segment is required verbatim and each verb becomes a wildcard, because a checkpoint
+// name or a wrapped error is whatever the object says it is. Deriving the pattern from the format is the
+// point — a hand-written one would be a second copy of the sentence, free to age out of step with the first.
+// A format using a verb outside formatVerbRE would leave that verb in the literal text and stop matching;
+// add it there rather than writing a pattern by hand.
+func literalFormatRE(format string) *regexp.Regexp {
+	segments := formatVerbRE.Split(format, -1)
+	for i, segment := range segments {
+		segments[i] = regexp.QuoteMeta(segment)
+	}
+	return regexp.MustCompile(`(?s)^` + strings.Join(segments, `.*`) + `$`)
+}
+
+// formatVerbRE matches the printf verbs the messages above use.
+var formatVerbRE = regexp.MustCompile(`%[svqd]`)
 
 // bindBoundSnapshotContentName writes the extended status.boundSnapshotContentName onto the VS under an
 // optimistic-lock merge patch (D4a), then verifies it persisted: on an upstream (non-fork) VolumeSnapshot

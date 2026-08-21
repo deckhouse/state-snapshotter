@@ -1,0 +1,48 @@
+# Read a snapshot subtree in the form it is restored from: the addressed node and its descendants in
+# one response, with the manifests rewritten for the namespace they are to be applied into (the
+# request names it, and it defaults to the snapshot's own). That is a different capability from
+# reading a single node's manifests as they were captured, which is what download_snapshots grants.
+#
+# The volume node's restore endpoint is served by the module that owns the CSI VolumeSnapshot, so its
+# group is named after that module and not after this one. It is granted here because one capability
+# describes one user operation: restoring a subtree compiles nodes of both kinds, and splitting the
+# grant per module would refuse the volume leg with 403 and hand back a partial tree.
+#
+# Like upload_snapshots, this role carries NO aggregation label. An aggregation label hands the
+# capability to everyone who already holds the matching cluster-wide role, and a tool that rewrites a
+# whole subtree for application into another namespace is not something such a holder asked for by
+# having this module installed. The role is granted by an explicit binding, to a subject chosen for
+# it, and is deliberately absent from any set of rights composed by aggregation.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/kind: use
+  name: d8:use:capability:module:state-snapshotter:restore_snapshots
+rules:
+  - apiGroups:
+      - subresources.state-snapshotter.deckhouse.io
+    resources:
+      - snapshots/manifests-with-data-restoration
+    verbs:
+      - get
+  - apiGroups:
+      - subresources.storage-foundation.deckhouse.io
+    resources:
+      - volumesnapshots/manifests-with-data-restoration
+    verbs:
+      - get
+  # The volume node's endpoints were served under the group below before they moved to the one above,
+  # and the group in the URL is what a SubjectAccessReview is built from — so a client released on
+  # another schedule, still addressing the old group, is refused here unless this rule stays. Removing
+  # it before every released client has moved would make the server-side compatibility alias useless:
+  # the request would reach a working endpoint and be answered 403. It goes away together with that
+  # alias, in one change.
+  - apiGroups:
+      - subresources.snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots/manifests-with-data-restoration
+    verbs:
+      - get

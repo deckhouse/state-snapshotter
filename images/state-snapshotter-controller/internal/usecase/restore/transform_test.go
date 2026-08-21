@@ -25,75 +25,33 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-func dataSourceRefName(pvc unstructured.Unstructured) string {
-	name, _, _ := unstructured.NestedString(pvc.Object, "spec", "dataSourceRef", "name")
-	return name
-}
+// The shared compilation rules (sanitize, orphan-PVC binding, the artifact-kind and missing-leaf
+// refusals) are tested next to the code that implements them. What is core's own and tested here is which
+// inputs core hands it — specifically that core claims no domain-covered PVCs.
 
-func TestTransformNode_OrphanPVCGetsDataSourceRef(t *testing.T) {
-	pvc := pvcManifest("data-pvc", "source-ns", "uid-a")
-	node := &RestoreNode{
-		SnapshotRef:  snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"},
-		DataBindings: []snapshot.DataBindingRef{dataBindingRef("uid-a", "data-pvc", "vsc-a")},
-		VSCToVS:      map[string]string{"vsc-a": "vs-a"},
+func pvcManifest(name, namespace, uid string) unstructured.Unstructured {
+	meta := map[string]interface{}{"name": name}
+	if namespace != "" {
+		meta["namespace"] = namespace
 	}
-
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
-	if err != nil {
-		t.Fatalf("transformNodeObjects: %v", err)
+	if uid != "" {
+		meta["uid"] = uid
 	}
-	if len(out) != 1 {
-		t.Fatalf("expected 1 object, got %d", len(out))
-	}
-	if out[0].GetNamespace() != "restore-ns" {
-		t.Fatalf("namespace = %q, want restore-ns", out[0].GetNamespace())
-	}
-	if got := dataSourceRefName(out[0]); got != "vs-a" {
-		t.Fatalf("dataSourceRef.name = %q, want vs-a", got)
-	}
-	apiGroup, _, _ := unstructured.NestedString(out[0].Object, "spec", "dataSourceRef", "apiGroup")
-	if apiGroup != csiSnapshotAPIGroup {
-		t.Fatalf("dataSourceRef.apiGroup = %q, want %q", apiGroup, csiSnapshotAPIGroup)
-	}
-}
-
-func TestTransformNode_OrphanPVCMissingVSLeafFailsClosed(t *testing.T) {
-	pvc := pvcManifest("data-pvc", "source-ns", "uid-a")
-	node := &RestoreNode{
-		SnapshotRef:  snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"},
-		DataBindings: []snapshot.DataBindingRef{dataBindingRef("uid-a", "data-pvc", "vsc-a")},
-		VSCToVS:      map[string]string{}, // VS leaf not resolved
-	}
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
-	if err == nil {
-		t.Fatal("expected contract violation when VS leaf is missing")
-	}
-	if !errors.Is(err, ErrContractViolation) {
-		t.Fatalf("expected ErrContractViolation, got %v", err)
-	}
-}
-
-func TestTransformNode_GenericPassThrough(t *testing.T) {
-	cm := unstructured.Unstructured{Object: map[string]interface{}{
+	return unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": "v1",
-		"kind":       "ConfigMap",
-		"metadata":   map[string]interface{}{"name": "cfg", "namespace": "source-ns"},
-		"data":       map[string]interface{}{"k": "v"},
+		"kind":       "PersistentVolumeClaim",
+		"metadata":   meta,
 	}}
-	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}}
-
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{cm}, "restore-ns")
-	if err != nil {
-		t.Fatalf("transformNodeObjects: %v", err)
-	}
-	if len(out) != 1 || out[0].GetKind() != "ConfigMap" {
-		t.Fatalf("expected ConfigMap pass-through, got %#v", out)
-	}
-	if out[0].GetNamespace() != "restore-ns" {
-		t.Fatalf("namespace = %q, want restore-ns", out[0].GetNamespace())
-	}
 }
 
+// TestTransformNode_PVCWithoutDataRefFailsClosed guards the core-side invariant of restore compilation: a
+// node compiled by core is never a domain node, so nothing in it recreates a PVC on its own, and a PVC
+// with no data binding is a broken snapshot rather than a stateless volume. Emitting it would apply
+// cleanly and provision an EMPTY volume — data loss discovered only when someone reads the data back — so
+// the whole request is refused instead.
+//
+// The refusal lives in the shared compilation, but whether core reaches it is core's decision: passing a
+// covered-PVC set here would suppress it. That is the mutation this test is written for.
 func TestTransformNode_PVCWithoutDataRefFailsClosed(t *testing.T) {
 	pvc := pvcManifest("plain-pvc", "source-ns", "uid-plain")
 	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}, VSCToVS: map[string]string{}}
@@ -107,21 +65,31 @@ func TestTransformNode_PVCWithoutDataRefFailsClosed(t *testing.T) {
 	}
 }
 
-func TestTransformNode_OrphanPVCNonVSCArtifactFailsClosed(t *testing.T) {
+// TestTransformNode_PVCDataBindingsReachCompilation proves the other half of the same wiring: core does
+// pass the node's own dataRefs on, so a PVC that IS backed by a VolumeSnapshot is emitted bound rather
+// than refused. Without this the test above would also pass on a core that never passes any binding at
+// all — and every restore with a volume would fail closed.
+func TestTransformNode_PVCDataBindingsReachCompilation(t *testing.T) {
 	pvc := pvcManifest("data-pvc", "source-ns", "uid-a")
-	binding := dataBindingRef("uid-a", "data-pvc", "artifact-x")
-	binding.Artifact.Kind = "ConfigMap" // not a VolumeSnapshotContent
 	node := &RestoreNode{
-		SnapshotRef:  snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"},
-		DataBindings: []snapshot.DataBindingRef{binding},
-		VSCToVS:      map[string]string{},
+		SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"},
+		DataBindings: []snapshot.DataBindingRef{{
+			TargetUID: "uid-a",
+			Target:    snapshot.ObjectRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Namespace: "source-ns", Name: "data-pvc", UID: "uid-a"},
+			Artifact:  snapshot.ObjectRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshotContent", Name: "vsc-a"},
+		}},
+		VSCToVS: map[string]string{"vsc-a": "vs-a"},
 	}
 
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
-	if err == nil {
-		t.Fatal("expected contract violation when orphan-PVC artifact is not a VolumeSnapshotContent")
+	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
+	if err != nil {
+		t.Fatalf("transformNodeObjects: %v", err)
 	}
-	if !errors.Is(err, ErrContractViolation) {
-		t.Fatalf("expected ErrContractViolation, got %v", err)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 object, got %d", len(out))
+	}
+	name, _, _ := unstructured.NestedString(out[0].Object, "spec", "dataSourceRef", "name")
+	if name != "vs-a" {
+		t.Fatalf("dataSourceRef.name = %q, want vs-a", name)
 	}
 }

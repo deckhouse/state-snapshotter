@@ -473,7 +473,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// BEFORE fillOwnLegs (in reconcileCommonSnapshotContentStatus below) reads status.dataRefs. Like the
 	// child edges + manifest pointer above, this is a separate optimistic-locked status patch observed on
 	// the next pass; the 500 ms self-requeue while !ready drives convergence.
-	dataRequeue, dataTermReason, dataTermMessage, err := r.reconcileDataLegProjection(ctx, obj, owner, ownerNamespace, ownerFound)
+	dataRequeue, dataTermReason, dataTermMessage, dataPendingDetail, err := r.reconcileDataLegProjection(ctx, obj, owner, ownerNamespace, ownerFound)
 	if err != nil {
 		logger.Error(err, "Failed to project data leg")
 		return ctrl.Result{}, err
@@ -484,8 +484,11 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 	// it via a separate patch this pass, or the VCR/VSC is not ready yet). dataTermReason/Message carry a
 	// core-owned terminal data-leg failure (failed VCR / Variant-A fault, decision D2): the aggregation
 	// makes the CONTENT itself terminal (DataReady=VolumeCaptureFailed) so it propagates up the
-	// content-aggregation tree as ChildrenFailed. See reconcileCommonSnapshotContentStatus.
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataTermReason, dataTermMessage, owner)
+	// content-aggregation tree as ChildrenFailed. dataPendingDetail is the non-terminal counterpart: a cause
+	// for a leg that is only pending (today: an import whose DataImport will not deliver), which replaces the
+	// generic waiting text so the reason is readable on the leaf and, through the child aggregation, on its
+	// ancestors. See reconcileCommonSnapshotContentStatus.
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, obj, dataRequeue, dataPendingDetail, dataTermReason, dataTermMessage, owner)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile common SnapshotContent status")
 		return ctrl.Result{}, err
@@ -596,7 +599,7 @@ type commonContentStatusPlan struct {
 // requeuing on !ready, which is what drives the child->parent archive wave to converge via active
 // re-evaluation instead of stalling on a droppable wake-up event (e.g. a not-yet-linked declared child, or
 // a same-binary artifact event observed before its ownerRef handoff) or the next informer resync.
-func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegTermReason, dataLegTermMessage string, owner *unstructured.Unstructured) (ready bool, err error) {
+func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured, dataLegPending bool, dataLegPendingDetail, dataLegTermReason, dataLegTermMessage string, owner *unstructured.Unstructured) (ready bool, err error) {
 	// Self-heal data-artifact ownerRefs from the published truth (status.dataRefs[]) so the
 	// ownerRef-based VSC wake-up stays robust. Best-effort: never writes status, never fails
 	// reconcile (INV-RECONCILE-TRUTH: correctness comes from revalidation below, watches are
@@ -621,10 +624,21 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	// the aggregation already sees as not-ready is left as computed. The next pass re-reads the fresh
 	// status.data and validates readyToUse for real, so this delays the FIRST Ready=True by exactly one
 	// pass instead of racing it.
+	//
+	// dataLegPendingDetail, when the projection knows WHY the leg is not arriving, replaces the generic text.
+	// The reason stays the non-terminal DataCapturePending either way: the cause it describes (today an
+	// import whose DataImport reached Expired or Failed) does not close the node — a client may create
+	// another DataImport for it — so a machine reader must keep treating this as "still waiting", while a
+	// human reader gets the actual cause here and, through the child aggregation, on the ancestors. The
+	// detail is built from facts that do not change while the situation lasts, so re-deriving it every pass
+	// writes no status (a detail carrying a timestamp would rewrite the status of a settled object forever).
 	if dataLegPending && plan.volumeReady == metav1.ConditionTrue {
 		plan.volumeReady = metav1.ConditionFalse
 		plan.volumeReason = snapshot.ReasonDataCapturePending
 		plan.volumeMessage = "waiting for the data leg to be published and the volume snapshot artifact to be ready"
+		if dataLegPendingDetail != "" {
+			plan.volumeMessage = dataLegPendingDetail
+		}
 		plan.volumeFailed = false
 		deriveReadyStatus(&plan)
 	}
@@ -778,12 +792,12 @@ func upsertContentCondition(contentLike snapshot.SnapshotContentLike, desired me
 }
 
 // ReconcileCommonSnapshotContentStatus is the exported aggregation entry (tests/utility). It passes
-// dataLegPending=false, no terminal data-leg reason, and a nil owner: callers that do not run the data-leg
-// projection this pass get the plain N/A treatment for an empty status.data, and the domain-phase fold
-// (applyDomainPhaseFold) is skipped (owner==nil is a no-op). The aggregator's own Reconcile threads the
-// real pending/terminal signal and the resolved owning Snapshot.
+// dataLegPending=false, no pending detail, no terminal data-leg reason, and a nil owner: callers that do not
+// run the data-leg projection this pass get the plain N/A treatment for an empty status.data, and the
+// domain-phase fold (applyDomainPhaseFold) is skipped (owner==nil is a no-op). The aggregator's own Reconcile
+// threads the real pending/terminal signal and the resolved owning Snapshot.
 func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx context.Context, obj *unstructured.Unstructured) (ready bool, err error) {
-	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "", nil)
+	return r.reconcileCommonSnapshotContentStatus(ctx, obj, false, "", "", "", nil)
 }
 
 // buildCommonSnapshotContentStatusPlan computes ManifestsReady, DataReady, ChildrenReady, the
@@ -1197,6 +1211,13 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 	total := 0
 	readyCount := 0
 	var pendingNames []string
+	// The pending child QUOTED in the aggregate message: the first ref, in the order the frozen edge set
+	// lists them, whose Ready condition carries a reason. Selection is first-with-a-reason rather than
+	// simply first because a child whose Ready has not been written yet states nothing, and quoting it
+	// would replace a sibling's real cause with silence (a child missing from the cache is skipped even
+	// earlier — it has no condition to read at all). The rest stay named in the progress list, as before:
+	// one cause is actionable, five nested ones are not.
+	var quotedChild, quotedLeaf, quotedLeafReason, quotedLeafMessage string
 	linked := make(map[string]struct{}, len(rawRefs))
 	for _, raw := range rawRefs {
 		refMap, ok := raw.(map[string]interface{})
@@ -1238,10 +1259,23 @@ func (r *SnapshotContentController) validateCommonContentChildren(ctx context.Co
 				buildChildrenFailedMessage(name, leaf, leafReason, leafMessage), nil
 		}
 		pendingNames = append(pendingNames, name)
+		if quotedChild == "" && readyCond != nil && readyCond.Reason != "" {
+			quotedChild = name
+			quotedLeaf, quotedLeafReason, quotedLeafMessage = childPendingLeafInfo(name, readyCond)
+		}
 	}
 	if len(pendingNames) > 0 {
-		return false, snapshot.ReasonChildrenPending,
-			"waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames), nil
+		message := "waiting for child snapshot contents: " + formatReadyProgress(readyCount, total, pendingNames)
+		if quotedChild != "" {
+			// Carry the waiting child's OWN reason and message up the tree. Without it an ancestor reports
+			// only which node it is waiting for, and the cause — which the leaf already knows, e.g. an import
+			// whose DataImport will not deliver — is reachable nowhere on the path a reader starts from.
+			// Appended after the progress fragment so everything that read this message before still finds
+			// what it read; the quote is the last clause, which is also what lets an ancestor re-quote the
+			// pinned leaf instead of nesting this whole message (parseChildrenPendingLeaf).
+			message += "; " + buildChildrenPendingMessage(quotedChild, quotedLeaf, quotedLeafReason, quotedLeafMessage)
+		}
+		return false, snapshot.ReasonChildrenPending, message, nil
 	}
 
 	// Read barrier (eager shells): with eager content creation a parent
@@ -1582,6 +1616,20 @@ func snapshotChildRefsFromRaw(rawRefs []interface{}) []storagev1alpha1.SnapshotC
 func childTerminalLeafInfo(childName string, readyCond *metav1.Condition) (leaf, reason, message string) {
 	if readyCond.Reason == snapshot.ReasonChildrenFailed {
 		if l, r, m, ok := parseChildrenFailedLeaf(readyCond.Message); ok {
+			return l, r, m
+		}
+	}
+	return childName, readyCond.Reason, readyCond.Message
+}
+
+// childPendingLeafInfo is childTerminalLeafInfo for a child that is merely WAITING: it distills the child's
+// Ready condition into the (leaf, reason, message) an ancestor quotes. An intermediate child that is itself
+// waiting on its children (ChildrenPending) already quotes the deepest waiting leaf, so parsing that quote
+// out keeps the ancestor's message the same size instead of wrapping one whole message per tree level; any
+// other child is the waiting leaf itself.
+func childPendingLeafInfo(childName string, readyCond *metav1.Condition) (leaf, reason, message string) {
+	if readyCond.Reason == snapshot.ReasonChildrenPending {
+		if l, r, m, ok := parseChildrenPendingLeaf(readyCond.Message); ok {
 			return l, r, m
 		}
 	}

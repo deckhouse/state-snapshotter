@@ -147,7 +147,7 @@ func TestReconcileContentReady_DomainPhaseFailedTerminalOnOwnContent(t *testing.
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	owner := ownerWithDomainPhase(string(storagev1alpha1.SnapshotCapturePhaseFailed), "ConsistencyDeadlineExceeded", "fsfreeze deadline elapsed")
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", owner)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", "", owner)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestReconcileContentReady_DomainPhaseNotFinishedHoldsChildrenPending(t *tes
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	owner := ownerWithDomainPhase(string(storagev1alpha1.SnapshotCapturePhasePlanned), "", "")
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", owner)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", "", owner)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

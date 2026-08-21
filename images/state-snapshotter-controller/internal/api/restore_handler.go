@@ -35,6 +35,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
+	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/restoreapi"
 )
 
 // maxManifestsUploadBytes bounds the per-CR import upload request body. A node's own manifests (not the
@@ -166,17 +167,15 @@ func (h *RestoreHandler) routeCoreSnapshotSubresource(w http.ResponseWriter, r *
 //
 // The core group serves ALL THREE user-facing namespaced subresources (manifests-download,
 // manifests-with-data-restoration, manifests-and-children-refs-upload) ONLY for the core Snapshot kind
-// (routeCoreSnapshotSubresource). A domain (non-core) snapshot kind is addressed through its own
-// aggregated group (subresources.<domain-group>): the domain facade writes childRefs on its own CR and
-// proxies/forwards to the cluster-scoped content layer; a VolumeSnapshot is addressed through the
-// subresources.snapshot.storage.k8s.io connector. Serving a domain GVR here would be a redundant delegation
-// hop (or plain broken for VolumeSnapshot), so every subresource is refused with 404 pointing the client at
-// the node's own group.
+// (routeCoreSnapshotSubresource). Every other snapshot kind is addressed through the aggregated group of
+// the module that owns it: that module's facade writes childRefs on its own CR and proxies/forwards to
+// the cluster-scoped content layer. Serving another module's GVR here would be a redundant delegation
+// hop, so every subresource is refused with 404 pointing the client at the node's own group.
 func (h *RestoreHandler) routeGenericSnapshotSubresource(w http.ResponseWriter, resource, subresource string) {
 	switch subresource {
 	case "manifests-download", "manifests-with-data-restoration", "manifests-and-children-refs-upload":
 		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound",
-			fmt.Sprintf("subresource %q is not served for %q under the core group; address the snapshot kind through its own aggregated group (the domain group for domain kinds, or the subresources.snapshot.storage.k8s.io connector for VolumeSnapshots)", subresource, resource))
+			fmt.Sprintf("subresource %q is not served for %q under the core group; address the snapshot kind through the aggregated group of the module that owns it", subresource, resource))
 	default:
 		h.writeKubernetesErrorResponse(w, http.StatusNotFound, "NotFound", "unknown subresource")
 	}
@@ -208,54 +207,14 @@ func (h *RestoreHandler) HandleListSnapshots(w http.ResponseWriter, r *http.Requ
 	_ = json.NewEncoder(w).Encode(listResponse)
 }
 
-// parseRestoreQueryOptions reads and validates the shared manifests-with-data-restoration query
-// parameters (scope, kind, name, apiVersion) into the restore.Options subset they control. It is used
-// uniformly by the core Snapshot handler and the VolumeSnapshot connector so the contract is enforced in
-// one place. targetNamespace and the snapshot identity are orthogonal and set by the caller. Every
-// validation failure is an ErrBadRequest (writeRestoreError maps it to 400):
-//   - unknown scope value;
-//   - kind without name, or name without kind;
-//   - apiVersion without kind;
-//   - any object filter (kind/name/apiVersion) together with scope != node (the object filter is valid
-//     only with scope=node).
-func parseRestoreQueryOptions(r *http.Request) (restore.Options, error) {
-	q := r.URL.Query()
-	scope := q.Get("scope")
-	kind := q.Get("kind")
-	name := q.Get("name")
-	apiVersion := q.Get("apiVersion")
-
-	opts := restore.Options{}
-	switch scope {
-	case "", string(restore.ScopeSubtree):
-		opts.Scope = restore.ScopeSubtree
-	case string(restore.ScopeNode):
-		opts.Scope = restore.ScopeNode
-	default:
-		return restore.Options{}, fmt.Errorf("%w: unknown scope %q (want %q or %q)", restore.ErrBadRequest, scope, restore.ScopeSubtree, restore.ScopeNode)
-	}
-
-	if (kind == "") != (name == "") {
-		return restore.Options{}, fmt.Errorf("%w: object filter requires both kind and name", restore.ErrBadRequest)
-	}
-	if apiVersion != "" && kind == "" {
-		return restore.Options{}, fmt.Errorf("%w: apiVersion filter requires kind and name", restore.ErrBadRequest)
-	}
-	if (kind != "" || apiVersion != "") && opts.Scope != restore.ScopeNode {
-		return restore.Options{}, fmt.Errorf("%w: object filter (kind/name/apiVersion) is only allowed with scope=node", restore.ErrBadRequest)
-	}
-
-	opts.FilterKind = kind
-	opts.FilterName = name
-	opts.FilterAPIVersion = apiVersion
-	return opts, nil
-}
-
 func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.ResponseWriter, r *http.Request, namespace, snapshotName string) {
 	start := time.Now()
-	opts, err := parseRestoreQueryOptions(r)
+	// The query contract (scope, object filter, and the statuses its violations map to) is shared with
+	// every other server of this subresource, so it is parsed and answered by the SDK, never re-decided
+	// here: a client must get the same answer to the same query on every group.
+	opts, err := restoreapi.ParseQueryOptions(r)
 	if err != nil {
-		h.writeRestoreError(w, err)
+		restoreapi.WriteError(w, err)
 		return
 	}
 	opts.SnapshotName = snapshotName
@@ -264,7 +223,7 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 
 	data, err := h.service.BuildManifestsWithDataRestoration(r.Context(), opts)
 	if err != nil {
-		h.writeRestoreError(w, err)
+		restoreapi.WriteError(w, err)
 		return
 	}
 
@@ -327,14 +286,9 @@ func (h *RestoreHandler) HandleContentSubtreeManifestIdentities(w http.ResponseW
 
 // HandleSnapshotManifestsAndChildrenUpload persists one core Snapshot node's import payload
 // ({manifests, childRefs}): it records the node's direct children, enforces bind-first, and forwards the
-// manifests to the content-addressed layer.
+// manifests to the content-addressed layer. It is the only namespaced upload this module serves: the
+// volume node's is served by the module that owns the CSI VolumeSnapshot, under its own group.
 func (h *RestoreHandler) HandleSnapshotManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) {
-	h.handleManifestsAndChildrenUpload(w, r, snapshotGVK, namespace, snapshotName, false)
-}
-
-// handleManifestsAndChildrenUpload is the shared NAMESPACED upload path for the core Snapshot kind and the
-// CSI VolumeSnapshot connector. leaf marks the connector (a leaf may declare no children).
-func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter, r *http.Request, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string, leaf bool) {
 	start := time.Now()
 	if h.importUpload == nil {
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "import upload handler not configured")
@@ -344,7 +298,7 @@ func (h *RestoreHandler) handleManifestsAndChildrenUpload(w http.ResponseWriter,
 	if !ok {
 		return
 	}
-	checkpointName, err := h.importUpload.Upload(r.Context(), snapshotGVK, namespace, snapshotName, body, leaf)
+	checkpointName, err := h.importUpload.Upload(r.Context(), snapshotGVK, namespace, snapshotName, body)
 	if err != nil {
 		h.writeAggregatedError(w, err)
 		return
@@ -427,31 +381,6 @@ func (h *RestoreHandler) writeAggregatedError(w http.ResponseWriter, err error) 
 		return
 	}
 	h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", err.Error())
-}
-
-func (h *RestoreHandler) writeRestoreError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	reason := "InternalError"
-	message := err.Error()
-
-	switch {
-	case errors.Is(err, restore.ErrBadRequest):
-		status = http.StatusBadRequest
-		reason = "BadRequest"
-	case errors.Is(err, restore.ErrNotFound) || apierrors.IsNotFound(err):
-		status = http.StatusNotFound
-		reason = "NotFound"
-	case apierrors.IsForbidden(err):
-		// The restore resolver returns apierrors.NewForbidden when a bound SnapshotContent's
-		// spec.snapshotRef does not point back at the addressed snapshot subject (anti-spoofing).
-		status = http.StatusForbidden
-		reason = "Forbidden"
-	case errors.Is(err, restore.ErrNotReady) || errors.Is(err, restore.ErrContractViolation):
-		status = http.StatusConflict
-		reason = "Conflict"
-	}
-
-	h.writeKubernetesErrorResponse(w, status, reason, message)
 }
 
 func (h *RestoreHandler) writeJSONResponse(w http.ResponseWriter, r *http.Request, data []byte) {

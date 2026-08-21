@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package restore
+package transform
 
 import (
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -41,7 +42,7 @@ func TestSanitizeForRestore_StripsRuntimeAndRewritesNamespace(t *testing.T) {
 		"status": map[string]interface{}{"observed": true},
 	}}
 
-	out, keep := sanitizeForRestore(cm, "restore-ns")
+	out, keep := SanitizeForRestore(cm, "", "restore-ns")
 	if !keep {
 		t.Fatal("expected ConfigMap to be kept")
 	}
@@ -84,7 +85,7 @@ func TestSanitizeForRestore_DropsClusterScoped(t *testing.T) {
 		"kind":       "ClusterRole",
 		"metadata":   map[string]interface{}{"name": "viewer"},
 	}}
-	if _, keep := sanitizeForRestore(clusterRole, "restore-ns"); keep {
+	if _, keep := SanitizeForRestore(clusterRole, "", "restore-ns"); keep {
 		t.Fatal("cluster-scoped object (no namespace) must be dropped")
 	}
 }
@@ -96,7 +97,7 @@ func TestSanitizeForRestore_DropsControlPlaneKinds(t *testing.T) {
 			"kind":       kind,
 			"metadata":   map[string]interface{}{"name": "n", "namespace": "source-ns"},
 		}}
-		if _, keep := sanitizeForRestore(obj, "restore-ns"); keep {
+		if _, keep := SanitizeForRestore(obj, "", "restore-ns"); keep {
 			t.Fatalf("control-plane kind %q must be dropped", kind)
 		}
 	}
@@ -115,7 +116,7 @@ func TestSanitizeForRestore_StripsKindSpecificFields(t *testing.T) {
 			"resources":     map[string]interface{}{"requests": map[string]interface{}{"storage": "1Gi"}},
 		},
 	}}
-	out, keep := sanitizeForRestore(pvc, "restore-ns")
+	out, keep := SanitizeForRestore(pvc, "", "restore-ns")
 	if !keep {
 		t.Fatal("PVC must be kept")
 	}
@@ -141,7 +142,7 @@ func TestSanitizeForRestore_StripsKindSpecificFields(t *testing.T) {
 			"selector":       map[string]interface{}{"app": "web"},
 		},
 	}}
-	svcOut, _ := sanitizeForRestore(svc, "restore-ns")
+	svcOut, _ := SanitizeForRestore(svc, "", "restore-ns")
 	svcSpec, _ := svcOut.Object["spec"].(map[string]interface{})
 	for _, f := range []string{"clusterIP", "clusterIPs", "ipFamilies", "ipFamilyPolicy"} {
 		if _, ok := svcSpec[f]; ok {
@@ -170,7 +171,7 @@ func TestSanitizeForRestore_StripsRestoreBreakingAnnotations(t *testing.T) {
 		},
 		"spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}},
 	}}
-	out, keep := sanitizeForRestore(pvc, "restore-ns")
+	out, keep := SanitizeForRestore(pvc, "", "restore-ns")
 	if !keep {
 		t.Fatal("PVC must be kept")
 	}
@@ -197,7 +198,7 @@ func TestSanitizeForRestore_DropsEmptyAnnotationsMap(t *testing.T) {
 			},
 		},
 	}}
-	out, _ := sanitizeForRestore(cm, "restore-ns")
+	out, _ := SanitizeForRestore(cm, "", "restore-ns")
 	if _, found, _ := unstructured.NestedMap(out.Object, "metadata", "annotations"); found {
 		t.Fatal("annotations map should be removed when it becomes empty")
 	}
@@ -217,7 +218,7 @@ func TestSanitizeForRestore_StripsServiceNodePortAndLoadBalancerIP(t *testing.T)
 			},
 		},
 	}}
-	out, _ := sanitizeForRestore(svc, "restore-ns")
+	out, _ := SanitizeForRestore(svc, "", "restore-ns")
 	if _, ok, _ := unstructured.NestedString(out.Object, "spec", "loadBalancerIP"); ok {
 		t.Fatal("Service spec.loadBalancerIP must be stripped")
 	}
@@ -247,7 +248,7 @@ func TestSanitizeForRestore_RewritesRoleBindingServiceAccountNamespace(t *testin
 			map[string]interface{}{"kind": "User", "name": "alice", "apiGroup": "rbac.authorization.k8s.io"},
 		},
 	}}
-	out, keep := sanitizeForRestore(rb, "restore-ns")
+	out, keep := SanitizeForRestore(rb, "", "restore-ns")
 	if !keep {
 		t.Fatal("RoleBinding must be kept")
 	}
@@ -260,4 +261,116 @@ func TestSanitizeForRestore_RewritesRoleBindingServiceAccountNamespace(t *testin
 	if _, ok := user["namespace"]; ok {
 		t.Fatal("User subject must not get a namespace")
 	}
+}
+
+// A RoleBinding may bind identities that do NOT live in the namespace being restored: an operator or CI
+// ServiceAccount from another namespace that was granted access into this one. Such a subject does not
+// move with the content, and rewriting its namespace retargets the grant at a DIFFERENT ServiceAccount
+// (namespace/name is the identity), silently in both directions — the intended grantee loses access with
+// no error, and a same-named account in the target namespace would gain the role instead.
+//
+// The WHOLE subjects slice is compared, not the moved subject alone: an assertion that only checks the
+// moved subject stays green when the foreign one is rewritten too, which is precisely the defect here.
+// The fixture also pins the two namespaces apart from each other and from the target, so the comparison
+// cannot pass by them coinciding.
+func TestSanitizeForRestore_RewritesOnlySubjectsFromTheSourceNamespace(t *testing.T) {
+	const (
+		sourceNS  = "source-ns"
+		foreignNS = "operator-ns"
+		targetNS  = "restore-ns"
+	)
+	if sourceNS == foreignNS || foreignNS == targetNS || sourceNS == targetNS {
+		t.Fatalf("fixture is vacuous: the three namespaces must differ (source=%s foreign=%s target=%s)",
+			sourceNS, foreignNS, targetNS)
+	}
+
+	rb := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "rbac.authorization.k8s.io/v1",
+		"kind":       "RoleBinding",
+		"metadata":   map[string]interface{}{"name": "rb", "namespace": sourceNS},
+		"roleRef":    map[string]interface{}{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "r"},
+		"subjects": []interface{}{
+			// Lives in the namespace being restored: moves with it.
+			map[string]interface{}{"kind": "ServiceAccount", "name": "app", "namespace": sourceNS},
+			// Lives elsewhere, granted access in: must stay put.
+			map[string]interface{}{"kind": "ServiceAccount", "name": "runner", "namespace": foreignNS},
+			// Not a ServiceAccount: carries no namespace at all and must not acquire one.
+			map[string]interface{}{"kind": "User", "name": "alice", "apiGroup": "rbac.authorization.k8s.io"},
+		},
+	}}
+
+	out, keep := SanitizeForRestore(rb, "", targetNS)
+	if !keep {
+		t.Fatal("RoleBinding must be kept")
+	}
+
+	subjects, found, err := unstructured.NestedSlice(out.Object, "subjects")
+	if err != nil {
+		t.Fatalf("reading subjects: %v", err)
+	}
+	if !found {
+		t.Fatal("the RoleBinding must keep its subjects")
+	}
+
+	want := []interface{}{
+		map[string]interface{}{"kind": "ServiceAccount", "name": "app", "namespace": targetNS},
+		map[string]interface{}{"kind": "ServiceAccount", "name": "runner", "namespace": foreignNS},
+		map[string]interface{}{"kind": "User", "name": "alice", "apiGroup": "rbac.authorization.k8s.io"},
+	}
+	if !reflect.DeepEqual(subjects, want) {
+		t.Fatalf("subjects mismatch\n got: %#v\nwant: %#v", subjects, want)
+	}
+	t.Logf("subjects checked: %d (1 moved, 1 foreign left alone, 1 non-ServiceAccount)", len(subjects))
+}
+
+// The explicit source namespace exists for callers whose manifests no longer carry the captured one: a
+// facade that compiles namespace-relative manifests attaches the TARGET namespace before compiling, so
+// obj.metadata.namespace is already the target and inferring the source from it would recognise nothing
+// as moved. This pins that the argument, when given, is what decides — not the object's own namespace.
+//
+// Without it the parameter would be untested on the only path that needs it: every other test leaves it
+// empty and exercises the inference instead.
+func TestSanitizeForRestore_ExplicitSourceNamespaceDecidesWhenTheObjectNoLongerCarriesIt(t *testing.T) {
+	const (
+		sourceNS  = "captured-ns"
+		foreignNS = "operator-ns"
+		targetNS  = "restore-ns"
+	)
+	if sourceNS == foreignNS || foreignNS == targetNS || sourceNS == targetNS {
+		t.Fatalf("fixture is vacuous: the three namespaces must differ (source=%s foreign=%s target=%s)",
+			sourceNS, foreignNS, targetNS)
+	}
+
+	// metadata.namespace is ALREADY the target — this is what a facade hands in.
+	rb := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "rbac.authorization.k8s.io/v1",
+		"kind":       "RoleBinding",
+		"metadata":   map[string]interface{}{"name": "rb", "namespace": targetNS},
+		"roleRef":    map[string]interface{}{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "r"},
+		"subjects": []interface{}{
+			map[string]interface{}{"kind": "ServiceAccount", "name": "app", "namespace": sourceNS},
+			map[string]interface{}{"kind": "ServiceAccount", "name": "runner", "namespace": foreignNS},
+		},
+	}}
+
+	out, keep := SanitizeForRestore(rb, sourceNS, targetNS)
+	if !keep {
+		t.Fatal("RoleBinding must be kept")
+	}
+	subjects, found, err := unstructured.NestedSlice(out.Object, "subjects")
+	if err != nil {
+		t.Fatalf("reading subjects: %v", err)
+	}
+	if !found {
+		t.Fatal("the RoleBinding must keep its subjects")
+	}
+
+	want := []interface{}{
+		map[string]interface{}{"kind": "ServiceAccount", "name": "app", "namespace": targetNS},
+		map[string]interface{}{"kind": "ServiceAccount", "name": "runner", "namespace": foreignNS},
+	}
+	if !reflect.DeepEqual(subjects, want) {
+		t.Fatalf("subjects mismatch\n got: %#v\nwant: %#v", subjects, want)
+	}
+	t.Logf("subjects checked: %d (explicit source honoured over the object's own namespace)", len(subjects))
 }

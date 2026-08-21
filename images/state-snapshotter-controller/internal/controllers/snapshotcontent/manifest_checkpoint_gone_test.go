@@ -72,7 +72,7 @@ func TestReconcileContentReady_PublishedMCPDeletedAfterCaptureTerminal(t *testin
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	owner := ownerWithManifestCaptured(true)
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", owner)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", "", owner)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestReconcileContentReady_MCPAbsentBeforeCaptureStaysPending(t *testing.T) 
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(content).WithStatusSubresource(content).Build()
 			r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-			ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", tc.owner)
+			ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", "", tc.owner)
 			if err != nil {
 				t.Fatalf("reconcile: %v", err)
 			}
@@ -141,7 +141,7 @@ func TestReconcileContentReady_MCPPresentAfterCaptureNoFalseEscalation(t *testin
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	owner := ownerWithManifestCaptured(true)
-	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", owner)
+	ready, err := r.reconcileCommonSnapshotContentStatus(ctx, content, false, "", "", "", owner)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

@@ -17,13 +17,15 @@ limitations under the License.
 package api //nolint:revive // package name matches internal/api directory
 
 import (
-	"fmt"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
@@ -116,18 +118,26 @@ func TestRestoreHandler_GenericDomainSubresourcesRemoved(t *testing.T) {
 	}
 }
 
-// TestRestoreHandler_WriteRestoreError_ForbiddenMapsTo403 pins that the restore resolver's anti-spoofing
-// apierrors.NewForbidden surfaces as HTTP 403 (not the 500 catch-all).
-func TestRestoreHandler_WriteRestoreError_ForbiddenMapsTo403(t *testing.T) {
-	log, _ := logger.NewLogger("error")
-	h := NewRestoreHandler(nil, nil, log, nil, nil)
-	rec := httptest.NewRecorder()
-	h.writeRestoreError(rec, apierrors.NewForbidden(
-		schema.GroupResource{Group: "state-snapshotter.deckhouse.io", Resource: "snapshotcontents"}, "c",
-		fmt.Errorf("bound SnapshotContent does not belong to snapshot ns/snap"),
-	))
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("writeRestoreError(Forbidden) status = %d, want 403", rec.Code)
+// TestRestoreHandler_BackRefMismatchIsForbidden pins that the anti-spoofing refusal reaches the client as
+// 403 and not as the 500 catch-all: a SnapshotContent whose spec.snapshotRef names a different snapshot
+// must not serve manifests to the snapshot that claims it. The status a client sees is what makes the
+// refusal actionable ("you may not read this"), so the whole path — resolver, handler, status mapping —
+// is exercised over HTTP rather than the mapping alone.
+func TestRestoreHandler_BackRefMismatchIsForbidden(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(coreSnapshotScheme()).Build()
+	seedCoreRootSnapshotWithContentBackRef(t, cl, []map[string]interface{}{
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "app-config", "namespace": "ns1"}, "data": map[string]interface{}{"k": "v"}},
+	}, "someone-else")
+	srv := newCoreSnapshotServer(t, cl)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + coreRestoreBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("back-ref mismatch = %d, want 403", resp.StatusCode)
 	}
 }
 
@@ -148,4 +158,59 @@ func TestRestoreHandler_ListSnapshotsMethodNotAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", resp.StatusCode)
 	}
+}
+
+// TestRestoreHandler_ForeignGVRRefusalNamesNoGroup pins the TEXT of the refusal a domain GVR gets under
+// the core group, not just its status: it must state the rule and name no aggregated group.
+//
+// The reason it is a guard and not a comment is that the published client contract says exactly this — a
+// reader is told the message explains the rule but carries no address to copy into a URL — and the
+// message is the one place that claim can go stale silently. It used to name a group: while this module
+// served the volume node's endpoints itself, it could point a caller at the group next door. It no longer
+// knows the name of any group but its own, so a message that names one can only be a stale literal, and a
+// client that copies it would build a request nobody serves.
+//
+// The check is the absence of "subresources." — the prefix every aggregated group of the platform carries,
+// so no group name can slip past it, this module's own included.
+//
+// LIMIT: it reads the refusal for ONE domain GVR and one subresource. The status codes of all three, and
+// of both methods, are TestRestoreHandler_GenericDomainSubresourcesRemoved's subject.
+func TestRestoreHandler_ForeignGVRRefusalNamesNoGroup(t *testing.T) {
+	log, _ := logger.NewLogger("error")
+	handler := NewRestoreHandler(nil, nil, log, nil, nil)
+	mux := http.NewServeMux()
+	handler.SetupRoutes(mux)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	const subresource = "manifests-with-data-restoration"
+	path := "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns/demovirtualdisksnapshots/disk-x/" + subresource
+
+	resp, err := http.Get(server.URL + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read refusal body: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET %s = %d, want 404: %s", path, resp.StatusCode, body)
+	}
+
+	var status metav1.Status
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatalf("refusal body is not a Status (%s): %v", body, err)
+	}
+	// Without this the group check below would also pass on an empty message, which is the one way to make
+	// this test say nothing.
+	if !strings.Contains(status.Message, subresource) {
+		t.Fatalf("the refusal does not name the subresource that was asked for (%q): %q", subresource, status.Message)
+	}
+	if strings.Contains(status.Message, "subresources.") {
+		t.Fatalf("the refusal names an aggregated group: %q. It must state the rule only — this module knows no other module's group name, so a group in this text is a literal that goes stale and a client copies it into a request nobody serves",
+			status.Message)
+	}
+	t.Logf("refusal checked: %q", status.Message)
 }

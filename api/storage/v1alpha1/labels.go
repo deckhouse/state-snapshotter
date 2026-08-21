@@ -98,14 +98,22 @@ func IsDeleteProtected(obj metav1.Object) bool {
 	return obj.GetLabels()[LabelDeleteProtected] == LabelDeleteProtectedValue
 }
 
-// LabelProvenance records WHO created the object, and states nothing else about it. Present with value
-// LabelProvenanceUnifiedSnapshot, it means the unified snapshot write-path built this object as a node of
-// a snapshot tree; absent, it means the object came from elsewhere — a user, a foreign controller — and
-// this module is merely an observer of it.
+// LabelProvenance records WHO created the object, and states nothing else about it. It is written by
+// whoever is present when the object is born — the write-path that builds it, or an admission of this
+// stack that intercepts a client's CREATE — so it reports a fact rather than a guess. Three readings:
+//
+//   - LabelProvenanceUnifiedSnapshot: the unified snapshot write-path built this object as a node of a
+//     snapshot tree;
+//   - LabelProvenanceUserInCluster: somebody else created it directly against the cluster API, and an
+//     admission of this stack was there while that CREATE was in flight;
+//   - the key ABSENT: nothing that could state an origin was present at the creation. For a kind whose
+//     CREATE this stack intercepts that means the object predates the interception — it was already in the
+//     cluster before this stack was; for every other kind it means only that the write-path did not build
+//     it. Absence is therefore read per kind, and never as a claim that the object is ours.
 //
 // Origin, permission to manage, and actually managing are three separate statements, and this label is
-// only the first: it never by itself makes an object protected or managed. Because only a write-path can
-// know an object's origin, the label MUST be stamped by the object's CREATOR into the CREATE payload, and
+// only the first: it never by itself makes an object protected or managed. Because only somebody present at
+// the creation can know an object's origin, the label MUST be stamped into the CREATE payload, and
 // MUST NOT be inferred by an observer from anything it can see about an object that already exists.
 // Conversely, an object without it MUST NOT be mutated by this module at all — not even with a negative
 // marker.
@@ -115,17 +123,30 @@ func IsDeleteProtected(obj metav1.Object) bool {
 // only because the object predates the label or someone stripped it (unlike the protection state, this one is
 // not immutable at admission).
 //
-// The value is a keyed origin rather than a boolean so that a second origin can be expressed later
-// without introducing a second label.
+// The value is a keyed origin rather than a boolean, which is what lets a second origin be stated on the
+// same key: "created by somebody else, under our watch" and "never seen being created" are different facts,
+// and a boolean could only have collapsed them into one.
 //
 // This is the single exported source of truth for the key, reused by the core, the SDK and domain
 // controllers; there must be no hardcoded string duplicates.
 const LabelProvenance = APIGroup + "/provenance"
 
-// LabelProvenanceUnifiedSnapshot is the only origin this module stamps: created by the unified snapshot
-// write-path as a node of a snapshot tree. Provenance is keyed on the exact key=value pair; any other
-// value means an origin this module does not recognise, which is not its own.
+// LabelProvenanceUnifiedSnapshot is the origin of a node of a snapshot tree: the unified snapshot
+// write-path created this object. Provenance is keyed on the exact key=value pair; any other value means an
+// origin that is not this write-path's, which is what HasProvenance answers.
 const LabelProvenanceUnifiedSnapshot = "unified-snapshot"
+
+// LabelProvenanceUserInCluster is the origin of an object an ordinary client of the cluster API created — a
+// person, a script, a controller that is not this write-path — stamped by an admission of this stack while
+// that CREATE was in flight. It says two things at once, and both are load-bearing: the object is NOT ours,
+// and it came into being under this stack's watch rather than before it.
+//
+// It never reads as "ours": HasProvenance compares against LabelProvenanceUnifiedSnapshot exactly, so an
+// object carrying this value keeps the shape that belongs to a snapshot somebody else made — its data
+// artifact stays its own and no retention is put over it. What it buys is the opposite statement, which
+// nothing else in the object can express: an object WITHOUT the key at all was never seen being created,
+// and a path that would take an object into this stack's lifecycle must leave that one alone.
+const LabelProvenanceUserInCluster = "user-in-cluster"
 
 // StampProvenance sets the provenance label on obj's labels (allocating the map if nil). Write-paths MUST
 // call it while BUILDING the object, in the same payload that carries the object's owner reference and its

@@ -17,11 +17,12 @@ limitations under the License.
 package restore
 
 import (
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+// cloneDataBindings copies a content's dataRefs onto the resolved node, so the compiled tree does not
+// alias the slice returned by the content wrapper. Matching a captured PVC to one of these bindings is
+// part of the shared restore compilation (transform.FindDataBindingForPVC), not of this resolver.
 func cloneDataBindings(refs []snapshot.DataBindingRef) []snapshot.DataBindingRef {
 	if len(refs) == 0 {
 		return nil
@@ -29,32 +30,4 @@ func cloneDataBindings(refs []snapshot.DataBindingRef) []snapshot.DataBindingRef
 	out := make([]snapshot.DataBindingRef, len(refs))
 	copy(out, refs)
 	return out
-}
-
-// findDataBindingForPVC matches a PVC manifest to this content node's dataRefs[] only.
-// When the PVC has a UID, only targetUID/target.uid are considered (no name fallback).
-// When the PVC UID is empty, match by apiVersion/kind/namespace/name.
-func findDataBindingForPVC(pvc unstructured.Unstructured, bindings []snapshot.DataBindingRef) (snapshot.DataBindingRef, bool) {
-	pvcUID := string(pvc.GetUID())
-	if pvcUID != "" {
-		for _, b := range bindings {
-			if b.TargetUID == pvcUID || b.Target.UID == pvcUID {
-				return b, true
-			}
-		}
-		return snapshot.DataBindingRef{}, false
-	}
-	for _, b := range bindings {
-		if bindingMatchesPVCIdentity(pvc, b) {
-			return b, true
-		}
-	}
-	return snapshot.DataBindingRef{}, false
-}
-
-func bindingMatchesPVCIdentity(pvc unstructured.Unstructured, b snapshot.DataBindingRef) bool {
-	return b.Target.APIVersion == pvc.GetAPIVersion() &&
-		b.Target.Kind == pvc.GetKind() &&
-		b.Target.Namespace == pvc.GetNamespace() &&
-		b.Target.Name == pvc.GetName()
 }

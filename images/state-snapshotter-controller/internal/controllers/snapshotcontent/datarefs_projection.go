@@ -63,10 +63,16 @@ import (
 // IMPORT does not take the DataImport branch; it shares the bound-VSC projection with capture.
 //
 // It is latch-idempotent: once status.data covers the source, it is kept even after the VCR is reaped.
-func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, termReason string, termMessage string, err error) {
+//
+// pendingDetail is the non-terminal twin of termMessage: a human-readable cause for a leg that is merely
+// PENDING, which the caller substitutes for the generic waiting text (see
+// reconcileCommonSnapshotContentStatus). Only the generic-import route fills it — an import can stall on a
+// DataImport whose own status says it will never deliver, while a capture leg either progresses or fails
+// terminally. Every other route returns it empty, so the capture path reads exactly as before.
+func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 
 	scenario := dataleg.Classify(
@@ -89,11 +95,11 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 	case dataleg.DomainCapture:
 		vcrName, nestedErr := domainVolumeCaptureRequestName(owner)
 		if nestedErr != nil {
-			return false, "", "", nestedErr
+			return false, "", "", "", nestedErr
 		}
 		if vcrName == "" {
 			// Manifest-only leaf (no data leg) or pre-Planned: nothing to project this pass.
-			return false, "", "", nil
+			return false, "", "", "", nil
 		}
 		return r.projectContentDataLegFromVCR(ctx, contentObj, ownerNamespace, vcrName)
 
@@ -101,7 +107,7 @@ func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Conte
 		// Unreachable while Classify is total over its two booleans (dataleg.Validate proves the four
 		// combinations cover the axis). Kept as an error rather than a panic or a silent no-op so a future
 		// scenario added to the axis without a route here is loud instead of dropping the data leg.
-		return false, "", "", fmt.Errorf("SnapshotContent %s: no data-leg route for scenario %q (owner %s %s/%s)",
+		return false, "", "", "", fmt.Errorf("SnapshotContent %s: no data-leg route for scenario %q (owner %s %s/%s)",
 			contentObj.GetName(), scenario, owner.GetObjectKind().GroupVersionKind().Kind, owner.GetNamespace(), owner.GetName())
 	}
 }
@@ -123,7 +129,7 @@ func domainVolumeCaptureRequestName(owner *unstructured.Unstructured) (string, e
 // fault are surfaced here as a non-empty (termReason, termMessage). The caller makes the CONTENT terminal
 // (DataReady=VolumeCaptureFailed), which propagates up as ChildrenFailed — the former hack only folded
 // the leg terminal into the owning snapshot's Ready, so it never reached the parent contents.
-func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Context, contentObj *unstructured.Unstructured, namespace, vcrName string) (requeue bool, termReason string, termMessage string, err error) {
+func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Context, contentObj *unstructured.Unstructured, namespace, vcrName string) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	contentName := contentObj.GetName()
 
 	vcr := &unstructured.Unstructured{}
@@ -138,23 +144,23 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 			// Pre-publish: the domain has not (re)created the VCR yet -> requeue until it appears.
 			// Post-publish: the binder reaped the VCR after a durable handoff -> keep the latched
 			// status.data, no requeue. Distinguish by whether the content already carries data.
-			return !r.contentHasData(ctx, contentName), "", "", nil
+			return !r.contentHasData(ctx, contentName), "", "", "", nil
 		}
-		return false, "", "", getErr
+		return false, "", "", "", getErr
 	}
 
 	expectedTargets, parseErr := vcctrl.ParseVolumeCaptureTargets(vcr)
 	if parseErr != nil {
-		return false, "", "", parseErr
+		return false, "", "", "", parseErr
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
+		return false, "", "", "", cErr
 	}
 	if vcctrl.ContentDataRefsCoverExpectedTargets(content.DataList(), expectedTargets) {
 		// Already published and covering the targets: latched, nothing to do.
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
 		// Core-owned terminal: make the content terminal on the failed VCR so it propagates upward.
@@ -162,19 +168,19 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 		if reason != "" {
 			detail = fmt.Sprintf("%s: %s", reason, msg)
 		}
-		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("data-leg volume capture failed: %s", detail), nil
+		return false, snapshot.ReasonVolumeCaptureFailed, fmt.Sprintf("data-leg volume capture failed: %s", detail), "", nil
 	}
 	if !vcctrl.VolumeCaptureRequestReady(vcr) {
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 
 	vcrRefs, refErr := vcctrl.ParseVolumeCaptureDataRefs(vcr)
 	if refErr != nil {
-		return false, "", "", refErr
+		return false, "", "", "", refErr
 	}
 	if validateErr := vcctrl.ValidateDataRefsForPublish(expectedTargets, vcrRefs); validateErr != nil {
 		// Ready VCR whose dataRefs are not yet consistent: retry without publishing.
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 
 	bindings := vcctrl.SnapshotDataBindingsFromVCRStatus(vcrRefs)
@@ -183,16 +189,16 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 	// of looping forever while the projection declines to publish.
 	if len(bindings) > 1 {
 		return false, snapshot.ReasonVolumeCaptureFailed,
-			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), nil
+			fmt.Sprintf("data-leg volume capture returned %d data artifacts for a single SnapshotContent %q; Variant A allows at most one PVC per domain volume node (decompose multiple volumes into child volume nodes)", len(bindings), contentName), "", nil
 	}
 	if len(bindings) != 1 {
 		// Zero bindings on a ready+valid VCR: not representable yet, hold pending.
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 	// A domain capture leg attests no import metadata (zero value): everything it publishes beyond the refs is
 	// read off the live source PVC by the enricher.
 	requeue, err = r.publishDataBindings(ctx, contentName, bindings, importVolumeMetadata{})
-	return requeue, "", "", err
+	return requeue, "", "", "", err
 }
 
 // projectContentDataLegFromBoundVSC projects the native-CSI data leg: a VolumeSnapshot owner is
@@ -206,17 +212,17 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 // The import-only extras — the DataImport reverse-lookup and the authoritative import StorageClass — are
 // therefore gated STRUCTURALLY on spec.mode: Import, never on the emptiness of a value. For a capture
 // owner not a single line of import logic runs and the latch stays exactly what it was.
-func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, termReason string, termMessage string, err error) {
+func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx context.Context, contentObj, owner *unstructured.Unstructured, _ string) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	contentName := contentObj.GetName()
 	isImport := usecase.IsUnstructuredImportMode(owner)
 
 	vscName, _, err := unstructured.NestedString(owner.Object, "status", "boundVolumeSnapshotContentName")
 	if err != nil {
-		return false, "", "", err
+		return false, "", "", "", err
 	}
 	if vscName == "" {
 		// CSI has not bound the VolumeSnapshot to a VolumeSnapshotContent yet: nothing to project.
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 
 	binding := storagev1alpha1.SnapshotDataBinding{
@@ -229,7 +235,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	}
 	if binding.SourceRef.Name == "" {
 		// The domain reconciler has not published status.sourceRef yet: wait.
-		return true, "", "", nil
+		return true, "", "", "", nil
 	}
 
 	// Import-only: the volume metadata of an imported volume lives on the DataImport that staged the bytes,
@@ -245,7 +251,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		// branch shared with capture would introduce a new wedge. It simply leaves the metadata unresolved.
 		di, _, _, lErr := controllercommon.FindDataImportForLeaf(ctx, r.Client, owner)
 		if lErr != nil {
-			return false, "", "", lErr
+			return false, "", "", "", lErr
 		}
 		importDataImportResolved = di != nil
 		importMeta = importVolumeMetadataFromDataImport(di)
@@ -261,7 +267,7 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
-		return false, "", "", cErr
+		return false, "", "", "", cErr
 	}
 	if isImport && !importDataImportResolved {
 		// Nothing attests these fields any more, so what the content already carries becomes the value to
@@ -294,10 +300,10 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		// capture owner importMeta is the zero value and adds no term at all, leaving this latch exactly what
 		// it was: a value-based comparison there could never match, so every native-CSI capture content would
 		// re-publish forever and, once its source PVC is gone, lose the durable metadata restore needs.
-		return false, "", "", nil
+		return false, "", "", "", nil
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding}, importMeta)
-	return requeue, "", "", err
+	return requeue, "", "", "", err
 }
 
 // importVolumeMetadata is the volume metadata that exists only on the import side, and only for as long as

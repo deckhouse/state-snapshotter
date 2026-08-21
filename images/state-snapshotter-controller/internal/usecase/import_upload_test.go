@@ -124,7 +124,7 @@ func TestImportUpload_HappyPath_BoundSnapshot(t *testing.T) {
 	svc := NewImportUploadService(cl)
 
 	child := UploadChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child"}
-	cpName, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t, child), false)
+	cpName, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t, child))
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestImportUpload_409UntilBound(t *testing.T) {
 	svc := NewImportUploadService(cl)
 
 	child := UploadChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child"}
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t, child), false)
+	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t, child))
 	assertAggReason(t, err, http.StatusConflict, ReasonImportContentNotBound)
 
 	// No reconstructed MCP is created pre-bind (nothing is written to the content layer).
@@ -208,7 +208,7 @@ func TestImportUpload_BackRefMismatch(t *testing.T) {
 	cl := uploadTestClient(t, importModeSnapshot(true), content)
 	svc := NewImportUploadService(cl)
 
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t), false)
+	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t))
 	assertAggStatus(t, err, http.StatusForbidden)
 
 	cp := &ssv1alpha1.ManifestCheckpoint{}
@@ -224,7 +224,7 @@ func TestImportUpload_BoundContentMissing(t *testing.T) {
 	ctx := context.Background()
 	cl := uploadTestClient(t, importModeSnapshot(true)) // bound name set, but no content object exists
 	svc := NewImportUploadService(cl)
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t), false)
+	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t))
 	assertAggStatus(t, err, http.StatusNotFound)
 }
 
@@ -236,7 +236,7 @@ func TestImportUpload_Idempotent(t *testing.T) {
 	svc := NewImportUploadService(cl)
 
 	body := uploadPayload(t)
-	first, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, body, false)
+	first, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, body)
 	if err != nil {
 		t.Fatalf("first upload: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestImportUpload_Idempotent(t *testing.T) {
 		t.Fatalf("mutate MCP: %v", err)
 	}
 
-	second, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, body, false)
+	second, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, body)
 	if err != nil {
 		t.Fatalf("second upload: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestImportUpload_RejectsNonImportMode(t *testing.T) {
 	cl := uploadTestClient(t, snap)
 	svc := NewImportUploadService(cl)
 
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t), false)
+	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t))
 	assertAggStatus(t, err, http.StatusConflict)
 }
 
@@ -285,30 +285,18 @@ func TestImportUpload_RejectsBadPayload(t *testing.T) {
 
 	// manifests missing.
 	bad, _ := json.Marshal(ManifestsAndChildrenUpload{})
-	_, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, bad, false)
+	_, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, bad)
 	assertAggStatus(t, err, http.StatusBadRequest)
 
 	// manifests not an array.
 	notArray, _ := json.Marshal(map[string]interface{}{"manifests": map[string]string{"not": "array"}})
-	_, err = svc.Upload(ctx, gvk, testSnapNS, testSnapName, notArray, false)
+	_, err = svc.Upload(ctx, gvk, testSnapNS, testSnapName, notArray)
 	assertAggStatus(t, err, http.StatusBadRequest)
 
 	// childRef missing name.
 	manifests, _ := json.Marshal([]map[string]interface{}{{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "x", "namespace": testSnapNS}}})
 	badChild, _ := json.Marshal(ManifestsAndChildrenUpload{Manifests: manifests, ChildRefs: []UploadChildRef{{APIVersion: "v1", Kind: "ConfigMap"}}})
-	_, err = svc.Upload(ctx, gvk, testSnapNS, testSnapName, badChild, false)
-	assertAggStatus(t, err, http.StatusBadRequest)
-}
-
-// TestImportUpload_LeafRejectsChildRefs pins the leaf validation: a leaf connector (the CSI VolumeSnapshot
-// connector, leaf=true) must reject a non-empty childRefs payload (400).
-func TestImportUpload_LeafRejectsChildRefs(t *testing.T) {
-	ctx := context.Background()
-	cl := uploadTestClient(t, importModeSnapshot(true), importContent())
-	svc := NewImportUploadService(cl)
-
-	child := UploadChildRef{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "c"}
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, testSnapName, uploadPayload(t, child), true)
+	_, err = svc.Upload(ctx, gvk, testSnapNS, testSnapName, badChild)
 	assertAggStatus(t, err, http.StatusBadRequest)
 }
 
@@ -316,7 +304,7 @@ func TestImportUpload_NotFound(t *testing.T) {
 	ctx := context.Background()
 	cl := uploadTestClient(t)
 	svc := NewImportUploadService(cl)
-	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, "missing", uploadPayload(t), false)
+	_, err := svc.Upload(ctx, coreSnapshotGVK(), testSnapNS, "missing", uploadPayload(t))
 	assertAggStatus(t, err, http.StatusNotFound)
 }
 
@@ -391,12 +379,12 @@ func TestImportUpload_LeafSkipsChildrenStatusWriteUnderConflict(t *testing.T) {
 
 	// Leaf (empty childRefs): no status write, so the status-owner conflict never fires and the bound
 	// upload succeeds through both layers.
-	if _, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, uploadPayload(t), false); err != nil {
+	if _, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, uploadPayload(t)); err != nil {
 		t.Fatalf("leaf upload must succeed despite a status-write conflict: %v", err)
 	}
 
 	// Non-leaf (childRefs present): the status write is required, so the conflict surfaces as 409.
 	child := UploadChildRef{APIVersion: storagev1alpha1.SchemeGroupVersion.String(), Kind: "Snapshot", Name: "child"}
-	_, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, uploadPayload(t, child), false)
+	_, err := svc.Upload(ctx, gvk, testSnapNS, testSnapName, uploadPayload(t, child))
 	assertAggStatus(t, err, http.StatusConflict)
 }

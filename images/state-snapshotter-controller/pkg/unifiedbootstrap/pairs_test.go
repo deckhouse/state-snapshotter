@@ -24,13 +24,16 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
-// TestIsOutOfProcessDomainSnapshotKind_csdOrigin guards the CSD-origin restore-delegation rule and its
-// regression: the predicate delegates a kind iff it is registered in the live GVK registry AND is not a
-// built-in in-process pair. The namespace-root "Snapshot" is a domain-CAPTURE kind, but its restore is
-// served in-process by the core apiserver — treating it as out-of-process would delegate the root back to
-// core's own endpoint (self-recursion / HTTP 500). The built-in CSI "VolumeSnapshot" restores in-process
-// too. A registered non-built-in kind can only have come from an eligible CustomSnapshotDefinition, so it
-// is an out-of-process domain (the core carries no domain-specific kind names).
+// TestIsOutOfProcessDomainSnapshotKind_csdOrigin guards the restore-delegation rule and the two mistakes
+// it is easy to make in it: the predicate delegates a kind iff it is registered in the live GVK registry
+// AND is not the namespace-root "Snapshot".
+//
+// The root is the ONLY kind excluded, because its restore is this apiserver's own endpoint — delegating it
+// would call back into the caller (self-recursion / HTTP 500). Everything else registered is served by the
+// module that owns the kind: a CustomSnapshotDefinition domain, and the built-in CSI "VolumeSnapshot",
+// whose capture is core behavior while its restore subresource is not. Being a BUILT-IN pair therefore says
+// nothing about delegation, and the assertion on the VolumeSnapshot below is what keeps that distinction
+// from quietly collapsing back into "built-ins restore in-process".
 func TestIsOutOfProcessDomainSnapshotKind_csdOrigin(t *testing.T) {
 	rootKind := DefaultSnapshotPair().Snapshot.Kind
 	vsKind := BuiltInVolumeSnapshotPair().Snapshot.Kind
@@ -50,12 +53,14 @@ func TestIsOutOfProcessDomainSnapshotKind_csdOrigin(t *testing.T) {
 		t.Fatalf("register domain kind: %v", err)
 	}
 
-	// Built-in kinds restore in-process — never delegated.
+	// The root restores in-process — never delegated.
 	if IsOutOfProcessDomainSnapshotKind(reg, rootKind) {
 		t.Errorf("root %q must NOT be an out-of-process domain restore kind (compiled in-process)", rootKind)
 	}
-	if IsOutOfProcessDomainSnapshotKind(reg, vsKind) {
-		t.Errorf("built-in %q must NOT be an out-of-process domain restore kind (restored in-process)", vsKind)
+	// The built-in CSI VolumeSnapshot IS delegated: its restore subresource is served by the module that
+	// owns the kind, so a volume node inside a tree is answered there and spliced in.
+	if !IsOutOfProcessDomainSnapshotKind(reg, vsKind) {
+		t.Errorf("built-in %q must be an out-of-process restore kind (its restore subresource is served by the module that owns the kind, not here)", vsKind)
 	}
 	// A registered, non-built-in (CSD-derived) kind is an out-of-process domain — delegated.
 	if !IsOutOfProcessDomainSnapshotKind(reg, domainKind) {

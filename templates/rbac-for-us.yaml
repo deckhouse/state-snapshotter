@@ -79,9 +79,31 @@ rules:
 # serves these subresources ONLY for the core Snapshot kind — never for domain GVR (→ 404). Concrete domain
 # groups/resources are NOT enumerated here: they are domain-specific and belong to the domain module that
 # ships them, so a domain module grants access to its own aggregated subresources in its own templates.
-# Connector over the generic-PVC extended VolumeSnapshot (subresources.snapshot.storage.k8s.io):
-# user-facing capability to export (manifests-download), restore (manifests-with-data-restoration), and
-# import (manifests-and-children-refs-upload) a single volume snapshot by namespaced VS name.
+# Volume nodes: export (manifests-download), restore (manifests-with-data-restoration) and import
+# (manifests-and-children-refs-upload) a single volume snapshot by namespaced VolumeSnapshot name. These
+# endpoints are served by the module that owns the CSI VolumeSnapshot, under a group named after THAT
+# module — which is why the group below is not one of this module's own. It is named here and not left to
+# that module's chart because this is the manual-kubectl role of this module's demo and diagnostics paths:
+# walking a tree with a volume in it from a shell needs both legs, and a missing grant shows up as a 403
+# in the middle of a demo.
+- apiGroups:
+  - subresources.storage-foundation.deckhouse.io
+  resources:
+  - volumesnapshots/manifests-download
+  - volumesnapshots/manifests-with-data-restoration
+  verbs:
+  - get
+- apiGroups:
+  - subresources.storage-foundation.deckhouse.io
+  resources:
+  - volumesnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
+# The same endpoints under the group they were served from before the move. A SubjectAccessReview is
+# built from the group in the URL, so without these two rules a caller still addressing the old path is
+# answered 403 even though the server-side compatibility alias answers it — which is exactly the check
+# the manual and end-to-end walkthroughs of that alias make through this kubeconfig. They go away
+# together with the alias, in one change.
 - apiGroups:
   - subresources.snapshot.storage.k8s.io
   resources:

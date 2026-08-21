@@ -104,14 +104,17 @@ func NewImportUploadService(c client.Client) *ImportUploadService {
 // identified by (snapshotGVK, namespace, name) and, once the CR is bound, forwards the manifests to the
 // content-addressed layer. It returns the reconstructed ManifestCheckpoint name.
 //
-// leaf marks a leaf-only connector (the CSI VolumeSnapshot connector): a leaf declares no children, so a
-// non-empty childRefs payload is rejected (400). Core Snapshots pass leaf=false.
+// It serves the kinds whose namespaced upload THIS module answers, which is the core Snapshot kind and
+// nothing else, so it enforces no leaf rule: a core Snapshot node is never a leaf of the tree. A leaf is a
+// volume node, addressed through the group of the module that owns its kind, and refusing a declared child
+// on it is that server's rule to hold — a second copy here would be a rule with no subject, free to drift
+// away from the one clients actually meet.
 //
 // Ordering (mirrors the domain upload facade): validate -> write childRefs (idempotent, a snapshot-layer
 // attribute the CR owner writes regardless of bind) -> bind-first gate (empty boundSnapshotContentName ->
 // 409 ImportContentNotBound) -> resolve content + anti-spoofing back-ref (403 on mismatch/missing) ->
 // forward manifests to UploadToContent.
-func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, name string, body []byte, leaf bool) (string, error) {
+func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, name string, body []byte) (string, error) {
 	if snapshotGVK.Empty() || namespace == "" || name == "" {
 		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
 	}
@@ -126,10 +129,6 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 	if err := validateUploadChildRefs(payload.ChildRefs); err != nil {
 		return "", err
-	}
-	if leaf && len(payload.ChildRefs) > 0 {
-		return "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest",
-			fmt.Sprintf("%s %s/%s is a leaf: childRefs must be empty", snapshotGVK.String(), namespace, name))
 	}
 
 	cr := &unstructured.Unstructured{}
@@ -150,7 +149,7 @@ func (s *ImportUploadService) Upload(ctx context.Context, snapshotGVK schema.Gro
 	}
 
 	// childRefs is a snapshot-layer attribute: the CR owner records it on its own status regardless of bind
-	// (idempotent, skip-if-equal). A leaf has no children, so this is a no-op there.
+	// (idempotent, skip-if-equal). A node with no children makes this a no-op.
 	if err := s.writeChildrenSnapshotRefs(ctx, snapshotGVK, namespace, name, payload.ChildRefs); err != nil {
 		return "", err
 	}
@@ -242,14 +241,13 @@ func (s *ImportUploadService) writeChildrenSnapshotRefs(ctx context.Context, sna
 		if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, fresh); err != nil {
 			return err
 		}
-		// Skip the status write when the children are already recorded as desired. This makes the upload
-		// a true no-op on retries and, for a leaf (childRefs empty), avoids touching status at all: a leaf
-		// has no children to record, so a blind Status().Update only races whoever owns the CR's status.
-		// The CSI VolumeSnapshot leaf is the concrete case — its forked status schema has no
-		// childrenSnapshotRefs field (the write is pruned anyway), while the state-snapshotter binder
-		// actively reconciles the import VolumeSnapshot's status; a blind write lost the conflict race for
-		// the whole retry budget and the upload returned 409 (see genericbinder/import.go). The graph
-		// consumers treat an absent list as "no children", so skipping the empty write is behavior-neutral.
+		// Skip the status write when the children are already recorded as desired. This makes the upload a
+		// true no-op on retries and, when the payload declares no children, avoids touching status at all:
+		// there is nothing to record, so a blind Status().Update only races whoever owns the CR's status.
+		// That race is not hypothetical — it was observed on a node whose status the binder reconciles
+		// actively (see genericbinder/import.go): the blind write lost the conflict for the whole retry
+		// budget and the upload returned 409. The graph consumers treat an absent list as "no children",
+		// so skipping the empty write is behavior-neutral.
 		current, _, err := unstructured.NestedSlice(fresh.Object, "status", "childrenSnapshotRefs")
 		if err != nil {
 			return err

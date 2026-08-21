@@ -160,6 +160,7 @@ func TestMirrorReadyToOwnerSnapshot_Barrier2FinishedGate(t *testing.T) {
 			got := snapshot.GetCondition(freshLike, snapshot.ConditionReady)
 			if got == nil {
 				t.Fatalf("owner has no Ready condition after mirror")
+				return
 			}
 			if got.Status != tt.wantStatus || got.Reason != tt.wantReason {
 				t.Fatalf("Ready = %s/%s, want %s/%s", got.Status, got.Reason, tt.wantStatus, tt.wantReason)

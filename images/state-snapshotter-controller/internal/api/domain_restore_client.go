@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
+	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
@@ -39,6 +41,42 @@ import (
 // sync with the domain apiserver's served group (internal/domainapi handler).
 const domainSubresourceGroupPrefix = "subresources."
 
+// delegateCallTimeout bounds ONE delegated call. A tree with N volume nodes makes N such calls in
+// sequence, and the whole request must still fit inside the kube-apiserver's own per-request budget
+// (60s by default), so no single owner may spend it all: a hung one is cut off and the request fails
+// closed with the delegate's error instead of the caller's deadline.
+const delegateCallTimeout = 30 * time.Second
+
+// subresourceGroupVersionOverrides pins the aggregated subresources group-version of the kinds for which
+// the mechanical "subresources." + CR group rule gives the wrong answer.
+//
+// The rule holds for a kind whose CR group belongs to the module that serves its subresources. It does
+// NOT hold for the CSI VolumeSnapshot: its objects live in the upstream CSI group, which belongs to no
+// Deckhouse module, while its subresources are served by a group named after the MODULE that owns the
+// kind. Prefixing the CSI group would therefore address a group that module does not serve, and the
+// delegation would fail on every tree carrying a volume node.
+//
+// This table is the ONE place the exception is written down; every caller goes through
+// subresourceGroupVersionFor so a second spelling cannot appear elsewhere. Both halves of the resolution
+// are asserted by the "subresourceGroupVersionFor" specs, and the address a delegated call actually
+// builds by the "requests the volume node's restore subresource in the owning module's group" spec.
+var subresourceGroupVersionOverrides = map[schema.GroupKind]schema.GroupVersion{
+	{Group: snapshot.CSISnapshotGroup, Kind: snapshot.KindVolumeSnapshot}: {
+		Group:   "subresources.storage-foundation.deckhouse.io",
+		Version: snapshot.CSISnapshotVersion,
+	},
+}
+
+// subresourceGroupVersionFor resolves the aggregated group-version that serves the restore subresource of
+// a snapshot kind: the pinned override when there is one, otherwise the mechanical rule (the CR's own
+// group prefixed with "subresources.", at the CR's own version).
+func subresourceGroupVersionFor(gvk schema.GroupVersionKind) schema.GroupVersion {
+	if gv, pinned := subresourceGroupVersionOverrides[gvk.GroupKind()]; pinned {
+		return gv
+	}
+	return schema.GroupVersion{Group: domainSubresourceGroupPrefix + gvk.Group, Version: gvk.Version}
+}
+
 // DomainRestoreClient delegates a domain snapshot subtree restore to the domain controller's
 // aggregated apiserver. All calls go through the kube-apiserver aggregation layer (in-cluster SA
 // token, k8s-managed front-proxy) — there is no bespoke mTLS client between pods. It implements
@@ -47,6 +85,10 @@ type DomainRestoreClient struct {
 	rc     rest.Interface
 	mapper meta.RESTMapper
 	log    logger.LoggerInterface
+	// timeout is the budget of ONE delegated call. NewDomainRestoreClient sets delegateCallTimeout; it is
+	// a field rather than the constant read at the call site so that a spec can shorten it and observe the
+	// abort instead of waiting out the production budget.
+	timeout time.Duration
 }
 
 var _ restore.DomainSubtreeRestorer = (*DomainRestoreClient)(nil)
@@ -67,12 +109,22 @@ func NewDomainRestoreClient(cfg *rest.Config, mapper meta.RESTMapper, log logger
 	if err != nil {
 		return nil, fmt.Errorf("build domain REST client: %w", err)
 	}
-	return &DomainRestoreClient{rc: rc, mapper: mapper, log: log}, nil
+	return &DomainRestoreClient{rc: rc, mapper: mapper, log: log, timeout: delegateCallTimeout}, nil
 }
 
 // RestoreDomainSubtree fetches GET
-// /apis/subresources.<group>/<version>/namespaces/<ns>/<resource>/<name>/manifests-with-data-restoration
-// from the domain apiserver and decodes the returned JSON array of apply-ready objects.
+// /apis/<subresources group>/<version>/namespaces/<ns>/<resource>/<name>/manifests-with-data-restoration
+// from the owner's apiserver and decodes the returned JSON array of apply-ready objects.
+//
+// The request carries an explicit timeout and NO automatic retries, and both are written out rather than
+// left to the client's defaults, which are wrong here in both directions: client-go retries a request up
+// to ten times on 429/5xx while honouring Retry-After, and sets no client-side timeout at all. Retrying
+// is unacceptable because manifests-and-children-refs-upload — the sibling this delegation shares its
+// wire contract with — is not idempotent, and because on a GET a retry only multiplies a latency that is
+// already linear in the number of delegated nodes.
+//
+// Setting the timeout also puts it in the request as ?timeout=, so the server that answers is told the
+// same budget the caller is holding it to instead of working on a request nobody is waiting for.
 func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name, targetNamespace string) ([]unstructured.Unstructured, error) {
 	if c == nil || c.rc == nil {
 		return nil, fmt.Errorf("domain restore client is not configured")
@@ -81,24 +133,24 @@ func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk sche
 	if err != nil {
 		return nil, err
 	}
-	subGroup := domainSubresourceGroupPrefix + gvk.Group
+	subGV := subresourceGroupVersionFor(gvk)
 	req := c.rc.Get().AbsPath(
-		"/apis", subGroup, gvk.Version,
+		"/apis", subGV.Group, subGV.Version,
 		"namespaces", namespace, resource, name, "manifests-with-data-restoration",
-	)
+	).MaxRetries(0).Timeout(c.timeout)
 	if targetNamespace != "" {
 		req = req.Param("targetNamespace", targetNamespace)
 	}
 	raw, err := req.DoRaw(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("call domain restore apiserver (%s/%s %s/%s): %w", subGroup, gvk.Version, namespace, name, err)
+		return nil, fmt.Errorf("call domain restore apiserver (%s %s/%s): %w", subGV.String(), namespace, name, err)
 	}
 	objs, err := decodeManifestArray(raw)
 	if err != nil {
 		return nil, err
 	}
 	if c.log != nil {
-		c.log.Debug("[api] delegated domain subtree restore", "group", subGroup, "resource", resource, "namespace", namespace, "name", name, "objects", len(objs))
+		c.log.Debug("[api] delegated domain subtree restore", "groupVersion", subGV.String(), "resource", resource, "namespace", namespace, "name", name, "objects", len(objs))
 	}
 	return objs, nil
 }

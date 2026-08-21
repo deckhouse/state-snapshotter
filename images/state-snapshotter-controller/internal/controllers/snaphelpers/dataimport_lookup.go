@@ -188,6 +188,52 @@ func ImportFsType(di *unstructured.Unstructured) string {
 	return fsType
 }
 
+// ImportStalledMessage explains, for an operator reading the snapshot side, why a leaf's data leg is not
+// arriving: the DataImport that was supposed to produce it has reached a phase from which it never will
+// (spec.ttl idle window elapsed, or the import failed) without publishing a data artifact. It returns the
+// empty string whenever the import can still deliver, which the callers use as "no cause to report yet".
+//
+// The published artifact WINS over the phase: a DataImport that already produced one has done its job for
+// the snapshot node, and the phase it happens to sit in afterwards says nothing about the node. Checking
+// the artifact first is what keeps a captured leaf from being described as stuck.
+//
+// The text is deliberately built from FACTS THAT DO NOT CHANGE while the situation lasts — the import's
+// namespace, name and phase — and carries no timestamp, byte count or attempt counter. Callers put it into
+// a status condition message and re-derive it on every reconcile pass, so anything moving in here would
+// rewrite the status of a settled object forever. The guard is that the expectations of the
+// "ImportStalledMessage: the cause of an import that will not deliver" table are whole literals: a moving
+// part cannot survive them.
+//
+// Mode-gated and nil-safe for the same reasons as ImportVolumeMode: a CreatePVC import describes a PVC it
+// creates AND KEEPS, not a snapshot node's data leg, so nothing on the snapshot side may report on it.
+func ImportStalledMessage(di *unstructured.Unstructured) string {
+	if !isPopulateDataImport(di) {
+		return ""
+	}
+	if artifact, _, _ := unstructured.NestedString(di.Object, "status", "data", "artifactRef", "name"); artifact != "" {
+		return ""
+	}
+	phase, _, _ := unstructured.NestedString(di.Object, "status", "phase")
+	if phase != snapshot.DataImportPhaseExpired && phase != snapshot.DataImportPhaseFailed {
+		return ""
+	}
+	cause := ""
+	if phase == snapshot.DataImportPhaseExpired {
+		cause = importStalledExpiredCause
+	}
+	return fmt.Sprintf(importStalledMessageFormat, di.GetNamespace(), di.GetName(), phase, cause)
+}
+
+const (
+	// importStalledMessageFormat is the ONE definition of the stalled-import message: nothing else states this
+	// sentence, so the exact-literal expectations of its table are the only place its wording lives.
+	importStalledMessageFormat = "DataImport %s/%s is in phase %s and produced no data artifact%s; " +
+		"create a new DataImport for this node to retry"
+	// importStalledExpiredCause is the clause an Expired import adds: its phase names the outcome but not
+	// what ran out. A Failed import adds nothing — the reason it failed is its own to report.
+	importStalledExpiredCause = ": its spec.ttl idle window elapsed before the upload finished"
+)
+
 // isPopulateDataImport reports whether the DataImport is the PopulateData one that materializes a snapshot
 // node's data leg. An empty spec.mode is the CRD default CreatePVC, so it is not PopulateData. nil-safe.
 func isPopulateDataImport(di *unstructured.Unstructured) bool {

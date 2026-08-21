@@ -29,6 +29,9 @@ import (
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 	utilversion "k8s.io/component-base/version"
+	openapihandler "k8s.io/kube-openapi/pkg/handler"
+	openapihandler3 "k8s.io/kube-openapi/pkg/handler3"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
 // buildAggregatedAPIServer assembles a k8s.io/apiserver genericapiserver that fronts the existing
@@ -50,6 +53,10 @@ import (
 //
 // Authn/authz talk to the kube-apiserver via the pod's in-cluster config (SA token); no kubeconfig flag
 // is needed. Serving cert/key are the same files previously consumed directly.
+//
+// The server also serves /openapi/v2 and /openapi/v3 (see installOpenAPIRoutes) — an aggregated
+// apiserver that answers 404 there keeps the kube-apiserver OpenAPI aggregation controllers retrying
+// and logging for as long as the APIService exists.
 func buildAggregatedAPIServer(name, addr, certFile, keyFile string, delegate http.Handler) (*genericapiserver.GenericAPIServer, error) {
 	if certFile == "" || keyFile == "" {
 		return nil, fmt.Errorf("serving cert and key files are required for the aggregated apiserver")
@@ -98,15 +105,76 @@ func buildAggregatedAPIServer(name, addr, certFile, keyFile string, delegate htt
 		return nil, fmt.Errorf("apply delegated authorization: %w", err)
 	}
 
-	completed := config.Complete(nil)
+	return newAggregatedServer(config.Complete(nil), name, delegate)
+}
+
+// newAggregatedServer turns a completed config into the running server: the endpoints it owns itself,
+// the OpenAPI documents, and the delegate behind everything else. It is split from the config assembly
+// above because that half cannot run outside a cluster (delegated authn/authz read the
+// extension-apiserver-authentication ConfigMap, secure serving binds a port) — this half is what the
+// specs exercise.
+func newAggregatedServer(completed genericapiserver.CompletedConfig, name string, delegate http.Handler) (*genericapiserver.GenericAPIServer, error) {
 	server, err := completed.New(name, genericapiserver.NewEmptyDelegate())
 	if err != nil {
 		return nil, fmt.Errorf("build generic apiserver: %w", err)
 	}
 
-	// Our routes are not registered as typed API groups; everything genericapiserver does not own (its
-	// /healthz, /readyz, /livez, /version, /apis discovery) falls through to this delegate.
+	if err := installOpenAPIRoutes(server, name); err != nil {
+		return nil, fmt.Errorf("install openapi routes: %w", err)
+	}
+
+	// genericapiserver owns its own endpoints: /healthz, /readyz, /livez, /version, /apis discovery and
+	// the OpenAPI documents installed just above. Our routes are not registered as typed API groups, so
+	// everything else — the group discovery and the subresources — falls through to this delegate.
 	server.Handler.NonGoRestfulMux.NotFoundHandler(delegate)
 
 	return server, nil
+}
+
+// installOpenAPIRoutes makes the server answer /openapi/v2 and /openapi/v3.
+//
+// The kube-apiserver OpenAPI aggregation controllers poll both paths for every APIService. Without
+// these routes the requests fall through to the delegate mux, which has no such route and answers 404,
+// and the control plane then logs "failed to download <apiservice>: resource not found" and requeues
+// for as long as the APIService exists. The upstream branch meant to skip a 404 silently cannot fire:
+// the sentinel error is wrapped in a message before the caller compares against it. What ends the retry
+// loop is the 200 — the content of the document does not matter to it.
+//
+// The documents are built here rather than through genericapiserver.DefaultOpenAPIConfig on purpose.
+// That path builds the spec from the registered go-restful routes and needs a generated definition for
+// every model they mention (starting with k8s.io/apimachinery/pkg/version.Info behind /version); with
+// no openapi-gen output in this module it does not degrade — it calls klog.Fatalf in PrepareRun and the
+// controller never starts.
+func installOpenAPIRoutes(server *genericapiserver.GenericAPIServer, name string) error {
+	v2 := openapihandler.NewOpenAPIService(&spec.Swagger{
+		SwaggerProps: spec.SwaggerProps{
+			Swagger: "2.0",
+			Info: &spec.Info{
+				InfoProps: spec.InfoProps{
+					Title: name,
+					// Nothing injects a build version into this binary, so anything derived from the
+					// build would report the version of the k8s libraries as if it were the module's.
+					// This is the same placeholder the upstream config completion falls back to, and
+					// the aggregator ignores the Info of a downloaded document anyway.
+					Version: "unversioned",
+				},
+			},
+			// Empty, and not a placeholder: the subresources are connector-style routes on the delegate
+			// mux (see NewServer), not typed REST storage, so there is no generated schema to publish.
+			// Of a downloaded document the aggregator keeps only the paths under this APIService's
+			// group and version, so an empty one contributes nothing to the cluster-wide spec.
+			Paths: &spec.Paths{Paths: map[string]spec.PathItem{}},
+		},
+	})
+	v2.RegisterOpenAPIVersionedService("/openapi/v2", server.Handler.NonGoRestfulMux)
+
+	// No group version is registered, so the v3 discovery document is an empty path map. That is a
+	// valid answer: it tells the aggregator this server publishes no v3 schema, instead of a 404 that
+	// it treats as a failed download.
+	v3 := openapihandler3.NewOpenAPIService()
+	if err := v3.RegisterOpenAPIV3VersionedService("/openapi/v3", server.Handler.NonGoRestfulMux); err != nil {
+		return fmt.Errorf("register /openapi/v3: %w", err)
+	}
+
+	return nil
 }

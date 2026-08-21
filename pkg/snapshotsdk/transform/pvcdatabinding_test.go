@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package restore
+package transform
 
 import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 func pvcManifest(name, namespace, uid string) unstructured.Unstructured {
@@ -41,17 +41,17 @@ func pvcManifest(name, namespace, uid string) unstructured.Unstructured {
 	}}
 }
 
-func dataBindingRef(targetUID, pvcName, vscName string) snapshot.DataBindingRef {
-	return snapshot.DataBindingRef{
+func dataBindingRef(targetUID, pvcName, vscName string) PVCDataBinding {
+	return PVCDataBinding{
 		TargetUID: targetUID,
-		Target: snapshot.ObjectRef{
+		Target: storagev1alpha1.ObjectRef{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Namespace:  "default",
 			Name:       pvcName,
 			UID:        targetUID,
 		},
-		Artifact: snapshot.ObjectRef{
+		Artifact: storagev1alpha1.ObjectRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,
@@ -62,11 +62,11 @@ func dataBindingRef(targetUID, pvcName, vscName string) snapshot.DataBindingRef 
 func TestFindDataBindingForPVC_UIDMatchPriority(t *testing.T) {
 	pvc := pvcManifest("data-a", "default", "uid-a")
 	pvc.SetUID("uid-a")
-	bindings := []snapshot.DataBindingRef{
+	bindings := []PVCDataBinding{
 		dataBindingRef("uid-b", "data-a", "vsc-wrong"),
 		dataBindingRef("uid-a", "data-a", "vsc-a"),
 	}
-	got, ok := findDataBindingForPVC(pvc, bindings)
+	got, ok := FindDataBindingForPVC(pvc, bindings)
 	if !ok || got.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected uid-a binding, got ok=%v ref=%#v", ok, got)
 	}
@@ -75,24 +75,24 @@ func TestFindDataBindingForPVC_UIDMatchPriority(t *testing.T) {
 func TestFindDataBindingForPVC_WrongUIDDoesNotMatchByName(t *testing.T) {
 	pvc := pvcManifest("data-a", "default", "uid-a")
 	pvc.SetUID("uid-a")
-	bindings := []snapshot.DataBindingRef{dataBindingRef("uid-b", "data-a", "vsc-b")}
-	if _, ok := findDataBindingForPVC(pvc, bindings); ok {
+	bindings := []PVCDataBinding{dataBindingRef("uid-b", "data-a", "vsc-b")}
+	if _, ok := FindDataBindingForPVC(pvc, bindings); ok {
 		t.Fatal("expected no match when PVC UID conflicts with binding targetUID")
 	}
 }
 
 func TestFindDataBindingForPVC_IdentityFallbackWhenUIDEmpty(t *testing.T) {
 	pvc := pvcManifest("data-a", "default", "")
-	bindings := []snapshot.DataBindingRef{{
-		Target: snapshot.ObjectRef{
+	bindings := []PVCDataBinding{{
+		Target: storagev1alpha1.ObjectRef{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 			Namespace:  "default",
 			Name:       "data-a",
 		},
-		Artifact: snapshot.ObjectRef{Kind: "VolumeSnapshotContent", Name: "vsc-a"},
+		Artifact: storagev1alpha1.ObjectRef{Kind: "VolumeSnapshotContent", Name: "vsc-a"},
 	}}
-	got, ok := findDataBindingForPVC(pvc, bindings)
+	got, ok := FindDataBindingForPVC(pvc, bindings)
 	if !ok || got.Artifact.Name != "vsc-a" {
 		t.Fatalf("expected identity fallback match, got ok=%v ref=%#v", ok, got)
 	}
@@ -101,7 +101,7 @@ func TestFindDataBindingForPVC_IdentityFallbackWhenUIDEmpty(t *testing.T) {
 func TestFindDataBindingForPVC_MissingBinding(t *testing.T) {
 	pvc := pvcManifest("missing", "default", "uid-missing")
 	pvc.SetUID("uid-missing")
-	if _, ok := findDataBindingForPVC(pvc, nil); ok {
+	if _, ok := FindDataBindingForPVC(pvc, nil); ok {
 		t.Fatal("expected no match")
 	}
 }

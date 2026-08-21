@@ -503,12 +503,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The restore delegate predicate is CSD-origin driven: a snapshot kind that is registered in the live
-	// graph registry but is NOT a built-in in-process pair (root "Snapshot" / CSI "VolumeSnapshot") can only
-	// have come from an eligible CustomSnapshotDefinition — i.e. an out-of-process domain that serves its own
-	// restore apiserver, so the compiler delegates it. Built-in kinds restore in-process (delegating the root
-	// back to core's own endpoint would be self-recursion → HTTP 500). graphRegProvider.Current() is live
-	// (refreshed on CSD changes), so this needs no hardcoded domain kind names.
+	// The restore delegate predicate delegates every registered snapshot kind EXCEPT the namespace-root
+	// "Snapshot", whose restore is this very apiserver's endpoint (delegating it would be self-recursion →
+	// HTTP 500). Everything else is served by the module that owns the kind: a CustomSnapshotDefinition
+	// domain, or the module owning the CSI VolumeSnapshot, whose capture is core behavior while its restore
+	// subresource is not. graphRegProvider.Current() is live (refreshed on CSD changes), so this needs no
+	// hardcoded domain kind names.
 	isOutOfProcessDomainKind := func(kind string) bool {
 		return unifiedbootstrap.IsOutOfProcessDomainSnapshotKind(graphRegProvider.Current(), kind)
 	}

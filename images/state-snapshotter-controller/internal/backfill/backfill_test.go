@@ -60,8 +60,8 @@ func newClient(objs ...*unstructured.Unstructured) client.Client {
 	return b.WithScheme(scheme).Build()
 }
 
-// snapGVK is this module's Snapshot; csiGVK is the upstream CSI VolumeSnapshot.
-// Both are the only kind their group is asked about in these tests.
+// snapGVK is the unified Snapshot kind this module owns; csiGVK is the shared CSI kind. These two are
+// what DefaultTargets protects, so the fixtures below need no other kind.
 func snapGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: groupStorage, Version: "v1alpha1", Kind: "Snapshot"}
 }

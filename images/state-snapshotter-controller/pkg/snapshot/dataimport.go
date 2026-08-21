@@ -26,4 +26,17 @@ const (
 	// default for an empty spec.mode) creates and keeps a PVC and never references a snapshot node, so
 	// nothing on the snapshot side may read its spec.
 	DataImportModePopulateData = "PopulateData"
+
+	// DataImportPhaseExpired and DataImportPhaseFailed are the two storage-foundation DataImport
+	// status.phase values that mean "this import will not produce a data artifact any more":
+	//
+	//   - Expired: the transfer server was torn down because its spec.ttl idle window elapsed;
+	//   - Failed: the import gave up.
+	//
+	// Neither is terminal for the snapshot NODE: a client may create another DataImport for the same node,
+	// so the snapshot side reports them as a cause inside a pending message and never as a terminal reason.
+	// The third phase (Completed) needs no constant here — a completed import is recognised by the data
+	// artifact it produced, not by its phase, and it is reaped soon after.
+	DataImportPhaseExpired = "Expired"
+	DataImportPhaseFailed  = "Failed"
 )

@@ -1,0 +1,30 @@
+# Read a snapshot and walk its tree: the Snapshot objects themselves plus the VolumeSnapshot objects
+# that stand for the tree's volume nodes. Reading a volume node's status is what makes the walk
+# possible (its bound content is named there), so it is part of viewing, not of data transfer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-kubernetes-as: viewer
+    rbac.deckhouse.io/kind: use
+  name: d8:use:capability:module:state-snapshotter:view_snapshots
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - snapshots
+      - snapshots/status
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - watch

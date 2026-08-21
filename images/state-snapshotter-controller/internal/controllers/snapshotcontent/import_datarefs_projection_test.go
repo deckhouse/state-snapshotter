@@ -308,7 +308,7 @@ func TestReconcileDataLegProjection_GenericImportStructuralNodeSkips(t *testing.
 	// GVKRegistry with the leaf kind NOT marked as data-bearing (default reads false).
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestReconcileDataLegProjection_GenericImportPublishesFromDataImport(t *test
 	reg.MarkRequiresDataArtifact(importLeafKind, true)
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestReconcileDataLegProjection_GenericImportStorageClassLatches(t *testing.
 	r, cl := newImportProjectionFixture(t, projContentTyped())
 	owner := importOwnerLeaf()
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 1): %v", err)
 	}
@@ -424,7 +424,7 @@ func TestReconcileDataLegProjection_GenericImportStorageClassLatches(t *testing.
 	}
 	rv := importContentResourceVersion(t, cl)
 
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection (pass 2): %v", err)
 	}
@@ -462,7 +462,7 @@ func TestReconcileDataLegProjection_GenericImportBackfillsStorageClassOnStaleCon
 	r, cl := newImportProjectionFixture(t, content)
 	owner := importOwnerLeaf()
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -497,7 +497,7 @@ func TestReconcileDataLegProjection_GenericImportBackfillsFsTypeOnStaleContent(t
 	}
 	r, cl := newImportProjectionFixture(t, content)
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestReconcileDataLegProjection_GenericImportLatchesWhenDataImportAttestsNot
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
 	rv := importContentResourceVersion(t, cl)
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
 	if err != nil {
 		t.Fatalf("reconcileDataLegProjection: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestReconcileDataLegProjection_GenericImportLatchWaitsForRestoreSize(t *tes
 	r, cl := newImportProjectionFixtureWithArtifact(t, projContentTyped(), projVSCUnowned())
 	owner := importOwnerLeaf()
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("first pass: reconcileDataLegProjection: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestReconcileDataLegProjection_GenericImportLatchWaitsForRestoreSize(t *tes
 
 	// Second pass, size still unreported: the leg must NOT latch. This pass is the only thing that will ever
 	// backfill the size, so latching here is the whole defect.
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("second pass: reconcileDataLegProjection: %v", err)
 	}
@@ -626,7 +626,7 @@ func TestReconcileDataLegProjection_GenericImportLatchWaitsForRestoreSize(t *tes
 	setVSCRestoreSize(t, cl, projTestVSCName, 524288000)
 
 	rvBeforeBackfill := importContentResourceVersion(t, cl)
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("backfill pass: reconcileDataLegProjection: %v", err)
 	}
@@ -649,7 +649,7 @@ func TestReconcileDataLegProjection_GenericImportLatchWaitsForRestoreSize(t *tes
 	// Everything is published now, so the latch must close — and a latched pass must write nothing. Judged by
 	// resourceVersion rather than by whether the publish helper was called: it is a no-op on an equal binding,
 	// which would make a forever-open latch look like a latched one.
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("latched pass: reconcileDataLegProjection: %v", err)
 	}
@@ -691,7 +691,7 @@ func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t
 	r, cl := newImportProjectionFixtureWithArtifact(t, projContentTyped(), projVSCUnowned())
 	owner := importOwnerLeaf()
 
-	requeue, termReason, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("first pass: reconcileDataLegProjection: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t
 	// Size still unreported and no DataImport: the leg must NOT latch, must not disturb the published
 	// metadata, and must not churn (the re-publish rebuilds an equal binding; publish is a no-op on it).
 	rvWaiting := importContentResourceVersion(t, cl)
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("reaped waiting pass: reconcileDataLegProjection: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t
 	// The driver reports the size only now — with no DataImport left to attest anything.
 	setVSCRestoreSize(t, cl, projTestVSCName, 524288000)
 
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("backfill pass: reconcileDataLegProjection: %v", err)
 	}
@@ -755,7 +755,7 @@ func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t
 
 	// Complete now: the latch closes and a latched pass writes nothing.
 	rvLatched := importContentResourceVersion(t, cl)
-	requeue, termReason, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+	requeue, termReason, _, _, err = r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 	if err != nil {
 		t.Fatalf("latched pass: reconcileDataLegProjection: %v", err)
 	}

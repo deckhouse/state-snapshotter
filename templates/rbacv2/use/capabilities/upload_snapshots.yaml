@@ -1,0 +1,60 @@
+# Load a snapshot tree back into the cluster, one node per request. Uploading is a POST, which the
+# aggregated API server authorizes as the "create" verb on "<resource>/<subresource>".
+#
+# The volume node's upload endpoint is served by the module that owns the CSI VolumeSnapshot, so its
+# group is named after that module and not after this one. It is granted here because one capability
+# describes one user operation: importing a tree writes nodes of both kinds, and splitting the grant
+# per module would refuse the volume leg with 403 halfway through an import.
+#
+# The VolumeSnapshot grant is not an extra: the objects that stand for volume nodes of an imported
+# tree are created by the client, not by the controller, so importing a tree with a volume in it is
+# impossible without create on volumesnapshots.
+#
+# Only create. Deleting a VolumeSnapshot whose content policy is Delete destroys the snapshot data
+# behind it, and a client does not need that verb to undo an import: the volume nodes of an imported
+# tree are created owned by their parent node, so dropping the root Snapshot takes the tree with it —
+# and deleting a Snapshot is what manage_snapshots is for.
+#
+# This role carries NO aggregation label. The label hands a capability to everyone already holding
+# the matching cluster-wide role, and this one writes into another module's resource: every manager
+# in the cluster would gain the ability to create VolumeSnapshots simply because this module is
+# installed. It is granted by an explicit binding to the subject that imports trees.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/kind: use
+  name: d8:use:capability:module:state-snapshotter:upload_snapshots
+rules:
+  - apiGroups:
+      - subresources.state-snapshotter.deckhouse.io
+    resources:
+      - snapshots/manifests-and-children-refs-upload
+    verbs:
+      - create
+  - apiGroups:
+      - subresources.storage-foundation.deckhouse.io
+    resources:
+      - volumesnapshots/manifests-and-children-refs-upload
+    verbs:
+      - create
+  # The volume node's endpoints were served under the group below before they moved to the one above,
+  # and the group in the URL is what a SubjectAccessReview is built from — so a client released on
+  # another schedule, still addressing the old group, is refused here unless this rule stays. Removing
+  # it before every released client has moved would make the server-side compatibility alias useless:
+  # the request would reach a working endpoint and be answered 403. It goes away together with that
+  # alias, in one change.
+  - apiGroups:
+      - subresources.snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots/manifests-and-children-refs-upload
+    verbs:
+      - create
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - create

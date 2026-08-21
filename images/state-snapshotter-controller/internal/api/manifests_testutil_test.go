@@ -31,9 +31,8 @@ import (
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
-// Shared HTTP test helpers for the manifest subresources (used by the per-CR manifests-download tests
-// and the subresources.snapshot.storage.k8s.io connector tests). encodeTestChunkData lives in
-// archive_handler_test.go.
+// Shared HTTP test helpers for the manifest subresources of this module's aggregated group.
+// encodeTestChunkData lives in archive_handler_test.go.
 
 // createReadyMCPForAPI seeds a Ready ManifestCheckpoint (single chunk) carrying the given objects, so a
 // manifests-download handler can decode a node's own manifests off it.
@@ -71,17 +70,10 @@ func createReadyMCPForAPI(t *testing.T, cl client.Client, mcpName string, object
 	}
 }
 
+// getAggregatedObjects requests an aggregated manifest endpoint and decodes its 200 body as the JSON
+// array of objects those endpoints return. Any other status fails with the body, which carries the
+// Kubernetes Status message.
 func getAggregatedObjects(t *testing.T, url string) []map[string]interface{} {
-	t.Helper()
-	body := getRawResponse(t, url, http.StatusOK)
-	var arr []map[string]interface{}
-	if err := json.Unmarshal(body, &arr); err != nil {
-		t.Fatal(err)
-	}
-	return arr
-}
-
-func getRawResponse(t *testing.T, url string, wantStatus int) []byte {
 	t.Helper()
 	resp, err := http.Get(url)
 	if err != nil {
@@ -92,10 +84,14 @@ func getRawResponse(t *testing.T, url string, wantStatus int) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != wantStatus {
-		t.Fatalf("status %d, want %d: %s", resp.StatusCode, wantStatus, string(body))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want %d: %s", resp.StatusCode, http.StatusOK, string(body))
 	}
-	return body
+	var arr []map[string]interface{}
+	if err := json.Unmarshal(body, &arr); err != nil {
+		t.Fatal(err)
+	}
+	return arr
 }
 
 func containsKindName(objects []map[string]interface{}, kind, name string) bool {

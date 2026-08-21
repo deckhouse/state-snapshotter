@@ -9,9 +9,12 @@
 > contract is [`CLAUDE.md`](./CLAUDE.md). The reference implementation is the demo domain controller
 > shipped as the `sds-unified-snapshots-poc` module (maintained in its own repository).
 >
-> SDK v1 scope is **capture-only** (snapshot planning: child snapshots + data capture +
-> manifest capture + lifecycle barriers). Restore is a separate sanctioned boundary
-> (`pkg/snapshotsdk/transform`) and is out of scope here.
+> Almost all of this guide is **capture** (snapshot planning: child snapshots + data capture +
+> manifest capture + lifecycle barriers) — that is the part a domain controller drives. The SDK also
+> carries the shared **restore** half: the generic compilation of one snapshot node into apply-ready
+> manifests (`pkg/snapshotsdk/transform`) and the request contract of the restoration endpoint
+> (`pkg/snapshotsdk/restoreapi`). A domain that serves that endpoint itself needs both; they are
+> mapped in [Restore: the shared node compilation](#restore-the-shared-node-compilation) at the end.
 
 **In one paragraph:** `snapshotsdk` lets a domain controller **describe snapshot intent** (child
 snapshots, an optional data PVC, manifest targets, the captured source) without implementing
@@ -964,6 +967,118 @@ branches.
   domain objects. The SDK owns: ownerRefs, capture orchestration, request lifecycle, the
   domain-written status fields and the lifecycle phase. The **core** owns the `Ready` condition and
   the `commonController` leg latches.
+
+---
+
+## Restore: the shared node compilation
+
+Everything above is capture. The restore path has one shared half, and it lives in the SDK:
+`pkg/snapshotsdk/transform` compiles **one** snapshot node's captured manifests into apply-ready
+objects, and `pkg/snapshotsdk/restoreapi` parses the request that asks for it and answers a failure.
+A domain that serves the `manifests-with-data-restoration` endpoint for its own subtree uses both.
+
+**Why it is shared and not per server.** That endpoint is served by more than one aggregated
+apiserver — the core one for the nodes the core owns, a domain facade for a subtree delegated to it —
+and a client applies the **concatenation** of their answers. The rules below are therefore a property
+of the whole compiled tree, not of one server. A private second implementation of them diverges
+silently, and the first rule it drops is the refusal to emit a PVC with no data source: the API
+accepts such a PVC and provisions an **empty** volume. Nothing fails at restore time; the loss
+surfaces when somebody reads the data back.
+
+### What the compilation does
+
+`transform.CompileNodeManifests(transform.NodeRestoreInput)` takes one node's captured manifests (with
+`uid` and the source namespace still intact — the binding lookup needs them), that node's own PVC →
+data-artifact bindings, and the map from a durable `VolumeSnapshotContent` name to the namespaced
+`VolumeSnapshot` that publishes it. It then:
+
+1. **Sanitizes for restore** (`transform.SanitizeForRestore`). Dropped outright: cluster-scoped objects
+   and control-plane / snapshot-machinery kinds (the checkpoint and request kinds, CSI `VolumeSnapshot`
+   and `VolumeSnapshotContent`, and any `*Snapshot` / `*SnapshotContent` — in this system those are
+   tree nodes, not restorable application objects). Stripped from what is kept: `uid`,
+   `resourceVersion`, `generation`, the timestamps, `managedFields`, `ownerReferences`, `status`, the
+   restore-breaking annotations (kubectl's last-applied snapshot, the PVC bind/scheduler ones) and
+   kind-specific server fields — a PVC's `volumeName` and any captured `dataSource`/`dataSourceRef`, a
+   `Service`'s allocated cluster IPs and node ports. Rewritten: `metadata.namespace` to the target
+   namespace, and a `RoleBinding`'s `ServiceAccount` subjects along with it. **`finalizers` are
+   deliberately preserved** — machine finalizers are re-added by the target cluster anyway, and a
+   custom one encodes user intent that must survive a restore.
+2. **Binds every emitted PVC to its data.** The node's binding for that PVC names a
+   `VolumeSnapshotContent`; that content's visibility leaf is a namespaced `VolumeSnapshot`; that name
+   becomes the PVC's `spec.dataSourceRef` (`apiGroup: snapshot.storage.k8s.io`,
+   `kind: VolumeSnapshot`). A `VolumeSnapshot` read out of the captured manifests is **not** a
+   substitute: it is not the leaf the restore target can bind to.
+
+`transform.FilterSingleObject` narrows the output to the single object a request addressed. It runs
+**after** compilation, on the already sanitized and namespace-rewritten objects, so an object the
+sanitizer dropped is simply absent — a 404, not something restorable.
+
+### The only domain input: `CoveredPVCNames`
+
+The compilation knows generic Kubernetes and CSI restore and **no domain kinds**. Its single
+domain-supplied input is `NodeRestoreInput.DomainCoveredPVCNames` — the PVCs of this node that the
+restored domain object recreates itself (`transform.Transformer.CoveredPVCNames`). Those are neither
+emitted nor expected to have a `VolumeSnapshot`: their data arrives with the domain object. A caller
+with no domain objects in the node leaves the set `nil`, and then **every** PVC in the node must be
+backed by a data binding.
+
+Domain-specific rewriting of an already-sanitized object stays where it always was, in
+`Transformer.TransformObject` — for example pointing a restored disk at its own snapshot.
+
+### Fail-closed rules
+
+| Situation | Result |
+|---|---|
+| An emitted namespaced PVC has no data binding | `transform.ErrContractViolation` — refusing beats restoring an empty volume |
+| A PVC's data artifact is not a `VolumeSnapshotContent` | `transform.ErrContractViolation` |
+| The artifact has no `VolumeSnapshot` visibility leaf | `transform.ErrContractViolation` |
+| An object filter matches more than one object | `transform.ErrBadRequest` — an ambiguous single-object answer is never served |
+| An object filter matches nothing | `transform.ErrNotFound` |
+
+None of these has a partial form: the whole request fails, and no subset of the node is handed out.
+
+### A domain facade must return apply-ready objects
+
+The delegating compiler splices a facade's answer into the tree **verbatim** — it does not sanitize it
+a second time, and it could not: only the facade knows what its subtree contains. Whatever a facade
+returns is exactly what the client applies. So compile with `transform.CompileNodeManifests` rather
+than a private copy of the rules above, and hand back objects that apply as they are.
+
+### The request contract
+
+`restoreapi.ParseQueryOptions` is the one validator of the endpoint's query, so the same query means
+the same thing whichever group a client addressed. It produces a `transform.Options`:
+
+- `scope` — `subtree` (the default, and what an unset value means: the addressed node plus its whole
+  run tree, compiled bottom-up) or `node` (the addressed node alone; the node's own validations still
+  run, but the children are not read at all, so a child that is not ready does not fail the request);
+- `kind` / `name` / `apiVersion` — the object filter, valid **only** with `scope=node`. `apiVersion` is
+  optional and may be a full `group/version` or a bare `group`, to disambiguate a kind+name that
+  exists in two groups.
+
+Four rules are checked separately, each a `400`, so a client learns which one it broke: an unknown
+`scope`; `kind` without `name` or `name` without `kind`; `apiVersion` without `kind`; any object filter
+together with a `scope` other than `node`.
+
+Failures are answered from the shared vocabulary rather than invented per server — that is what lets a
+client tell "not there" from "not ready, retry" from "you asked wrongly" by status alone:
+
+| Failure | Status |
+|---|---|
+| `transform.ErrBadRequest` | `400` |
+| `transform.ErrNotFound`, or a Kubernetes not-found error | `404` |
+| A Kubernetes forbidden error — a bound content whose back-reference does not name the addressed node | `403` |
+| `transform.ErrNotReady`, `transform.ErrContractViolation` | `409` |
+| Anything unclassified | `500` |
+
+`restoreapi.HTTPStatusForError` is that mapping; `restoreapi.WriteError` writes the Kubernetes `Status`
+object for it and passes the error's own message through, because for a client of an aggregated
+subresource that message is the only diagnostic there is.
+
+The godoc of `pkg/snapshotsdk/transform` and `pkg/snapshotsdk/restoreapi` is normative for all of the
+above; this section is the map, not the contract.
+
+---
 
 ## Where to start in practice
 

@@ -23,7 +23,6 @@ import (
 	"net/http"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -97,28 +96,6 @@ func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONForRootSnapshot(ctx co
 		return nil, fmt.Errorf("get SnapshotContent %q: %w", rootContent, err)
 	}
 	if err := verifyContentSnapshotRef(content, storagev1alpha1.SchemeGroupVersion.String(), "Snapshot", namespace, snapshotName, snapshotUID); err != nil {
-		return nil, err
-	}
-	return s.buildSingleNodeJSONFromContentObject(ctx, content)
-}
-
-// BuildSingleNodeJSONFromSnapshot returns the own-node manifests of any namespaced snapshot-like CR
-// (by GVK; e.g. a generic-PVC extended VolumeSnapshot), resolving its bound SnapshotContent via
-// status.boundSnapshotContentName. No subtree recursion. It enforces the anti-spoofing handshake: the
-// resolved content must carry a spec.snapshotRef pointing back at the addressed CR (fail-closed 403).
-func (s *AggregatedNamespaceManifests) BuildSingleNodeJSONFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) ([]byte, error) {
-	contentName, snapshotUID, err := s.resolveContentNameFromSnapshot(ctx, snapshotGVK, namespace, snapshotName)
-	if err != nil {
-		return nil, err
-	}
-	content := &storagev1alpha1.SnapshotContent{}
-	if err := s.client.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("SnapshotContent %q not found", contentName))
-		}
-		return nil, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
-	}
-	if err := verifyContentSnapshotRef(content, snapshotGVK.GroupVersion().String(), snapshotGVK.Kind, namespace, snapshotName, snapshotUID); err != nil {
 		return nil, err
 	}
 	return s.buildSingleNodeJSONFromContentObject(ctx, content)

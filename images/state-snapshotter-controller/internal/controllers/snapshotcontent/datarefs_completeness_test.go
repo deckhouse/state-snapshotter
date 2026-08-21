@@ -200,7 +200,7 @@ func driveDataLegToSettled(t *testing.T, r *SnapshotContentController, owner *un
 	t.Helper()
 	ctx := context.Background()
 	for pass := 1; pass <= maxDataLegPasses; pass++ {
-		requeue, termReason, termMessage, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
+		requeue, termReason, termMessage, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), owner, projTestNS, true)
 		if err != nil {
 			t.Fatalf("pass %d: reconcileDataLegProjection: %v", pass, err)
 		}

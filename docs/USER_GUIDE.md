@@ -28,7 +28,7 @@ When you create a `Snapshot`, the controller:
 4. **Publishes status**: when the capture is complete and stored, the `Snapshot` becomes `Ready=True` and `status.boundSnapshotContentName` points at the stored content.
 5. **Retains** the stored content after the `Snapshot` is deleted for a configurable TTL, so a captured state survives the deletion of the request object.
 
-The capture is **fail-closed**: if some resource type cannot be listed (e.g. RBAC not yet propagated, or a broken aggregated API), the controller does not produce a partial snapshot — it reports `Ready=False` / `NamespaceCaptureIncomplete` and retries.
+The capture is **fail-closed**: if some resource type cannot be listed (e.g. RBAC not yet propagated, or a broken aggregated API), the controller does not produce a partial snapshot — the `Snapshot` simply never reaches `Ready=True`, and the capture is retried until the type becomes readable. The diagnosis is published in two places: `status.captureState.domainSpecificController.message` names the resource types that could not be read, and a `Warning` event with reason `NamespacePlanUnreadable` is emitted on the `Snapshot`.
 
 ## What gets captured
 
@@ -78,7 +78,7 @@ An excluded object is **recorded, not silently dropped**: the excluding snapshot
 
 ## Creating a Snapshot
 
-Create a `Snapshot` in the namespace you want to capture. The default mode (no `spec.source`) performs dynamic namespace capture:
+Create a `Snapshot` in the namespace you want to capture. The default mode (`spec.mode: Capture`) performs dynamic namespace capture:
 
 ```yaml
 d8 k apply -f - <<EOF
@@ -100,8 +100,8 @@ d8 k -n my-app get snap
 ```
 
 ```console
-NAME                    READY   REASON      CONTENT                       AGE
-my-namespace-snapshot   True    Captured    snap-content-my-app-...       30s
+NAME                    READY   REASON      CONTENT                        AGE
+my-namespace-snapshot   True    Completed   nss-content-1f4b0c9d2a3e5f76   30s
 ```
 
 Inspect conditions for details:
@@ -122,28 +122,51 @@ Captured manifests are read through a controlled aggregated subresource (raw pay
 
 ```bash
 d8 k get --raw \
-  "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/my-app/snapshots/my-namespace-snapshot/manifests" \
+  "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/my-app/snapshots/my-namespace-snapshot/manifests-download" \
   | jq 'length'
 ```
 
-This returns the list of captured objects. The same endpoint is the entry point used by restore tooling.
+`manifests-download` returns the manifests of **that node only** — it does not walk the snapshot tree — and returns them **as they were captured**, including `status` and other runtime fields. Read the rest of the tree one request per node: `status.childrenSnapshotRefs` names the direct children of the node you just read, each child is read the same way through the aggregated group of its own kind, and its own `status.childrenSnapshotRefs` continues the walk.
+
+The group **and the version** to address a child with follow that child's own kind, not the group you used for its parent. A child of kind CSI `VolumeSnapshot` — the node a plain PVC's data is captured into — has its node endpoints served by the module that owns that kind: group `subresources.storage-foundation.deckhouse.io`, version `v1`, resource `volumesnapshots` (`{name}` below is the child's name, taken from the parent's `status.childrenSnapshotRefs`):
+
+```bash
+d8 k get --raw \
+  "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/my-app/volumesnapshots/{name}/manifests-download" \
+  | jq 'length'
+```
+
+The endpoint names are the same in both groups, so the group, the version and the resource are the only things that change between a `Snapshot` node and a volume node. Mind the version — the `Snapshot` node group is `v1alpha1` and the volume-node group is `v1`; addressing one with the other's version does not fall back to anything, it is simply a path the API server does not serve. A node contributed by a domain module instead — a virtual machine and its disks, say — is served by that module's own endpoint group, which is not the volume node's and cannot be derived from it. The whole table of groups, versions and endpoints is in [Backup integration](BACKUP_INTEGRATION.md).
+
+> Volume-node endpoints were previously served under the group `subresources.snapshot.storage.k8s.io`. That group still answers, identically, as a compatibility alias for clients released on their own schedule — the `d8` command-line client among them — and it will be removed in a later release of the platform, once those clients address the group above. Anything written from scratch uses the group above.
 
 ## Restoring
 
 A captured namespace is restored through the module's controlled read path — you do **not** create internal request objects (such as `VolumeRestoreRequest`) by hand; those are module machinery and are not exposed to users.
 
-- **Manifests** — read the captured objects via the `/manifests` endpoint above and apply them into the target namespace.
-- **State with data** — to restore objects together with their persistent data, the module exposes a data-restoration read path on the snapshot. The module materializes the data into the target namespace internally; you consume the result through the aggregated API, not by creating data-transfer objects yourself.
+- **Manifests** — read the captured objects node by node via the `manifests-download` endpoint above and apply them into the target namespace.
+- **State with data** — to restore objects together with their persistent data, read the snapshot through the data-restoration path `/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests-with-data-restoration?targetNamespace={target-namespace}` (`GET`). Unlike `manifests-download`, it is **recursive** — the addressed node and its children come back in one response — and the manifests are cleaned up for applying: runtime metadata (`uid`, `resourceVersion`, `ownerReferences`, `managedFields`, ...) and `status` are stripped, and the objects are rewritten into the target namespace.
+
+  The recursion crosses the module boundary for you: a volume node inside the tree is compiled by the module that owns the `VolumeSnapshot` kind, and its objects come back in the same response — you address this endpoint once, on the `Snapshot` node, and never assemble the tree yourself. It is **fail-closed**: if any node of the addressed subtree is not ready, the request fails instead of answering with a partial namespace.
+
+  Pass `targetNamespace` explicitly. It is what the objects are rewritten into; when the parameter is omitted it defaults to the namespace of the snapshot itself, so the response restores back over the source.
+
+  The body is a **plain JSON array of objects** — not a `List` object and not a YAML stream — so a client iterates the array and applies the elements itself instead of piping the body into `apply -f -`. The module materializes the data into the target namespace internally; you consume the result through the aggregated API, not by creating data-transfer objects yourself.
 
 ## Snapshot modes
 
-The capture source is selected by `spec.source` (immutable, exactly one member when set):
+How a `Snapshot` obtains its content is selected by `spec.mode`, immutable like the rest of the spec:
 
 | Mode | `spec` | Behavior |
 |------|--------|----------|
-| Dynamic capture (default) | `spec: {}` | The controller captures the live namespace. |
-| Import | `spec.source.import: {}` | The Snapshot is materialized from an uploaded payload instead of the live namespace — used by cross-cluster migration / restore tooling. |
-| Static binding | `spec.source.snapshotContentName: <name>` | The Snapshot binds to an existing pre-provisioned `SnapshotContent` (analogous to a CSI `volumeSnapshotContentName`). |
+| `Capture` (default) | `spec: {}`, or `spec.mode: Capture` explicitly | The controller captures the live namespace. |
+| `Import` | `spec.mode: Import` | The Snapshot is materialized from an uploaded payload instead of the live namespace — used by cross-cluster migration / restore tooling. The live namespace is never captured. |
+
+> Spell the field name exactly. The API server **prunes unknown fields before validation**, so a misspelled or obsolete field is not rejected: the object is accepted, the field is dropped, and the snapshot silently falls back to `Capture` — a live namespace capture where an import was intended. Read the mode back from the created object to confirm what was stored:
+>
+> ```bash
+> d8 k -n my-app get snap my-namespace-snapshot -o jsonpath='{.spec.mode}'
+> ```
 
 ## Lifecycle and retention
 

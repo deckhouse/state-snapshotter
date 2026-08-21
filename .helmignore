@@ -32,3 +32,4 @@ pkg
 .golangci.yaml
 .dmtlint.yaml
 go-lint.sh
+base_images.yml

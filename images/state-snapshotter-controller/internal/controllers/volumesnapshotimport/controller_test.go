@@ -25,9 +25,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -230,17 +232,19 @@ const (
 
 // vsImportScheme registers the extended VolumeSnapshot (unstructured) plus the SVDM DataImport/DataImportList
 // the reverse-lookup lists, so the fake client can serve every read Reconcile performs.
-func vsImportScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
+//
+// It takes no testing handle so the specs of both test styles in this package can share it; a scheme
+// registration that fails is a broken build, not a test outcome, hence the panic.
+func vsImportScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add storage scheme: %v", err)
-	}
-	if err := ssv1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatalf("add state-snapshotter scheme: %v", err)
-	}
+	utilruntime.Must(storagev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(ssv1alpha1.AddToScheme(scheme))
 	scheme.AddKnownTypeWithName(csiVolumeSnapshotGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(csiVolumeSnapshotGVK.GroupVersion().WithKind(csiVolumeSnapshotGVK.Kind+"List"), &unstructured.UnstructuredList{})
+	// The produced VolumeSnapshotContent, which the Retain handoff reads before the leaf's manifests are
+	// resolved: a scenario that walks past the artifact needs it served.
+	scheme.AddKnownTypeWithName(csiVolumeSnapshotContentGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(csiVolumeSnapshotContentGVK.GroupVersion().WithKind(csiVolumeSnapshotContentGVK.Kind+"List"), &unstructured.UnstructuredList{})
 	diGVK := schema.GroupVersionKind{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport"}
 	scheme.AddKnownTypeWithName(diGVK, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(diGVK.GroupVersion().WithKind("DataImportList"), &unstructured.UnstructuredList{})
@@ -249,8 +253,7 @@ func vsImportScheme(t *testing.T) *runtime.Scheme {
 
 // vsImportLeaf builds an import-mode extended VolumeSnapshot already bound to its SnapshotContent, with a
 // child->parent ownerRef. boundVSCName != "" marks the leaf whose data leg the DataImport already produced.
-func vsImportLeaf(t *testing.T, boundVSCName string) *unstructured.Unstructured {
-	t.Helper()
+func vsImportLeaf(boundVSCName string) *unstructured.Unstructured {
 	vs := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	vs.SetGroupVersionKind(csiVolumeSnapshotGVK)
 	vs.SetNamespace(vsImportNS)
@@ -262,16 +265,10 @@ func vsImportLeaf(t *testing.T, boundVSCName string) *unstructured.Unstructured 
 		Name:       vsImportParentSnap,
 		UID:        types.UID(vsImportParentUID),
 	}})
-	if err := unstructured.SetNestedField(vs.Object, string(storagev1alpha1.SnapshotModeImport), "spec", "mode"); err != nil {
-		t.Fatalf("set spec.mode Import: %v", err)
-	}
-	if err := unstructured.SetNestedField(vs.Object, vsImportContentName, "status", "boundSnapshotContentName"); err != nil {
-		t.Fatalf("set boundSnapshotContentName: %v", err)
-	}
+	utilruntime.Must(unstructured.SetNestedField(vs.Object, string(storagev1alpha1.SnapshotModeImport), "spec", "mode"))
+	utilruntime.Must(unstructured.SetNestedField(vs.Object, vsImportContentName, "status", "boundSnapshotContentName"))
 	if boundVSCName != "" {
-		if err := unstructured.SetNestedField(vs.Object, boundVSCName, "status", "boundVolumeSnapshotContentName"); err != nil {
-			t.Fatalf("set boundVolumeSnapshotContentName: %v", err)
-		}
+		utilruntime.Must(unstructured.SetNestedField(vs.Object, boundVSCName, "status", "boundVolumeSnapshotContentName"))
 	}
 	return vs
 }
@@ -312,12 +309,11 @@ func vsImportPublishedData() *storagev1alpha1.SnapshotDataBinding {
 	}
 }
 
-// vsImportReconcile assembles the parent chain + reconstructed checkpoint every import reconcile walks
-// through and runs one Reconcile against it. No DataImport object is ever created: these tests are about
-// the leaf that outlived its own.
-func vsImportReconcile(t *testing.T, vs *unstructured.Unstructured, content *storagev1alpha1.SnapshotContent) (ctrl.Result, client.Client, error) {
-	t.Helper()
-	scheme := vsImportScheme(t)
+// vsImportFixture assembles the parent chain + reconstructed checkpoint every import reconcile walks
+// through. extra carries whatever else the scenario needs — a DataImport above all: with none supplied the
+// reverse-lookup finds nothing, which is the leaf that outlived its own. calls intercepts client calls so a
+// spec can count the writes a pass performs (see vsImportReconcile for the plain case).
+func vsImportFixture(vs *unstructured.Unstructured, content *storagev1alpha1.SnapshotContent, calls interceptor.Funcs, extra ...client.Object) client.Client {
 	parent := &storagev1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Namespace: vsImportNS, Name: vsImportParentSnap, UID: types.UID(vsImportParentUID)},
 	}
@@ -331,20 +327,32 @@ func vsImportReconcile(t *testing.T, vs *unstructured.Unstructured, content *sto
 
 	statusStub := &unstructured.Unstructured{}
 	statusStub.SetGroupVersionKind(csiVolumeSnapshotGVK)
-	cl := fake.NewClientBuilder().
-		WithScheme(scheme).
+	return fake.NewClientBuilder().
+		WithScheme(vsImportScheme()).
 		WithStatusSubresource(statusStub, &storagev1alpha1.SnapshotContent{}, &storagev1alpha1.Snapshot{}).
-		WithObjects(vs, parent, parentContent, content, mcp).
+		WithObjects(append([]client.Object{vs, parent, parentContent, content, mcp}, extra...)...).
+		WithInterceptorFuncs(calls).
 		Build()
+}
+
+// vsImportRequest addresses the leaf VolumeSnapshot of the fixture above.
+func vsImportRequest() ctrl.Request {
+	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: vsImportNS, Name: vsImportName}}
+}
+
+// vsImportReconcile runs one Reconcile against a fresh fixture and hands the client back, so a spec can read
+// what the pass wrote (or keep reconciling over the same state).
+func vsImportReconcile(vs *unstructured.Unstructured, content *storagev1alpha1.SnapshotContent, extra ...client.Object) (ctrl.Result, client.Client, error) {
+	cl := vsImportFixture(vs, content, interceptor.Funcs{}, extra...)
 	r := &Controller{Client: cl, APIReader: cl}
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: vsImportNS, Name: vsImportName}})
+	res, err := r.Reconcile(context.Background(), vsImportRequest())
 	return res, cl, err
 }
 
 // Steady state of a finished import: the DataImport is gone, the VSC is bound and the content carries its
 // data leg. Reconcile must stop polling and still refresh the status.data export mirror.
 func TestReconcile_SteadyStateWithoutDataImportMirrorsAndStopsPolling(t *testing.T) {
-	res, cl, err := vsImportReconcile(t, vsImportLeaf(t, vsImportVSCName), vsImportLeafContent(vsImportPublishedData()))
+	res, cl, err := vsImportReconcile(vsImportLeaf(vsImportVSCName), vsImportLeafContent(vsImportPublishedData()))
 	if err != nil {
 		t.Fatalf("Reconcile must not fail in the DataImport-less steady state: %v", err)
 	}
@@ -368,7 +376,7 @@ func TestReconcile_SteadyStateWithoutDataImportMirrorsAndStopsPolling(t *testing
 // Genuinely pending import: no DataImport and the VSC is not bound yet, so the data leg is still ahead of
 // this leaf. Nothing wakes the controller (no DataImport watch), so the poll must survive. Regression guard.
 func TestReconcile_PendingWithoutDataImportKeepsPolling(t *testing.T) {
-	res, cl, err := vsImportReconcile(t, vsImportLeaf(t, ""), vsImportLeafContent(nil))
+	res, cl, err := vsImportReconcile(vsImportLeaf(""), vsImportLeafContent(nil))
 	if err != nil {
 		t.Fatalf("Reconcile on a pending import must not fail: %v", err)
 	}
@@ -390,7 +398,7 @@ func TestReconcile_PendingWithoutDataImportKeepsPolling(t *testing.T) {
 // publish is still converging, and the aggregator's write produces no event for this controller, so the poll
 // must survive until the content actually carries its data leg.
 func TestReconcile_BoundVSCWithoutPublishedContentDataKeepsPolling(t *testing.T) {
-	res, _, err := vsImportReconcile(t, vsImportLeaf(t, vsImportVSCName), vsImportLeafContent(nil))
+	res, _, err := vsImportReconcile(vsImportLeaf(vsImportVSCName), vsImportLeafContent(nil))
 	if err != nil {
 		t.Fatalf("Reconcile must not fail while the content is unpublished: %v", err)
 	}

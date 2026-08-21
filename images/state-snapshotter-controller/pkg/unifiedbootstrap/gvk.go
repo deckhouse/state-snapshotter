@@ -62,6 +62,13 @@ func DefaultSnapshotPair() UnifiedGVKPair {
 // NOT added to DedicatedSnapshotControllerKinds (no in-process reconciler) nor DomainCaptureSnapshotKinds
 // (that list is a strict subset of the dedicated kinds) — the boot domain-capture MARK is wired explicitly
 // (see StartupBuiltInVolumeSnapshotPair) and re-asserted by unifiedruntime.Syncer.Sync.
+//
+// Being built in says where CAPTURE happens and nothing about restore. The RESTORE of a volume node is
+// served by the module that owns the kind, under its own aggregated group, and the compiler DELEGATES it
+// (IsOutOfProcessDomainSnapshotKind). That is what a partial domain looks like — the domain owns the
+// planning and the API surface, this module owns the capture — and it is why neither half may be inferred
+// from the other: reading "built-in pair" as "restored in-process" is the mistake this paragraph exists to
+// prevent.
 func BuiltInVolumeSnapshotPair() UnifiedGVKPair {
 	return UnifiedGVKPair{
 		Snapshot:             schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"},

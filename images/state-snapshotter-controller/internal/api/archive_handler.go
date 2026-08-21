@@ -298,27 +298,6 @@ func shouldCompressResponse(r *http.Request) bool {
 }
 
 // ============================================================================
-// Health Check Endpoints
-// ============================================================================
-
-// HandleHealth handles GET /healthz (Kubernetes standard endpoint)
-func (h *ArchiveHandler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
-	response := map[string]string{
-		"status": "ok",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(response)
-}
-
-// HandleLive handles GET /livez (Kubernetes standard endpoint)
-func (h *ArchiveHandler) HandleLive(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte("ok")); err != nil {
-		return
-	}
-}
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -377,11 +356,12 @@ func (h *ArchiveHandler) SetupRoutes(mux *http.ServeMux) {
 		}
 	})
 
-	// Health check endpoints (Kubernetes standard)
-	mux.HandleFunc("/healthz", h.HandleHealth)
-	mux.HandleFunc("/readyz", h.HandleHealth)
-	mux.HandleFunc("/livez", h.HandleLive)
-
-	// Log health check endpoint registration
-	h.logger.Info("Health check endpoints registered", "healthz", "/healthz", "readyz", "/readyz", "livez", "/livez")
+	// No health routes here, and this mux is not where the pod's health is served at all.
+	//
+	// Two independent reasons, and neither is the kubelet: /healthz, /readyz and /livez on the aggregated
+	// apiserver's port are installed by genericapiserver itself (PrepareRun) on the mux that owns this one
+	// as its NotFoundHandler, and an exact route there always wins over the fall-through — so a route
+	// registered here could not be reached even if it were wanted. And the probes of this Pod do not use
+	// that port: they are configured against the controller manager's own health address, which is a
+	// different listener in the same process, so nothing registered here would ever be probed either.
 }

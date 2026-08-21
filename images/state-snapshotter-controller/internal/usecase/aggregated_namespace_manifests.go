@@ -25,7 +25,6 @@ import (
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -150,32 +149,6 @@ func (s *AggregatedNamespaceManifests) retainedRootContentForSnapshot(ctx contex
 		return "", NewAggregatedStatusError(http.StatusConflict, "Conflict",
 			fmt.Sprintf("multiple retained SnapshotContents for Snapshot %s/%s found via ObjectKeeper %q", namespace, snapshotName, ok.Name))
 	}
-}
-
-// resolveContentNameFromSnapshot resolves any namespaced snapshot-like CR (by GVK) to its bound
-// SnapshotContent name via status.boundSnapshotContentName. It also returns the CR's own UID so the
-// caller can enforce the anti-spoofing back-reference against the resolved content. Used by the per-CR
-// (single-node) manifest reads for non-core snapshot kinds (the VolumeSnapshot connector download).
-func (s *AggregatedNamespaceManifests) resolveContentNameFromSnapshot(ctx context.Context, snapshotGVK schema.GroupVersionKind, namespace, snapshotName string) (contentName, snapshotUID string, err error) {
-	if snapshotName == "" || namespace == "" || snapshotGVK.Empty() {
-		return "", "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "snapshot GVK, namespace, and name are required")
-	}
-	snap := &unstructured.Unstructured{}
-	snap.SetGroupVersionKind(snapshotGVK)
-	if err := s.client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: snapshotName}, snap); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "", "", NewAggregatedStatusError(http.StatusNotFound, "NotFound", fmt.Sprintf("%s %s/%s not found", snapshotGVK.String(), namespace, snapshotName))
-		}
-		return "", "", fmt.Errorf("get %s %s/%s: %w", snapshotGVK.String(), namespace, snapshotName, err)
-	}
-	contentName, _, cerr := unstructured.NestedString(snap.Object, "status", "boundSnapshotContentName")
-	if cerr != nil {
-		return "", "", NewAggregatedStatusError(http.StatusInternalServerError, "InternalError", fmt.Sprintf("%s %s/%s has invalid status.boundSnapshotContentName: %v", snapshotGVK.String(), namespace, snapshotName, cerr))
-	}
-	if contentName == "" {
-		return "", "", NewAggregatedStatusError(http.StatusBadRequest, "BadRequest", "boundSnapshotContentName is empty")
-	}
-	return contentName, string(snap.GetUID()), nil
 }
 
 // verifyContentSnapshotRef enforces the anti-spoofing handshake for a SnapshotContent resolved via a
