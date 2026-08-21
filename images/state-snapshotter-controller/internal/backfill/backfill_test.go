@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,20 +29,13 @@ import (
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
-// obj builds an unstructured object of the given GVK with name, optional labels and ownerRef kinds.
-func obj(gvk schema.GroupVersionKind, name string, labels map[string]string, ownerKinds ...string) *unstructured.Unstructured {
+// obj builds an unstructured object of the given GVK with a name and optional labels.
+func obj(gvk schema.GroupVersionKind, name string, labels map[string]string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(gvk)
 	u.SetName(name)
 	if labels != nil {
 		u.SetLabels(labels)
-	}
-	var owners []metav1.OwnerReference
-	for _, k := range ownerKinds {
-		owners = append(owners, metav1.OwnerReference{APIVersion: "x/v1", Kind: k, Name: "o"})
-	}
-	if owners != nil {
-		u.SetOwnerReferences(owners)
 	}
 	return u
 }
@@ -68,21 +60,23 @@ func newClient(objs ...*unstructured.Unstructured) client.Client {
 	return b.WithScheme(scheme).Build()
 }
 
-func snapGVK(kind string) schema.GroupVersionKind {
-	return schema.GroupVersionKind{Group: groupStorage, Version: "v1alpha1", Kind: kind}
+// snapGVK is this module's Snapshot; csiGVK is the upstream CSI VolumeSnapshot.
+// Both are the only kind their group is asked about in these tests.
+func snapGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: groupStorage, Version: "v1alpha1", Kind: "Snapshot"}
 }
 
-func csiGVK(kind string) schema.GroupVersionKind {
-	return schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: kind}
+func csiGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: groupCSI, Version: "v1", Kind: "VolumeSnapshot"}
 }
 
 func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 	ctx := context.Background()
-	root := obj(snapGVK("Snapshot"), "my-app-backup", nil)           // user-named root → NOT ours
-	child := obj(snapGVK("Snapshot"), "nss-snap-aabbccdd-0011", nil) // deterministic child → ours
+	root := obj(snapGVK(), "my-app-backup", nil)           // user-named root → NOT ours
+	child := obj(snapGVK(), "nss-snap-aabbccdd-0011", nil) // deterministic child → ours
 
 	cl := newClient(root, child)
-	targets := []Target{{GVK: snapGVK("Snapshot"), IsOurs: hasNamePrefix("nss-snap-")}}
+	targets := []Target{{GVK: snapGVK(), IsOurs: hasNamePrefix("nss-snap-")}}
 
 	rep, err := Apply(ctx, cl, targets)
 	if err != nil {
@@ -93,7 +87,7 @@ func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 	}
 
 	gotRoot := &unstructured.Unstructured{}
-	gotRoot.SetGroupVersionKind(snapGVK("Snapshot"))
+	gotRoot.SetGroupVersionKind(snapGVK())
 	if err := cl.Get(ctx, client.ObjectKey{Name: "my-app-backup"}, gotRoot); err != nil {
 		t.Fatalf("get root: %v", err)
 	}
@@ -102,7 +96,7 @@ func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 	}
 
 	gotChild := &unstructured.Unstructured{}
-	gotChild.SetGroupVersionKind(snapGVK("Snapshot"))
+	gotChild.SetGroupVersionKind(snapGVK())
 	if err := cl.Get(ctx, client.ObjectKey{Name: "nss-snap-aabbccdd-0011"}, gotChild); err != nil {
 		t.Fatalf("get child: %v", err)
 	}
@@ -113,15 +107,15 @@ func TestApplyStampsChildSnapshotButNotRoot(t *testing.T) {
 
 func TestApplyIsIdempotentAndGateBecomesMet(t *testing.T) {
 	ctx := context.Background()
-	child := obj(snapGVK("Snapshot"), "nss-snap-a-b", nil)
-	ourVS := obj(csiGVK("VolumeSnapshot"), "nss-vs-a-b", map[string]string{
+	child := obj(snapGVK(), "nss-snap-a-b", nil)
+	ourVS := obj(csiGVK(), "nss-vs-a-b", map[string]string{
 		storagev1alpha1.LabelProvenance: storagev1alpha1.LabelProvenanceUnifiedSnapshot,
 	})
 
 	cl := newClient(child, ourVS)
 	targets := []Target{
-		{GVK: snapGVK("Snapshot"), IsOurs: hasNamePrefix("nss-snap-")},
-		{GVK: csiGVK("VolumeSnapshot"), IsOurs: hasProvenance},
+		{GVK: snapGVK(), IsOurs: hasNamePrefix("nss-snap-")},
+		{GVK: csiGVK(), IsOurs: hasProvenance},
 	}
 
 	// Gate is NOT met before backfill.
@@ -164,11 +158,11 @@ func TestApplyToleratesUninstalledKind(t *testing.T) {
 	ctx := context.Background()
 	// Client serves only Snapshot; the CSI VolumeSnapshot kind is not installed on this cluster. Apply must
 	// not fail — a protected Kind with no objects to migrate is a no-op, not an error.
-	child := obj(snapGVK("Snapshot"), "nss-snap-a-b", nil)
+	child := obj(snapGVK(), "nss-snap-a-b", nil)
 	cl := newClient(child)
 	targets := []Target{
-		{GVK: snapGVK("Snapshot"), IsOurs: hasNamePrefix("nss-snap-")},
-		{GVK: csiGVK("VolumeSnapshot"), IsOurs: hasProvenance},
+		{GVK: snapGVK(), IsOurs: hasNamePrefix("nss-snap-")},
+		{GVK: csiGVK(), IsOurs: hasProvenance},
 	}
 
 	rep, err := Apply(ctx, cl, targets)
@@ -195,13 +189,13 @@ func TestApplyToleratesUninstalledKind(t *testing.T) {
 func TestClassifierFailsClosedForSharedKinds(t *testing.T) {
 	const labelManaged = storagev1alpha1.APIGroup + "/managed"
 
-	ourVS := obj(csiGVK("VolumeSnapshot"), "some-vs", map[string]string{
+	ourVS := obj(csiGVK(), "some-vs", map[string]string{
 		storagev1alpha1.LabelProvenance: storagev1alpha1.LabelProvenanceUnifiedSnapshot,
 	})
-	legacyOrphanVS := obj(csiGVK("VolumeSnapshot"), "nss-vs-a-b", nil)
-	capturedUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs", map[string]string{labelManaged: "true"})
-	vetoedUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs2", map[string]string{labelManaged: "false"})
-	plainUserVS := obj(csiGVK("VolumeSnapshot"), "user-vs3", nil)
+	legacyOrphanVS := obj(csiGVK(), "nss-vs-a-b", nil)
+	capturedUserVS := obj(csiGVK(), "user-vs", map[string]string{labelManaged: "true"})
+	vetoedUserVS := obj(csiGVK(), "user-vs2", map[string]string{labelManaged: "false"})
+	plainUserVS := obj(csiGVK(), "user-vs3", nil)
 
 	vc := anyOf(hasProvenance, hasNamePrefix("nss-vs-"))
 	for _, tc := range []struct {
