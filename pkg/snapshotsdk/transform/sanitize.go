@@ -72,8 +72,8 @@ func isControlPlaneKind(kind string) bool {
 // content from one that points at an identity living elsewhere (see rewriteInSpecNamespaces). Passing ""
 // means "take it from obj.metadata.namespace", which is correct for manifests read straight out of a
 // checkpoint — capture stamps each namespaced object with its namespace, so the value is there by
-// construction. A caller whose manifests do NOT carry it — a facade that attaches the target namespace
-// to namespace-relative manifests before compiling — MUST pass it explicitly: with source == target
+// construction. A caller whose manifests do NOT carry it — a facade that attaches the node namespace to
+// namespace-relative manifests before compiling — MUST pass it explicitly: with source == target
 // nothing is recognised as moved, and references that were supposed to follow the content silently stop
 // following it.
 func SanitizeForRestore(obj unstructured.Unstructured, sourceNamespace, targetNamespace string) (unstructured.Unstructured, bool) {

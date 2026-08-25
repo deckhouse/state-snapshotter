@@ -49,11 +49,19 @@ type NodeRestoreInput struct {
 	// CapturedManifests are this node's own captured manifests, as stored at capture time (uid and
 	// source namespace still intact — the data binding lookup needs them).
 	CapturedManifests []unstructured.Unstructured
-	// TargetNamespace is the namespace the output is rewritten to.
-	TargetNamespace string
+	// NodeNamespace is the namespace the compiled node lives in, and the one its output is addressed
+	// into. There is no second choice: a restored PVC reaches its data through a dataSourceRef that
+	// carries no namespace, so it resolves where the claim lands, while the VolumeSnapshot handle it
+	// names stays with the node. Addressing a subtree anywhere else would emit claims that apply and
+	// never bind, so moving a namespace elsewhere is the download-and-import path instead, which
+	// materializes a handle of its own in the destination.
+	//
+	// It is NOT the namespace the manifests were captured in — for a tree imported into a cluster those
+	// differ, and SourceNamespace below is the one that means capture.
+	NodeNamespace string
 	// SourceNamespace is the namespace the manifests were CAPTURED in. Leave it empty when
 	// CapturedManifests carry it themselves (anything read out of a checkpoint does): it is then taken
-	// from each object. Set it when they do not — a facade that attaches the target namespace to
+	// from each object. Set it when they do not — a facade that attaches the node namespace to
 	// namespace-relative manifests before compiling must say what the source was, or in-body namespace
 	// references stop being recognised as moved. See SanitizeForRestore.
 	SourceNamespace string
@@ -85,7 +93,7 @@ func CompileNodeManifests(in NodeRestoreInput) ([]unstructured.Unstructured, err
 
 	out := make([]unstructured.Unstructured, 0, len(in.CapturedManifests))
 	for i := range in.CapturedManifests {
-		sanitized, keep := SanitizeForRestore(in.CapturedManifests[i], in.SourceNamespace, in.TargetNamespace)
+		sanitized, keep := SanitizeForRestore(in.CapturedManifests[i], in.SourceNamespace, in.NodeNamespace)
 		if !keep {
 			continue
 		}

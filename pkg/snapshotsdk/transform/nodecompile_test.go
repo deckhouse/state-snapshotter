@@ -34,7 +34,7 @@ func TestCompileNodeManifests_OrphanPVCGetsDataSourceRef(t *testing.T) {
 
 	out, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests:           []unstructured.Unstructured{pvc},
-		TargetNamespace:             "restore-ns",
+		NodeNamespace:               "restore-ns",
 		PVCDataBindings:             []PVCDataBinding{dataBindingRef("uid-a", "data-pvc", "vsc-a")},
 		VolumeSnapshotByContentName: map[string]string{"vsc-a": "vs-a"},
 	})
@@ -61,7 +61,7 @@ func TestCompileNodeManifests_OrphanPVCMissingVSLeafFailsClosed(t *testing.T) {
 
 	_, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests:           []unstructured.Unstructured{pvc},
-		TargetNamespace:             "restore-ns",
+		NodeNamespace:               "restore-ns",
 		PVCDataBindings:             []PVCDataBinding{dataBindingRef("uid-a", "data-pvc", "vsc-a")},
 		VolumeSnapshotByContentName: map[string]string{}, // VS leaf not resolved
 	})
@@ -83,7 +83,7 @@ func TestCompileNodeManifests_GenericPassThrough(t *testing.T) {
 
 	out, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests: []unstructured.Unstructured{cm},
-		TargetNamespace:   "restore-ns",
+		NodeNamespace:     "restore-ns",
 	})
 	if err != nil {
 		t.Fatalf("CompileNodeManifests: %v", err)
@@ -101,7 +101,7 @@ func TestCompileNodeManifests_PVCWithoutDataRefFailsClosed(t *testing.T) {
 
 	_, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests:           []unstructured.Unstructured{pvc},
-		TargetNamespace:             "restore-ns",
+		NodeNamespace:               "restore-ns",
 		VolumeSnapshotByContentName: map[string]string{},
 	})
 	if err == nil {
@@ -123,7 +123,7 @@ func TestCompileNodeManifests_OrphanPVCNonVSCArtifactFailsClosed(t *testing.T) {
 
 	_, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests:           []unstructured.Unstructured{pvc},
-		TargetNamespace:             "restore-ns",
+		NodeNamespace:               "restore-ns",
 		PVCDataBindings:             []PVCDataBinding{binding},
 		VolumeSnapshotByContentName: map[string]string{"artifact-x": "vs-x"},
 	})
@@ -153,7 +153,7 @@ func TestCompileNodeManifests_DomainCoveredPVCIsDropped(t *testing.T) {
 
 	out, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests:     []unstructured.Unstructured{covered, cm},
-		TargetNamespace:       "restore-ns",
+		NodeNamespace:         "restore-ns",
 		DomainCoveredPVCNames: map[string]struct{}{"disk-pvc": {}},
 	})
 	if err != nil {
@@ -196,7 +196,7 @@ func TestCompileNodeManifests_SourceNamespaceReachesTheSanitizer(t *testing.T) {
 	out, err := CompileNodeManifests(NodeRestoreInput{
 		CapturedManifests: []unstructured.Unstructured{rb},
 		SourceNamespace:   sourceNS,
-		TargetNamespace:   targetNS,
+		NodeNamespace:     targetNS,
 	})
 	if err != nil {
 		t.Fatalf("CompileNodeManifests: %v", err)

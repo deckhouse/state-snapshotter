@@ -7,6 +7,7 @@ metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-backup-agent-as: member
     rbac.deckhouse.io/aggregate-to-kubernetes-as: manager
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:state-snapshotter:manage_snapshots

@@ -104,12 +104,15 @@ func seedCoreRootSnapshotWithContentBackRef(t *testing.T, cl client.Client, obje
 const coreRestoreBase = "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/ns1/snapshots/snap/manifests-with-data-restoration"
 
 // TestCoreHandler_ScopeNodeAndFilter exercises the wired core handler end to end: a bad request maps to
-// 400, a filter miss to 404, and a scope=node / scope=node+filter request to 200 with targetNamespace
-// applied.
+// 400, a filter miss to 404, and a scope=node / scope=node+filter request to 200 holding only the
+// addressed node. Where the answer is addressed is asserted here too, and it is a real assertion rather
+// than a restatement: the seeded manifest is captured in a THIRD namespace, so "ns1" can only come from
+// the compiler addressing the output into the snapshot's own namespace. That the read takes no namespace
+// from its caller is a separate promise, pinned by TestPartnerDocRestoreReadTakesNoQueryNamespace.
 func TestCoreHandler_ScopeNodeAndFilter(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(coreSnapshotScheme()).Build()
 	seedCoreRootReadySnapshot(t, cl, []map[string]interface{}{
-		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "app-config", "namespace": "ns1"}, "data": map[string]interface{}{"k": "v"}},
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "app-config", "namespace": "captured-elsewhere-ns"}, "data": map[string]interface{}{"k": "v"}},
 	})
 	srv := newCoreSnapshotServer(t, cl)
 	defer srv.Close()
@@ -136,13 +139,13 @@ func TestCoreHandler_ScopeNodeAndFilter(t *testing.T) {
 		t.Fatalf("filter miss = %d, want 404", got)
 	}
 
-	// 200: scope=node returns only the node's own manifest, with targetNamespace applied.
-	objs := getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node&targetNamespace=restore-ns")
+	// 200: scope=node returns only the node's own manifest, addressed into the snapshot's namespace.
+	objs := getAggregatedObjects(t, srv.URL+coreRestoreBase+"?scope=node")
 	if len(objs) != 1 || !containsKindName(objs, "ConfigMap", "app-config") {
 		t.Fatalf("scope=node output = %#v, want single ConfigMap/app-config", objs)
 	}
-	if ns := (&unstructured.Unstructured{Object: objs[0]}).GetNamespace(); ns != "restore-ns" {
-		t.Fatalf("scope=node targetNamespace not applied: namespace = %q, want restore-ns", ns)
+	if ns := (&unstructured.Unstructured{Object: objs[0]}).GetNamespace(); ns != "ns1" {
+		t.Fatalf("scope=node namespace = %q, want the addressed snapshot's own ns1", ns)
 	}
 
 	// 200: scope=node + filter returns exactly the addressed object.

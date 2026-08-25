@@ -15,16 +15,22 @@
 # tree are created owned by their parent node, so dropping the root Snapshot takes the tree with it —
 # and deleting a Snapshot is what manage_snapshots is for.
 #
-# This role carries NO aggregation label. The label hands a capability to everyone already holding
-# the matching cluster-wide role, and this one writes into another module's resource: every manager
-# in the cluster would gain the ability to create VolumeSnapshots simply because this module is
-# installed. It is granted by an explicit binding to the subject that imports trees.
+# This role carries no rbac.deckhouse.io/aggregate-to-kubernetes-as label and must not: that axis
+# hands a capability to everyone already holding the matching cluster-wide role, and this capability
+# writes into another module's resource — every manager in the cluster would gain the ability to
+# create VolumeSnapshots simply because this module is installed.
+#
+# It does carry rbac.deckhouse.io/aggregate-to-backup-agent-as, and that axis is a different
+# bargain: the role collecting it is composed of these capabilities and handed to nobody until a
+# RoleBinding names it, so this capability still reaches only a subject chosen for it — the one that
+# imports trees.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-backup-agent-as: member
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:state-snapshotter:upload_snapshots
 rules:

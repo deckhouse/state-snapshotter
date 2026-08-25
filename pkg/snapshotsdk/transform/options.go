@@ -31,13 +31,13 @@ const (
 )
 
 // Options is the already-validated form of one manifests-with-data-restoration request: which node is
-// addressed, how deep to compile it, where to restore it, and optionally which single object to return.
+// addressed, how deep to compile it, and optionally which single object to return. Where the output is
+// addressed is not part of a request — it is the namespace of the node itself.
 // It is shared by every server of the subresource so the same query means the same thing on every group;
 // the validation that produces it is restoreapi.ParseQueryOptions.
 type Options struct {
 	SnapshotName      string
 	SnapshotNamespace string
-	TargetNamespace   string
 
 	// Scope selects the compilation depth (see Scope). An empty value is treated as ScopeSubtree, so a
 	// zero Options keeps the historical recursive behavior. Set by the handler from the ?scope= query.

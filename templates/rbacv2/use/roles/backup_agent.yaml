@@ -1,0 +1,54 @@
+# The whole permission set an external backup product needs, as one role to bind instead of a list of
+# capabilities to bind one by one. A forgotten binding is invisible at setup time: a RoleBinding is
+# created successfully whether or not the role it names exists, roleRef is not checked against
+# anything, and the refusal surfaces only on the first request that needs the missing capability —
+# typically the one that moves a volume's bytes, long after whoever wired the integration left.
+#
+# The rules below are empty and stay empty in this chart: the clusterrole-aggregation-controller
+# fills them with the union of the rules of every ClusterRole matching the selector. Nothing is
+# copied here, so a grant edited on a capability role reaches this role without a chart change.
+#
+# Carrying the axis is not the same as being granted it. This role composes capabilities into one
+# object and hands them to nobody: until a RoleBinding names it, it grants nothing, and what it
+# grants then is bounded by the namespaces of those bindings.
+#
+# The selector matches ANY ClusterRole in the cluster carrying both labels, not only the roles of
+# this chart — which is how the volume-data transfer capability, shipped by the module that owns it,
+# joins the set. What is pinned, by TestBackupAgentAxisIsCarriedByExactlyThePinnedRoles, is which
+# roles under templates/rbacv2 carry the axis — that subtree and no further: the chart's other
+# ClusterRoles are templated, a flat parse cannot read them, and both labels added to one of those
+# would pour its rules in here with every test still green. A role of this chart meant to be a member
+# belongs under templates/rbacv2; a role outside this chart is that chart's business, and pointing the
+# axis at a role is a deliberate act either way.
+#
+# What this role does NOT carry is the condition that keeps the arrangement safe, and all of it is
+# pinned by TestBackupAgentAggregateRoleCollectsOneAxisAndSpreadsThroughNone:
+#
+#   - no aggregation axis of any name. The axis belongs on the capabilities this role collects, never
+#     on this role: composed onto one, it hands the entire set — reading a subtree rewritten for
+#     another namespace, loading a tree back in, moving a volume's bytes — to every holder of the
+#     corresponding access level, merely because this module is installed. The label below,
+#     rbac.deckhouse.io/kind: use, is the other half of what the platform's own aggregates select on,
+#     so one line naming any of their axes would be enough, and those aggregates are themselves
+#     delegatable.
+#   - no annotations at all. The access levels of the cluster roles shipped here are assembled from
+#     an annotation, and a platform hook turns one on a role into bindings for that level's subjects,
+#     cluster-wide bindings included — which is exactly the "grants nothing until a RoleBinding names
+#     it" boundary above.
+#   - no rbac.deckhouse.io/delegatable. That label puts a role into the set a project owner may hand
+#     out inside their own project. This role is bound by whoever connects an external backup
+#     product to the cluster, which is not a per-project decision.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/kind: use
+  name: d8:use:capability:module:state-snapshotter:backup_agent
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.deckhouse.io/aggregate-to-backup-agent-as: member
+        rbac.deckhouse.io/kind: use
+rules: []

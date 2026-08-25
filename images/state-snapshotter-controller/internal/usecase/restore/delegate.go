@@ -34,14 +34,15 @@ import (
 // transformer contract now lives in the importable pkg/domainsdk, used inside the domain pod).
 type DomainSubtreeRestorer interface {
 	// RestoreDomainSubtree returns the apply-ready manifests for the whole subtree rooted at the
-	// domain snapshot identified by (gvk, namespace, name). targetNamespace is the namespace the
-	// caller wants the objects applied into (empty means the source namespace). The implementation
-	// must return objects already sanitized and rewritten for restore (the same contract the core
-	// compiler produces for generic nodes), so the spliced output is uniformly apply-ready.
+	// domain snapshot identified by (gvk, namespace, name). There is no target namespace to pass: a
+	// subtree is compiled into the namespace of the node addressed, which is already in namespace.
+	// The implementation must return objects already sanitized and addressed for restore (the same
+	// contract the core compiler produces for generic nodes), so the spliced output is uniformly
+	// apply-ready.
 	//
 	// The implementation must uphold the same fail-closed contract as the core compiler: it must
 	// enforce readiness of the addressed subtree and must never return a data-less object (e.g. a PVC
 	// with no data binding). Any such condition must be returned as an error so the whole restore
 	// aborts rather than silently producing an empty/partial result.
-	RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name, targetNamespace string) ([]unstructured.Unstructured, error)
+	RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) ([]unstructured.Unstructured, error)
 }

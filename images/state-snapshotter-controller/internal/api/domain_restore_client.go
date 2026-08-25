@@ -125,7 +125,7 @@ func NewDomainRestoreClient(cfg *rest.Config, mapper meta.RESTMapper, log logger
 //
 // Setting the timeout also puts it in the request as ?timeout=, so the server that answers is told the
 // same budget the caller is holding it to instead of working on a request nobody is waiting for.
-func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name, targetNamespace string) ([]unstructured.Unstructured, error) {
+func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) ([]unstructured.Unstructured, error) {
 	if c == nil || c.rc == nil {
 		return nil, fmt.Errorf("domain restore client is not configured")
 	}
@@ -138,9 +138,6 @@ func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk sche
 		"/apis", subGV.Group, subGV.Version,
 		"namespaces", namespace, resource, name, "manifests-with-data-restoration",
 	).MaxRetries(0).Timeout(c.timeout)
-	if targetNamespace != "" {
-		req = req.Param("targetNamespace", targetNamespace)
-	}
 	raw, err := req.DoRaw(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("call domain restore apiserver (%s %s/%s): %w", subGV.String(), namespace, name, err)

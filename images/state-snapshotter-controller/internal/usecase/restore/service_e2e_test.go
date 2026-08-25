@@ -87,7 +87,7 @@ func newVolumeLegRestoreCluster(t *testing.T) client.Client {
 	// Variant A: the root MCP holds only the ConfigMap; the orphan PVC manifest lives on its own child
 	// volume node's MCP (mcp-orphan), reachable via the VolumeSnapshot handle's boundSnapshotContentName.
 	rootData, rootChecksum := encodeChunk([]map[string]interface{}{
-		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "cfg", "namespace": "source-ns"}, "data": map[string]interface{}{"k": "v"}},
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "cfg", "namespace": "captured-elsewhere-ns"}, "data": map[string]interface{}{"k": "v"}},
 	})
 	rootChunk := &ssv1alpha1.ManifestCheckpointContentChunk{
 		ObjectMeta: metav1.ObjectMeta{Name: "chunk-root-0"},
@@ -109,7 +109,7 @@ func newVolumeLegRestoreCluster(t *testing.T) client.Client {
 	})
 
 	orphanData, orphanChecksum := encodeChunk([]map[string]interface{}{
-		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "orphan", "namespace": "source-ns", "uid": "uid-orphan"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}, "volumeName": "pv-x"}},
+		{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": map[string]interface{}{"name": "orphan", "namespace": "captured-elsewhere-ns", "uid": "uid-orphan"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}, "volumeName": "pv-x"}},
 	})
 	orphanChunk := &ssv1alpha1.ManifestCheckpointContentChunk{
 		ObjectMeta: metav1.ObjectMeta{Name: "chunk-orphan-0"},
@@ -188,10 +188,13 @@ func newVolumeLegRestoreCluster(t *testing.T) client.Client {
 		WithObjects(rootChunk, rootMCP, orphanChunk, orphanMCP, content, orphanContent, snap, vs).Build()
 }
 
-// volumeLegRestoreOptions addresses the namespace root of newVolumeLegRestoreService and restores it into
-// a different namespace, so the output also proves the namespace rewrite.
+// volumeLegRestoreOptions addresses the namespace root of newVolumeLegRestoreService. There is no target
+// namespace to choose: the output is addressed into the namespace of the node, always. The rewrite is
+// still exercised, and not trivially — the captured manifests of this tree carry a THIRD namespace
+// (captured-elsewhere-ns), the shape a tree loaded back into a cluster has, so an output in source-ns
+// proves the compiler re-addressed it rather than passed it through.
 func volumeLegRestoreOptions() Options {
-	return Options{SnapshotName: "snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns"}
+	return Options{SnapshotName: "snap", SnapshotNamespace: "source-ns"}
 }
 
 // volumeLegRestoreOutput is the pinned response body of manifests-with-data-restoration for the tree of
@@ -225,7 +228,8 @@ func TestBuildManifestsWithDataRestoration_VolumeLegOutputIsByteStable(t *testin
 
 // TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC exercises the full restore compiler
 // chain (resolve run tree -> load MCP -> sanitize -> transform -> marshal) for a namespace root with
-// a ConfigMap and an orphan PVC, restored into a different namespace.
+// a ConfigMap and an orphan PVC. See volumeLegRestoreOptions for where the output is addressed and why
+// that is not a tautology here.
 func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) {
 	svc := newVolumeLegRestoreService(t)
 
@@ -249,8 +253,8 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 		case "VolumeSnapshot", "VolumeSnapshotContent", "VolumeRestoreRequest":
 			t.Fatalf("control-plane kind %s must not be emitted", u.GetKind())
 		}
-		if u.GetNamespace() != "restore-ns" {
-			t.Fatalf("%s namespace = %q, want restore-ns", u.GetKind(), u.GetNamespace())
+		if u.GetNamespace() != "source-ns" {
+			t.Fatalf("%s namespace = %q, want source-ns", u.GetKind(), u.GetNamespace())
 		}
 		if u.GetKind() == "PersistentVolumeClaim" {
 			foundPVC = true
@@ -274,10 +278,9 @@ func TestBuildManifestsWithDataRestoration_NamespaceRootOrphanPVC(t *testing.T) 
 
 // volumeNodeFacadeCall is one delegated request as the owner received it.
 type volumeNodeFacadeCall struct {
-	gvk             schema.GroupVersionKind
-	namespace       string
-	name            string
-	targetNamespace string
+	gvk       schema.GroupVersionKind
+	namespace string
+	name      string
 }
 
 // volumeNodeOwnerFacade stands in for the aggregated apiserver of the module that owns the CSI
@@ -312,8 +315,8 @@ var _ DomainSubtreeRestorer = (*volumeNodeOwnerFacade)(nil)
 // VolumeSnapshot, check it is usable and that its bound SnapshotContent points back at it (anti-spoofing),
 // fetch the captured objects from the snapshot core's content layer, compile them with the shared
 // compilation, and hand back the JSON array — decoded again on this side, as core's delegate client does.
-func (f *volumeNodeOwnerFacade) RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name, targetNamespace string) ([]unstructured.Unstructured, error) {
-	f.calls = append(f.calls, volumeNodeFacadeCall{gvk: gvk, namespace: namespace, name: name, targetNamespace: targetNamespace})
+func (f *volumeNodeOwnerFacade) RestoreDomainSubtree(ctx context.Context, gvk schema.GroupVersionKind, namespace, name string) ([]unstructured.Unstructured, error) {
+	f.calls = append(f.calls, volumeNodeFacadeCall{gvk: gvk, namespace: namespace, name: name})
 
 	wantGVK := schema.GroupVersionKind{Group: snapshot.CSISnapshotGroup, Version: snapshot.CSISnapshotVersion, Kind: snapshot.KindVolumeSnapshot}
 	if gvk != wantGVK {
@@ -357,8 +360,10 @@ func (f *volumeNodeOwnerFacade) RestoreDomainSubtree(ctx context.Context, gvk sc
 
 	objects, err := transform.CompileNodeManifests(transform.NodeRestoreInput{
 		CapturedManifests: captured,
-		TargetNamespace:   targetNamespace,
-		PVCDataBindings:   ownerPVCDataBindings(content.Status.Data),
+		// The handle this request addresses lives in the request's namespace, and that is the only
+		// namespace its subtree is compiled into.
+		NodeNamespace:   namespace,
+		PVCDataBindings: ownerPVCDataBindings(content.Status.Data),
 		// This handle IS the visibility leaf of the volume its captured PVC used: the durable artifact the
 		// data binding names is the content it is bound to, and this namespaced object is what a restored
 		// PVC can reference.
@@ -463,8 +468,8 @@ func TestBuildManifestsWithDataRestoration_DelegatedVolumeLegKeepsTheWireFormat(
 	if call.gvk != wantGVK {
 		t.Fatalf("delegated identity = %v, want %v", call.gvk, wantGVK)
 	}
-	if call.namespace != "source-ns" || call.name != "vs-orphan" || call.targetNamespace != "restore-ns" {
-		t.Fatalf("delegated call = %s/%s -> %s, want source-ns/vs-orphan -> restore-ns", call.namespace, call.name, call.targetNamespace)
+	if call.namespace != "source-ns" || call.name != "vs-orphan" {
+		t.Fatalf("delegated call = %s/%s, want source-ns/vs-orphan", call.namespace, call.name)
 	}
 
 	if !bytes.Equal(out, volumeLegRestoreOutput) {

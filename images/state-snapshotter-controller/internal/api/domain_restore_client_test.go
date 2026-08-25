@@ -113,7 +113,7 @@ var _ = Describe("DomainRestoreClient.RestoreDomainSubtree", func() {
 		})
 		defer srv.Close()
 
-		objs, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1", "restore-ns")
+		objs, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(objs).To(HaveLen(1))
 		Expect(objs[0].GetName()).To(Equal("restored"))
@@ -125,7 +125,9 @@ var _ = Describe("DomainRestoreClient.RestoreDomainSubtree", func() {
 		Expect(count.Load()).To(Equal(int32(1)))
 		Expect((*seen)[0].path).To(Equal(
 			"/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/src-ns/volumesnapshots/vs-1/manifests-with-data-restoration"))
-		Expect((*seen)[0].query.Get("targetNamespace")).To(Equal("restore-ns"))
+		// The delegated call carries no namespace of its own: a facade compiles its subtree into the
+		// namespace the node is addressed in, which is already in the path.
+		Expect((*seen)[0].query).NotTo(HaveKey("targetNamespace"))
 		// Setting the per-call budget also states it in the request, so the value reaches the wire and is
 		// observable here — this is what pins the 30s decision to the request rather than to a constant
 		// nobody reads.
@@ -150,7 +152,7 @@ var _ = Describe("DomainRestoreClient.RestoreDomainSubtree", func() {
 
 		client.timeout = 100 * time.Millisecond
 		start := time.Now()
-		_, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1", "restore-ns")
+		_, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1")
 		Expect(err).To(HaveOccurred())
 		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
 		Expect(count.Load()).To(Equal(int32(1)))
@@ -167,7 +169,7 @@ var _ = Describe("DomainRestoreClient.RestoreDomainSubtree", func() {
 		})
 		defer srv.Close()
 
-		_, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1", "restore-ns")
+		_, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1")
 		Expect(err).To(HaveOccurred())
 		Expect(count.Load()).To(Equal(int32(1)), "the delegated call must reach the owner exactly once")
 	})

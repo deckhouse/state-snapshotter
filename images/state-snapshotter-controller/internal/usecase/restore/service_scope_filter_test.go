@@ -111,7 +111,7 @@ func newRootNodeServiceReady(t *testing.T, objects []map[string]interface{}, chi
 func cm(name string) map[string]interface{} {
 	return map[string]interface{}{
 		"apiVersion": "v1", "kind": "ConfigMap",
-		"metadata": map[string]interface{}{"name": name, "namespace": "source-ns"},
+		"metadata": map[string]interface{}{"name": name, "namespace": "captured-elsewhere-ns"},
 		"data":     map[string]interface{}{"k": "v"},
 	}
 }
@@ -129,7 +129,7 @@ func TestScopeNode_ReturnsOnlyOwnManifests(t *testing.T) {
 	})
 
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns", Scope: ScopeNode,
+		SnapshotName: "snap", SnapshotNamespace: "source-ns", Scope: ScopeNode,
 	})
 	if err != nil {
 		t.Fatalf("scope=node build: %v", err)
@@ -143,8 +143,8 @@ func TestScopeNode_ReturnsOnlyOwnManifests(t *testing.T) {
 		if u.GetKind() != "ConfigMap" {
 			t.Fatalf("unexpected kind %q in node-only output", u.GetKind())
 		}
-		if u.GetNamespace() != "restore-ns" {
-			t.Fatalf("namespace = %q, want restore-ns", u.GetNamespace())
+		if u.GetNamespace() != "source-ns" {
+			t.Fatalf("namespace = %q, want source-ns", u.GetNamespace())
 		}
 	}
 }
@@ -155,7 +155,7 @@ func TestScopeNodeFilter_Hit(t *testing.T) {
 	svc := newRootNodeService(t, []map[string]interface{}{cm("app-config"), cm("other")}, nil)
 
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "snap", SnapshotNamespace: "source-ns",
 		Scope: ScopeNode, FilterKind: "ConfigMap", FilterName: "app-config",
 	})
 	if err != nil {
@@ -169,8 +169,8 @@ func TestScopeNodeFilter_Hit(t *testing.T) {
 	if u.GetKind() != "ConfigMap" || u.GetName() != "app-config" {
 		t.Fatalf("filter returned %s/%s, want ConfigMap/app-config", u.GetKind(), u.GetName())
 	}
-	if u.GetNamespace() != "restore-ns" {
-		t.Fatalf("filtered object namespace = %q, want restore-ns", u.GetNamespace())
+	if u.GetNamespace() != "source-ns" {
+		t.Fatalf("filtered object namespace = %q, want source-ns", u.GetNamespace())
 	}
 }
 

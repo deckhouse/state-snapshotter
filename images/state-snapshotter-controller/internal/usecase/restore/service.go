@@ -56,24 +56,19 @@ func NewService(kubeClient client.Client, archiveService *usecase.ArchiveService
 
 // BuildManifestsWithDataRestoration is the restore compiler: it walks the Snapshot run tree and
 // compiles apply-ready manifests bottom-up (post-order), rewriting data references so the output can
-// be applied directly into targetNamespace. It never emits VolumeRestoreRequest or other
-// control-plane objects.
+// be applied directly into the namespace of the addressed Snapshot. It never emits VolumeRestoreRequest
+// or other control-plane objects.
 //
 // opts.Scope selects the depth: ScopeSubtree (default) walks the whole run-tree; ScopeNode resolves and
 // compiles ONLY the root node (children are not read). An object filter (opts.FilterKind/Name) further
 // narrows the output to a single object (valid only with ScopeNode; enforced by the handler).
 func (s *Service) BuildManifestsWithDataRestoration(ctx context.Context, opts Options) ([]byte, error) {
-	targetNamespace := opts.TargetNamespace
-	if targetNamespace == "" {
-		targetNamespace = opts.SnapshotNamespace
-	}
-
 	root, err := s.resolveRoot(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := s.compileNode(ctx, root, targetNamespace)
+	result, err := s.compileNode(ctx, root)
 	if err != nil {
 		return nil, err
 	}
@@ -106,14 +101,14 @@ func restoreSubject(root *RestoreNode) string {
 // compileNode compiles a RestoreNode in post-order: children are compiled first so their objects are
 // emitted before the parent, then this node's manifests are loaded and compiled. A domain node is not
 // compiled in-process: its whole subtree is delegated to the domain controller's aggregated apiserver.
-func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetNamespace string) (NodeResult, error) {
+func (s *Service) compileNode(ctx context.Context, node *RestoreNode) (NodeResult, error) {
 	if node.Domain {
-		return s.compileDomainNode(ctx, node, targetNamespace)
+		return s.compileDomainNode(ctx, node)
 	}
 
 	childObjects := make([]unstructured.Unstructured, 0)
 	for _, child := range node.Children {
-		childResult, err := s.compileNode(ctx, child, targetNamespace)
+		childResult, err := s.compileNode(ctx, child)
 		if err != nil {
 			return NodeResult{}, err
 		}
@@ -124,7 +119,7 @@ func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetName
 	if err != nil {
 		return NodeResult{}, err
 	}
-	nodeObjects, err := transformNodeObjects(node, raw, targetNamespace)
+	nodeObjects, err := transformNodeObjects(node, raw)
 	if err != nil {
 		return NodeResult{}, err
 	}
@@ -141,7 +136,7 @@ func (s *Service) compileNode(ctx context.Context, node *RestoreNode, targetName
 // apiserver (it resolves and compiles its own subtree, fetching base manifests from core). The
 // returned objects are already apply-ready; they are spliced as this node's result. It fails closed
 // when no delegate is configured rather than silently dropping the subtree.
-func (s *Service) compileDomainNode(ctx context.Context, node *RestoreNode, targetNamespace string) (NodeResult, error) {
+func (s *Service) compileDomainNode(ctx context.Context, node *RestoreNode) (NodeResult, error) {
 	if s.domainRestorer == nil {
 		return NodeResult{}, fmt.Errorf(
 			"%w: domain snapshot %s %s/%s requires the domain restore delegate, which is not configured",
@@ -149,7 +144,7 @@ func (s *Service) compileDomainNode(ctx context.Context, node *RestoreNode, targ
 		)
 	}
 	gvk := schema.FromAPIVersionAndKind(node.SnapshotRef.APIVersion, node.SnapshotRef.Kind)
-	objects, err := s.domainRestorer.RestoreDomainSubtree(ctx, gvk, node.SnapshotRef.Namespace, node.SnapshotRef.Name, targetNamespace)
+	objects, err := s.domainRestorer.RestoreDomainSubtree(ctx, gvk, node.SnapshotRef.Namespace, node.SnapshotRef.Name)
 	if err != nil {
 		return NodeResult{}, fmt.Errorf(
 			"delegate domain restore for %s %s/%s: %w",

@@ -126,7 +126,7 @@ func TestRestoreHandler_GenericDomainSubresourcesRemoved(t *testing.T) {
 func TestRestoreHandler_BackRefMismatchIsForbidden(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(coreSnapshotScheme()).Build()
 	seedCoreRootSnapshotWithContentBackRef(t, cl, []map[string]interface{}{
-		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "app-config", "namespace": "ns1"}, "data": map[string]interface{}{"k": "v"}},
+		{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]interface{}{"name": "app-config", "namespace": "captured-elsewhere-ns"}, "data": map[string]interface{}{"k": "v"}},
 	}, "someone-else")
 	srv := newCoreSnapshotServer(t, cl)
 	defer srv.Close()

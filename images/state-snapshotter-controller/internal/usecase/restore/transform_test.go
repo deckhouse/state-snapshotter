@@ -56,7 +56,7 @@ func TestTransformNode_PVCWithoutDataRefFailsClosed(t *testing.T) {
 	pvc := pvcManifest("plain-pvc", "source-ns", "uid-plain")
 	node := &RestoreNode{SnapshotRef: snapshot.ObjectRef{Kind: "Snapshot", Name: "snap", Namespace: "source-ns"}, VSCToVS: map[string]string{}}
 
-	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
+	_, err := transformNodeObjects(node, []unstructured.Unstructured{pvc})
 	if err == nil {
 		t.Fatal("expected error: a PVC without a data binding must not be emitted data-less")
 	}
@@ -81,7 +81,7 @@ func TestTransformNode_PVCDataBindingsReachCompilation(t *testing.T) {
 		VSCToVS: map[string]string{"vsc-a": "vs-a"},
 	}
 
-	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc}, "restore-ns")
+	out, err := transformNodeObjects(node, []unstructured.Unstructured{pvc})
 	if err != nil {
 		t.Fatalf("transformNodeObjects: %v", err)
 	}

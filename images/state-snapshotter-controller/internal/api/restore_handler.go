@@ -217,9 +217,12 @@ func (h *RestoreHandler) HandleGetSnapshotManifestsWithDataRestoration(w http.Re
 		restoreapi.WriteError(w, err)
 		return
 	}
+	if err := restoreapi.RejectForeignTargetNamespace(r, namespace); err != nil {
+		restoreapi.WriteError(w, err)
+		return
+	}
 	opts.SnapshotName = snapshotName
 	opts.SnapshotNamespace = namespace
-	opts.TargetNamespace = r.URL.Query().Get("targetNamespace")
 
 	data, err := h.service.BuildManifestsWithDataRestoration(r.Context(), opts)
 	if err != nil {

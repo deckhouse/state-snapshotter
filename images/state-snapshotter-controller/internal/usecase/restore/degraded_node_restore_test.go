@@ -151,7 +151,7 @@ func TestScopeNode_DegradedRootFilterReturnsObject(t *testing.T) {
 		metav1.Condition{Type: snapshot.ConditionReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.ReasonChildSnapshotDeleted})
 
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "snap", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "snap", SnapshotNamespace: "source-ns",
 		Scope: ScopeNode, FilterKind: "ConfigMap", FilterName: "app-config",
 	})
 	if err != nil {
@@ -165,7 +165,7 @@ func TestScopeNode_DegradedRootFilterReturnsObject(t *testing.T) {
 	if u.GetKind() != "ConfigMap" || u.GetName() != "app-config" {
 		t.Fatalf("filter returned %s/%s, want ConfigMap/app-config", u.GetKind(), u.GetName())
 	}
-	if u.GetNamespace() != "restore-ns" {
-		t.Fatalf("filtered object namespace = %q, want restore-ns", u.GetNamespace())
+	if u.GetNamespace() != "source-ns" {
+		t.Fatalf("filtered object namespace = %q, want source-ns", u.GetNamespace())
 	}
 }

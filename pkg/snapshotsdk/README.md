@@ -1060,6 +1060,14 @@ Four rules are checked separately, each a `400`, so a client learns which one it
 `scope`; `kind` without `name` or `name` without `kind`; `apiVersion` without `kind`; any object filter
 together with a `scope` other than `node`.
 
+`restoreapi.RejectForeignTargetNamespace` is the second call every server of this subresource makes, and
+it is not optional. There is no target namespace in the query, but a client can still put one on the
+wire, and what happens then has to be the same on every group. A value naming any namespace other than
+the addressed snapshot's own is a `400`: a subtree is compiled into the namespace of the node addressed,
+so no server can honour it, and answering `200` with objects addressed somewhere else is exactly how a
+caller ends up applying them over the wrong namespace. A value equal to the addressed namespace is
+accepted, because existing clients send it and mean nothing by it.
+
 Failures are answered from the shared vocabulary rather than invented per server — that is what lets a
 client tell "not there" from "not ready, retry" from "you asked wrongly" by status alone:
 

@@ -53,10 +53,19 @@ const partnerDocForeignRole = "d8:use:capability:module:storage-foundation:trans
 // on this module's prefix would skip it silently.
 var partnerDocRoleNameRE = regexp.MustCompile(`d8:use:capability:module:[a-z0-9-]+:[a-z0-9_]+`)
 
-// TestPartnerDocRoleNamesExist checks every capability role the backup integration document names. Names
-// of this module must be published by templates/rbacv2/use/capabilities; the single foreign name must be
-// the pinned one; anything else fails. The roles are read from the templates, so renaming a capability
-// without updating the document is caught here rather than by the reader of the document.
+// TestPartnerDocRoleNamesExist checks every capability role the backup integration document names.
+// Names of this module must be published by the chart, from either of two directories the document has
+// reason to name: templates/rbacv2/use/capabilities, where one role grants one capability, and
+// templates/rbacv2/use/roles, where one role collects several so that a reader binds once instead of
+// six times. The single foreign name must be the pinned one; anything else fails. The roles are read
+// from the templates, so renaming one without updating the document is caught here rather than by the
+// reader of the document.
+//
+// The two directories are listed HERE and not folded into capabilityRolesDir, which feeds the guards
+// that count and pin capabilities: a collecting role is not a capability, and widening that helper
+// would break their counts and drag the collector into a coverage comparison it has no place in. What
+// keeps the second directory from becoming a way to advertise an unpinned role is that its file count
+// is pinned by TestBackupAgentAggregateRoleCollectsOneAxisAndSpreadsThroughNone.
 //
 // LIMIT: this checks that a named role EXISTS, not that the set named in the document is sufficient for
 // the operations it describes. What each role grants is pinned by
@@ -64,13 +73,15 @@ var partnerDocRoleNameRE = regexp.MustCompile(`d8:use:capability:module:[a-z0-9-
 // path is answered by the end-to-end scenario, not by a guard over text.
 func TestPartnerDocRoleNamesExist(t *testing.T) {
 	published := map[string]bool{}
-	for _, file := range templateYAMLFiles(t, capabilityRolesDir(t)) {
-		for _, role := range clusterRolesFromTemplate(t, file) {
-			published[role.Name] = true
+	for _, dir := range []string{capabilityRolesDir(t), aggregateRolesDir(t)} {
+		for _, file := range templateYAMLFiles(t, dir) {
+			for _, role := range clusterRolesFromTemplate(t, file) {
+				published[role.Name] = true
+			}
 		}
 	}
 	if len(published) == 0 {
-		t.Fatal("no capability role read from templates/rbacv2/use/capabilities — with an empty set every documented name would be reported as missing, or none at all")
+		t.Fatal("no role read from templates/rbacv2/use/capabilities or templates/rbacv2/use/roles — with an empty set every documented name would be reported as missing, or none at all")
 	}
 
 	repoRoot := filepath.Clean("../../../../..")
@@ -98,7 +109,7 @@ func TestPartnerDocRoleNamesExist(t *testing.T) {
 		}
 	}
 
-	t.Logf("checked %d role mention(s) of this module and %d of the pinned foreign role across %d document file(s), against %d published capability role(s)",
+	t.Logf("checked %d role mention(s) of this module and %d of the pinned foreign role across %d document file(s), against %d published role(s)",
 		ownChecked, foreignChecked, len(partnerDocFiles), len(published))
 	if ownChecked == 0 {
 		t.Fatal("the backup integration document names no role of this module — zero mentions means the extractor stopped matching, not that the document is correct")

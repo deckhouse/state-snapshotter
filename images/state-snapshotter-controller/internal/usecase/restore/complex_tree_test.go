@@ -87,7 +87,7 @@ func complexTreeScheme() *runtime.Scheme {
 func cmManifest(name string) map[string]interface{} {
 	return map[string]interface{}{
 		"apiVersion": "v1", "kind": "ConfigMap",
-		"metadata": map[string]interface{}{"name": name, "namespace": "source-ns"},
+		"metadata": map[string]interface{}{"name": name, "namespace": "captured-elsewhere-ns"},
 		"data":     map[string]interface{}{"k": "v"},
 	}
 }
@@ -95,7 +95,7 @@ func cmManifest(name string) map[string]interface{} {
 func pvcManifestRaw(name, uid string) map[string]interface{} {
 	return map[string]interface{}{
 		"apiVersion": "v1", "kind": "PersistentVolumeClaim",
-		"metadata": map[string]interface{}{"name": name, "namespace": "source-ns", "uid": uid},
+		"metadata": map[string]interface{}{"name": name, "namespace": "captured-elsewhere-ns", "uid": uid},
 		"spec":     map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}},
 	}
 }
@@ -169,7 +169,8 @@ func materializeRoot(t *testing.T, manifests []map[string]interface{}, orphans [
 }
 
 // recordingDelegate is a stub DomainSubtreeRestorer: it records every delegated call and returns
-// canned objects keyed by snapshot name, namespaced into the requested targetNamespace.
+// canned objects keyed by snapshot name, namespaced into the node's own namespace — the only namespace
+// a subtree is ever compiled into.
 type recordingDelegate struct {
 	byName map[string][]map[string]interface{}
 	err    error
@@ -177,14 +178,13 @@ type recordingDelegate struct {
 }
 
 type delegateCall struct {
-	gvk             schema.GroupVersionKind
-	namespace       string
-	name            string
-	targetNamespace string
+	gvk       schema.GroupVersionKind
+	namespace string
+	name      string
 }
 
-func (d *recordingDelegate) RestoreDomainSubtree(_ context.Context, gvk schema.GroupVersionKind, namespace, name, targetNamespace string) ([]unstructured.Unstructured, error) {
-	d.calls = append(d.calls, delegateCall{gvk: gvk, namespace: namespace, name: name, targetNamespace: targetNamespace})
+func (d *recordingDelegate) RestoreDomainSubtree(_ context.Context, gvk schema.GroupVersionKind, namespace, name string) ([]unstructured.Unstructured, error) {
+	d.calls = append(d.calls, delegateCall{gvk: gvk, namespace: namespace, name: name})
 	if d.err != nil {
 		return nil, d.err
 	}
@@ -192,7 +192,7 @@ func (d *recordingDelegate) RestoreDomainSubtree(_ context.Context, gvk schema.G
 	out := make([]unstructured.Unstructured, 0, len(raw))
 	for _, o := range raw {
 		u := unstructured.Unstructured{Object: deepCopyMap(o)}
-		u.SetNamespace(targetNamespace)
+		u.SetNamespace(namespace)
 		out = append(out, u)
 	}
 	return out, nil
@@ -236,7 +236,7 @@ func hasObj(objs []map[string]interface{}, kind, name string) bool {
 // TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees compiles a generic root (ConfigMap +
 // orphan PVC) with two top-level domain children (a VM snapshot and a standalone disk snapshot). Core
 // compiles the root in-process and delegates each domain subtree; the spliced output is apply-ready,
-// post-order, and in the target namespace.
+// post-order, and addressed into the namespace of the addressed snapshot.
 func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T) {
 	// Variant A: the orphan PVC manifest now lives on its own child volume node's MCP (materializeRoot
 	// seeds it from the orphanLeaf), so the root MCP carries only the ConfigMap.
@@ -261,7 +261,7 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 
 	svc := newServiceWithDelegate(t, objs, delegate)
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err != nil {
 		t.Fatalf("BuildManifestsWithDataRestoration: %v", err)
@@ -289,25 +289,26 @@ func TestBuildManifestsWithDataRestoration_DelegatesDomainSubtrees(t *testing.T)
 		}
 	}
 
-	// Everything is in the target namespace and carries no control-plane kinds.
+	// Everything is addressed into the namespace of the addressed snapshot (NOT the namespace the
+	// manifests were captured in) and carries no control-plane kinds.
 	for _, o := range objects {
 		u := unstructured.Unstructured{Object: o}
 		switch u.GetKind() {
 		case "VolumeSnapshot", "VolumeSnapshotContent", "Snapshot", "SnapshotContent":
 			t.Fatalf("control-plane kind %s must not be emitted", u.GetKind())
 		}
-		if u.GetNamespace() != "restore-ns" {
-			t.Fatalf("%s/%s namespace = %q, want restore-ns", u.GetKind(), u.GetName(), u.GetNamespace())
+		if u.GetNamespace() != "source-ns" {
+			t.Fatalf("%s/%s namespace = %q, want source-ns", u.GetKind(), u.GetName(), u.GetNamespace())
 		}
 	}
 
-	// Each top-level domain child was delegated exactly once with the right identity + targetNamespace.
+	// Each top-level domain child was delegated exactly once with the right identity.
 	if len(delegate.calls) != 2 {
 		t.Fatalf("expected 2 delegate calls, got %d", len(delegate.calls))
 	}
 	for _, c := range delegate.calls {
-		if c.namespace != "source-ns" || c.targetNamespace != "restore-ns" {
-			t.Fatalf("delegate call %s/%s: namespace=%q targetNamespace=%q", c.gvk.Kind, c.name, c.namespace, c.targetNamespace)
+		if c.namespace != "source-ns" {
+			t.Fatalf("delegate call %s/%s: namespace=%q, want source-ns", c.gvk.Kind, c.name, c.namespace)
 		}
 		if c.gvk.Group != "sds-unified-snapshots-poc.deckhouse.io" {
 			t.Fatalf("delegate call gvk group = %q, want demo group", c.gvk.Group)
@@ -339,7 +340,7 @@ func TestBuildManifestsWithDataRestoration_DuplicateAcrossDelegatedFailsClosed(t
 	}}
 	svc := newServiceWithDelegate(t, objs, delegate)
 	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatal("expected duplicate object across delegated + root to fail closed")
@@ -360,7 +361,7 @@ func TestBuildManifestsWithDataRestoration_DelegateErrorFailsClosed(t *testing.T
 	delegate := &recordingDelegate{err: errors.New("domain apiserver unavailable")}
 	svc := newServiceWithDelegate(t, objs, delegate)
 	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatal("expected delegate error to fail the whole restore")
@@ -381,7 +382,7 @@ func TestBuildManifestsWithDataRestoration_NoDelegateFailsClosed(t *testing.T) {
 	// isDomainKind set, but no delegate wired.
 	svc := NewService(cl, arch, nil, isDemoSnapshotKind)
 	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatal("expected fail-closed when a domain node has no delegate configured")
@@ -402,7 +403,7 @@ func TestBuildManifestsWithDataRestoration_RootNotReadyFailsClosed(t *testing.T)
 	delegate := &recordingDelegate{byName: map[string][]map[string]interface{}{"disk-x-snap": {cmManifest("d")}}}
 	svc := newServiceWithDelegate(t, objs, delegate)
 	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatal("expected not-Ready root content to fail closed")
@@ -488,7 +489,7 @@ func materializeRootWithDelegatedVolumeNodes(t *testing.T, manifests []map[strin
 
 // TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes proves the volume leg of a tree is answered by
 // the module that owns the kind and spliced in, exactly like any other delegated subtree: the delegate is
-// called with the CSI VolumeSnapshot identity, its objects reach the output in the target namespace, and
+// called with the CSI VolumeSnapshot identity, its objects reach the output in the node's namespace, and
 // they precede the root's own objects (post-order).
 func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
 	objs := materializeRootWithDelegatedVolumeNodes(t, []map[string]interface{}{cmManifest("config")}, []string{"vs-shared"})
@@ -512,7 +513,7 @@ func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
 	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
 
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err != nil {
 		t.Fatalf("BuildManifestsWithDataRestoration: %v", err)
@@ -527,8 +528,8 @@ func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
 	if call.gvk != wantGVK {
 		t.Fatalf("delegated identity = %v, want %v", call.gvk, wantGVK)
 	}
-	if call.namespace != "source-ns" || call.name != "vs-shared" || call.targetNamespace != "restore-ns" {
-		t.Fatalf("delegated call = %s/%s -> %s, want source-ns/vs-shared -> restore-ns", call.namespace, call.name, call.targetNamespace)
+	if call.namespace != "source-ns" || call.name != "vs-shared" {
+		t.Fatalf("delegated call = %s/%s, want source-ns/vs-shared", call.namespace, call.name)
 	}
 
 	if !hasObj(objects, "PersistentVolumeClaim", "delegated-pvc") {
@@ -539,8 +540,8 @@ func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
 	}
 	for _, o := range objects {
 		u := unstructured.Unstructured{Object: o}
-		if u.GetNamespace() != "restore-ns" {
-			t.Fatalf("%s/%s namespace = %q, want restore-ns", u.GetKind(), u.GetName(), u.GetNamespace())
+		if u.GetNamespace() != "source-ns" {
+			t.Fatalf("%s/%s namespace = %q, want source-ns", u.GetKind(), u.GetName(), u.GetNamespace())
 		}
 	}
 	// Post-order is unchanged by which side compiled the node: the volume node's objects come before the
@@ -564,7 +565,7 @@ func TestBuildManifestsWithDataRestoration_VolumeNodeDelegateErrorFailsClosed(t 
 	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
 
 	out, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatalf("expected the unavailable owner to fail the whole restore, got output %s", out)
@@ -595,7 +596,7 @@ func TestBuildManifestsWithDataRestoration_VolumeNodeNoDelegateFailsClosed(t *te
 	svc := NewService(cl, arch, nil, isOutOfProcessRestoreKind(t))
 
 	_, err := svc.BuildManifestsWithDataRestoration(context.Background(), Options{
-		SnapshotName: "app", SnapshotNamespace: "source-ns", TargetNamespace: "restore-ns",
+		SnapshotName: "app", SnapshotNamespace: "source-ns",
 	})
 	if err == nil {
 		t.Fatal("expected fail-closed when the volume node has no delegate configured")

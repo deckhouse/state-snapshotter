@@ -33,10 +33,10 @@ import (
 // manifests must therefore be backed by a dataRefs -> VolumeSnapshot binding, and one that is not aborts
 // the request instead of restoring an empty volume. Guarded by
 // TestTransformNode_PVCWithoutDataRefFailsClosed.
-func transformNodeObjects(node *RestoreNode, captured []unstructured.Unstructured, targetNamespace string) ([]unstructured.Unstructured, error) {
+func transformNodeObjects(node *RestoreNode, captured []unstructured.Unstructured) ([]unstructured.Unstructured, error) {
 	return transform.CompileNodeManifests(transform.NodeRestoreInput{
 		CapturedManifests:           captured,
-		TargetNamespace:             targetNamespace,
+		NodeNamespace:               node.SnapshotRef.Namespace,
 		PVCDataBindings:             pvcDataBindings(node.DataBindings),
 		VolumeSnapshotByContentName: node.VSCToVS,
 	})

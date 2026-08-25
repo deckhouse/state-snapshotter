@@ -8,17 +8,22 @@
 # describes one user operation: restoring a subtree compiles nodes of both kinds, and splitting the
 # grant per module would refuse the volume leg with 403 and hand back a partial tree.
 #
-# Like upload_snapshots, this role carries NO aggregation label. An aggregation label hands the
-# capability to everyone who already holds the matching cluster-wide role, and a tool that rewrites a
-# whole subtree for application into another namespace is not something such a holder asked for by
-# having this module installed. The role is granted by an explicit binding, to a subject chosen for
-# it, and is deliberately absent from any set of rights composed by aggregation.
+# This role carries no rbac.deckhouse.io/aggregate-to-kubernetes-as label and must not: that axis
+# hands the capability to everyone who already holds the matching cluster-wide role, and reading a
+# whole subtree rewritten for application into another namespace is not something such a holder
+# asked for by having this module installed.
+#
+# It does carry rbac.deckhouse.io/aggregate-to-backup-agent-as, so it is part of the set an external
+# backup product is granted in one binding. That axis hands the capability to nobody by itself: the
+# role collecting it grants nothing until a RoleBinding names it, which is what keeps this
+# capability with the subject chosen for it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     heritage: deckhouse
     module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-backup-agent-as: member
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:state-snapshotter:restore_snapshots
 rules:
