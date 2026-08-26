@@ -1,10 +1,15 @@
 Changes:
-- General Availability level release. state-snapshotter has been translated into GA
-  and is automatically enabled in the Default, Managed and Minimal bundles (basic
-  backup functionality is always available).
-- This version v1.0.0 is the base version on which the storage-foundation module (requirements.modules
-  state-snapshotter >= 1.0.0) is pinned, building its own snapshot domain on top of
-  it.
-- Requires Deckhouse >= 1.76.9 (consistent with the unified snapshots stack that ships
-  the d8 compatible CLI). The module is no longer activated on clusters below 1.76.9,
-  including the Minimal bundle.
+  - First release, at the General Availability level. The module captures the entire state of a
+    namespace, both its object manifests and its volume data. A snapshot is a tree in which each node
+    is served by the module that owns it.
+  - An object that must not go into a snapshot carries the state-snapshotter.deckhouse.io/exclude
+    label. The value of the label is ignored; the key alone is enough.
+  - A snapshot can be downloaded and uploaded back, and the module hands out its manifests ready to
+    apply, with references already rewritten. The module does not resolve conflicts with what the
+    target namespace already holds; a client does that, either d8 or the web console.
+  - Enabled automatically in the Default, Managed and Minimal bundles, so basic backup functionality
+    is always available.
+  - Requires Deckhouse >= 1.76.9, the release that ships a compatible d8 CLI. On anything earlier the
+    module does not activate.
+  - Snapshots are not for the cluster administrator alone. Anyone granted the matching permissions can
+    work with them.
