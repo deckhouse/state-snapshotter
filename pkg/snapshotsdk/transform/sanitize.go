@@ -168,6 +168,18 @@ func stripKindSpecificFields(out *unstructured.Unstructured) {
 			unstructured.RemoveNestedField(out.Object, "spec", "dataSource")
 			unstructured.RemoveNestedField(out.Object, "spec", "dataSourceRef")
 		}
+	case "Pod":
+		if out.GetAPIVersion() == "v1" {
+			// spec.nodeName on a running Pod is the scheduler's decision, not the author's. A restored
+			// Pod that still carries it is already "scheduled" as far as the scheduler is concerned, so
+			// the scheduler never runs for it — and the scheduler is the only writer of the
+			// volume.kubernetes.io/selected-node annotation that WaitForFirstConsumer provisioning waits
+			// for. Keeping the field therefore deadlocks the very claims whose source-cluster pinning is
+			// stripped above: nothing re-pins them, so they stay Pending and the Pod never mounts them.
+			// Only the Pod kind is sanitized here, so a nodeName a user wrote into a workload
+			// controller's pod template is left alone.
+			unstructured.RemoveNestedField(out.Object, "spec", "nodeName")
+		}
 	case "Service":
 		if out.GetAPIVersion() == "v1" {
 			// clusterIP(s)/ipFamilies/loadBalancerIP and per-port nodePort are allocated by the

@@ -152,6 +152,51 @@ func TestSanitizeForRestore_StripsKindSpecificFields(t *testing.T) {
 	if _, ok := svcSpec["selector"]; !ok {
 		t.Fatal("Service spec.selector must be preserved")
 	}
+
+	pod := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata":   map[string]interface{}{"name": "consumer", "namespace": "source-ns"},
+		"spec": map[string]interface{}{
+			"nodeName":     "node-1",
+			"nodeSelector": map[string]interface{}{"kubernetes.io/hostname": "node-1"},
+			"containers":   []interface{}{map[string]interface{}{"name": "box", "image": "busybox"}},
+		},
+	}}
+	podOut, _ := SanitizeForRestore(pod, "", "restore-ns")
+	podSpec, _ := podOut.Object["spec"].(map[string]interface{})
+	if _, ok := podSpec["nodeName"]; ok {
+		t.Fatal("Pod spec.nodeName should have been stripped")
+	}
+	for _, f := range []string{"nodeSelector", "containers"} {
+		if _, ok := podSpec[f]; !ok {
+			t.Fatalf("Pod spec.%s must be preserved", f)
+		}
+	}
+}
+
+// TestSanitizeForRestore_KeepsNodeNameInAWorkloadPodTemplate separates the two meanings of one field
+// name: on a Pod it is what the scheduler wrote, inside a controller's pod template it is what the
+// author wrote, and only the first is stripped.
+func TestSanitizeForRestore_KeepsNodeNameInAWorkloadPodTemplate(t *testing.T) {
+	deployment := unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]interface{}{"name": "web", "namespace": "source-ns"},
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{"nodeName": "node-1"},
+			},
+		},
+	}}
+	out, keep := SanitizeForRestore(deployment, "", "restore-ns")
+	if !keep {
+		t.Fatal("Deployment must be kept")
+	}
+	nodeName, found, err := unstructured.NestedString(out.Object, "spec", "template", "spec", "nodeName")
+	if err != nil || !found || nodeName != "node-1" {
+		t.Fatalf("pod template spec.nodeName = %q (found=%v, err=%v), want it preserved", nodeName, found, err)
+	}
 }
 
 func TestSanitizeForRestore_StripsRestoreBreakingAnnotations(t *testing.T) {
