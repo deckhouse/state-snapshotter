@@ -1,6 +1,6 @@
 module github.com/deckhouse/state-snapshotter/lib/go/common
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/sirupsen/logrus v1.9.3
