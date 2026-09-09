@@ -22,12 +22,12 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/sirupsen/logrus"
-	kwhlogrus "github.com/slok/kubewebhook/v2/pkg/log/logrus"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/webhooks/handlers"
 )
@@ -58,9 +58,16 @@ const (
 )
 
 func main() {
-	logrusLogEntry := logrus.NewEntry(logrus.New())
-	logrusLogEntry.Logger.SetLevel(logrus.DebugLevel)
-	logger := kwhlogrus.NewLogrus(logrusLogEntry)
+	// LOG_LEVEL arrives as a number 0..4 from lib-helm, which is what the
+	// controller container in this same pod already reads. This webhook used to
+	// ignore it, so its level was whatever main hard-coded no matter what the
+	// module setting said.
+	log, err := logger.NewLoggerFromEnv(logger.InfoLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unable to create the logger: %s\n", err)
+		os.Exit(1)
+	}
+	kwhLog := kwhlogger.New(log)
 
 	cfg := initFlags()
 
@@ -92,7 +99,7 @@ func main() {
 		handlers.MCRValidate,
 		MCRValidatorID,
 		&storagev1alpha1.ManifestCaptureRequest{},
-		logger,
+		kwhLog,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating mcrValidatingWebhookHandler: %s", err)
@@ -103,7 +110,7 @@ func main() {
 	mux.Handle("/validate", mcrValidatingWebhookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
-	logger.Infof("Listening on %s", port)
+	log.Info("listening", "address", port)
 	err = http.ListenAndServeTLS(port, cfg.certFile, cfg.keyFile, mux)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error serving webhook: %s", err)

@@ -12,14 +12,15 @@ spec:
     protocol: TCP
     name: https
     appProtocol: https
-  - port: 8080
-    targetPort: metrics
+  # The port of the kube-rbac-proxy, not of the controller: the controller keeps
+  # its metrics on 127.0.0.1 and only the proxy can reach them.
+  - port: {{ .Values.stateSnapshotter.internal.controllerMetricsProxyPort }}
+    targetPort: https-metrics
     protocol: TCP
-    name: metrics
-  - port: 8081
-    targetPort: health
-    protocol: TCP
-    name: health
+    name: https-metrics
+  {{- /* No health port here: /healthz and /readyz are for kubelet, which reaches the
+         pod directly. Publishing them through the Service only made two unauthenticated
+         endpoints reachable from the whole pod network. */}}
   selector:
     app: controller
 

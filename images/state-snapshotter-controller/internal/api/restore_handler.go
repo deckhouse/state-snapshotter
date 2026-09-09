@@ -31,10 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/restoreapi"
 )
 
@@ -51,12 +51,12 @@ func storageSnapshotGVK() schema.GroupVersionKind {
 type RestoreHandler struct {
 	client       client.Client
 	service      *restore.Service
-	logger       logger.LoggerInterface
+	logger       logger.Logger
 	nsAggregated *usecase.AggregatedNamespaceManifests
 	importUpload *usecase.ImportUploadService
 }
 
-func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.LoggerInterface, nsAggregated *usecase.AggregatedNamespaceManifests, importUpload *usecase.ImportUploadService) *RestoreHandler {
+func NewRestoreHandler(client client.Client, service *restore.Service, logger logger.Logger, nsAggregated *usecase.AggregatedNamespaceManifests, importUpload *usecase.ImportUploadService) *RestoreHandler {
 	return &RestoreHandler{
 		client:       client,
 		service:      service,

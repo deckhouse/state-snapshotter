@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/csd"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/genericbinder"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
@@ -34,7 +35,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotcontent"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 type GenericSnapshotBinderController = genericbinder.GenericSnapshotBinderController
@@ -67,7 +67,7 @@ func NewManifestCheckpointController(
 	c client.Client,
 	apiReader client.Reader,
 	scheme *runtime.Scheme,
-	log logger.LoggerInterface,
+	log logger.Logger,
 	cfg *config.Options,
 ) (*ManifestCheckpointController, error) {
 	return manifestcapture.NewManifestCheckpointController(c, apiReader, scheme, log, cfg)
@@ -76,7 +76,7 @@ func NewManifestCheckpointController(
 func NewCustomSnapshotDefinitionReconciler(
 	c client.Client,
 	scheme *runtime.Scheme,
-	log logger.LoggerInterface,
+	log logger.Logger,
 	cfg *config.Options,
 ) (*CustomSnapshotDefinitionReconciler, error) {
 	return csd.NewCustomSnapshotDefinitionReconciler(c, scheme, log, cfg)
@@ -104,7 +104,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 // When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddManifestCheckpointControllerToManager(
 	mgr ctrl.Manager,
-	log logger.LoggerInterface,
+	log logger.Logger,
 	cfg *config.Options,
 ) error {
 	reconciler, err := manifestcapture.NewManifestCheckpointController(
@@ -138,7 +138,7 @@ func AddManifestCheckpointControllerToManager(
 // graph code picks up new eligible CSD pairs without restarting the pod.
 func AddCustomSnapshotDefinitionControllerToManager(
 	mgr ctrl.Manager,
-	log logger.LoggerInterface,
+	log logger.Logger,
 	cfg *config.Options,
 	unifiedRuntimeSync func(context.Context) error,
 	graphRegistryRefresh func(context.Context) error,

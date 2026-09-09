@@ -23,10 +23,10 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // apiServerName identifies this aggregated apiserver in genericapiserver logging.
@@ -39,7 +39,7 @@ type Server struct {
 	addr           string
 	handler        http.Handler
 	archiveHandler *ArchiveHandler
-	logger         logger.LoggerInterface
+	logger         logger.Logger
 	tlsCertFile    string
 	tlsKeyFile     string
 }
@@ -55,7 +55,7 @@ type Server struct {
 // Authentication (front-proxy requestheader + TokenReview) and authorization (SubjectAccessReview) are
 // provided by genericapiserver's delegated authn/authz, wired in Start; NewServer only assembles the
 // route handlers so it stays cheap and unit-testable (no port bind, no in-cluster lookup).
-func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.LoggerInterface, graphRegistry snapshotgraphregistry.LiveReader, domainRestorer restore.DomainSubtreeRestorer, isDomainKind func(kind string) bool, tlsCertFile, tlsKeyFile string) *Server {
+func NewServer(addr string, _ client.Client, directClient client.Client, logger logger.Logger, graphRegistry snapshotgraphregistry.LiveReader, domainRestorer restore.DomainSubtreeRestorer, isDomainKind func(kind string) bool, tlsCertFile, tlsKeyFile string) *Server {
 	// Create archive service with directClient for all operations
 	// directClient is used for both ManifestCheckpoint and chunks to avoid informer requirements
 	archiveService := usecase.NewArchiveService(directClient, directClient, logger)
@@ -86,7 +86,7 @@ func NewServer(addr string, _ client.Client, directClient client.Client, logger 
 }
 
 // loggingMiddleware adds request logging to HTTP handlers
-func loggingMiddleware(next http.Handler, logger logger.LoggerInterface) http.Handler {
+func loggingMiddleware(next http.Handler, logger logger.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 

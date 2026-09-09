@@ -20,6 +20,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -30,20 +31,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // ArchiveHandler handles HTTP requests for archive operations
 type ArchiveHandler struct {
 	client         client.Client
 	archiveService *usecase.ArchiveService
-	logger         logger.LoggerInterface
+	logger         logger.Logger
 }
 
 // NewArchiveHandler creates a new ArchiveHandler
-func NewArchiveHandler(client client.Client, archiveService *usecase.ArchiveService, logger logger.LoggerInterface) *ArchiveHandler {
+func NewArchiveHandler(client client.Client, archiveService *usecase.ArchiveService, logger logger.Logger) *ArchiveHandler {
 	return &ArchiveHandler{
 		client:         client,
 		archiveService: archiveService,
@@ -93,7 +94,7 @@ func (h *ArchiveHandler) HandleAPIGroupDiscovery(w http.ResponseWriter, r *http.
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(apiGroup); err != nil {
-		h.logger.Error(err, "Failed to encode APIGroup response")
+		h.logger.Error("Failed to encode APIGroup response", logger.Err(err))
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "Failed to encode response")
 		return
 	}
@@ -178,7 +179,7 @@ func (h *ArchiveHandler) HandleAPIResourceListDiscovery(w http.ResponseWriter, r
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(apiResourceList); err != nil {
-		h.logger.Error(err, "Failed to encode APIResourceList response")
+		h.logger.Error("Failed to encode APIResourceList response", logger.Err(err))
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", "Failed to encode response")
 		return
 	}
@@ -212,7 +213,7 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 			_ = json.NewEncoder(w).Encode(status)
 			return
 		}
-		h.logger.Error(err, "Failed to get checkpoint", "checkpoint", checkpointName)
+		h.logger.Error("Failed to get checkpoint", logger.Err(err), slog.String("checkpoint", checkpointName))
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("failed to get checkpoint: %v", err))
 		return
 	}
@@ -224,7 +225,7 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 		if readyCondition != nil {
 			reason = readyCondition.Reason
 		}
-		h.logger.Warning("Checkpoint is not ready",
+		h.logger.Warn("Checkpoint is not ready",
 			"checkpoint", checkpointName,
 			"reason", reason)
 		h.writeKubernetesErrorResponse(w, http.StatusConflict, "Conflict", fmt.Sprintf("checkpoint not ready: reason=%s", reason))
@@ -239,7 +240,7 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 
 	archiveData, _, err := h.archiveService.GetArchiveFromCheckpoint(r.Context(), &checkpoint, req)
 	if err != nil {
-		h.logger.Error(err, "Failed to get archive", "checkpoint", checkpointName)
+		h.logger.Error("Failed to get archive", logger.Err(err), slog.String("checkpoint", checkpointName))
 		h.writeKubernetesErrorResponse(w, http.StatusInternalServerError, "InternalError", fmt.Sprintf("failed to get archive: %v", err))
 		return
 	}
@@ -254,12 +255,12 @@ func (h *ArchiveHandler) HandleGetManifests(w http.ResponseWriter, r *http.Reque
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
 		if _, err := gz.Write(archiveData); err != nil {
-			h.logger.Error(err, "Failed to write gzipped response", "checkpoint", checkpointName)
+			h.logger.Error("Failed to write gzipped response", logger.Err(err), slog.String("checkpoint", checkpointName))
 			return
 		}
 	} else {
 		if _, err := w.Write(archiveData); err != nil {
-			h.logger.Error(err, "Failed to write response", "checkpoint", checkpointName)
+			h.logger.Error("Failed to write response", logger.Err(err), slog.String("checkpoint", checkpointName))
 			return
 		}
 	}

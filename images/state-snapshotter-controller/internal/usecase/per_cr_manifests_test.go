@@ -25,9 +25,9 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // perCRNodeFixture installs a root SnapshotContent (with one child) whose own MCP holds a single object,
@@ -35,7 +35,7 @@ import (
 func perCRNodeFixture(t *testing.T) *AggregatedNamespaceManifests {
 	t.Helper()
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
 
@@ -124,7 +124,7 @@ func TestBuildSingleNodeJSONFromContent_ChildNodeOwnOnly(t *testing.T) {
 // reconstructed MCP (including those without metadata.namespace) are returned verbatim on download.
 func TestBuildSingleNodeJSON_ImportReconstructedObjectsKept(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	arch := NewArchiveService(cl, cl, log)
 	ctx := context.Background()
@@ -167,7 +167,7 @@ func TestBuildSingleNodeJSON_ImportReconstructedObjectsKept(t *testing.T) {
 // namespace and status intact — the shape DataImport needs for PVC parameter extraction.
 func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&ssv1alpha1.ManifestCheckpoint{}).
@@ -246,7 +246,7 @@ func TestBuildSingleNodeJSON_DownloadUploadRoundTripPreservesRawFields(t *testin
 
 func TestBuildSingleNodeJSON_Errors(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	ctx := context.Background()
 
 	t.Run("content not found 404", func(t *testing.T) {
@@ -279,7 +279,7 @@ func TestBuildSingleNodeJSON_Errors(t *testing.T) {
 // matching back-ref serves the root's own manifests; a mismatched or missing one is fail-closed 403.
 func TestBuildSingleNodeJSONForRootSnapshot_BackRef(t *testing.T) {
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 
 	newAgg := func(t *testing.T, ref *storagev1alpha1.SnapshotSubjectRef) *AggregatedNamespaceManifests {
 		t.Helper()

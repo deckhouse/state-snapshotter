@@ -30,8 +30,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // volumeSnapshotDelegateGVK is the snapshot kind whose restore this module delegates to the module that
@@ -74,8 +74,7 @@ func newDelegateAgainst(respond func(w http.ResponseWriter, r *http.Request)) (*
 		respond(w, r)
 	}))
 
-	log, err := logger.NewLogger("error")
-	Expect(err).NotTo(HaveOccurred())
+	log := logger.NewNop()
 	client, err := NewDomainRestoreClient(&rest.Config{Host: srv.URL}, delegateRESTMapper(), log)
 	Expect(err).NotTo(HaveOccurred())
 	return client, srv, &count, seen

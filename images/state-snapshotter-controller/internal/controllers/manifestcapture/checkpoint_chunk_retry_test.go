@@ -37,11 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // failChunkCreate returns an interceptor that fails Create on ManifestCheckpointContentChunk objects
@@ -67,7 +67,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 		ctx        context.Context
 		scheme     *runtime.Scheme
 		cfg        *config.Options
-		testLogger logger.LoggerInterface
+		testLogger logger.Logger
 	)
 
 	BeforeEach(func() {
@@ -82,10 +82,7 @@ var _ = Describe("ManifestCaptureRequest chunk creation resilience", func() {
 			DefaultTTLStr:     "10m",
 			MaxChunkSizeBytes: 800000,
 		}
-
-		var err error
-		testLogger, err = logger.NewLogger("info")
-		Expect(err).ToNot(HaveOccurred())
+		testLogger = logger.NewNop()
 	})
 
 	newController := func(c ctrlclient.Client) *ManifestCheckpointController {

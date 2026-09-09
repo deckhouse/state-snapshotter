@@ -24,8 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // ManifestCaptureService handles creation of ManifestCaptureRequest
@@ -35,11 +35,11 @@ import (
 // - Update existing MCR targets (targets are immutable)
 type ManifestCaptureService struct {
 	client client.Client
-	logger logger.LoggerInterface
+	logger logger.Logger
 }
 
 // NewManifestCaptureService creates a new ManifestCaptureService
-func NewManifestCaptureService(client client.Client, logger logger.LoggerInterface) *ManifestCaptureService {
+func NewManifestCaptureService(client client.Client, logger logger.Logger) *ManifestCaptureService {
 	return &ManifestCaptureService{
 		client: client,
 		logger: logger,

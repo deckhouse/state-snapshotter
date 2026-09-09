@@ -35,13 +35,13 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // TestManifestCaptureRequestGinkgo is the single entry point for all Ginkgo tests
@@ -104,7 +104,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 		ctrl       *ManifestCheckpointController
 		scheme     *runtime.Scheme
 		cfg        *config.Options
-		testLogger logger.LoggerInterface
+		testLogger logger.Logger
 	)
 
 	BeforeEach(func() {
@@ -123,11 +123,9 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
+		testLogger = logger.NewNop()
 
 		var err error
-		testLogger, err = logger.NewLogger("info")
-		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
-		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
 		ctrl, err = NewManifestCheckpointController(
 			baseClient,
 			baseClient, // Use same client for APIReader in tests
@@ -946,8 +944,7 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 			}
 			Expect(client.Create(ctx, oldObjectKeeper)).To(Succeed())
 
-			testLogger, err := logger.NewLogger("info")
-			Expect(err).NotTo(HaveOccurred())
+			testLogger := logger.NewNop()
 			ctrl, err := NewManifestCheckpointController(client, client, scheme, testLogger, &config.Options{
 				DefaultTTL:    10 * time.Minute,
 				DefaultTTLStr: "10m",
@@ -973,11 +970,12 @@ var _ = Describe("ManifestCaptureRequest ObjectKeeper", func() {
 
 var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", func() {
 	var (
-		ctx    context.Context
-		client ctrlclient.Client
-		ctrl   *ManifestCheckpointController
-		scheme *runtime.Scheme
-		cfg    *config.Options
+		ctx        context.Context
+		client     ctrlclient.Client
+		ctrl       *ManifestCheckpointController
+		scheme     *runtime.Scheme
+		cfg        *config.Options
+		testLogger logger.Logger
 	)
 
 	BeforeEach(func() {
@@ -998,9 +996,9 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
 
-		testLogger, err := logger.NewLogger("info")
-		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
-		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
+		testLogger = logger.NewNop()
+
+		var err error
 		ctrl, err = NewManifestCheckpointController(
 			client,
 			client, // Use same client for APIReader in tests
@@ -1519,7 +1517,7 @@ var _ = Describe("Ready Condition Semantics", func() {
 		reconciler *ManifestCheckpointController
 		scheme     *runtime.Scheme
 		cfg        *config.Options
-		testLogger logger.LoggerInterface
+		testLogger logger.Logger
 	)
 
 	BeforeEach(func() {
@@ -1540,12 +1538,9 @@ var _ = Describe("Ready Condition Semantics", func() {
 			WithRESTMapper(testRESTMapper()).
 			WithStatusSubresource(&storagev1alpha1.ManifestCaptureRequest{}).
 			Build()
+		testLogger = logger.NewNop()
 
 		var err error
-		testLogger, err = logger.NewLogger("info")
-		Expect(err).ToNot(HaveOccurred(), "Failed to create logger")
-		Expect(testLogger).ToNot(BeNil(), "Logger must not be nil")
-
 		reconciler, err = NewManifestCheckpointController(
 			k8sClient,
 			k8sClient, // Use same client for APIReader in tests

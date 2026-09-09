@@ -26,7 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 func TestServer(t *testing.T) {
@@ -39,14 +39,12 @@ func TestServer(t *testing.T) {
 // exercised here.
 var _ = Describe("NewServer", func() {
 	var (
-		log        logger.LoggerInterface
+		log        logger.Logger
 		fakeClient client.Client
 	)
 
 	BeforeEach(func() {
-		var err error
-		log, err = logger.NewLogger("ERROR")
-		Expect(err).NotTo(HaveOccurred())
+		log = logger.NewNop()
 		fakeClient = fake.NewClientBuilder().Build()
 	})
 

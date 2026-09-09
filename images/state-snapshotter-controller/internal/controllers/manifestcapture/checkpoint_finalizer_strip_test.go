@@ -31,10 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // decodeChunkObjects base64-decodes + gunzips a chunk's Spec.Data back into the captured object list,
@@ -76,10 +76,7 @@ func TestCreateChunks_StripsTransientCaptureFinalizerVerbatimRest(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	testLogger, err := logger.NewLogger("info")
-	if err != nil {
-		t.Fatal(err)
-	}
+	testLogger := logger.NewNop()
 	cfg := &config.Options{DefaultTTL: 10 * time.Minute, DefaultTTLStr: "10m", MaxChunkSizeBytes: 800000}
 
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()

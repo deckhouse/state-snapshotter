@@ -18,7 +18,6 @@ package api //nolint:revive // package name matches internal/api directory
 
 import (
 	"encoding/json"
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,7 +30,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 // TestRoutedSubresourcesMatchDiscovery holds the namespaced subresource routers and the discovery
@@ -336,24 +335,16 @@ func advertisedSubresources(t *testing.T, mux *http.ServeMux, discoveryURL, reso
 func servedDiscoveryMux(t *testing.T) *http.ServeMux {
 	t.Helper()
 
-	mux, err := newServedDiscoveryMux()
-	if err != nil {
-		t.Fatalf("mount the served routes: %v", err)
-	}
-	return mux
+	return newServedDiscoveryMux()
 }
 
 // newServedDiscoveryMux mounts the production routes on a fresh mux. It is framework-agnostic so that the
 // specs which need the SAME delegate — the OpenAPI ones, which run under Ginkgo and have no *testing.T —
 // mount it through this function instead of keeping a second copy of the wiring.
-func newServedDiscoveryMux() (*http.ServeMux, error) {
-	log, err := logger.NewLogger("error")
-	if err != nil {
-		return nil, fmt.Errorf("create logger: %w", err)
-	}
+func newServedDiscoveryMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	NewArchiveHandler(nil, nil, log).SetupRoutes(mux)
-	return mux, nil
+	NewArchiveHandler(nil, nil, logger.NewNop()).SetupRoutes(mux)
+	return mux
 }
 
 func contains(values []string, want string) bool {

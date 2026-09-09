@@ -32,9 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // CSD condition types.
@@ -75,7 +75,7 @@ type CustomSnapshotDefinitionReconciler struct {
 	Client     client.Client
 	Scheme     *runtime.Scheme
 	RESTMapper meta.RESTMapper
-	Logger     logger.LoggerInterface
+	Logger     logger.Logger
 	Config     *config.Options
 
 	// UnifiedRuntimeSync runs after a successful full CSD reconcile. Production wiring always provides it;
@@ -90,7 +90,7 @@ type CustomSnapshotDefinitionReconciler struct {
 func NewCustomSnapshotDefinitionReconciler(
 	c client.Client,
 	scheme *runtime.Scheme,
-	log logger.LoggerInterface,
+	log logger.Logger,
 	cfg *config.Options,
 ) (*CustomSnapshotDefinitionReconciler, error) {
 	if c == nil {
@@ -98,9 +98,6 @@ func NewCustomSnapshotDefinitionReconciler(
 	}
 	if scheme == nil {
 		return nil, fmt.Errorf("scheme must not be nil")
-	}
-	if log == nil {
-		return nil, fmt.Errorf("logger must not be nil")
 	}
 	return &CustomSnapshotDefinitionReconciler{
 		Client: c,
@@ -117,17 +114,17 @@ func (r *CustomSnapshotDefinitionReconciler) Reconcile(ctx context.Context, _ ct
 		return ctrl.Result{}, err
 	}
 	if err := r.reconcileAll(ctx, list.Items); err != nil {
-		r.Logger.Error(err, "CSD reconcileAll failed")
+		r.Logger.Error("CSD reconcileAll failed", logger.Err(err))
 		return ctrl.Result{}, err
 	}
 	if r.GraphRegistryRefresh != nil {
 		if err := r.GraphRegistryRefresh(ctx); err != nil {
-			r.Logger.Warning("snapshot graph registry refresh after CSD reconcile failed", "error", err)
+			r.Logger.Warn("snapshot graph registry refresh after CSD reconcile failed", logger.Err(err))
 		}
 	}
 	if r.UnifiedRuntimeSync != nil {
 		if err := r.UnifiedRuntimeSync(ctx); err != nil {
-			r.Logger.Warning("unified GVK runtime sync after CSD reconcile failed", "error", err)
+			r.Logger.Warn("unified GVK runtime sync after CSD reconcile failed", logger.Err(err))
 		}
 	}
 	return ctrl.Result{}, nil
@@ -488,9 +485,6 @@ func csdConditionFieldsEqual(x, y metav1.Condition) bool {
 }
 
 func (r *CustomSnapshotDefinitionReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	if r.Logger == nil {
-		return fmt.Errorf("Logger is required")
-	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.CustomSnapshotDefinition{}).
 		Complete(r)

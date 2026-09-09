@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers"
@@ -54,7 +55,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 var (
@@ -791,8 +791,7 @@ var _ = BeforeSuite(func() {
 		DefaultTTL: 168 * time.Hour,
 	}
 
-	integrationLog, err := logger.NewLogger("error")
-	Expect(err).NotTo(HaveOccurred())
+	integrationLog := logger.NewNop()
 
 	var errProv error
 	integrationGraphRegProvider, errProv = snapshotgraphregistry.NewProvider(testCfg, mgr.GetRESTMapper(), mgr.GetAPIReader(), ctrl.Log.WithName("integration-graph-registry"))

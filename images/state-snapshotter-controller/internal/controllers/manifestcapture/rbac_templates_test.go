@@ -31,8 +31,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 func TestManifestCheckpointContentChunkRBACIsInternalOnly(t *testing.T) {
@@ -976,10 +976,7 @@ func TestEveryNamespacedSubresourceRouteHasCapabilityRole(t *testing.T) {
 func servedAggregatedResources(t *testing.T) []metav1.APIResourceList {
 	t.Helper()
 
-	log, err := logger.NewLogger("error")
-	if err != nil {
-		t.Fatalf("create logger: %v", err)
-	}
+	log := logger.NewNop()
 
 	// Discovery touches neither the client nor the usecases, so nil dependencies are enough.
 	mux := http.NewServeMux()

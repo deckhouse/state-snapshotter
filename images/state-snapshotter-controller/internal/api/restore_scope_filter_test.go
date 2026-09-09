@@ -29,12 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // The query parser and the four rules it enforces are shared with every other server of this subresource
@@ -51,7 +51,7 @@ func coreSnapshotScheme() *runtime.Scheme {
 
 func newCoreSnapshotServer(t *testing.T, cl client.Client) *httptest.Server {
 	t.Helper()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	agg := usecase.NewAggregatedNamespaceManifests(cl, arch, nil)
 	rs := restore.NewService(cl, arch, nil, nil)

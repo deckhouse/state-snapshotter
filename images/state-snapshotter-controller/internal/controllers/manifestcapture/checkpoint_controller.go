@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/api/names"
 	snapstorage "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -53,7 +55,6 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/config"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // Provenance labels stamped on a capture-path ManifestCheckpoint so it can be routed back to its
@@ -171,7 +172,7 @@ type ManifestCheckpointController struct {
 	client.Client
 	APIReader client.Reader // Required: for reading ObjectKeeper directly from API server after creation
 	Scheme    *runtime.Scheme
-	Logger    logger.LoggerInterface
+	Logger    logger.Logger
 	Config    *config.Options
 	// configMu guards the mutable fields of Config (MaxChunkSizeBytes, DefaultTTL) that
 	// loadConfigFromConfigMap rewrites at the start of every Reconcile. With MaxConcurrentReconciles>1
@@ -206,7 +207,7 @@ func NewManifestCheckpointController(
 	client client.Client,
 	apiReader client.Reader,
 	scheme *runtime.Scheme,
-	logger logger.LoggerInterface,
+	logger logger.Logger,
 	cfg *config.Options,
 ) (*ManifestCheckpointController, error) {
 	if client == nil {
@@ -217,9 +218,6 @@ func NewManifestCheckpointController(
 	}
 	if scheme == nil {
 		return nil, fmt.Errorf("Scheme must not be nil")
-	}
-	if logger == nil {
-		return nil, fmt.Errorf("Logger must not be nil")
 	}
 	if cfg == nil {
 		return nil, fmt.Errorf("Config must not be nil")
@@ -241,11 +239,11 @@ func (r *ManifestCheckpointController) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.loadConfigFromConfigMap(ctx); err != nil {
 		// If config is nil, this is a fatal misconfiguration - return error
 		if r.Config == nil {
-			r.Logger.Error(err, "Config is nil - fatal misconfiguration, cannot proceed")
+			r.Logger.Error("Config is nil - fatal misconfiguration, cannot proceed", logger.Err(err))
 			return ctrl.Result{}, fmt.Errorf("config is nil: %w", err)
 		}
 		// Other errors (e.g., ConfigMap not found) are non-fatal - use defaults
-		r.Logger.Warning("Failed to load config from ConfigMap, using defaults", "error", err)
+		r.Logger.Warn("Failed to load config from ConfigMap, using defaults", logger.Err(err))
 	}
 
 	mcr := &storagev1alpha1.ManifestCaptureRequest{}
@@ -411,7 +409,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			},
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
-			r.Logger.Error(err, "Failed to create ObjectKeeper", "name", retainerName)
+			r.Logger.Error("Failed to create ObjectKeeper", logger.Err(err), slog.String("name", retainerName))
 			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create ObjectKeeper: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
@@ -487,9 +485,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 
 	if err := r.Create(ctx, checkpoint); err != nil {
 		if !errors.IsAlreadyExists(err) {
-			r.Logger.Error(err, "Failed to create ManifestCheckpoint",
-				"checkpoint", checkpointName,
-				"ownerRefs", mcpOwnerRefs)
+			r.Logger.Error("Failed to create ManifestCheckpoint", logger.Err(err), slog.Any("checkpoint", checkpointName), slog.Any("ownerRefs", mcpOwnerRefs))
 			if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create checkpoint: %v", err)); err != nil {
 				if errors.IsNotFound(err) {
 					return ctrl.Result{}, nil
@@ -500,7 +496,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		}
 		// Checkpoint already exists, get it
 		if err := r.Get(ctx, client.ObjectKey{Name: checkpointName}, checkpoint); err != nil {
-			r.Logger.Error(err, "Failed to get existing checkpoint", "checkpoint", checkpointName)
+			r.Logger.Error("Failed to get existing checkpoint", logger.Err(err), slog.String("checkpoint", checkpointName))
 			return ctrl.Result{}, err
 		}
 		r.Logger.Info("Checkpoint already exists, using existing",
@@ -520,7 +516,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 				LastTransitionTime: now,
 			})
 			if err := r.Status().Update(ctx, checkpoint); err != nil {
-				r.Logger.Error(err, "Failed to set Processing condition on existing checkpoint", "checkpoint", checkpointName)
+				r.Logger.Error("Failed to set Processing condition on existing checkpoint", logger.Err(err), slog.String("checkpoint", checkpointName))
 				// Non-critical error, continue processing
 			}
 		}
@@ -544,7 +540,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			LastTransitionTime: now,
 		})
 		if err := r.Status().Update(ctx, checkpoint); err != nil {
-			r.Logger.Error(err, "Failed to set Processing condition on checkpoint", "checkpoint", checkpointName)
+			r.Logger.Error("Failed to set Processing condition on checkpoint", logger.Err(err), slog.String("checkpoint", checkpointName))
 			// Non-critical error, continue processing
 		}
 		// Update Processing message to show progress
@@ -575,10 +571,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			r.updateProcessingMessage(ctx, mcr, fmt.Sprintf("Transient error creating chunks, retrying: %v", err))
 			return ctrl.Result{}, err
 		}
-		r.Logger.Error(err, "❌ Step 3 failed: Failed to create chunks",
-			"checkpoint", checkpointName,
-			"objects", len(objects),
-			"error", err.Error())
+		r.Logger.Error("❌ Step 3 failed: Failed to create chunks", logger.Err(err), slog.String("checkpoint", checkpointName), slog.Int("objects", len(objects)))
 		// Update checkpoint status to Failed
 		now := metav1.Now()
 		setSingleCondition(&checkpoint.Status.Conditions, metav1.Condition{
@@ -589,7 +582,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 			LastTransitionTime: now,
 		})
 		if updateErr := r.Status().Update(ctx, checkpoint); updateErr != nil {
-			r.Logger.Error(updateErr, "Failed to update checkpoint status to Failed", "checkpoint", checkpointName)
+			r.Logger.Error("Failed to update checkpoint status to Failed", logger.Err(updateErr), slog.String("checkpoint", checkpointName))
 		}
 		if err := r.finalizeMCR(ctx, mcr, metav1.ConditionFalse, storagev1alpha1.ManifestCaptureRequestConditionReasonFailed, fmt.Sprintf("Failed to create chunks: %v", err)); err != nil {
 			if errors.IsNotFound(err) {
@@ -627,10 +620,7 @@ func (r *ManifestCheckpointController) processCaptureRequest(ctx context.Context
 		LastTransitionTime: now,
 	})
 	if err := r.Status().Update(ctx, checkpoint); err != nil {
-		r.Logger.Error(err, "Failed to update checkpoint status",
-			"checkpoint", checkpointName,
-			"chunks", len(chunks),
-			"totalObjects", totalObjects)
+		r.Logger.Error("Failed to update checkpoint status", logger.Err(err), slog.Any("checkpoint", checkpointName), slog.Any("chunks", len(chunks)), slog.Any("totalObjects", totalObjects))
 		return ctrl.Result{}, err
 	}
 	r.Logger.Info("✅ Step 4 complete: Updated checkpoint status",
@@ -987,7 +977,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			singleObjJSON, _ := json.Marshal([]interface{}{obj})
 			singleGzipBytes, err := r.compressToBytes(singleObjJSON)
 			if err == nil && len(singleGzipBytes) > int(maxChunkSize) {
-				r.Logger.Warning("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
+				r.Logger.Warn("Object exceeds MaxChunkSizeBytes - storing as-is, may break etcd on large clusters",
 					"compressedSizeBytes", len(singleGzipBytes),
 					"maxSizeBytes", maxChunkSize)
 				chunks = append(chunks, chunkData{objects: []interface{}{obj}})
@@ -1087,7 +1077,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 				"index", i,
 				"checkpoint", checkpointName)
 			if err := r.Get(ctx, client.ObjectKey{Name: chunkName}, chunk); err != nil {
-				r.Logger.Error(err, "Failed to get existing chunk", "chunk", chunkName)
+				r.Logger.Error("Failed to get existing chunk", logger.Err(err), slog.String("chunk", chunkName))
 				// Transient read error: requeue (plain error), do not wedge the snapshot.
 				return nil, fmt.Errorf("failed to get existing chunk %s: %w", chunkName, err)
 			}
@@ -1095,12 +1085,7 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 			if chunk.Spec.CheckpointName == checkpointName && chunk.Spec.Index == i {
 				// Verify checksum matches to ensure data consistency (idempotency check)
 				if chunk.Spec.Checksum != checksum {
-					r.Logger.Error(nil, "Chunk exists but checksum mismatch (data inconsistency detected)",
-						"chunk", chunkName,
-						"expectedChecksum", checksum,
-						"actualChecksum", chunk.Spec.Checksum,
-						"checkpoint", checkpointName,
-						"index", i)
+					r.Logger.Error("Chunk exists but checksum mismatch (data inconsistency detected)", slog.Any("chunk", chunkName), slog.Any("expectedChecksum", checksum), slog.Any("actualChecksum", chunk.Spec.Checksum), slog.Any("checkpoint", checkpointName), slog.Any("index", i))
 					return nil, terminalCapturef("chunk %s already exists but checksum mismatch: expected %s, got %s", chunkName, checksum, chunk.Spec.Checksum)
 				}
 				r.Logger.Info("✅ Chunk already exists and matches (index, checkpoint, checksum)",
@@ -1110,20 +1095,11 @@ func (r *ManifestCheckpointController) createChunks(ctx context.Context, checkpo
 					"checksum", checksum)
 			} else {
 				// If it's a different chunk, this is an error
-				r.Logger.Error(nil, "Chunk exists but belongs to different checkpoint",
-					"chunk", chunkName,
-					"expectedCheckpoint", checkpointName,
-					"actualCheckpoint", chunk.Spec.CheckpointName,
-					"expectedIndex", i,
-					"actualIndex", chunk.Spec.Index)
+				r.Logger.Error("Chunk exists but belongs to different checkpoint", slog.Any("chunk", chunkName), slog.Any("expectedCheckpoint", checkpointName), slog.Any("actualCheckpoint", chunk.Spec.CheckpointName), slog.Any("expectedIndex", i), slog.Any("actualIndex", chunk.Spec.Index))
 				return nil, terminalCapturef("chunk %s already exists but belongs to different checkpoint", chunkName)
 			}
 		default:
-			r.Logger.Error(err, "Failed to create chunk",
-				"chunk", chunkName,
-				"checkpoint", checkpointName,
-				"index", i,
-				"sizeBytes", len(gzipBytes))
+			r.Logger.Error("Failed to create chunk", logger.Err(err), slog.Any("chunk", chunkName), slog.Any("checkpoint", checkpointName), slog.Any("index", i), slog.Any("sizeBytes", len(gzipBytes)))
 			// Only validation/shape/size rejections are terminal; every other error (timeouts, 5xx,
 			// connection blips, Forbidden during rollout) is transient and requeued so a momentary
 			// apiserver hiccup does not wedge the whole snapshot. createChunks resumes idempotently
@@ -1180,13 +1156,13 @@ func (r *ManifestCheckpointController) normalizeObjectForJSON(obj interface{}) i
 	// This ensures any yaml.MapSlice or other special structures are converted to standard JSON types
 	jsonData, err := json.Marshal(obj)
 	if err != nil {
-		r.Logger.Warning("Failed to marshal object for normalization, using as-is", "error", err)
+		r.Logger.Warn("Failed to marshal object for normalization, using as-is", logger.Err(err))
 		return obj
 	}
 
 	var normalized interface{}
 	if err := json.Unmarshal(jsonData, &normalized); err != nil {
-		r.Logger.Warning("Failed to unmarshal normalized object, using as-is", "error", err)
+		r.Logger.Warn("Failed to unmarshal normalized object, using as-is", logger.Err(err))
 		return obj
 	}
 
@@ -1387,9 +1363,6 @@ func (r *ManifestCheckpointController) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	if r.Config == nil {
 		return fmt.Errorf("Config is required")
-	}
-	if r.Logger == nil {
-		return fmt.Errorf("Logger is required")
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.ManifestCaptureRequest{}).

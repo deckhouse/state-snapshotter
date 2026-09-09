@@ -8,6 +8,18 @@ properties:
     default: {}
     description: "System internal values populated by hooks. Do not set manually."
     properties:
+      controllerMetricsPort:
+        type: integer
+        default: 8080
+        description: |
+          The port the controller serves its metrics on, bound on 127.0.0.1: the only
+          thing that reaches it is the kube-rbac-proxy of the same pod.
+      controllerMetricsProxyPort:
+        type: integer
+        default: 8080
+        description: |
+          The port the kube-rbac-proxy publishes the controller metrics on. Reaching
+          it requires "get" on deployments/prometheus-metrics for the controller.
       apiServerCert:
         type: object
         default: {}

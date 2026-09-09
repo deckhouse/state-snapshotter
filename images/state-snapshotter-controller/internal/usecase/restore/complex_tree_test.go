@@ -32,12 +32,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // Orchestration harness: out-of-process domains run outside core (the reference demo domain lives in the
@@ -205,7 +205,7 @@ func deepCopyMap(in map[string]interface{}) map[string]interface{} {
 func newServiceWithDelegate(t *testing.T, objs []client.Object, delegate DomainSubtreeRestorer) *Service {
 	t.Helper()
 	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	return NewService(cl, arch, delegate, isDemoSnapshotKind)
 }
@@ -377,7 +377,7 @@ func TestBuildManifestsWithDataRestoration_NoDelegateFailsClosed(t *testing.T) {
 		[]domainChild{{kind: "DemoVirtualDiskSnapshot", name: "disk-x-snap"}}, false)
 
 	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	// isDomainKind set, but no delegate wired.
 	svc := NewService(cl, arch, nil, isDemoSnapshotKind)
@@ -508,7 +508,7 @@ func TestBuildManifestsWithDataRestoration_DelegatesVolumeNodes(t *testing.T) {
 	}}
 
 	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
 
@@ -560,7 +560,7 @@ func TestBuildManifestsWithDataRestoration_VolumeNodeDelegateErrorFailsClosed(t 
 
 	delegate := &recordingDelegate{err: errDelegateUnavailable}
 	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	svc := NewService(cl, arch, delegate, isOutOfProcessRestoreKind(t))
 
@@ -591,7 +591,7 @@ func TestBuildManifestsWithDataRestoration_VolumeNodeNoDelegateFailsClosed(t *te
 	objs := materializeRootWithDelegatedVolumeNodes(t, []map[string]interface{}{cmManifest("config")}, []string{"vs-shared"})
 
 	cl := fake.NewClientBuilder().WithScheme(complexTreeScheme()).WithObjects(objs...).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	svc := NewService(cl, arch, nil, isOutOfProcessRestoreKind(t))
 

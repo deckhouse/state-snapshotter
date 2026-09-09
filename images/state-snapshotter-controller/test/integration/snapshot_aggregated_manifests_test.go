@@ -40,13 +40,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 func aggregatedManifestsIntegrationEncodeChunk(objects []map[string]interface{}) (data string, checksum string) {
@@ -125,8 +125,7 @@ func aggregatedManifestsIntegrationMustCreateSnapshotContent(ctx context.Context
 }
 
 func aggregatedManifestsIntegrationStartServer() *httptest.Server {
-	log, err := logger.NewLogger("error")
-	Expect(err).NotTo(HaveOccurred())
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
 	agg := usecase.NewAggregatedNamespaceManifests(k8sClient, arch, nil)
 	ah := api.NewArchiveHandler(k8sClient, arch, log)

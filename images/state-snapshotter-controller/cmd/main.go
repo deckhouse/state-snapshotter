@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	goruntime "runtime"
@@ -41,7 +42,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
@@ -55,7 +58,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 var (
@@ -140,17 +142,21 @@ func main() {
 
 	cfgParams := config.NewConfig()
 
-	log, err := logger.NewLogger(string(cfgParams.Loglevel))
+	log, err := logger.NewLogger(cfgParams.Loglevel)
 	if err != nil {
 		fmt.Printf("unable to create NewLogger, err: %v\n", err)
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
 
-	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
-	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
+	// One sub-logger for everything main() itself writes; `log` stays the base one,
+	// which is what the manager and the controllers below are handed.
+	mainLog := log.Named("main")
+
+	mainLog.Info(fmt.Sprintf("go Version:%s ", goruntime.Version()))
+	mainLog.Info(fmt.Sprintf("OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
-		log.Info(fmt.Sprintf("[main] BuildInfo: module=%s version=%s", buildInfo.Main.Path, buildInfo.Main.Version))
+		mainLog.Info(fmt.Sprintf("BuildInfo: module=%s version=%s", buildInfo.Main.Path, buildInfo.Main.Version))
 		var vcsRevision, vcsTime, vcsModified string
 		for _, setting := range buildInfo.Settings {
 			switch setting.Key {
@@ -163,27 +169,29 @@ func main() {
 			}
 		}
 		if vcsRevision != "" || vcsTime != "" || vcsModified != "" {
-			log.Info(fmt.Sprintf("[main] VCS: revision=%s time=%s modified=%s", vcsRevision, vcsTime, vcsModified))
+			mainLog.Info(fmt.Sprintf("VCS: revision=%s time=%s modified=%s", vcsRevision, vcsTime, vcsModified))
 		}
 	}
 
-	log.Info("[main] CfgParams has been successfully created")
-	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
-	log.Info(fmt.Sprintf("[main] RequeueStorageClassInterval = %d", cfgParams.RequeueStorageClassInterval))
+	mainLog.Info("configuration",
+		"logLevel", string(cfgParams.Loglevel),
+		"requeueStorageClassInterval", cfgParams.RequeueStorageClassInterval,
+		"healthProbeBindAddress", cfgParams.HealthProbeBindAddress,
+		"metricsBindAddress", cfgParams.MetricsBindAddress)
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
 	if err != nil {
-		log.Error(err, "[main] unable to KubernetesDefaultConfigCreate")
+		mainLog.Error("unable to KubernetesDefaultConfigCreate", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
-	log.Info("[main] kubernetes config has been successfully created.")
+	mainLog.Info("kubernetes config has been successfully created.")
 
 	// One-shot backfill mode: stamp the delete-protection marker onto legacy nodes (or just verify marker
 	// coverage) and exit. This never starts the controller manager.
 	if runBackfillMode {
 		cancel()
-		os.Exit(runBackfill(context.Background(), log, kConfig, backfillVerifyOnly))
+		os.Exit(runBackfill(context.Background(), log.Named("backfill"), kConfig, backfillVerifyOnly))
 	}
 
 	// Raise the client-go rate limiter above the conservative library defaults (QPS=5 / Burst=10).
@@ -197,7 +205,7 @@ func main() {
 	)
 	kConfig.QPS = kubeClientQPS
 	kConfig.Burst = kubeClientBurst
-	log.Info("[main] kubernetes client rate limiter configured",
+	mainLog.Info("kubernetes client rate limiter configured",
 		"qps", kConfig.QPS,
 		"burst", kConfig.Burst,
 	)
@@ -207,12 +215,12 @@ func main() {
 	for _, f := range resourcesSchemeFuncs {
 		err := f(scheme)
 		if err != nil {
-			log.Error(err, "[main] unable to add scheme to func")
+			mainLog.Error("unable to add scheme to func", logger.Err(err))
 			cancel() // Ensure cleanup before exit
 			os.Exit(1)
 		}
 	}
-	log.Info("[main] successfully read scheme CR")
+	mainLog.Info("successfully read scheme CR")
 
 	// Create full scheme for API direct client (no informers)
 	fullScheme := runtime.NewScheme()
@@ -225,8 +233,8 @@ func main() {
 	// Don't restrict cache to specific namespace - ManifestCaptureRequest can be in any namespace
 	// Cluster-scoped resources (ManifestCheckpoint, Retainer) are always watched
 	managerOpts := manager.Options{
-		Scheme: scheme,
-		//MetricsBindAddress: cfgParams.MetricsPort,
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
@@ -236,36 +244,36 @@ func main() {
 
 	mgr, err := manager.New(kConfig, managerOpts)
 	if err != nil {
-		log.Error(err, "[main] unable to manager.New")
+		mainLog.Error("unable to manager.New", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
-	log.Info("[main] successfully created kubernetes manager")
+	mainLog.Info("successfully created kubernetes manager")
 
 	graphRegProvider, err := snapshotgraphregistry.NewProvider(cfgParams, mgr.GetRESTMapper(), mgr.GetAPIReader(), ctrl.Log.WithName("snapshot-graph-registry"))
 	if err != nil {
-		log.Error(err, "[main] snapshot graph registry provider")
+		mainLog.Error("snapshot graph registry provider", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
 	if err := graphRegProvider.Refresh(ctx); err != nil {
-		log.Warning("initial snapshot graph registry refresh failed (generic graph may be empty until CSD reconcile)", "error", err)
+		mainLog.Warn("initial snapshot graph registry refresh failed (generic graph may be empty until CSD reconcile)", logger.Err(err))
 	}
 
 	// Add controllers
 	if err := controllers.AddManifestCheckpointControllerToManager(mgr, log, cfgParams); err != nil {
-		log.Error(err, "Failed to add ManifestCheckpointController to manager")
+		mainLog.Error("failed to add ManifestCheckpointController to manager", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
-	log.Info("ManifestCheckpointController added to manager")
+	mainLog.Info("ManifestCheckpointController added to manager")
 
 	if err := controllers.AddSnapshotControllerToManager(mgr, cfgParams, graphRegProvider); err != nil {
-		log.Error(err, "Failed to add NamespaceGenericSnapshotBinderController to manager")
+		mainLog.Error("failed to add NamespaceGenericSnapshotBinderController to manager", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("NamespaceGenericSnapshotBinderController added to manager")
+	mainLog.Info("NamespaceGenericSnapshotBinderController added to manager")
 
 	// Out-of-process domain controllers (the PoC demo domain, and real domains such as virtualization) run
 	// in a separate pod/binary, not in core. Core carries no domain-specific kind names: it discovers such
@@ -282,16 +290,16 @@ func main() {
 		[]schema.GroupVersionKind{unifiedbootstrap.CommonSnapshotContentGVK()},
 	)
 	if err != nil {
-		log.Error(err, "Failed to create SnapshotContentController")
+		mainLog.Error("failed to create SnapshotContentController", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
 	if err := contentController.SetupWithManager(mgr); err != nil {
-		log.Error(err, "Failed to setup SnapshotContentController with manager")
+		mainLog.Error("failed to setup SnapshotContentController with manager", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
+	mainLog.Info("SnapshotContentController added to manager", "snapshotContentGVKs", 1)
 
 	// Unified runtime is always on in v0; the static bootstrap list is the hardcoded built-in default
 	// (unifiedbootstrap.DefaultGraphRegistryBuiltInPairs) — domain kinds come only from eligible CSD.
@@ -300,36 +308,36 @@ func main() {
 		Mapper: mgr.GetRESTMapper(),
 	})
 	if err != nil {
-		log.Error(err, "[main] unable to create client for CSD→unified GVK bootstrap")
+		mainLog.Error("unable to create client for CSD→unified GVK bootstrap", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
 	csdPairs, err := csdregistry.EligibleUnifiedGVKPairs(ctx, csdBootstrapClient)
 	if err != nil {
-		log.Warning("CSD list/parse for unified GVK bootstrap failed; using bootstrap-only merge", "error", err)
+		mainLog.Warn("CSD list/parse for unified GVK bootstrap failed; using bootstrap-only merge", logger.Err(err))
 		csdPairs = nil
 	} else {
-		log.Info("[main] CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
+		mainLog.Info("CSD-derived unified GVK pairs (eligible by conditions; before RESTMapper / CRD presence filter)", "count", len(csdPairs))
 	}
 	bootstrapPairs := unifiedbootstrap.DefaultGraphRegistryBuiltInPairs()
-	log.Info("[main] unified static bootstrap", "pairCount", len(bootstrapPairs))
+	mainLog.Info("unified static bootstrap", "pairCount", len(bootstrapPairs))
 	mergedPairs := unifiedbootstrap.MergeBootstrapAndCSDPairs(bootstrapPairs, csdPairs)
-	log.Info("[main] unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
+	mainLog.Info("unified GVK pairs after merge (bootstrap + CSD)", "count", len(mergedPairs))
 	snapshotGVKs, snapshotContentGVKs := unifiedbootstrap.ResolveAvailableUnifiedGVKPairs(
 		mgr.GetRESTMapper(),
 		mergedPairs,
 		ctrl.Log.WithName("unified-bootstrap"),
 	)
 	if len(snapshotGVKs) == 0 {
-		log.Info("[main] no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
+		mainLog.Info("no unified snapshot CRDs found in API; unified snapshot controllers run with zero watches (manifest/MCR and other controllers continue)")
 	} else {
-		log.Info("[main] unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
+		mainLog.Info("unified snapshot GVKs after API discovery filter", "count", len(snapshotGVKs))
 	}
 
 	genericSnapshotGVKs, genericContentGVKs := unifiedbootstrap.FilterGenericSnapshotGVKPairs(snapshotGVKs, snapshotContentGVKs)
 	for _, snapshotGVK := range snapshotGVKs {
 		if err := contentController.AddSnapshotStatusWatch(mgr, snapshotGVK); err != nil {
-			log.Error(err, "Failed to setup SnapshotContentController snapshot status watch", "snapshotGVK", snapshotGVK.String())
+			mainLog.Error("failed to setup SnapshotContentController snapshot status watch", logger.Err(err), slog.String("snapshotGVK", snapshotGVK.String()))
 			cancel()
 			os.Exit(1)
 		}
@@ -343,7 +351,7 @@ func main() {
 		nil,
 	)
 	if err != nil {
-		log.Error(err, "Failed to create GenericSnapshotBinderController")
+		mainLog.Error("failed to create GenericSnapshotBinderController", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
@@ -364,14 +372,14 @@ func main() {
 	// status flip enqueues the owning SnapshotContent directly. Idempotent + RESTMapping-guarded internally.
 	if anyDataArtifactKind {
 		if err := contentController.AddVolumeCaptureRequestWatch(mgr); err != nil {
-			log.Error(err, "Failed to add VolumeCaptureRequest watch to SnapshotContentController")
+			mainLog.Error("failed to add VolumeCaptureRequest watch to SnapshotContentController", logger.Err(err))
 			cancel()
 			os.Exit(1)
 		}
 	}
 	for i := range genericSnapshotGVKs {
 		if err := snapshotController.AddWatchForPair(mgr, genericSnapshotGVKs[i], genericContentGVKs[i]); err != nil {
-			log.Error(err, "Failed to setup GenericSnapshotBinderController watch", "snapshotGVK", genericSnapshotGVKs[i].String(), "snapshotContentGVK", genericContentGVKs[i].String())
+			mainLog.Error("failed to setup GenericSnapshotBinderController watch", logger.Err(err), slog.String("snapshotGVK", genericSnapshotGVKs[i].String()), slog.String("snapshotContentGVK", genericContentGVKs[i].String()))
 			cancel()
 			os.Exit(1)
 		}
@@ -386,11 +394,11 @@ func main() {
 		// Main runs the root's capture-leg lifecycle (latches + MCR reap).
 		contentController.MarkDomainCaptureKind(rootSnapGVK)
 		if err := snapshotController.AddWatchForPair(mgr, rootSnapGVK, rootContentGVK); err != nil {
-			log.Error(err, "Failed to setup GenericSnapshotBinderController root Snapshot watch", "snapshotGVK", rootSnapGVK.String(), "snapshotContentGVK", rootContentGVK.String())
+			mainLog.Error("failed to setup GenericSnapshotBinderController root Snapshot watch", logger.Err(err), slog.String("snapshotGVK", rootSnapGVK.String()), slog.String("snapshotContentGVK", rootContentGVK.String()))
 			cancel()
 			os.Exit(1)
 		}
-		log.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup", "snapshotGVK", rootSnapGVK.String())
+		mainLog.Info("GenericSnapshotBinderController watching built-in root Snapshot at startup", "snapshotGVK", rootSnapGVK.String())
 	}
 	// Built-in CSI VolumeSnapshot: mark it domain-capture at boot. Unlike the root it is NOT a dedicated
 	// kind, so FilterGenericSnapshotGVKPairs kept it and the loop above already added its watch — only the
@@ -402,9 +410,9 @@ func main() {
 	if vsSnapGVK, _, ok := unifiedbootstrap.StartupBuiltInVolumeSnapshotPair(snapshotGVKs, snapshotContentGVKs); ok {
 		snapshotController.MarkDomainCaptureKind(vsSnapGVK)
 		contentController.MarkDomainCaptureKind(vsSnapGVK)
-		log.Info("GenericSnapshotBinderController marked built-in VolumeSnapshot domain-capture at startup", "snapshotGVK", vsSnapGVK.String())
+		mainLog.Info("GenericSnapshotBinderController marked built-in VolumeSnapshot domain-capture at startup", "snapshotGVK", vsSnapGVK.String())
 	}
-	log.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
+	mainLog.Info("GenericSnapshotBinderController added to manager", "snapshotGVKs", len(genericSnapshotGVKs))
 
 	// Import binder for extended generic-PVC VolumeSnapshots (spec.mode: Import; owning DataImport
 	// found by reverse-lookup of DataImport.spec.snapshotRef).
@@ -412,11 +420,11 @@ func main() {
 	// and writes the binding (extended boundSnapshotContentName + legacy boundVolumeSnapshotContentName/readyToUse).
 	// Self-guards by RESTMapping: a not-yet-installed VolumeSnapshot CRD degrades to "no controller".
 	if err := volumesnapshotimport.AddToManager(mgr); err != nil {
-		log.Error(err, "Failed to add VolumeSnapshot import binder to manager")
+		mainLog.Error("failed to add VolumeSnapshot import binder to manager", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("VolumeSnapshot import binder added to manager")
+	mainLog.Info("VolumeSnapshot import binder added to manager")
 
 	// No dedicated controller activators in core: the only in-process dedicated kind is the namespace-root
 	// "Snapshot", whose controller is registered statically at startup (AddSnapshotControllerToManager
@@ -436,42 +444,42 @@ func main() {
 	)
 
 	if err := controllers.AddCustomSnapshotDefinitionControllerToManager(mgr, log, cfgParams, unifiedSync.Sync, graphRegProvider.Refresh); err != nil {
-		log.Error(err, "Failed to add CustomSnapshotDefinition reconciler to manager")
+		mainLog.Error("failed to add CustomSnapshotDefinition reconciler to manager", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
-	log.Info("CustomSnapshotDefinition reconciler added to manager")
+	mainLog.Info("CustomSnapshotDefinition reconciler added to manager")
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
 	// Add health checks
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to mgr.AddHealthzCheck")
+		mainLog.Error("unable to mgr.AddHealthzCheck", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
-	log.Info("[main] successfully AddHealthzCheck")
+	mainLog.Info("successfully AddHealthzCheck")
 
 	if err = mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to mgr.AddReadyzCheck")
+		mainLog.Error("unable to mgr.AddReadyzCheck", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
-	log.Info("[main] successfully AddReadyzCheck")
+	mainLog.Info("successfully AddReadyzCheck")
 
 	// Create direct client for API server (without informer cache)
 	// API server doesn't need informers - it only does direct GET requests
 	// This avoids requiring list/watch permissions on any CRD resources
 	httpClient, err := rest.HTTPClientFor(kConfig)
 	if err != nil {
-		log.Error(err, "[main] unable to create HTTP client for API server")
+		mainLog.Error("unable to create HTTP client for API server", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
 	mapper, err := apiutil.NewDynamicRESTMapper(kConfig, httpClient)
 	if err != nil {
-		log.Error(err, "[main] unable to create REST mapper for API server")
+		mainLog.Error("unable to create REST mapper for API server", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
@@ -480,7 +488,7 @@ func main() {
 		Mapper: mapper,
 	})
 	if err != nil {
-		log.Error(err, "[main] unable to create direct client for API server")
+		mainLog.Error("unable to create direct client for API server", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
@@ -498,7 +506,7 @@ func main() {
 	// pure-generic restores are unaffected.
 	domainRestoreClient, err := api.NewDomainRestoreClient(kConfig, mapper, log)
 	if err != nil {
-		log.Error(err, "[main] unable to create domain restore delegation client")
+		mainLog.Error("unable to create domain restore delegation client", logger.Err(err))
 		cancel()
 		os.Exit(1)
 	}
@@ -514,12 +522,12 @@ func main() {
 	}
 	apiServer := api.NewServer(apiAddr, directClient, directClient, log, graphRegProvider, domainRestoreClient, isOutOfProcessDomainKind, apiTLSCertFile, apiTLSKeyFile)
 
-	log.Info("Starting state-snapshotter-controller", "api-addr", apiAddr)
+	mainLog.Info("starting state-snapshotter-controller", "apiAddr", apiAddr)
 
 	// Start controller manager in background
 	go func() {
 		if err := mgr.Start(ctx); err != nil {
-			log.Error(err, "[main] unable to mgr.Start")
+			mainLog.Error("unable to mgr.Start", logger.Err(err))
 			cancel() // Ensure cleanup before exit
 			os.Exit(1)
 		}
@@ -527,7 +535,7 @@ func main() {
 
 	// Start API server (blocks until context cancellation)
 	if err := apiServer.Start(ctx); err != nil {
-		log.Error(err, "[main] Failed to start API server")
+		mainLog.Error("failed to start API server", logger.Err(err))
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
@@ -540,28 +548,28 @@ func main() {
 //	2 — coverage is incomplete (classifier-protected objects still lack the marker).
 //
 // With verifyOnly it performs a read-only verify pass; otherwise it applies markers and then verifies.
-func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, verifyOnly bool) int {
+func runBackfill(ctx context.Context, log logger.Logger, kConfig *rest.Config, verifyOnly bool) int {
 	scheme := runtime.NewScheme()
 	for _, add := range resourcesSchemeFuncs {
 		if err := add(scheme); err != nil {
-			log.Error(err, "[backfill] unable to build scheme")
+			log.Error("unable to build scheme", logger.Err(err))
 			return 1
 		}
 	}
 
 	httpClient, err := rest.HTTPClientFor(kConfig)
 	if err != nil {
-		log.Error(err, "[backfill] unable to create HTTP client")
+		log.Error("unable to create HTTP client", logger.Err(err))
 		return 1
 	}
 	mapper, err := apiutil.NewDynamicRESTMapper(kConfig, httpClient)
 	if err != nil {
-		log.Error(err, "[backfill] unable to create REST mapper")
+		log.Error("unable to create REST mapper", logger.Err(err))
 		return 1
 	}
 	cl, err := client.New(kConfig, client.Options{Scheme: scheme, Mapper: mapper})
 	if err != nil {
-		log.Error(err, "[backfill] unable to create client")
+		log.Error("unable to create client", logger.Err(err))
 		return 1
 	}
 
@@ -570,7 +578,7 @@ func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, 
 	if !verifyOnly {
 		applied, aerr := backfill.Apply(ctx, cl, targets)
 		if aerr != nil {
-			log.Error(aerr, "[backfill] apply pass failed")
+			log.Error("apply pass failed", logger.Err(aerr))
 			return 1
 		}
 		logBackfillReport(log, "apply", applied)
@@ -578,28 +586,33 @@ func runBackfill(ctx context.Context, log *logger.Logger, kConfig *rest.Config, 
 
 	verified, verr := backfill.Verify(ctx, cl, targets)
 	if verr != nil {
-		log.Error(verr, "[backfill] verify pass failed")
+		log.Error("verify pass failed", logger.Err(verr))
 		return 1
 	}
 	logBackfillReport(log, "verify", verified)
 
 	if remaining := verified.OursUnmarkedTotal(); remaining > 0 {
-		log.Error(fmt.Errorf("%d classifier-protected object(s) still lack the marker", remaining),
-			"[backfill] incomplete — unmarked legacy objects remain outside delete-guard protection")
+		// A count is a value, not an error: logger.Err would print it under "error".
+		log.Error("incomplete — unmarked legacy objects remain outside delete-guard protection",
+			slog.Int("classifierProtectedWithoutMarker", remaining))
 		return 2
 	}
-	log.Info("[backfill] complete: every classifier-protected object carries the delete-protected marker")
+	log.Info("complete: every classifier-protected object carries the delete-protected marker")
 	return 0
 }
 
-func logBackfillReport(log *logger.Logger, phase string, r backfill.Report) {
+func logBackfillReport(log logger.Logger, phase string, r backfill.Report) {
+	// The phase used to be spelled into every message as "[backfill:apply]"; the
+	// caller already named this logger "backfill", so it belongs in the name.
+	log = log.Named(phase)
+
 	for _, k := range r.Kinds {
 		if k.Skipped {
-			log.Info(fmt.Sprintf("[backfill:%s] %s: skipped (CRD/API not installed)", phase, k.GVK.Kind))
+			log.Info(fmt.Sprintf("%s: skipped (CRD/API not installed)", k.GVK.Kind))
 			continue
 		}
-		log.Info(fmt.Sprintf("[backfill:%s] %s: total=%d ours=%d alreadyProtected=%d patched=%d oursUnmarked=%d",
-			phase, k.GVK.Kind, k.Total, k.Ours, k.AlreadyProtect, k.Patched, k.OursUnmarked))
+		log.Info(fmt.Sprintf("%s: total=%d ours=%d alreadyProtected=%d patched=%d oursUnmarked=%d",
+			k.GVK.Kind, k.Total, k.Ours, k.AlreadyProtect, k.Patched, k.OursUnmarked))
 	}
-	log.Info(fmt.Sprintf("[backfill:%s] TOTALS: patched=%d oursUnmarked=%d", phase, r.PatchedTotal(), r.OursUnmarkedTotal()))
+	log.Info(fmt.Sprintf("TOTALS: patched=%d oursUnmarked=%d", r.PatchedTotal(), r.OursUnmarkedTotal()))
 }

@@ -28,9 +28,9 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase/restore"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // domainSubresourceGroupPrefix is prepended to a domain snapshot's API group to address its aggregated
@@ -84,7 +84,7 @@ func subresourceGroupVersionFor(gvk schema.GroupVersionKind) schema.GroupVersion
 type DomainRestoreClient struct {
 	rc     rest.Interface
 	mapper meta.RESTMapper
-	log    logger.LoggerInterface
+	log    logger.Logger
 	// timeout is the budget of ONE delegated call. NewDomainRestoreClient sets delegateCallTimeout; it is
 	// a field rather than the constant read at the call site so that a spec can shorten it and observe the
 	// abort instead of waiting out the production budget.
@@ -95,7 +95,7 @@ var _ restore.DomainSubtreeRestorer = (*DomainRestoreClient)(nil)
 
 // NewDomainRestoreClient builds a DomainRestoreClient from an in-cluster rest.Config. mapper resolves
 // a domain snapshot GVK to its resource (plural) for the request path.
-func NewDomainRestoreClient(cfg *rest.Config, mapper meta.RESTMapper, log logger.LoggerInterface) (*DomainRestoreClient, error) {
+func NewDomainRestoreClient(cfg *rest.Config, mapper meta.RESTMapper, log logger.Logger) (*DomainRestoreClient, error) {
 	cfgCopy := rest.CopyConfig(cfg)
 	// APIPath/GroupVersion/NegotiatedSerializer only satisfy rest.RESTClientFor; the actual request
 	// uses AbsPath with a per-call group/version (the domain group varies by kind), so the GroupVersion
@@ -146,9 +146,7 @@ func (c *DomainRestoreClient) RestoreDomainSubtree(ctx context.Context, gvk sche
 	if err != nil {
 		return nil, err
 	}
-	if c.log != nil {
-		c.log.Debug("[api] delegated domain subtree restore", "groupVersion", subGV.String(), "resource", resource, "namespace", namespace, "name", name, "objects", len(objs))
-	}
+	c.log.Debug("delegated domain subtree restore", "groupVersion", subGV.String(), "resource", resource, "namespace", namespace, "name", name, "objects", len(objs))
 	return objs, nil
 }
 

@@ -35,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 func setupTestService() (*ArchiveService, client.Client) {
@@ -44,7 +44,7 @@ func setupTestService() (*ArchiveService, client.Client) {
 	_ = storagev1alpha1.AddToScheme(scheme)
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	service := NewArchiveService(fakeClient, fakeClient, log)
 
 	return service, fakeClient

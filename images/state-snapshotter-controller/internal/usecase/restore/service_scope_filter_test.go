@@ -29,11 +29,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 func scopeFilterScheme() *runtime.Scheme {
@@ -62,7 +62,7 @@ func newRootNodeService(t *testing.T, objects []map[string]interface{}, childRef
 func newRootNodeServiceReady(t *testing.T, objects []map[string]interface{}, childRefs []storagev1alpha1.SnapshotChildRef, rootReady metav1.Condition) *Service {
 	t.Helper()
 	scheme := scopeFilterScheme()
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 
 	data, checksum := encodeChunk(objects)
 	chunk := &ssv1alpha1.ManifestCheckpointContentChunk{

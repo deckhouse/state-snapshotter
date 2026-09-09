@@ -25,8 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
@@ -64,7 +64,7 @@ func subtreeCreateNode(ctx context.Context, t *testing.T, cl client.Client, cpNa
 func newSubtreeAgg(t *testing.T) (*AggregatedNamespaceManifests, client.Client, context.Context) {
 	t.Helper()
 	scheme := aggManifestTestScheme(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	return NewAggregatedNamespaceManifests(cl, NewArchiveService(cl, cl, log), nil), cl, context.Background()
 }

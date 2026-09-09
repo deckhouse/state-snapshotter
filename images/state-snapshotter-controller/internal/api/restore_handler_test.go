@@ -27,11 +27,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 func TestRestoreHandler_RoutingInvalidPaths(t *testing.T) {
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	handler := NewRestoreHandler(nil, nil, log, nil, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)
@@ -64,7 +64,7 @@ func TestRestoreHandler_RoutingInvalidPaths(t *testing.T) {
 // 404-unknown fall-through — with nil deps a live handler returns 500, and the POST-only upload returns 405
 // on a GET).
 func TestRestoreHandler_GenericDomainSubresourcesRemoved(t *testing.T) {
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	handler := NewRestoreHandler(nil, nil, log, nil, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)
@@ -142,7 +142,7 @@ func TestRestoreHandler_BackRefMismatchIsForbidden(t *testing.T) {
 }
 
 func TestRestoreHandler_ListSnapshotsMethodNotAllowed(t *testing.T) {
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	handler := NewRestoreHandler(nil, nil, log, nil, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)
@@ -176,7 +176,7 @@ func TestRestoreHandler_ListSnapshotsMethodNotAllowed(t *testing.T) {
 // LIMIT: it reads the refusal for ONE domain GVR and one subresource. The status codes of all three, and
 // of both methods, are TestRestoreHandler_GenericDomainSubresourcesRemoved's subject.
 func TestRestoreHandler_ForeignGVRRefusalNamesNoGroup(t *testing.T) {
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	handler := NewRestoreHandler(nil, nil, log, nil, nil)
 	mux := http.NewServeMux()
 	handler.SetupRoutes(mux)

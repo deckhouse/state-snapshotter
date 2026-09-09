@@ -37,11 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk/transform"
 )
 
@@ -62,7 +62,7 @@ func encodeChunk(objects []map[string]interface{}) (string, string) {
 func newVolumeLegRestoreService(t *testing.T) *Service {
 	t.Helper()
 	cl := newVolumeLegRestoreCluster(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 	return NewService(cl, arch, nil, nil)
 }
@@ -449,7 +449,7 @@ func ownerPVCDataBindings(data *storagev1alpha1.SnapshotDataBinding) []transform
 // walkthrough.
 func TestBuildManifestsWithDataRestoration_DelegatedVolumeLegKeepsTheWireFormat(t *testing.T) {
 	cl := newVolumeLegRestoreCluster(t)
-	log, _ := logger.NewLogger("error")
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(cl, cl, log)
 
 	owner := &volumeNodeOwnerFacade{reader: cl, core: usecase.NewAggregatedNamespaceManifests(cl, arch, nil)}

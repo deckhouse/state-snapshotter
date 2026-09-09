@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
@@ -40,15 +41,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // ArchiveService handles archive operations
 type ArchiveService struct {
 	client      client.Reader // ManifestCheckpoint reads (direct, no informer cache)
 	chunkClient client.Reader // chunk reads (direct, no list/watch informer)
-	logger      logger.LoggerInterface
+	logger      logger.Logger
 	cache       *ArchiveCache
 
 	// Limits for DoS protection
@@ -73,7 +74,7 @@ type CacheItem struct {
 // NewArchiveService creates a new ArchiveService.
 // client and chunkClient should bypass the controller cache (APIReader or dedicated direct client):
 // ManifestCheckpointContentChunk is not watched by informers (internal-only RBAC).
-func NewArchiveService(client client.Reader, chunkClient client.Reader, logger logger.LoggerInterface) *ArchiveService {
+func NewArchiveService(client client.Reader, chunkClient client.Reader, logger logger.Logger) *ArchiveService {
 	return &ArchiveService{
 		client:      client,
 		chunkClient: chunkClient,
@@ -121,7 +122,7 @@ func (s *ArchiveService) GetArchiveFromCheckpoint(ctx context.Context, checkpoin
 
 	// Validate UID matches (detect checkpoint regeneration)
 	if string(checkpoint.UID) != req.CheckpointUID {
-		s.logger.Warning("Checkpoint UID mismatch - checkpoint was regenerated",
+		s.logger.Warn("Checkpoint UID mismatch - checkpoint was regenerated",
 			"checkpoint", req.CheckpointName,
 			"expectedUID", req.CheckpointUID,
 			"actualUID", string(checkpoint.UID))
@@ -145,7 +146,7 @@ func (s *ArchiveService) GetArchiveFromCheckpoint(ctx context.Context, checkpoin
 
 	// Check archive size limit after creation
 	if checkpoint.Status.TotalSizeBytes > s.maxArchiveSizeBytes {
-		s.logger.Warning("Checkpoint archive size exceeds limit",
+		s.logger.Warn("Checkpoint archive size exceeds limit",
 			"checkpoint", req.CheckpointName,
 			"size", checkpoint.Status.TotalSizeBytes,
 			"limit", s.maxArchiveSizeBytes)
@@ -156,7 +157,7 @@ func (s *ArchiveService) GetArchiveFromCheckpoint(ctx context.Context, checkpoin
 	s.logger.Debug("Creating JSON archive", "checkpoint", req.CheckpointName, "objects", len(objects))
 	archiveData, err := s.createJSONArchive(objects)
 	if err != nil {
-		s.logger.Error(err, "Failed to create archive", "checkpoint", req.CheckpointName)
+		s.logger.Error("Failed to create archive", logger.Err(err), slog.String("checkpoint", req.CheckpointName))
 		return nil, "", err
 	}
 
@@ -325,7 +326,7 @@ func (s *ArchiveService) decodeChunkDataWithChecksum(encodedData string, expecte
 
 			objMap := s.convertKeyValueArrayToMap(itemArray)
 			if objMap == nil {
-				s.logger.Warning("Failed to convert Key/Value array to map, skipping",
+				s.logger.Warn("Failed to convert Key/Value array to map, skipping",
 					"chunk", chunkName,
 					"index", i)
 				continue
@@ -339,7 +340,7 @@ func (s *ArchiveService) decodeChunkDataWithChecksum(encodedData string, expecte
 		// Regular map object
 		objMap, ok := item.(map[string]interface{})
 		if !ok {
-			s.logger.Warning("Skipping non-map item in chunk",
+			s.logger.Warn("Skipping non-map item in chunk",
 				"chunk", chunkName,
 				"index", i,
 				"type", reflect.TypeOf(item).String())
@@ -393,7 +394,7 @@ func (s *ArchiveService) createJSONArchive(objects []unstructured.Unstructured) 
 
 		// Check if JSON contains Key/Value structure
 		if strings.Contains(preview, `"Key"`) && strings.Contains(preview, `"Value"`) {
-			s.logger.Warning("JSON archive contains Key/Value structure - conversion may have failed",
+			s.logger.Warn("JSON archive contains Key/Value structure - conversion may have failed",
 				"preview", preview)
 		}
 	}

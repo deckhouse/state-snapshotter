@@ -311,8 +311,7 @@ var _ = Describe("the aggregated group this module still serves", func() {
 
 	BeforeEach(func() {
 		// The real routes, not a stub: what falls through to them is what a cluster reaches.
-		delegate, err := newServedDiscoveryMux()
-		Expect(err).NotTo(HaveOccurred())
+		delegate := newServedDiscoveryMux()
 
 		scheme := runtime.NewScheme()
 		metav1.AddToGroupVersion(scheme, schema.GroupVersion{Version: "v1"})
@@ -323,6 +322,7 @@ var _ = Describe("the aggregated group this module still serves", func() {
 		config.ExternalAddress = "127.0.0.1:8443"
 		config.LoopbackClientConfig = &rest.Config{Host: "https://127.0.0.1:8443"}
 
+		var err error
 		server, err = newAggregatedServer(config.Complete(nil), apiServerName, delegate)
 		Expect(err).NotTo(HaveOccurred())
 		server.PrepareRun()

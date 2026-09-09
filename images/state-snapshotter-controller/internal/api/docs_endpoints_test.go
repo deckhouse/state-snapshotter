@@ -57,9 +57,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/state-snapshotter/api/names"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // docsRepoRoot is the repository root relative to this package (internal/api -> internal -> controller
@@ -354,10 +354,7 @@ func docsSnapshotSpecFields(t *testing.T) map[string]bool {
 func docsServedSubresources(t *testing.T) docsServedSet {
 	t.Helper()
 
-	log, err := logger.NewLogger("error")
-	if err != nil {
-		t.Fatalf("create logger: %v", err)
-	}
+	log := logger.NewNop()
 
 	served := docsServedSet{}
 	add := func(list metav1.APIResourceList) {

@@ -26,16 +26,15 @@ import (
 	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	"github.com/deckhouse/state-snapshotter/lib/go/common/pkg/logger"
 )
 
 // integrationArchiveObjectsFromMCP decodes the manifest archive bytes that the archive service builds
 // for a given ManifestCheckpoint. Kind-agnostic helper shared by core envtest specs.
 func integrationArchiveObjectsFromMCP(ctx context.Context, mcpName string) []map[string]interface{} {
-	log, err := logger.NewLogger("error")
-	Expect(err).NotTo(HaveOccurred())
+	log := logger.NewNop()
 	arch := usecase.NewArchiveService(k8sClient, k8sClient, log)
 	mcp := &ssv1alpha1.ManifestCheckpoint{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: mcpName}, mcp)).To(Succeed())
