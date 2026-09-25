@@ -405,3 +405,25 @@ func TestShouldIncludeNamespaceObject_ExcludesDeckhouseManagedObjects(t *testing
 		t.Fatal("object with a non-deckhouse heritage value must be included")
 	}
 }
+
+func TestShouldIncludeNamespaceObject_ExcludesProjectManagedObjects(t *testing.T) {
+	// What the multitenancy manager puts into a project namespace: the read-only catalog of cluster
+	// resources available to the project, which it refuses to have created by anyone else.
+	catalog := obj("multitenancy.deckhouse.io/v1alpha1", "AvailableClusterResource", "clusterissuers", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{
+			"heritage": "multitenancy-manager", "module": "multitenancy-manager", "projects.deckhouse.io/project": "p",
+		}
+	})
+	if ShouldIncludeNamespaceObject(catalog, nil) {
+		t.Fatal("a Project-managed object (heritage=multitenancy-manager) must be excluded from capture")
+	}
+
+	// The project label alone is not the signal: a user's own object in a project namespace carries no
+	// heritage and must still be captured.
+	userCM := obj("v1", "ConfigMap", "app-config", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"projects.deckhouse.io/project": "p"}
+	})
+	if !ShouldIncludeNamespaceObject(userCM, nil) {
+		t.Fatal("a user object in a project namespace must be included")
+	}
+}

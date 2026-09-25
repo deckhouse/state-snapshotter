@@ -450,6 +450,33 @@ func main() {
 	}
 	mainLog.Info("CustomSnapshotDefinition reconciler added to manager")
 
+	// The CSI VolumeSnapshot CRDs are installed by storage-foundation, which depends on this module, so on a
+	// fresh install they are not served yet when this process starts: the binder pair, the import binder and
+	// the graph registry entry above all degrade to "not RESTMappable yet". Syncer.Sync would add them without
+	// a restart, but it runs on CustomSnapshotDefinition reconciles only, and a cluster may have none. Until
+	// then a user's VolumeSnapshot is claimed by its domain controller and never gets a SnapshotContent. So
+	// when the kind is missing at boot, wait for it and run the same wiring once it appears.
+	vsGVK := unifiedbootstrap.BuiltInVolumeSnapshotPair().Snapshot
+	if _, err := mgr.GetRESTMapper().RESTMapping(vsGVK.GroupKind(), vsGVK.Version); err != nil {
+		mainLog.Info("CSI VolumeSnapshot is not served yet; its wiring is deferred until it is", "gvk", vsGVK.String())
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			return unifiedruntime.RunWhenMappable(ctx, ctrl.Log.WithName("deferred-volumesnapshot"), mgr.GetRESTMapper(), vsGVK, 10*time.Second,
+				func(ctx context.Context) error {
+					if err := graphRegProvider.Refresh(ctx); err != nil {
+						return fmt.Errorf("refresh the snapshot graph registry: %w", err)
+					}
+					if err := unifiedSync.Sync(ctx); err != nil {
+						return fmt.Errorf("sync the unified snapshot watches: %w", err)
+					}
+					return volumesnapshotimport.AddToManager(mgr)
+				})
+		})); err != nil {
+			mainLog.Error("failed to add the deferred VolumeSnapshot wiring to manager", logger.Err(err))
+			cancel()
+			os.Exit(1)
+		}
+	}
+
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
 
