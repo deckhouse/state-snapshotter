@@ -18,19 +18,27 @@
 
 set -euo pipefail
 
-# Keep in sync with api/README.md and CRD annotation controller-gen.kubebuilder.io/version.
-CONTROLLER_GEN_VERSION=v0.18.0
-CONTROLLER_GEN_BIN="$(go env GOPATH)/bin/controller-gen"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_PATHS="${ROOT_DIR}/api/v1alpha1;${ROOT_DIR}/api/storage/v1alpha1"
 
-echo "Ensuring controller-gen ${CONTROLLER_GEN_VERSION}..."
-go install "sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}"
+# controller-gen is pinned in hack/tools/go.mod and built into a temporary
+# directory. It used to be installed with `go install ...@v0.18.0` into
+# $GOPATH/bin, which pins the version but writes outside the repository, leaves
+# whatever was installed last on the developer's PATH and is not covered by any
+# go.sum. The version now lives in one place for both generators.
+TOOLS_DIR="$(mktemp -d)"
+trap 'rm -rf "${TOOLS_DIR}"' EXIT
+
+echo "Building controller-gen (pinned in hack/tools/go.mod)..."
+go -C "${ROOT_DIR}/hack/tools" build -o "${TOOLS_DIR}" \
+    sigs.k8s.io/controller-tools/cmd/controller-gen
 
 echo "Generating deepcopy code..."
-"${CONTROLLER_GEN_BIN}" object:headerFile="${ROOT_DIR}/hack/boilerplate.txt" paths="${API_PATHS}"
+"${TOOLS_DIR}/controller-gen" object:headerFile="${ROOT_DIR}/hack/boilerplate.txt" paths="${API_PATHS}"
 
+# The CRD manifests are rendered and then enriched; that pair lives in its own
+# script because the shared .crds_generated_check CI job runs it by name.
 echo "Generating CRD manifests..."
-"${CONTROLLER_GEN_BIN}" crd:crdVersions=v1 output:crd:dir="${ROOT_DIR}/crds" paths="${API_PATHS}"
+"${ROOT_DIR}/hack/generate_crds.sh"
 
 echo "Deepcopy and CRD generation complete."
