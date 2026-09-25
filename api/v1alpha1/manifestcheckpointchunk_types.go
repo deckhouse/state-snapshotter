@@ -20,6 +20,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ManifestCheckpointContentChunk is one chunk of the data of a ManifestCheckpoint.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcpchunk
 // +kubebuilder:metadata:labels=module=state-snapshotter

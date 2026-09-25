@@ -28,6 +28,9 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: |-
+          ManifestCheckpoint is the immutable checkpoint of manifest state created for a
+          ManifestCaptureRequest.
         properties:
           apiVersion:
             description: |-

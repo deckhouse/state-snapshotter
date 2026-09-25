@@ -20,6 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ManifestCaptureRequest asks for the state of the listed Kubernetes objects to be
+// captured into a manifest checkpoint.
+//
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=mcr

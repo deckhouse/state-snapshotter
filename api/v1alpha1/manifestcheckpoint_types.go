@@ -20,6 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ManifestCheckpoint is the immutable checkpoint of manifest state created for a
+// ManifestCaptureRequest.
+//
 // +kubebuilder:subresource:status
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcp

@@ -31,6 +31,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: ManifestCheckpointContentChunk is one chunk of the data of a
+          ManifestCheckpoint.
         properties:
           apiVersion:
             description: |-

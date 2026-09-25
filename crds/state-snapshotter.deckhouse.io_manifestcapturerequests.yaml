@@ -25,6 +25,9 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
+        description: |-
+          ManifestCaptureRequest asks for the state of the listed Kubernetes objects to be
+          captured into a manifest checkpoint.
         properties:
           apiVersion:
             description: |-
