@@ -82,7 +82,7 @@ statuses, and both groups answer at the same API server address: between a `Snap
 ## Permissions
 
 Give the product a `ServiceAccount` of its own in every namespace it works in, and bind one role to it:
-`d8:use:capability:module:state-snapshotter:backup_agent`. It is a `ClusterRole` that aggregates the six
+`d8:state-snapshotter:backup-agent`. It is a `ClusterRole` that aggregates the six
 capability roles from the table below — five of the snapshot module and one of the module that exports
 and imports volume data — so the whole set arrives through a single binding. A `RoleBinding` makes it
 effective in one namespace only; to cover one more namespace, create an account and a binding there —
@@ -106,7 +106,7 @@ subjects:
     namespace: my-app
 roleRef:
   kind: ClusterRole
-  name: d8:use:capability:module:state-snapshotter:backup_agent
+  name: d8:state-snapshotter:backup-agent
   apiGroup: rbac.authorization.k8s.io
 ```
 
@@ -115,12 +115,29 @@ the whole set; here is what the set is made of.
 
 | Role | What it buys the client |
 |---|---|
-| `d8:use:capability:module:state-snapshotter:view_snapshots` | Read `Snapshot` and `VolumeSnapshot` objects — the nodes of the tree. Walking the tree is reading node statuses, so this is the role that makes the walk possible. |
-| `d8:use:capability:module:state-snapshotter:manage_snapshots` | Create a `Snapshot` and delete it. There is no update: the spec is immutable, and cancelling a snapshot means deleting it, which takes the whole tree with it. |
-| `d8:use:capability:module:state-snapshotter:download_snapshots` | Read a node's manifests — in both groups of node endpoints. |
-| `d8:use:capability:module:state-snapshotter:upload_snapshots` | Write a node's manifests back — in both groups of node endpoints — and create the `VolumeSnapshot` objects of an imported tree: the client creates them, not the module. |
-| `d8:use:capability:module:state-snapshotter:restore_snapshots` | Read a whole subtree at once, addressed into the namespace of the requested snapshot — in both groups of node endpoints. This is a read for restoration, not an apply: see [Restoration, in brief](#restoration-in-brief). |
-| `d8:use:capability:module:storage-foundation:transfer_volume_data` | Create `DataExport` and `DataImport` objects and move volume data through their HTTP endpoints. |
+| `d8:namespace-capability:state-snapshotter:view_snapshots` | Read `Snapshot` and `VolumeSnapshot` objects — the nodes of the tree. Walking the tree is reading node statuses, so this is the role that makes the walk possible. |
+| `d8:namespace-capability:state-snapshotter:manage_snapshots` | Create a `Snapshot` and delete it. There is no update: the spec is immutable, and cancelling a snapshot means deleting it, which takes the whole tree with it. |
+| `d8:namespace-capability:state-snapshotter:download_snapshots` | Read a node's manifests — in both groups of node endpoints. |
+| `d8:namespace-capability:state-snapshotter:upload_snapshots` | Write a node's manifests back — in both groups of node endpoints — and create the `VolumeSnapshot` objects of an imported tree: the client creates them, not the module. |
+| `d8:namespace-capability:state-snapshotter:restore_snapshots` | Read a whole subtree at once, addressed into the namespace of the requested snapshot — in both groups of node endpoints. This is a read for restoration, not an apply: see [Restoration, in brief](#restoration-in-brief). |
+| `d8:namespace-capability:storage-foundation:transfer_volume_data` | Create `DataExport` and `DataImport` objects and move volume data through their HTTP endpoints. |
+
+The names above are those of DKP 1.78 and later. A cluster below 1.78 serves the same roles under
+their legacy names; bind those there:
+
+| DKP 1.78 and later | Below DKP 1.78 |
+|---|---|
+| `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
+| `d8:namespace-capability:state-snapshotter:view_snapshots` | `d8:use:capability:module:state-snapshotter:view_snapshots` |
+| `d8:namespace-capability:state-snapshotter:manage_snapshots` | `d8:use:capability:module:state-snapshotter:manage_snapshots` |
+| `d8:namespace-capability:state-snapshotter:download_snapshots` | `d8:use:capability:module:state-snapshotter:download_snapshots` |
+| `d8:namespace-capability:state-snapshotter:upload_snapshots` | `d8:use:capability:module:state-snapshotter:upload_snapshots` |
+| `d8:namespace-capability:state-snapshotter:restore_snapshots` | `d8:use:capability:module:state-snapshotter:restore_snapshots` |
+| `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
+
+After an upgrade to 1.78, a binding to the legacy `d8:use:capability:module:state-snapshotter:backup_agent`
+keeps working: that name is kept as a deprecated alias of `d8:state-snapshotter:backup-agent`. Move such
+bindings to the new name — a binding cannot be edited in place, so create the new one and delete the old.
 
 **Bind the role only in the namespaces the product has actually been given, and bind only the roles it
 uses.** The set grants deleting snapshots and creating objects in a live namespace, so every binding

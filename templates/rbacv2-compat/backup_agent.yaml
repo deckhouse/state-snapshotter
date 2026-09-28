@@ -1,0 +1,36 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+# The legacy name of d8:state-snapshotter:backup-agent, kept for the bindings made before the
+# upgrade to DKP 1.78: roleRef is immutable, so a RoleBinding to the old name cannot be moved onto the
+# new one, and without this object it would silently grant nothing. It is an alias in the way
+# user-authz keeps its own old role names: an empty ClusterRole whose aggregationRule repeats the
+# selector of the new role, so it collects the same capabilities.
+#
+# There is no rules key, not even an empty one: the rules belong to the aggregation controller, and
+# shipping rules: [] makes server-side apply fight it, emptying the role for a moment on every
+# reconcile.
+#
+# rbac.deckhouse.io/deprecated and the rbac.deckhouse.io/deprecated-replaced-by annotation make a
+# binding to this name raise D8UserAuthzDeprecatedRBACv2ModuleRoleInUse; without the annotation the
+# alias is ignored with a warning. Like the role it stands for, it carries no aggregation label and no
+# rbac.deckhouse.io/delegatable. Remove this file once no supported cluster can hold a binding made
+# before 1.78.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:use:capability:module:state-snapshotter:backup_agent
+  annotations:
+    en.meta.deckhouse.io/title: "Deprecated: d8:use:capability:module:state-snapshotter:backup_agent"
+    ru.meta.deckhouse.io/title: "Устарело: d8:use:capability:module:state-snapshotter:backup_agent"
+    en.meta.deckhouse.io/description: "Deprecated role of the state-snapshotter module kept for backward compatibility. Migrate bindings to d8:state-snapshotter:backup-agent."
+    ru.meta.deckhouse.io/description: "Устаревшая роль модуля state-snapshotter, оставленная для обратной совместимости. Переведите привязки на d8:state-snapshotter:backup-agent."
+    rbac.deckhouse.io/deprecated-replaced-by: "d8:state-snapshotter:backup-agent"
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/deprecated: "true"
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+        rbac.deckhouse.io/kind: capability
+{{- end }}

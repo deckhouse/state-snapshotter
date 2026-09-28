@@ -545,9 +545,13 @@ var partnerDocGroupVersions = []string{
 	"subresources.storage-foundation.deckhouse.io/v1",
 }
 
-// docsRoleNameRE matches a capability role name of any Deckhouse module, not only this one: a document
-// that starts naming a role of a third module must surface rather than pass unnoticed.
-var docsRoleNameRE = regexp.MustCompile(`d8:use:capability:module:[a-z0-9-]+:[a-z0-9_]+`)
+// docsRoleNameRE matches a capability role name of any Deckhouse module, not only this one, in both
+// role models — the capability/scope names of DKP 1.78 and later and the legacy manage/use ones the
+// documents give for older clusters: a document that starts naming a role of a third module must
+// surface rather than pass unnoticed, and a mirror that kept only one family of names must fail the
+// comparison. The collecting role of the new model sits outside the role model and has no capability
+// prefix, so its name is spelled out.
+var docsRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|namespace-capability):[a-z0-9-]+:[a-z0-9_]+|d8:state-snapshotter:backup-agent`)
 
 // TestPartnerDocCoveredByDocsGuards pins that the guards in this file actually read the backup
 // integration document. They scan docs/*.md and fail only when the WHOLE directory yields nothing, so

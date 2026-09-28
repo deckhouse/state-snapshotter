@@ -81,7 +81,7 @@ namespace'ов Deckhouse за пределами кластера. Он покр
 ## Права
 
 Заведите продукту собственный `ServiceAccount` в каждом namespace, где он работает, и привяжите к
-нему одну роль — `d8:use:capability:module:state-snapshotter:backup_agent`. Это `ClusterRole`,
+нему одну роль — `d8:state-snapshotter:backup-agent`. Это `ClusterRole`,
 которая собирает шесть capability-ролей из таблицы ниже — пять ролей модуля снимков и одну роль
 модуля экспорта и импорта данных томов, — так что весь набор приезжает одной привязкой.
 `RoleBinding` делает её действующей только в одном namespace; чтобы охватить ещё
@@ -105,7 +105,7 @@ subjects:
     namespace: my-app
 roleRef:
   kind: ClusterRole
-  name: d8:use:capability:module:state-snapshotter:backup_agent
+  name: d8:state-snapshotter:backup-agent
   apiGroup: rbac.authorization.k8s.io
 ```
 
@@ -114,12 +114,30 @@ roleRef:
 
 | Роль | Зачем она клиенту |
 |---|---|
-| `d8:use:capability:module:state-snapshotter:view_snapshots` | Читать объекты `Snapshot` и `VolumeSnapshot` — узлы дерева. Обход дерева — это чтение статусов узлов, поэтому именно эта роль делает обход возможным. |
-| `d8:use:capability:module:state-snapshotter:manage_snapshots` | Создать `Snapshot` и удалить его. Обновления нет: спека неизменяема, а отмена снимка — это его удаление, которое уносит всё дерево. |
-| `d8:use:capability:module:state-snapshotter:download_snapshots` | Читать манифесты узла — в обеих группах эндпоинтов узлов. |
-| `d8:use:capability:module:state-snapshotter:upload_snapshots` | Записывать манифесты узла обратно — в обеих группах эндпоинтов узлов — и создавать объекты `VolumeSnapshot` импортируемого дерева: их создаёт клиент, а не модуль. |
-| `d8:use:capability:module:state-snapshotter:restore_snapshots` | Читать целое поддерево сразу, адресованное в namespace запрошенного снимка, — в обеих группах эндпоинтов узлов. Это чтение для восстановления, а не применение: см. [Восстановление, коротко](#восстановление-коротко). |
-| `d8:use:capability:module:storage-foundation:transfer_volume_data` | Создавать объекты `DataExport` и `DataImport` и экспортировать и импортировать данные томов через их HTTP-эндпоинты. |
+| `d8:namespace-capability:state-snapshotter:view_snapshots` | Читать объекты `Snapshot` и `VolumeSnapshot` — узлы дерева. Обход дерева — это чтение статусов узлов, поэтому именно эта роль делает обход возможным. |
+| `d8:namespace-capability:state-snapshotter:manage_snapshots` | Создать `Snapshot` и удалить его. Обновления нет: спека неизменяема, а отмена снимка — это его удаление, которое уносит всё дерево. |
+| `d8:namespace-capability:state-snapshotter:download_snapshots` | Читать манифесты узла — в обеих группах эндпоинтов узлов. |
+| `d8:namespace-capability:state-snapshotter:upload_snapshots` | Записывать манифесты узла обратно — в обеих группах эндпоинтов узлов — и создавать объекты `VolumeSnapshot` импортируемого дерева: их создаёт клиент, а не модуль. |
+| `d8:namespace-capability:state-snapshotter:restore_snapshots` | Читать целое поддерево сразу, адресованное в namespace запрошенного снимка, — в обеих группах эндпоинтов узлов. Это чтение для восстановления, а не применение: см. [Восстановление, коротко](#восстановление-коротко). |
+| `d8:namespace-capability:storage-foundation:transfer_volume_data` | Создавать объекты `DataExport` и `DataImport` и экспортировать и импортировать данные томов через их HTTP-эндпоинты. |
+
+Имена выше — имена DKP 1.78 и новее. Кластер ниже 1.78 обслуживает те же роли под прежними
+именами; там привязывайте их:
+
+| DKP 1.78 и новее | Ниже DKP 1.78 |
+|---|---|
+| `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
+| `d8:namespace-capability:state-snapshotter:view_snapshots` | `d8:use:capability:module:state-snapshotter:view_snapshots` |
+| `d8:namespace-capability:state-snapshotter:manage_snapshots` | `d8:use:capability:module:state-snapshotter:manage_snapshots` |
+| `d8:namespace-capability:state-snapshotter:download_snapshots` | `d8:use:capability:module:state-snapshotter:download_snapshots` |
+| `d8:namespace-capability:state-snapshotter:upload_snapshots` | `d8:use:capability:module:state-snapshotter:upload_snapshots` |
+| `d8:namespace-capability:state-snapshotter:restore_snapshots` | `d8:use:capability:module:state-snapshotter:restore_snapshots` |
+| `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
+
+После обновления до 1.78 привязка к прежнему имени `d8:use:capability:module:state-snapshotter:backup_agent`
+продолжает работать: это имя оставлено как устаревший псевдоним `d8:state-snapshotter:backup-agent`.
+Переведите такие привязки на новое имя — привязку нельзя изменить на месте, поэтому создайте новую и
+удалите старую.
 
 **Привязывайте роль только в тех namespace'ах, которые продукту действительно отданы, и только те
 роли, которыми он пользуется.** Набор даёт право удалять снимки и создавать объекты в живом

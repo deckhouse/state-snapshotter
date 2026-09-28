@@ -1,3 +1,33 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+# Ask for a snapshot and drop it again. A Snapshot spec is immutable and one-shot, so there is no
+# update or patch to grant: a different snapshot is a new object, and undoing one is deleting it.
+# Child nodes are created by the controller and removed with the root, so this covers the whole tree.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    rbac.deckhouse.io/aggregate-to-namespace-as: manager
+    rbac.deckhouse.io/kind: capability
+    rbac.deckhouse.io/capability: "namespace-capability.state-snapshotter.manage_snapshots"
+    rbac.deckhouse.io/scope: namespace
+  name: d8:namespace-capability:state-snapshotter:manage_snapshots
+  annotations:
+    en.meta.deckhouse.io/title: "Module state-snapshotter: create and delete snapshots"
+    ru.meta.deckhouse.io/title: "Модуль state-snapshotter: создание и удаление снимков"
+    en.meta.deckhouse.io/description: "Create and delete Snapshot objects in a namespace; the controller creates and removes the child nodes of the tree."
+    ru.meta.deckhouse.io/description: "Создание и удаление объектов Snapshot в пространстве имён; дочерние узлы дерева создаёт и удаляет контроллер."
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - snapshots
+    verbs:
+      - create
+      - delete
+{{- else }}
 # Ask for a snapshot and drop it again. A Snapshot spec is immutable and one-shot, so there is no
 # update or patch to grant: a different snapshot is a new object, and undoing one is deleting it.
 # Child nodes are created by the controller and removed with the root, so this covers the whole tree.
@@ -19,3 +49,4 @@ rules:
     verbs:
       - create
       - delete
+{{- end }}

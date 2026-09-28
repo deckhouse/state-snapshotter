@@ -1,3 +1,30 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    rbac.deckhouse.io/aggregate-to-namespace-as: viewer
+    rbac.deckhouse.io/kind: capability
+    rbac.deckhouse.io/capability: "namespace-capability.state-snapshotter.view"
+    rbac.deckhouse.io/scope: namespace
+  name: d8:namespace-capability:state-snapshotter:view
+  annotations:
+    en.meta.deckhouse.io/title: "Module state-snapshotter: view"
+    ru.meta.deckhouse.io/title: "Модуль state-snapshotter: просмотр"
+    en.meta.deckhouse.io/description: "Read-only access to state-snapshotter resources in a namespace."
+    ru.meta.deckhouse.io/description: "Доступ только на чтение к ресурсам модуля state-snapshotter в пространстве имён."
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - manifestcapturerequests
+    verbs:
+      - get
+      - list
+      - watch
+{{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -16,3 +43,4 @@ rules:
       - get
       - list
       - watch
+{{- end }}

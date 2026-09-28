@@ -1,3 +1,61 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+# Read the manifests of a snapshot node, one node per request, for both node kinds: a core Snapshot
+# through this module's aggregated group, a volume node through the group of the module that owns the
+# CSI VolumeSnapshot. The aggregated API server authorizes every request with a SubjectAccessReview
+# built from the URL, so a subresource is named "<resource>/<subresource>" here and the verb follows
+# the HTTP method (GET -> get). The groups carry different API versions; RBAC is version-independent,
+# so only the group names appear below.
+#
+# The volume-node grant names a group this module does not serve, and it belongs here nonetheless: one
+# capability describes one user operation, and that operation walks a tree whose nodes are of both
+# kinds. Splitting it per module would answer 403 on the volume leg and hand the user a partial tree
+# behind a fail-closed refusal.
+#
+# Only the namespaced layer is granted: the cluster-scoped snapshot content and checkpoint resources
+# are never addressed by a client walking a tree, and this role must not open them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    rbac.deckhouse.io/aggregate-to-namespace-as: manager
+    rbac.deckhouse.io/kind: capability
+    rbac.deckhouse.io/capability: "namespace-capability.state-snapshotter.download_snapshots"
+    rbac.deckhouse.io/scope: namespace
+  name: d8:namespace-capability:state-snapshotter:download_snapshots
+  annotations:
+    en.meta.deckhouse.io/title: "Module state-snapshotter: download snapshot manifests"
+    ru.meta.deckhouse.io/title: "Модуль state-snapshotter: выгрузка манифестов снимков"
+    en.meta.deckhouse.io/description: "Read the manifests of a snapshot node as they were captured, one node per request, for both Snapshot and VolumeSnapshot nodes in a namespace."
+    ru.meta.deckhouse.io/description: "Чтение манифестов узла снимка в том виде, в каком они были сохранены, по одному узлу за запрос, для узлов Snapshot и VolumeSnapshot в пространстве имён."
+rules:
+  - apiGroups:
+      - subresources.state-snapshotter.deckhouse.io
+    resources:
+      - snapshots/manifests-download
+    verbs:
+      - get
+  - apiGroups:
+      - subresources.storage-foundation.deckhouse.io
+    resources:
+      - volumesnapshots/manifests-download
+    verbs:
+      - get
+  # The volume node's endpoints were served under the group below before they moved to the one above,
+  # and the group in the URL is what a SubjectAccessReview is built from — so a client released on
+  # another schedule, still addressing the old group, is refused here unless this rule stays. Removing
+  # it before every released client has moved would make the server-side compatibility alias useless:
+  # the request would reach a working endpoint and be answered 403. It goes away together with that
+  # alias, in one change.
+  - apiGroups:
+      - subresources.snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots/manifests-download
+    verbs:
+      - get
+{{- else }}
 # Read the manifests of a snapshot node, one node per request, for both node kinds: a core Snapshot
 # through this module's aggregated group, a volume node through the group of the module that owns the
 # CSI VolumeSnapshot. The aggregated API server authorizes every request with a SubjectAccessReview
@@ -47,3 +105,4 @@ rules:
       - volumesnapshots/manifests-download
     verbs:
       - get
+{{- end }}

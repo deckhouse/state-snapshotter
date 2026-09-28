@@ -1,3 +1,4 @@
+{{- if ne (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
 # The whole permission set an external backup product needs, as one role to bind instead of a list of
 # capabilities to bind one by one. A forgotten binding is invisible at setup time: a RoleBinding is
 # created successfully whether or not the role it names exists, roleRef is not checked against
@@ -52,3 +53,4 @@ aggregationRule:
         rbac.deckhouse.io/aggregate-to-backup-agent-as: member
         rbac.deckhouse.io/kind: use
 rules: []
+{{- end }}

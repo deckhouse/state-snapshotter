@@ -1,3 +1,43 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+# Read a snapshot and walk its tree: the Snapshot objects themselves plus the VolumeSnapshot objects
+# that stand for the tree's volume nodes. Reading a volume node's status is what makes the walk
+# possible (its bound content is named there), so it is part of viewing, not of data transfer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+    state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    rbac.deckhouse.io/aggregate-to-namespace-as: viewer
+    rbac.deckhouse.io/kind: capability
+    rbac.deckhouse.io/capability: "namespace-capability.state-snapshotter.view_snapshots"
+    rbac.deckhouse.io/scope: namespace
+  name: d8:namespace-capability:state-snapshotter:view_snapshots
+  annotations:
+    en.meta.deckhouse.io/title: "Module state-snapshotter: view snapshots"
+    ru.meta.deckhouse.io/title: "Модуль state-snapshotter: просмотр снимков"
+    en.meta.deckhouse.io/description: "Read Snapshot objects in a namespace and the VolumeSnapshot objects that stand for their volume nodes, to walk a snapshot tree."
+    ru.meta.deckhouse.io/description: "Чтение объектов Snapshot в пространстве имён и объектов VolumeSnapshot, представляющих их узлы-тома, для обхода дерева снимка."
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - snapshots
+      - snapshots/status
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - watch
+{{- else }}
 # Read a snapshot and walk its tree: the Snapshot objects themselves plus the VolumeSnapshot objects
 # that stand for the tree's volume nodes. Reading a volume node's status is what makes the walk
 # possible (its bound content is named there), so it is part of viewing, not of data transfer.
@@ -29,3 +69,4 @@ rules:
       - get
       - list
       - watch
+{{- end }}

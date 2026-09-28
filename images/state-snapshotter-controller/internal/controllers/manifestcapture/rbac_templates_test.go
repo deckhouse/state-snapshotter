@@ -18,11 +18,13 @@ package manifestcapture
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -396,32 +398,78 @@ func TestWebhookRBACDoesNotUseWildcardResourceReads(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// User capability roles and the role that collects them —
-// templates/rbacv2/use/capabilities/*.yaml and templates/rbacv2/use/roles/*.yaml
+// User capability roles and the roles that collect them —
+// templates/rbacv2/use/capabilities/*.yaml, templates/rbacv2/use/roles/*.yaml,
+// templates/backup-agent/*.yaml and templates/rbacv2-compat/*.yaml
 //
 // Plain testing guards reading the chart from disk rather than Ginkgo specs over embedded fixtures:
 // the subject of every check below IS the template file the chart ships, so an embedded copy would be
 // a copy checking itself and a passing test would say nothing about what the cluster gets.
+//
+// TWO ROLE MODELS are shipped from one chart. DKP 1.78 replaced the manage/use kinds of RBACv2 with
+// capability/scope, and this module is installed on clusters on both sides of that release, so every
+// template here carries the object of each model behind a gate on global.deckhouseVersion (see
+// templates/_rbacv2_compat.tpl). Both branches reach a cluster, so both are pinned: the new one in full,
+// the legacy one by name, labels and grants, and the two against each other where they must agree.
 // ---------------------------------------------------------------------------
 
+// rbacScheme names the branch of a gated template the guards read: the capability/scope model of DKP
+// 1.78 and later, or the legacy manage/use model rendered below it.
+type rbacScheme string
+
 const (
-	// capabilityRolePrefix is the name every user capability role of this module carries; the file
-	// base name is the capability that follows it.
-	capabilityRolePrefix = "d8:use:capability:module:state-snapshotter:"
+	schemeNew    rbacScheme = "capability/scope (DKP >= 1.78)"
+	schemeLegacy rbacScheme = "manage/use (DKP < 1.78)"
+)
 
-	// rbacAggregationLabel is the cluster-level axis. A role carrying it is handed to everyone
-	// already holding the matching cluster-wide role, with nobody binding anything, so its presence
-	// is part of the contract and is pinned per role below.
-	rbacAggregationLabel = "rbac.deckhouse.io/aggregate-to-kubernetes-as"
+var rbacSchemes = []rbacScheme{schemeNew, schemeLegacy}
 
-	// rbacBackupAgentLabel is the axis that composes the capabilities an external backup product
-	// needs into one role for it to be bound to. It is not a second road onto a cluster-wide level,
-	// and that difference is why a capability may carry this axis while deliberately refusing the one
-	// above: the role collecting this axis carries no axis of its own and grants nothing at all until
-	// a RoleBinding names it, whereas rbacAggregationLabel hands the capability to every holder of a
-	// level the moment the label appears. Written down because the flat ban this replaced looked
-	// right, and restoring it would take the single-binding path away.
-	rbacBackupAgentLabel = "rbac.deckhouse.io/aggregate-to-backup-agent-as"
+// The gate lines exactly as rbacv2-migrate-module.sh writes them (the "eq" shape, optionally with an
+// else branch) and as the legacy-only file of the collecting role spells its own ("ne"). Matched as
+// whole lines, so a gate on anything else is not mistaken for this one.
+const (
+	rbacGateNewScheme    = `{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}`
+	rbacGateLegacyScheme = `{{- if ne (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}`
+	rbacGateElse         = `{{- else }}`
+	rbacGateEnd          = `{{- end }}`
+)
+
+const (
+	// capabilityRolePrefix is the name every user capability role of this module carries in the new
+	// model; the file base name is the capability that follows it.
+	capabilityRolePrefix = "d8:namespace-capability:state-snapshotter:"
+
+	// legacyCapabilityRolePrefix is the name the same capability carries in the legacy branch.
+	legacyCapabilityRolePrefix = "d8:use:capability:module:state-snapshotter:"
+
+	// capabilityMarkerPrefix is the value prefix of rbac.deckhouse.io/capability, the marker the
+	// platform keeps unique across the cluster; the capability follows it.
+	capabilityMarkerPrefix = "namespace-capability.state-snapshotter."
+
+	// namespaceLevelLabel is the level a new-model capability aggregates into. That lineage is granted
+	// per namespace, through a RoleBinding, so it is not the cluster-wide road the legacy axis below
+	// is; the level it carries is pinned per role all the same, because it decides who in a namespace
+	// gains the capability without anyone binding it separately.
+	namespaceLevelLabel = "rbac.deckhouse.io/aggregate-to-namespace-as"
+
+	// legacyAggregationLabel is the cluster-level axis of the legacy model. A role carrying it is
+	// handed to everyone already holding the matching cluster-wide role, with nobody binding anything,
+	// so its presence is part of the contract and is pinned per role below.
+	legacyAggregationLabel = "rbac.deckhouse.io/aggregate-to-kubernetes-as"
+
+	// backupAgentMemberLabel composes, in the new model, the capabilities an external backup product
+	// needs into one role for it to be bound to. It is a label of this module, outside
+	// rbac.deckhouse.io/, because the platform contract refuses an axis it does not know there. It
+	// is not a road onto any level: the role collecting it carries nothing of the role model and
+	// grants nothing at all until a RoleBinding names it.
+	backupAgentMemberLabel = "state-snapshotter.deckhouse.io/aggregate-to-backup-agent"
+
+	// legacyBackupAgentLabel is the same membership in the legacy model, spelled as an axis of the
+	// platform's own prefix. That is why a legacy capability may carry this axis while deliberately
+	// refusing legacyAggregationLabel: the difference between them is the difference between being
+	// bound explicitly and being handed out to a whole level. Written down because the flat ban this
+	// replaced looked right, and restoring it would take the single-binding path away.
+	legacyBackupAgentLabel = "rbac.deckhouse.io/aggregate-to-backup-agent-as"
 
 	// rbacAggregationAxisPrefix is what every aggregation axis of this platform is named with. The
 	// guards below compare against the PREFIX and not against a list of axis names, because the list
@@ -429,36 +477,60 @@ const (
 	// carrying one of them is composed into a set assembled elsewhere, on terms nothing here states.
 	rbacAggregationAxisPrefix = "rbac.deckhouse.io/aggregate-"
 
-	// backupAgentRoleName is the role that collects rbacBackupAgentLabel. It lives under
-	// templates/rbacv2/use/roles and not among the capabilities because a role with an
-	// aggregationRule inside that directory is refused below, for a reason that still holds.
-	backupAgentRoleName = capabilityRolePrefix + "backup_agent"
+	// backupAgentRoleName is the role that collects backupAgentMemberLabel. It is an ordinary
+	// ClusterRole outside the role model — the 1.78 model has no role of a module — and lives in
+	// templates/backup-agent, away from the capabilities, because a role with an aggregationRule among
+	// them is refused below, for a reason that still holds.
+	backupAgentRoleName = "d8:state-snapshotter:backup-agent"
+
+	// legacyBackupAgentRoleName is the collecting role of the legacy model, shipped from
+	// templates/rbacv2/use/roles below 1.78 and kept from 1.78 on as a deprecated alias in
+	// templates/rbacv2-compat, so the bindings made before the upgrade keep granting.
+	legacyBackupAgentRoleName = legacyCapabilityRolePrefix + "backup_agent"
 )
 
-// TestUserCapabilityRolesGrantExactRulesAndLabels pins every user capability role by name: the exact
-// set of "<apiGroup>/<resource>" grants with their verbs, BOTH aggregation axes — including the two
-// roles that deliberately stay off the cluster-level one — and that nothing else composes the role
-// into somebody's rights. Rules are compared flattened, so regrouping the YAML is free while adding
-// or widening a grant is not.
+// capabilityI18nAnnotations are the annotations the console shows next to a capability of the new
+// model, and the only annotations such a capability may carry. Every one is required: the platform
+// contract refuses a capability missing any of them.
+var capabilityI18nAnnotations = []string{
+	"en.meta.deckhouse.io/title",
+	"ru.meta.deckhouse.io/title",
+	"en.meta.deckhouse.io/description",
+	"ru.meta.deckhouse.io/description",
+}
+
+// TestUserCapabilityRolesGrantExactRulesAndLabels pins every user capability role by name, in both
+// branches of its template: the exact set of "<apiGroup>/<resource>" grants with their verbs, the level
+// it aggregates into, its membership in the backup-agent set, and that nothing else composes the role
+// into somebody's rights. Rules are compared flattened, so regrouping the YAML is free while adding or
+// widening a grant is not — and the two branches are held to the SAME grants, so a fix applied to one
+// model only fails here instead of reaching half the clusters.
 //
-// TWO AXES, and the difference between them is why one is allowed where the other is refused:
-// rbacAggregationLabel puts the capability into a cluster-wide access level, so every holder of that
-// level gains it with nobody binding anything; rbacBackupAgentLabel puts it into a role that carries
-// no axis of its own and grants nothing until a RoleBinding names it. Both are pinned per role below,
-// in both directions — an axis on a role that must not have it fails here, and so does an axis
-// missing from a role that must.
+// NEW MODEL: the labels are compared as an exact set. Every label a capability of the new model may
+// carry is part of the contract — the kind, the scope, the unique marker, one level, the module label
+// for the backup-agent set — so anything beyond that set is a way in nothing here describes, and
+// anything missing is a capability the platform refuses or a collector that stays short of it. The
+// annotations are the four texts the console shows and nothing else.
+//
+// LEGACY MODEL: two axes, and the difference between them is why one is allowed where the other is
+// refused: legacyAggregationLabel puts the capability into a cluster-wide access level, so every holder
+// of that level gains it with nobody binding anything; legacyBackupAgentLabel puts it into a role that
+// carries no axis of its own and grants nothing until a RoleBinding names it. Both are pinned per role
+// below, in both directions.
 //
 // LIMIT: this compares what the role SAYS. That the granted subresources are the ones the server
 // actually serves is a different question, checked by TestEveryNamespacedSubresourceRouteHasCapabilityRole.
 func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 	expected := map[string]struct {
-		aggregateAs   string // "" — this role deliberately stays off the cluster-level axis
-		backupAgentAs string // "" — this role is deliberately not part of the backup-agent set
-		grants        map[string][]string
+		namespaceAs  string // the level of the new model; every capability aggregates into one
+		kubernetesAs string // "" — the legacy object deliberately stays off the cluster-level axis
+		backupAgent  bool   // part of the set the backup-agent role collects, in both models
+		grants       map[string][]string
 	}{
 		"view_snapshots": {
-			aggregateAs:   "viewer",
-			backupAgentAs: "member",
+			namespaceAs:  "viewer",
+			kubernetesAs: "viewer",
+			backupAgent:  true,
 			grants: map[string][]string{
 				"state-snapshotter.deckhouse.io/snapshots":        {"get", "list", "watch"},
 				"state-snapshotter.deckhouse.io/snapshots/status": {"get", "list", "watch"},
@@ -468,16 +540,18 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 			},
 		},
 		"manage_snapshots": {
-			aggregateAs:   "manager",
-			backupAgentAs: "member",
+			namespaceAs:  "manager",
+			kubernetesAs: "manager",
+			backupAgent:  true,
 			// No update/patch: a Snapshot spec is one-shot and immutable.
 			grants: map[string][]string{
 				"state-snapshotter.deckhouse.io/snapshots": {"create", "delete"},
 			},
 		},
 		"download_snapshots": {
-			aggregateAs:   "manager",
-			backupAgentAs: "member",
+			namespaceAs:  "manager",
+			kubernetesAs: "manager",
+			backupAgent:  true,
 			grants: map[string][]string{
 				"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-download":        {"get"},
 				"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-download": {"get"},
@@ -491,13 +565,17 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 			},
 		},
 		"upload_snapshots": {
-			// Off the cluster-level axis for a reason of its own: this capability writes into ANOTHER
-			// module's resource, so that axis would let every manager in the cluster create
-			// VolumeSnapshots merely because this module is installed. In the backup-agent set all the
-			// same — loading a tree back into the cluster is half of what a backup product does — and
-			// that set reaches an explicitly bound subject only.
-			aggregateAs:   "",
-			backupAgentAs: "member",
+			// Namespace admin in the new model, off the cluster-level axis in the legacy one, for one
+			// reason: this capability writes into ANOTHER module's resource, so a cluster-wide road
+			// would let every manager in the cluster create VolumeSnapshots merely because this module
+			// is installed. The namespace lineage is granted per namespace, and admin — the level that
+			// runs the namespace and can already reach a volume's contents through the pod mounting it
+			// — gains nothing new in kind. In the backup-agent set all the same: loading a tree back
+			// into the cluster is half of what a backup product does, and that set reaches an
+			// explicitly bound subject only.
+			namespaceAs:  "admin",
+			kubernetesAs: "",
+			backupAgent:  true,
 			grants: map[string][]string{
 				"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-and-children-refs-upload":        {"create"},
 				"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-and-children-refs-upload": {"create"},
@@ -512,13 +590,16 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 			},
 		},
 		"restore_snapshots": {
-			// Off the cluster-level axis: this capability reads a whole subtree already rewritten for
-			// a target namespace, which is not something a holder of a general cluster-wide role is
-			// assumed to have asked for. In the backup-agent set, because restoring is the other half
-			// of what a backup product does, and membership there grants nothing until somebody binds
-			// the collecting role in a namespace on purpose.
-			aggregateAs:   "",
-			backupAgentAs: "member",
+			// Namespace admin in the new model, off the cluster-level axis in the legacy one: this
+			// capability reads a whole subtree already rewritten for a target namespace, which is not
+			// something a holder of a general cluster-wide role is assumed to have asked for. A
+			// namespace admin can already reach a volume's contents, so it gains nothing new in kind.
+			// In the backup-agent set, because restoring is the other half of what a backup product
+			// does, and membership there grants nothing until somebody binds the collecting role in a
+			// namespace on purpose.
+			namespaceAs:  "admin",
+			kubernetesAs: "",
+			backupAgent:  true,
 			grants: map[string][]string{
 				"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-with-data-restoration":        {"get"},
 				"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-with-data-restoration": {"get"},
@@ -539,307 +620,553 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 		capability := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 		want, pinned := expected[capability]
 		if !pinned {
-			t.Errorf("%s: capability %q is published with no expectation here — every capability this module hands out is pinned by name, so add its grants and aggregation label above", file, capability)
+			t.Errorf("%s: capability %q is published with no expectation here — every capability this module hands out is pinned by name, so add its grants and aggregation labels above", file, capability)
+			continue
+		}
+		if want.namespaceAs == "" {
+			t.Errorf("%s: capability %q is pinned with no level of the new model — the platform contract refuses a capability that aggregates into no level, so pin the one it carries", file, capability)
+		}
+
+		roles := map[rbacScheme]rbacv1.ClusterRole{}
+		for _, scheme := range rbacSchemes {
+			parsed := clusterRolesFromTemplate(t, file, scheme)
+			if len(parsed) != 1 {
+				t.Errorf("%s: the %s branch holds %d ClusterRole(s), want exactly one — both models ship this capability", file, scheme, len(parsed))
+				continue
+			}
+			roles[scheme] = parsed[0]
+		}
+		if len(roles) != len(rbacSchemes) {
 			continue
 		}
 
-		roles := clusterRolesFromTemplate(t, file)
-		if len(roles) != 1 {
-			t.Errorf("%s: holds %d ClusterRole(s), want exactly one", file, len(roles))
-			continue
-		}
-		role := roles[0]
+		checkNewCapabilityRole(t, file, capability, roles[schemeNew], want.namespaceAs, want.backupAgent)
+		checkLegacyCapabilityRole(t, file, capability, roles[schemeLegacy], want.kubernetesAs, want.backupAgent)
 
-		if want := capabilityRolePrefix + capability; role.Name != want {
-			t.Errorf("%s: role is named %q, want %q (the file base name is the capability)", file, role.Name, want)
-		}
-		for key, value := range map[string]string{
-			"heritage":               "deckhouse",
-			"module":                 "state-snapshotter",
-			"rbac.deckhouse.io/kind": "use",
-		} {
-			if got := role.Labels[key]; got != value {
-				t.Errorf("%s: label %q is %q, want %q", file, key, got, value)
+		for _, scheme := range rbacSchemes {
+			role := roles[scheme]
+			// An aggregationRule on the capability itself makes the controller overwrite its rules
+			// from whatever matches the selector — after which the comparison below describes the file
+			// and not the role the cluster ends up with. That ban is why the roles collecting the
+			// backup-agent set live outside this directory instead of among the capabilities.
+			if role.AggregationRule != nil {
+				t.Errorf("%s (%s): declares an aggregationRule — its rules would then be rewritten by the controller from the roles the selector matches, and everything pinned below would stop describing the effective role", file, scheme)
 			}
-		}
-		// A capability reaches somebody's rights by exactly two mechanisms: the two aggregation axes
-		// pinned above. Three others would do it quietly, and all three are refused outright rather
-		// than pinned per role — a THIRD rbac.deckhouse.io/aggregate-* axis, whose collecting role
-		// this repository does not describe and whose reach therefore nothing here bounds; any
-		// annotation (the access levels of the cluster roles this module ships are assembled from an
-		// annotation, so one access-level annotation on a role that must not be aggregated hands it to
-		// an entire level); and an aggregationRule on the capability itself, which makes the controller
-		// overwrite rules from whatever matches the selector — after which the comparison below
-		// describes the file and not the role the cluster ends up with. That last ban is why the role
-		// collecting rbacBackupAgentLabel lives outside this directory instead of among the
-		// capabilities it collects.
-		if role.AggregationRule != nil {
-			t.Errorf("%s: declares an aggregationRule — its rules would then be rewritten by the controller from the roles the selector matches, and everything pinned below would stop describing the effective role", file)
-		}
-		for key := range role.Annotations {
-			t.Errorf("%s: carries annotation %q — a capability role is composed into somebody's rights through its aggregation label and nothing else, and an annotation is another way in", file, key)
-		}
-		for key := range role.Labels {
-			if strings.HasPrefix(key, rbacAggregationAxisPrefix) &&
-				key != rbacAggregationLabel && key != rbacBackupAgentLabel {
-				t.Errorf("%s: carries a third aggregation axis %q — the capabilities of this module go onto %s and %s only, and an axis described nowhere in this repository composes them into rights nothing here bounds",
-					file, key, rbacAggregationLabel, rbacBackupAgentLabel)
+			for _, rule := range role.Rules {
+				if len(rule.ResourceNames) > 0 || len(rule.NonResourceURLs) > 0 {
+					t.Errorf("%s (%s): a rule narrows to resourceNames/nonResourceURLs %v/%v, which the flattened comparison below does not model — pin it explicitly or drop it",
+						file, scheme, rule.ResourceNames, rule.NonResourceURLs)
+				}
 			}
-		}
-
-		got, labelled := role.Labels[rbacAggregationLabel]
-		switch {
-		case want.aggregateAs == "" && labelled:
-			t.Errorf("%s: carries %s=%q, but this capability must stay off the cluster-level axis — the label would hand it to every holder of that cluster-wide role, silently", file, rbacAggregationLabel, got)
-		case want.aggregateAs != "" && got != want.aggregateAs:
-			t.Errorf("%s: aggregates as %q, want %q", file, got, want.aggregateAs)
-		}
-
-		gotAgent, agentLabelled := role.Labels[rbacBackupAgentLabel]
-		switch {
-		case want.backupAgentAs == "" && agentLabelled:
-			t.Errorf("%s: carries %s=%q, but this capability is not pinned as part of the backup-agent set — the label adds its grants to the one role an external backup product is bound to", file, rbacBackupAgentLabel, gotAgent)
-		case want.backupAgentAs != "" && gotAgent != want.backupAgentAs:
-			t.Errorf("%s: is in the backup-agent set as %q, want %q — the selector of %s matches on the value, so anything else leaves this capability out of the single binding and its absence surfaces only when a client is refused",
-				file, gotAgent, want.backupAgentAs, backupAgentRoleName)
-		}
-
-		for _, rule := range role.Rules {
-			if len(rule.ResourceNames) > 0 || len(rule.NonResourceURLs) > 0 {
-				t.Errorf("%s: a rule narrows to resourceNames/nonResourceURLs %v/%v, which the flattened comparison below does not model — pin it explicitly or drop it",
-					file, rule.ResourceNames, rule.NonResourceURLs)
+			if grants := flattenPolicyRules(role.Rules); !reflect.DeepEqual(grants, want.grants) {
+				t.Errorf("%s (%s): grants\n  %v\nwant\n  %v", file, scheme, sortedGrantLines(grants), sortedGrantLines(want.grants))
 			}
+			grantsChecked += len(want.grants)
 		}
-		if grants := flattenPolicyRules(role.Rules); !reflect.DeepEqual(grants, want.grants) {
-			t.Errorf("%s: grants\n  %v\nwant\n  %v", file, sortedGrantLines(grants), sortedGrantLines(want.grants))
-		}
-		grantsChecked += len(want.grants)
 	}
 
-	t.Logf("checked %d capability role(s) and %d grant(s) under templates/rbacv2/use/capabilities", len(files), grantsChecked)
+	t.Logf("checked %d capability role file(s) in %d model(s) and %d grant(s) under templates/rbacv2/use/capabilities", len(files), len(rbacSchemes), grantsChecked)
 	if grantsChecked == 0 {
 		t.Fatal("no grant checked — zero findings means the roles stopped being read, not that they are correct")
 	}
 }
 
+// checkNewCapabilityRole pins the new-model object of one capability: its name, its labels as an exact
+// set and its annotations as exactly the four console texts.
+func checkNewCapabilityRole(t *testing.T, file, capability string, role rbacv1.ClusterRole, namespaceAs string, backupAgent bool) {
+	t.Helper()
+
+	if want := capabilityRolePrefix + capability; role.Name != want {
+		t.Errorf("%s: the new-model role is named %q, want %q (the file base name is the capability)", file, role.Name, want)
+	}
+
+	// Exact, in both directions. A label outside this set is refused whatever it is called: a third
+	// rbac.deckhouse.io/aggregate-* axis composes the capability into a set nothing here bounds, the
+	// legacy axes mean nothing to a 1.78 cluster and are refused by its contract, and
+	// rbac.deckhouse.io/delegatable would put a single capability into what a project owner hands out.
+	// A MISSING label is as bad the other way: without the level the contract refuses the capability,
+	// without the module label the backup-agent role silently collects one capability fewer.
+	wantLabels := map[string]string{
+		"heritage":                     "deckhouse",
+		"module":                       "state-snapshotter",
+		"rbac.deckhouse.io/kind":       "capability",
+		"rbac.deckhouse.io/scope":      "namespace",
+		"rbac.deckhouse.io/capability": capabilityMarkerPrefix + capability,
+		namespaceLevelLabel:            namespaceAs,
+	}
+	if backupAgent {
+		wantLabels[backupAgentMemberLabel] = "true"
+	}
+	if !reflect.DeepEqual(role.Labels, wantLabels) {
+		t.Errorf("%s: the new-model role carries labels\n  %v\nwant exactly\n  %v\n— every label of a capability decides who gains it or whether the platform accepts it, so none is incidental",
+			file, sortedLabelLines(role.Labels), sortedLabelLines(wantLabels))
+	}
+	if marker := capabilityMarkerPrefix + capability; len(marker) > 63 {
+		t.Errorf("%s: the capability marker %q is %d characters long, and a label value holds 63 at most", file, marker, len(marker))
+	}
+
+	// The four texts the console shows, and no other annotation: the access levels of the cluster roles
+	// this module ships are assembled from an annotation, so one access-level annotation on a
+	// capability hands it to an entire level.
+	for key, value := range role.Annotations {
+		if !slices.Contains(capabilityI18nAnnotations, key) {
+			t.Errorf("%s: the new-model role carries annotation %q=%q — a capability carries its four console texts and nothing else, and any other annotation is another way into somebody's rights", file, key, value)
+		}
+	}
+	for _, key := range capabilityI18nAnnotations {
+		if strings.TrimSpace(role.Annotations[key]) == "" {
+			t.Errorf("%s: the new-model role has no %s — the platform contract refuses a capability without it, and the console shows it next to the capability", file, key)
+		}
+	}
+	// The migration script writes these texts from the action's name and asks for them to be reworded;
+	// what it writes is recognizable, and shipping it would show a placeholder in the console.
+	enTitle := role.Annotations["en.meta.deckhouse.io/title"]
+	if !strings.HasPrefix(enTitle, "Module state-snapshotter: ") {
+		t.Errorf("%s: the English title %q does not start with \"Module state-snapshotter: \", the form every capability of the platform is titled in", file, enTitle)
+	}
+	if action := strings.TrimPrefix(enTitle, "Module state-snapshotter: "); action != "" && strings.Contains(role.Annotations["ru.meta.deckhouse.io/title"], action) {
+		t.Errorf("%s: the Russian title repeats the English action %q — that is the placeholder of the migration script, not a translation", file, action)
+	}
+	if strings.HasSuffix(role.Annotations["en.meta.deckhouse.io/description"], " capability of the state-snapshotter module.") ||
+		strings.HasPrefix(role.Annotations["ru.meta.deckhouse.io/description"], "Capability ") {
+		t.Errorf("%s: a description is the placeholder of the migration script — say what the capability grants, in both languages", file)
+	}
+}
+
+// checkLegacyCapabilityRole pins the legacy object of one capability the way it has been pinned since
+// before the new model existed: name, the labels the legacy aggregates select on, both axes in both
+// directions, and no annotation at all.
+func checkLegacyCapabilityRole(t *testing.T, file, capability string, role rbacv1.ClusterRole, kubernetesAs string, backupAgent bool) {
+	t.Helper()
+
+	if want := legacyCapabilityRolePrefix + capability; role.Name != want {
+		t.Errorf("%s: the legacy role is named %q, want %q (the file base name is the capability)", file, role.Name, want)
+	}
+	for key, value := range map[string]string{
+		"heritage":               "deckhouse",
+		"module":                 "state-snapshotter",
+		"rbac.deckhouse.io/kind": "use",
+	} {
+		if got := role.Labels[key]; got != value {
+			t.Errorf("%s: the legacy role's label %q is %q, want %q", file, key, got, value)
+		}
+	}
+	// A legacy capability reaches somebody's rights by exactly two mechanisms: the two axes pinned
+	// here. A THIRD rbac.deckhouse.io/aggregate-* axis, whose collecting role this repository does not
+	// describe, and any annotation — the access levels of the cluster roles this module ships are
+	// assembled from one — would do it quietly, so both are refused outright. So is the module label of
+	// the new model: the legacy collector does not select on it, and it would only make the legacy
+	// object look like a member it is not.
+	for key := range role.Annotations {
+		t.Errorf("%s: the legacy role carries annotation %q — a capability role is composed into somebody's rights through its aggregation label and nothing else, and an annotation is another way in", file, key)
+	}
+	for key := range role.Labels {
+		if strings.HasPrefix(key, rbacAggregationAxisPrefix) &&
+			key != legacyAggregationLabel && key != legacyBackupAgentLabel {
+			t.Errorf("%s: the legacy role carries a third aggregation axis %q — the legacy capabilities of this module go onto %s and %s only, and an axis described nowhere in this repository composes them into rights nothing here bounds",
+				file, key, legacyAggregationLabel, legacyBackupAgentLabel)
+		}
+	}
+	if value, labelled := role.Labels[backupAgentMemberLabel]; labelled {
+		t.Errorf("%s: the legacy role carries %s=%q, the membership label of the new model — the legacy collector selects on %s, so this label only misstates what the object is part of",
+			file, backupAgentMemberLabel, value, legacyBackupAgentLabel)
+	}
+
+	got, labelled := role.Labels[legacyAggregationLabel]
+	switch {
+	case kubernetesAs == "" && labelled:
+		t.Errorf("%s: the legacy role carries %s=%q, but this capability must stay off the cluster-level axis — the label would hand it to every holder of that cluster-wide role, silently", file, legacyAggregationLabel, got)
+	case kubernetesAs != "" && got != kubernetesAs:
+		t.Errorf("%s: the legacy role aggregates as %q, want %q", file, got, kubernetesAs)
+	}
+
+	gotAgent, agentLabelled := role.Labels[legacyBackupAgentLabel]
+	switch {
+	case !backupAgent && agentLabelled:
+		t.Errorf("%s: the legacy role carries %s=%q, but this capability is not pinned as part of the backup-agent set — the label adds its grants to the one role an external backup product is bound to", file, legacyBackupAgentLabel, gotAgent)
+	case backupAgent && gotAgent != "member":
+		t.Errorf("%s: the legacy role is in the backup-agent set as %q, want %q — the selector of %s matches on the value, so anything else leaves this capability out of the single binding and its absence surfaces only when a client is refused",
+			file, gotAgent, "member", legacyBackupAgentRoleName)
+	}
+}
+
 // TestBackupAgentAggregateRoleCollectsOneAxisAndSpreadsThroughNone pins the role an external backup
-// product is bound to: its name, the labels it carries, the two it must not, that its rules are empty
-// in the chart, and that its aggregationRule is exactly one selector over exactly two labels.
+// product is bound to, in each model: its name, the labels it carries, the ones it must not, what its
+// rules are in the chart, and that its aggregationRule is exactly one selector over exactly two labels.
 //
-// WHAT IS ABSENT is the security condition of the whole arrangement, so it is pinned by absence
-// rather than described in a comment. Three ways in, and none of them is pinned by name — a named
-// ban only forbids the axis somebody already thought of, and the platform ships axes this repository
-// does not know:
+// NEW MODEL: d8:state-snapshotter:backup-agent in templates/backup-agent, an ordinary ClusterRole
+// OUTSIDE the role model — the model of 1.78 has no role of a module. Its labels are pinned as an exact
+// set of two, heritage and module: no rbac.deckhouse.io/kind, so none of the platform's own aggregates
+// can ever select it, and no rbac.deckhouse.io/* label at all. It has no rules key, not even an empty
+// one: rules belong to the aggregation controller, and a rules key in the chart makes server-side apply
+// fight it, emptying the role for a moment on every reconcile.
 //
-//   - ANY label under rbacAggregationAxisPrefix. Composed onto an axis, this role hands the whole set
-//     — reading subtrees rewritten for another namespace, loading trees back in, moving a volume's
-//     bytes — to every holder of the corresponding access level, with nobody binding anything. The
-//     cluster-level axis is only the nearest example: this role already carries
-//     rbac.deckhouse.io/kind: use, the other half of what the platform's own aggregates select on, so
-//     a single line naming any of their axes is enough, and those aggregates are delegatable on top.
-//   - ANY annotation, refused exactly as it is on the capabilities this role collects: the access
-//     levels of the cluster roles shipped here are assembled from an annotation, and a hook turns one
-//     on a role into bindings for the subjects of that level — including a CLUSTER-wide one, which is
-//     precisely the boundary "grants nothing until a RoleBinding names it" claims to hold.
-//   - rbac.deckhouse.io/delegatable, pinned separately because it is not under that prefix. It would
-//     add this role to the set a project owner may hand out inside their own project, while
-//     connecting an external backup product to a cluster is not a per-project call.
+// LEGACY MODEL: d8:use:capability:module:state-snapshotter:backup_agent in templates/rbacv2/use/roles,
+// pinned as it always was, rules: [] included — that branch renders byte-for-byte what earlier releases
+// shipped.
 //
-// Empty rules are not an oversight: in the cluster the clusterrole-aggregation-controller fills them
-// from the roles the selector matches. A rule written here would be overwritten and would only
-// mislead a reader of the chart.
+// WHAT IS ABSENT is the security condition of the whole arrangement in both models, so it is pinned by
+// absence rather than described in a comment. Three ways in, and none of them is pinned by name — a
+// named ban only forbids the axis somebody already thought of, and the platform ships axes this
+// repository does not know:
+//
+//   - ANY label under rbacAggregationAxisPrefix, and the membership label of this module. Composed onto
+//     an axis, this role hands the whole set — reading subtrees rewritten for another namespace, loading
+//     trees back in, moving a volume's bytes — to every holder of the corresponding access level, with
+//     nobody binding anything. The legacy role already carries rbac.deckhouse.io/kind: use, the other
+//     half of what the platform's own legacy aggregates select on, so a single line naming any of their
+//     axes is enough there.
+//   - ANY annotation, refused exactly as it is on the legacy capabilities this role collects: the
+//     access levels of the cluster roles shipped here are assembled from an annotation, and a hook turns
+//     one on a role into bindings for the subjects of that level — including a CLUSTER-wide one, which
+//     is precisely the boundary "grants nothing until a RoleBinding names it" claims to hold.
+//   - rbac.deckhouse.io/delegatable, named separately because it is not under that prefix. It would add
+//     this role to the set a project owner may hand out inside their own project, while connecting an
+//     external backup product to a cluster is not a per-project call.
 //
 // The selector is pinned down to its exact labels so that widening it takes a decision. A second
-// selector, an extra matchLabels entry, or a matchExpressions clause is each another set of roles
-// whose rules enter this one, and each would pass a check that only looked for the labels expected.
+// selector, an extra matchLabels entry, or a matchExpressions clause is each another set of roles whose
+// rules enter this one, and each would pass a check that only looked for the labels expected.
 //
-// The FILE COUNT of the directory is pinned too, fail-closed, because TestPartnerDocRoleNamesExist
-// treats every role published here as one the backup integration document may name: an unpinned file
-// added here would be simultaneously unpinned and legal to advertise to a reader.
+// The FILE COUNT of both directories is pinned too, fail-closed, and so is the model each file ships
+// in, because TestPartnerDocRoleNamesExist treats every role published from them as one the backup
+// integration document may name: an unpinned file added there would be simultaneously unpinned and legal
+// to advertise to a reader.
 //
 // LIMIT: this describes the chart, and it recognizes a way in by its NAME — a label under that one
 // prefix, an annotation, that one label. A future platform mechanism keyed on something else would
 // pass. Nor does any of it reach the cluster: a label added to the live object is invisible here, and
 // whether the aggregation controller filled this role at all — and with which rules — is past what a
-// guard over a template can answer. NOTHING in this repository answers it today: doing so takes a
-// subject holding this role and no other, and an assertion on the rules the role ends up carrying.
+// guard over a template can answer. The end-to-end vendor path binds the role and exercises it.
 func TestBackupAgentAggregateRoleCollectsOneAxisAndSpreadsThroughNone(t *testing.T) {
-	files := templateYAMLFiles(t, aggregateRolesDir(t))
-	if len(files) != 1 {
-		t.Fatalf("templates/rbacv2/use/roles holds %d file(s), want exactly the one pinned here: %v — a role added there is unpinned, and being published from this directory it may already be named to a reader of the backup integration document",
-			len(files), files)
+	cases := []struct {
+		scheme       rbacScheme
+		dir          string
+		name         string
+		labels       map[string]string // exact for the new model, required for the legacy one
+		exactLabels  bool
+		selector     map[string]string
+		rulesKeyless bool // no rules key at all, rather than an empty list
+	}{
+		{
+			scheme:       schemeNew,
+			dir:          backupAgentRoleDir(t),
+			name:         backupAgentRoleName,
+			labels:       map[string]string{"heritage": "deckhouse", "module": "state-snapshotter"},
+			exactLabels:  true,
+			selector:     map[string]string{backupAgentMemberLabel: "true", "rbac.deckhouse.io/kind": "capability"},
+			rulesKeyless: true,
+		},
+		{
+			scheme:   schemeLegacy,
+			dir:      aggregateRolesDir(t),
+			name:     legacyBackupAgentRoleName,
+			labels:   map[string]string{"heritage": "deckhouse", "module": "state-snapshotter", "rbac.deckhouse.io/kind": "use"},
+			selector: map[string]string{legacyBackupAgentLabel: "member", "rbac.deckhouse.io/kind": "use"},
+		},
 	}
-	file := files[0]
 
-	roles := clusterRolesFromTemplate(t, file)
-	if len(roles) != 1 {
-		t.Fatalf("%s: holds %d ClusterRole(s), want exactly one", file, len(roles))
-	}
-	role := roles[0]
-
-	if role.Name != backupAgentRoleName {
-		t.Errorf("%s: role is named %q, want %q — the name is what a reader of the document binds", file, role.Name, backupAgentRoleName)
-	}
-
-	requiredLabels := map[string]string{
-		"heritage":               "deckhouse",
-		"module":                 "state-snapshotter",
-		"rbac.deckhouse.io/kind": "use",
-	}
-	for key, value := range requiredLabels {
-		if got := role.Labels[key]; got != value {
-			t.Errorf("%s: label %q is %q, want %q", file, key, got, value)
+	for _, tc := range cases {
+		files := templateYAMLFiles(t, tc.dir)
+		if len(files) != 1 {
+			t.Fatalf("%s holds %d file(s), want exactly the one pinned here: %v — a role added there is unpinned, and being published from this directory it may already be named to a reader of the backup integration document",
+				tc.dir, len(files), files)
 		}
-	}
+		file := files[0]
 
-	// No aggregation axis, whatever it is called. This role is a collector, not a member of anything:
-	// an axis on it composes the entire set into somebody else's rights, and which sets exist is
-	// decided outside this repository.
-	labelsScanned := 0
-	for key, value := range role.Labels {
-		labelsScanned++
-		if strings.HasPrefix(key, rbacAggregationAxisPrefix) {
-			t.Errorf("%s: carries the aggregation axis %s=%q — this role must carry none: it collects the whole permission set of an external backup product, and an axis hands that set to every holder of the corresponding access level at once, with nobody binding anything. The axis to add is on the CAPABILITIES this role collects, never on this role",
+		for _, other := range rbacSchemes {
+			if other == tc.scheme {
+				continue
+			}
+			if extra := clusterRolesFromTemplate(t, file, other); len(extra) != 0 {
+				t.Errorf("%s: the %s branch renders %d ClusterRole(s), want none — this file ships the collector of the %s model only, and a collector rendered into the other model selects on labels that model's capabilities do not carry",
+					file, other, len(extra), tc.scheme)
+			}
+		}
+
+		roles := clusterRolesFromTemplate(t, file, tc.scheme)
+		if len(roles) != 1 {
+			t.Fatalf("%s: the %s branch holds %d ClusterRole(s), want exactly one", file, tc.scheme, len(roles))
+		}
+		role := roles[0]
+
+		if role.Name != tc.name {
+			t.Errorf("%s: role is named %q, want %q — the name is what a reader of the document binds", file, role.Name, tc.name)
+		}
+
+		if tc.exactLabels {
+			if !reflect.DeepEqual(role.Labels, tc.labels) {
+				t.Errorf("%s: carries labels %v, want exactly %v — this role sits outside the role model, and every further label is either a road into it or a selector's match nobody decided",
+					file, sortedLabelLines(role.Labels), sortedLabelLines(tc.labels))
+			}
+		} else {
+			for key, value := range tc.labels {
+				if got := role.Labels[key]; got != value {
+					t.Errorf("%s: label %q is %q, want %q", file, key, got, value)
+				}
+			}
+		}
+
+		// No aggregation axis, whatever it is called, and not this module's membership label either.
+		// This role is a collector, not a member of anything: a label of that kind on it composes the
+		// entire set into somebody else's rights, and which sets exist is decided outside this
+		// repository.
+		labelsScanned := 0
+		for key, value := range role.Labels {
+			labelsScanned++
+			if strings.HasPrefix(key, rbacAggregationAxisPrefix) || key == backupAgentMemberLabel {
+				t.Errorf("%s: carries the aggregation label %s=%q — this role must carry none: it collects the whole permission set of an external backup product, and such a label hands that set to every holder of the corresponding access level at once, with nobody binding anything. The label to add is on the CAPABILITIES this role collects, never on this role",
+					file, key, value)
+			}
+		}
+		if got, labelled := role.Labels["rbac.deckhouse.io/delegatable"]; labelled {
+			t.Errorf("%s: carries rbac.deckhouse.io/delegatable=%q, which this role must not have: it would put the role into the set a project owner may hand out inside their own project, and connecting an external backup product to the cluster is not a per-project decision",
+				file, got)
+		}
+
+		// Annotations are refused outright, the same way and for the same reason as on the legacy
+		// capabilities this role collects — with the boundary this role claims to hold making it worse
+		// here: an access-level annotation is turned into bindings by a platform hook, cluster-wide ones
+		// included, so the whole set would reach subjects nobody bound it to.
+		for key, value := range role.Annotations {
+			t.Errorf("%s: carries annotation %q=%q — a role that collects capabilities reaches a subject through an explicit binding and nothing else, and an annotation is another way in: the access levels of the cluster roles shipped here are assembled from one, and a hook turns it into bindings for that level's subjects",
 				file, key, value)
 		}
-	}
-	if got, labelled := role.Labels["rbac.deckhouse.io/delegatable"]; labelled {
-		t.Errorf("%s: carries rbac.deckhouse.io/delegatable=%q, which this role must not have: it would put the role into the set a project owner may hand out inside their own project, and connecting an external backup product to the cluster is not a per-project decision",
-			file, got)
-	}
 
-	// Annotations are refused outright, the same way and for the same reason as on the capabilities
-	// this role collects — with the boundary this role claims to hold making it worse here: an
-	// access-level annotation is turned into bindings by a platform hook, cluster-wide ones included,
-	// so the whole set would reach subjects nobody bound it to.
-	for key, value := range role.Annotations {
-		t.Errorf("%s: carries annotation %q=%q — a role that collects capabilities reaches a subject through an explicit binding and nothing else, and an annotation is another way in: the access levels of the cluster roles shipped here are assembled from one, and a hook turns it into bindings for that level's subjects",
-			file, key, value)
-	}
-
-	if len(role.Rules) != 0 {
-		t.Errorf("%s: declares %d rule(s), want none — the rules of this role are filled in the cluster from the roles its selector matches, so a rule written here is overwritten and describes nothing: %v",
-			file, len(role.Rules), role.Rules)
-	}
-
-	selectorLabelsChecked := 0
-	wantSelector := map[string]string{
-		rbacBackupAgentLabel:     "member",
-		"rbac.deckhouse.io/kind": "use",
-	}
-	switch {
-	case role.AggregationRule == nil:
-		t.Errorf("%s: declares no aggregationRule — the role then stays as empty as it is written here and a binding to it grants nothing at all", file)
-	case len(role.AggregationRule.ClusterRoleSelectors) != 1:
-		t.Errorf("%s: aggregationRule holds %d selector(s), want exactly one — each further selector is an independent set of roles whose rules land in this one",
-			file, len(role.AggregationRule.ClusterRoleSelectors))
-	default:
-		selector := role.AggregationRule.ClusterRoleSelectors[0]
-		if len(selector.MatchExpressions) > 0 {
-			t.Errorf("%s: the selector carries matchExpressions %v, which the comparison below does not model — an expression can match far more roles than a label equality does",
-				file, selector.MatchExpressions)
+		switch {
+		case tc.rulesKeyless && role.Rules != nil:
+			t.Errorf("%s: declares a rules key (%d rule(s)), want none at all — the rules of this role are filled in the cluster from the roles its selector matches, and a rules key in the chart, even an empty one, makes server-side apply fight the aggregation controller", file, len(role.Rules))
+		case len(role.Rules) != 0:
+			t.Errorf("%s: declares %d rule(s), want none — the rules of this role are filled in the cluster from the roles its selector matches, so a rule written here is overwritten and describes nothing: %v",
+				file, len(role.Rules), role.Rules)
 		}
-		selectorLabelsChecked = len(selector.MatchLabels)
-		if !reflect.DeepEqual(selector.MatchLabels, wantSelector) {
-			t.Errorf("%s: the selector matches %v, want exactly %v — dropping a label widens the set of roles collected here, and adding one drops roles out of it with no error anywhere",
-				file, selector.MatchLabels, wantSelector)
-		}
-	}
 
-	t.Logf("checked the aggregate role %q in %d file(s) under templates/rbacv2/use/roles: %d label(s) required, %d label(s) scanned against the %q prefix and rbac.deckhouse.io/delegatable, %d annotation(s) (all refused), %d rule(s) declared, %d selector label(s) compared",
-		role.Name, len(files), len(requiredLabels), labelsScanned, rbacAggregationAxisPrefix, len(role.Annotations), len(role.Rules), selectorLabelsChecked)
-	if labelsScanned == 0 || selectorLabelsChecked == 0 {
-		t.Fatalf("scanned %d label(s) and compared %d selector label(s) — a zero on either side means the role was not read, not that it is clean",
-			labelsScanned, selectorLabelsChecked)
+		selectorLabelsChecked := checkSingleSelector(t, file, role, tc.selector)
+
+		t.Logf("checked the %s aggregate role %q in %s: %d label(s) required, %d label(s) scanned against the %q prefix, the membership label and rbac.deckhouse.io/delegatable, %d annotation(s) (all refused), %d rule(s) declared, %d selector label(s) compared",
+			tc.scheme, role.Name, file, len(tc.labels), labelsScanned, rbacAggregationAxisPrefix, len(role.Annotations), len(role.Rules), selectorLabelsChecked)
+		if labelsScanned == 0 || selectorLabelsChecked == 0 {
+			t.Fatalf("scanned %d label(s) and compared %d selector label(s) — a zero on either side means the role was not read, not that it is clean",
+				labelsScanned, selectorLabelsChecked)
+		}
 	}
 }
 
-// TestBackupAgentAxisIsCarriedByExactlyThePinnedRoles pins the membership of the set an external
-// backup product receives in one binding: which roles of this chart carry rbacBackupAgentLabel, and —
-// the half that is easy to leave out — that no other role of the chart carries it. One line of YAML is
-// all it takes to add a role's rules to what the aggregate hands out, and templates/rbacv2/use/view.yaml
-// already carries the selector's other label, rbac.deckhouse.io/kind: use, so that line on that file
-// would pour its grants into the set with nothing else to notice.
+// TestBackupAgentLegacyNameAliasCollectsWhatTheNewRoleDoes pins the alias that keeps the legacy name of
+// the collecting role working on a 1.78 cluster, where the legacy object is no longer rendered. roleRef
+// is immutable, so a RoleBinding made before the upgrade cannot be moved onto the new name; without the
+// alias it would stay in place and grant nothing, and the first sign of it would be a client refused
+// mid-backup.
 //
-// SCOPE — every template under templates/rbacv2, deliberately the whole tree and not just the
-// directory the set lives in: the hole this closes is the label on a role nobody expects in the set,
-// and a scan of that one directory could not see it. That subtree is also exactly as far as reading
-// templates as objects goes — not one file in it contains a Helm action, so the labels parsed out of
-// it are the labels the cluster gets.
+// The alias follows the way user-authz keeps its own old role names: an empty ClusterRole whose
+// aggregationRule is the new role's, the rbac.deckhouse.io/deprecated label, and the
+// rbac.deckhouse.io/deprecated-replaced-by annotation naming the new role — without that annotation the
+// platform ignores the alias with a warning, and a binding to it raises no deprecation alert. It is the
+// one role here allowed annotations, and only those: the four console texts and the replacement.
+//
+// The selector is compared with the new role's own, not with a literal: the alias exists to grant what
+// the new role grants, so the two drifting apart is the defect whichever of them moved.
+//
+// LIMIT: this pins the chart. That a binding to the alias raises the deprecation alert is the
+// platform's behaviour and is not exercised here.
+func TestBackupAgentLegacyNameAliasCollectsWhatTheNewRoleDoes(t *testing.T) {
+	files := templateYAMLFiles(t, rbacv2CompatDir(t))
+	if len(files) != 1 {
+		t.Fatalf("templates/rbacv2-compat holds %d file(s), want exactly the alias pinned here: %v", len(files), files)
+	}
+	file := files[0]
+
+	if legacy := clusterRolesFromTemplate(t, file, schemeLegacy); len(legacy) != 0 {
+		t.Errorf("%s: the %s branch renders %d ClusterRole(s), want none — below 1.78 the legacy name is the real role, shipped from templates/rbacv2/use/roles, and an alias beside it would collide with it by name",
+			file, schemeLegacy, len(legacy))
+	}
+	roles := clusterRolesFromTemplate(t, file, schemeNew)
+	if len(roles) != 1 {
+		t.Fatalf("%s: the %s branch holds %d ClusterRole(s), want exactly one", file, schemeNew, len(roles))
+	}
+	alias := roles[0]
+
+	newRoles := clusterRolesFromTemplate(t, templateYAMLFiles(t, backupAgentRoleDir(t))[0], schemeNew)
+	if len(newRoles) != 1 || newRoles[0].AggregationRule == nil {
+		t.Fatalf("the new collecting role could not be read from templates/backup-agent — the alias has nothing to be compared with")
+	}
+
+	if alias.Name != legacyBackupAgentRoleName {
+		t.Errorf("%s: the alias is named %q, want %q — it exists for the bindings made to that name", file, alias.Name, legacyBackupAgentRoleName)
+	}
+	wantLabels := map[string]string{
+		"heritage":                     "deckhouse",
+		"module":                       "state-snapshotter",
+		"rbac.deckhouse.io/deprecated": "true",
+	}
+	if !reflect.DeepEqual(alias.Labels, wantLabels) {
+		t.Errorf("%s: the alias carries labels %v, want exactly %v — like the role it stands for it sits outside the role model, and an aggregation or delegatable label would hand its set out past the bindings it exists for",
+			file, sortedLabelLines(alias.Labels), sortedLabelLines(wantLabels))
+	}
+
+	wantAnnotations := append([]string{"rbac.deckhouse.io/deprecated-replaced-by"}, capabilityI18nAnnotations...)
+	for key, value := range alias.Annotations {
+		if !slices.Contains(wantAnnotations, key) {
+			t.Errorf("%s: the alias carries annotation %q=%q — only the console texts and the replacement belong on it, and any other annotation is another way into somebody's rights", file, key, value)
+		}
+	}
+	for _, key := range capabilityI18nAnnotations {
+		if strings.TrimSpace(alias.Annotations[key]) == "" {
+			t.Errorf("%s: the alias has no %s — the console shows it next to the deprecated name", file, key)
+		}
+	}
+	if got := alias.Annotations["rbac.deckhouse.io/deprecated-replaced-by"]; got != backupAgentRoleName {
+		t.Errorf("%s: rbac.deckhouse.io/deprecated-replaced-by is %q, want %q — without it the platform ignores the alias, and with another value it points the reader at the wrong role", file, got, backupAgentRoleName)
+	}
+	if !strings.Contains(alias.Annotations["en.meta.deckhouse.io/description"], backupAgentRoleName) ||
+		!strings.Contains(alias.Annotations["ru.meta.deckhouse.io/description"], backupAgentRoleName) {
+		t.Errorf("%s: a description of the alias does not name %s — it is where the console tells a reader what to migrate the binding to", file, backupAgentRoleName)
+	}
+
+	if alias.Rules != nil {
+		t.Errorf("%s: the alias declares a rules key (%d rule(s)), want none at all — its rules belong to the aggregation controller", file, len(alias.Rules))
+	}
+	selectorLabelsChecked := checkSingleSelector(t, file, alias, newRoles[0].AggregationRule.ClusterRoleSelectors[0].MatchLabels)
+
+	t.Logf("checked the alias %q in %s against %q: %d label(s), %d annotation(s), %d selector label(s) compared",
+		alias.Name, file, backupAgentRoleName, len(alias.Labels), len(alias.Annotations), selectorLabelsChecked)
+	if selectorLabelsChecked == 0 {
+		t.Fatal("no selector label compared — zero findings means the alias was not read, not that it matches")
+	}
+}
+
+// checkSingleSelector pins an aggregationRule to exactly one selector matching exactly the given labels,
+// and returns how many selector labels it compared.
+func checkSingleSelector(t *testing.T, file string, role rbacv1.ClusterRole, want map[string]string) int {
+	t.Helper()
+
+	switch {
+	case role.AggregationRule == nil:
+		t.Errorf("%s: declares no aggregationRule — the role then stays as empty as it is written here and a binding to it grants nothing at all", file)
+		return 0
+	case len(role.AggregationRule.ClusterRoleSelectors) != 1:
+		t.Errorf("%s: aggregationRule holds %d selector(s), want exactly one — each further selector is an independent set of roles whose rules land in this one",
+			file, len(role.AggregationRule.ClusterRoleSelectors))
+		return 0
+	}
+	selector := role.AggregationRule.ClusterRoleSelectors[0]
+	if len(selector.MatchExpressions) > 0 {
+		t.Errorf("%s: the selector carries matchExpressions %v, which the comparison below does not model — an expression can match far more roles than a label equality does",
+			file, selector.MatchExpressions)
+	}
+	if !reflect.DeepEqual(selector.MatchLabels, want) {
+		t.Errorf("%s: the selector matches %v, want exactly %v — dropping a label widens the set of roles collected here, and adding one drops roles out of it with no error anywhere",
+			file, selector.MatchLabels, want)
+	}
+	return len(selector.MatchLabels)
+}
+
+// TestBackupAgentAxisIsCarriedByExactlyThePinnedRoles pins the membership of the set an external
+// backup product receives in one binding, in each model: which roles of this chart carry the membership
+// label of that model, and — the half that is easy to leave out — that no other role of the chart
+// carries it, nor the label of the OTHER model. One line of YAML is all it takes to add a role's rules
+// to what the collector hands out, and templates/rbacv2/use/view.yaml already carries the selector's
+// other label (rbac.deckhouse.io/kind, capability or use by model), so that line on that file would
+// pour its grants into the set with nothing else to notice.
+//
+// SCOPE — every template under templates/rbacv2, templates/rbacv2-compat and templates/backup-agent,
+// deliberately the whole of those trees and not just the directory the set lives in: the hole this
+// closes is the label on a role nobody expects in the set, and a scan of that one directory could not
+// see it. Those trees are also exactly as far as reading templates as objects goes — the only Helm
+// actions in them are the model gate lines, which templateBranch resolves and fails the read on
+// anything else, so the labels parsed out of a branch are the labels the cluster gets.
 //
 // The chart's other ClusterRoles — templates/rbac-for-us.yaml, templates/controller/rbac-for-us.yaml,
 // templates/webhooks/rbac-for-us.yaml and templates/user-authz-cluster-roles.yaml — are out of scope,
 // and not because scanning them would prove nothing: they cannot be scanned here at all. Their labels
-// arrive from a Helm action, and the flat parse this guard shares with the rest of this file stops on
-// that line with "error converting YAML to JSON" — not one document of those four parses — so pointing
-// the walk at them would fail the test on the parse rather than check anything. What
-// templates/user-authz-cluster-roles.yaml grants to cluster-level roles is deliberate and
-// long-standing, which TestUseRolesDoNotGrantClusterScopedSnapshotLayer says where it draws its own
-// scope; that is a separate question from the axis tracked here.
+// arrive from a Helm action, which templateBranch refuses, so pointing the walk at them would fail the
+// test on the read rather than check anything. What templates/user-authz-cluster-roles.yaml grants to
+// cluster-level roles is deliberate and long-standing, which TestUseRolesDoNotGrantClusterScopedSnapshotLayer
+// says where it draws its own scope; that is a separate question from the membership tracked here.
 //
 // LIMIT, and the blind spot worth watching is this rather than those four files being skipped: ANY
-// role outside templates/rbacv2 that carries both selector labels joins the set unseen here — a
-// static one because nothing walks it, a templated one because nothing here can read it. Both labels
-// on a role in templates/rbac-for-us.yaml would pour its rules into the set an external backup
-// product is bound to with this entire package still green. A role of this chart meant to be a member
-// therefore belongs under templates/rbacv2; putting one anywhere else means widening the walk above in
-// the same change, and for a templated file that is not a widening but a guard of another kind.
+// role outside the scanned trees that carries both selector labels joins the set unseen here — a
+// static one because nothing walks it, a templated one because nothing here can read it. A role of
+// this chart meant to be a member therefore belongs under templates/rbacv2; putting one anywhere else
+// means widening the walk above in the same change, and for a templated file that is not a widening but
+// a guard of another kind.
 //
-// SECOND LIMIT: this sees the templates of this chart, while the aggregate collects any ClusterRole in
+// SECOND LIMIT: this sees the templates of this chart, while the collector gathers any ClusterRole in
 // the CLUSTER carrying both selector labels. The capability that completes the set — moving a volume's
-// bytes, named in partnerDocForeignRole — ships with another module, so that it carries the axis is
-// held by a guard in that module's repository and not by anything here.
+// bytes, named in partnerDocForeignRoles — ships with another module, so that it carries the membership
+// label is held by a guard in that module's repository and not by anything here.
 func TestBackupAgentAxisIsCarriedByExactlyThePinnedRoles(t *testing.T) {
-	want := map[string]string{
-		capabilityRolePrefix + "view_snapshots":     "member",
-		capabilityRolePrefix + "manage_snapshots":   "member",
-		capabilityRolePrefix + "download_snapshots": "member",
-		capabilityRolePrefix + "upload_snapshots":   "member",
-		capabilityRolePrefix + "restore_snapshots":  "member",
+	members := []string{"view_snapshots", "manage_snapshots", "download_snapshots", "upload_snapshots", "restore_snapshots"}
+	membership := map[rbacScheme]struct {
+		label, value, prefix, otherLabel string
+	}{
+		schemeNew:    {backupAgentMemberLabel, "true", capabilityRolePrefix, legacyBackupAgentLabel},
+		schemeLegacy: {legacyBackupAgentLabel, "member", legacyCapabilityRolePrefix, backupAgentMemberLabel},
 	}
 
-	rbacDir := filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2")
-	files := templateYAMLFiles(t, rbacDir)
+	repoRoot := filepath.Clean("../../../../..")
+	var files []string
+	for _, dir := range []string{
+		filepath.Join(repoRoot, "templates", "rbacv2"),
+		rbacv2CompatDir(t),
+		backupAgentRoleDir(t),
+	} {
+		files = append(files, templateYAMLFiles(t, dir)...)
+	}
 
-	got := map[string]string{}
 	rolesScanned := 0
-	for _, file := range files {
-		for _, role := range clusterRolesFromTemplate(t, file) {
-			rolesScanned++
-			value, labelled := role.Labels[rbacBackupAgentLabel]
-			if !labelled {
-				continue
-			}
-			if _, pinned := want[role.Name]; !pinned {
-				t.Errorf("%s: role %q carries %s=%q and is not one of the %d pinned members — its rules would be handed out with the set, so either it belongs there and belongs on the list in this test, or the label on it is the defect",
-					file, role.Name, rbacBackupAgentLabel, value, len(want))
-				continue
-			}
-			got[role.Name] = value
+	for _, scheme := range rbacSchemes {
+		m := membership[scheme]
+		want := map[string]string{}
+		for _, member := range members {
+			want[m.prefix+member] = m.value
 		}
+
+		got := map[string]string{}
+		for _, file := range files {
+			for _, role := range clusterRolesFromTemplate(t, file, scheme) {
+				rolesScanned++
+				if value, labelled := role.Labels[m.otherLabel]; labelled {
+					t.Errorf("%s (%s): role %q carries %s=%q, the membership label of the other model — nothing of this model selects on it, so it either misstates membership or waits for a collector nobody pinned",
+						file, scheme, role.Name, m.otherLabel, value)
+				}
+				value, labelled := role.Labels[m.label]
+				if !labelled {
+					continue
+				}
+				if _, pinned := want[role.Name]; !pinned {
+					t.Errorf("%s (%s): role %q carries %s=%q and is not one of the %d pinned members — its rules would be handed out with the set, so either it belongs there and belongs on the list in this test, or the label on it is the defect",
+						file, scheme, role.Name, m.label, value, len(want))
+					continue
+				}
+				got[role.Name] = value
+			}
+		}
+
+		for name, value := range want {
+			switch gotValue, member := got[name]; {
+			case !member:
+				t.Errorf("%s (%s) does not carry %s — the role then stays out of the set an external backup product is bound to, and the capability it grants is missing from that binding with no error at binding time",
+					name, scheme, m.label)
+			case gotValue != value:
+				t.Errorf("%s (%s) carries %s=%q, want %q — the selector matches on the value, so any other value leaves the role out of the set", name, scheme, m.label, gotValue, value)
+			}
+		}
+		t.Logf("%s: %d of %d pinned member(s) carry %s", scheme, len(got), len(want), m.label)
 	}
 
-	for name, value := range want {
-		switch gotValue, member := got[name]; {
-		case !member:
-			t.Errorf("%s does not carry %s — the role then stays out of the set an external backup product is bound to, and the capability it grants is missing from that binding with no error at binding time",
-				name, rbacBackupAgentLabel)
-		case gotValue != value:
-			t.Errorf("%s carries %s=%q, want %q — the selector matches on the value, so any other value leaves the role out of the set", name, rbacBackupAgentLabel, gotValue, value)
-		}
-	}
-
-	t.Logf("scanned %d file(s) and %d role(s) under templates/rbacv2 for %s: %d of %d pinned member(s) found",
-		len(files), rolesScanned, rbacBackupAgentLabel, len(got), len(want))
+	t.Logf("scanned %d file(s) and %d role(s) across %d model(s) for the backup-agent membership labels", len(files), rolesScanned, len(rbacSchemes))
 	if rolesScanned == 0 {
-		t.Fatal("no role scanned under templates/rbacv2 — zero findings means the walk stopped reading the templates, not that the set is intact")
+		t.Fatal("no role scanned — zero findings means the walk stopped reading the templates, not that the set is intact")
 	}
 }
 
 // TestUseRolesDoNotGrantClusterScopedSnapshotLayer keeps the cluster-scoped layer of this module out
-// of the roles handed to users. A client reads and writes namespaced objects and namespaced
-// subresources; the snapshot contents, the manifest checkpoints and their chunks, and the snapshot
-// definitions are the module's internals, and raw chunk data is the most sensitive of them.
+// of the roles handed to users, in both models. A client reads and writes namespaced objects and
+// namespaced subresources; the snapshot contents, the manifest checkpoints and their chunks, and the
+// snapshot definitions are the module's internals, and raw chunk data is the most sensitive of them. In
+// the new model a cluster-scoped rule in a namespace capability would grant nothing at all, which is no
+// reason to let one in: it would still say something the role does not do.
 //
 // The prefixes are SINGULAR on purpose: the chunk resource is named manifestcheckpointcontentchunks,
 // which the plural "manifestcheckpoints" does not cover — the exact hole this test exists to close.
@@ -865,27 +1192,29 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 	files := templateYAMLFiles(t, useDir)
 
 	var rolesScanned, resourcesScanned int
-	for _, file := range files {
-		for _, role := range clusterRolesFromTemplate(t, file) {
-			rolesScanned++
-			for _, rule := range role.Rules {
-				for _, group := range rule.APIGroups {
-					if strings.Contains(group, "*") {
-						t.Errorf("%s: role %q grants %v on API group %q — a wildcard group covers this module's cluster-scoped layer too, so it is refused here whatever the resources say",
-							file, role.Name, rule.Verbs, group)
+	for _, scheme := range rbacSchemes {
+		for _, file := range files {
+			for _, role := range clusterRolesFromTemplate(t, file, scheme) {
+				rolesScanned++
+				for _, rule := range role.Rules {
+					for _, group := range rule.APIGroups {
+						if strings.Contains(group, "*") {
+							t.Errorf("%s (%s): role %q grants %v on API group %q — a wildcard group covers this module's cluster-scoped layer too, so it is refused here whatever the resources say",
+								file, scheme, role.Name, rule.Verbs, group)
+						}
 					}
-				}
-				for _, resource := range rule.Resources {
-					resourcesScanned++
-					if strings.Contains(resource, "*") {
-						t.Errorf("%s: role %q grants %v on %q — a wildcard resource (\"*\" or \"*/<subresource>\") reaches this module's cluster-scoped layer, and no prefix comparison can see through it",
-							file, role.Name, rule.Verbs, resource)
-						continue
-					}
-					for _, prefix := range clusterScopedPrefixes {
-						if strings.HasPrefix(resource, prefix) {
-							t.Errorf("%s: role %q grants %v on %q, which belongs to this module's cluster-scoped layer — user roles address namespaced objects and namespaced subresources only",
-								file, role.Name, rule.Verbs, resource)
+					for _, resource := range rule.Resources {
+						resourcesScanned++
+						if strings.Contains(resource, "*") {
+							t.Errorf("%s (%s): role %q grants %v on %q — a wildcard resource (\"*\" or \"*/<subresource>\") reaches this module's cluster-scoped layer, and no prefix comparison can see through it",
+								file, scheme, role.Name, rule.Verbs, resource)
+							continue
+						}
+						for _, prefix := range clusterScopedPrefixes {
+							if strings.HasPrefix(resource, prefix) {
+								t.Errorf("%s (%s): role %q grants %v on %q, which belongs to this module's cluster-scoped layer — user roles address namespaced objects and namespaced subresources only",
+									file, scheme, role.Name, rule.Verbs, resource)
+							}
 						}
 					}
 				}
@@ -893,8 +1222,8 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 		}
 	}
 
-	t.Logf("scanned %d file(s), %d role(s) and %d resource grant(s) under templates/rbacv2/use against %d forbidden prefix(es), wildcards refused",
-		len(files), rolesScanned, resourcesScanned, len(clusterScopedPrefixes))
+	t.Logf("scanned %d file(s) in %d model(s), %d role(s) and %d resource grant(s) under templates/rbacv2/use against %d forbidden prefix(es), wildcards refused",
+		len(files), len(rbacSchemes), rolesScanned, resourcesScanned, len(clusterScopedPrefixes))
 	if resourcesScanned == 0 {
 		t.Fatal("no resource grant scanned under templates/rbacv2/use — zero findings means the scan stopped reading the roles, not that they are clean")
 	}
@@ -902,9 +1231,9 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 
 // TestEveryNamespacedSubresourceRouteHasCapabilityRole is the guard against the drift "an endpoint was
 // added and the rights for it were not": every namespaced aggregated subresource this module serves
-// must be reachable with the capability roles it publishes, with the verb the endpoint is authorized
-// under (the aggregated API server authorizes each request with a SubjectAccessReview built from the
-// URL, so GET reads as "get" and POST as "create").
+// must be reachable with the capability roles it publishes, in each model, with the verb the endpoint is
+// authorized under (the aggregated API server authorizes each request with a SubjectAccessReview built
+// from the URL, so GET reads as "get" and POST as "create").
 //
 // Coverage is measured against the capability roles alone. The older use/view and use/edit roles cover
 // a different resource entirely and are no part of this contract, so a subresource reachable only
@@ -926,43 +1255,47 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 // advertises, so nothing checks those against a server; their presence is pinned by name in
 // TestUserCapabilityRolesGrantExactRulesAndLabels and their reachability by the end-to-end suite.
 func TestEveryNamespacedSubresourceRouteHasCapabilityRole(t *testing.T) {
-	granted := map[string]map[string]bool{}
 	capabilityFiles := templateYAMLFiles(t, capabilityRolesDir(t))
-	for _, file := range capabilityFiles {
-		for _, role := range clusterRolesFromTemplate(t, file) {
-			for key, verbs := range flattenPolicyRules(role.Rules) {
-				if granted[key] == nil {
-					granted[key] = map[string]bool{}
-				}
-				for _, verb := range verbs {
-					granted[key][verb] = true
-				}
-			}
-		}
-	}
+	served := servedAggregatedResources(t)
 
 	var namespacedChecked, verbsChecked, clusterScopedSkipped int
-	for _, list := range servedAggregatedResources(t) {
-		group, _, _ := strings.Cut(list.GroupVersion, "/")
-		for _, resource := range list.APIResources {
-			if !resource.Namespaced {
-				clusterScopedSkipped++
-				continue
+	for _, scheme := range rbacSchemes {
+		granted := map[string]map[string]bool{}
+		for _, file := range capabilityFiles {
+			for _, role := range clusterRolesFromTemplate(t, file, scheme) {
+				for key, verbs := range flattenPolicyRules(role.Rules) {
+					if granted[key] == nil {
+						granted[key] = map[string]bool{}
+					}
+					for _, verb := range verbs {
+						granted[key][verb] = true
+					}
+				}
 			}
-			namespacedChecked++
-			key := group + "/" + resource.Name
-			for _, verb := range resource.Verbs {
-				verbsChecked++
-				if !granted[key][verb] {
-					t.Errorf("%s serves %q for verb %q, which no capability role grants — add it to a role under templates/rbacv2/use/capabilities (a served endpoint nobody can be granted is unusable)",
-						list.GroupVersion, resource.Name, verb)
+		}
+
+		for _, list := range served {
+			group, _, _ := strings.Cut(list.GroupVersion, "/")
+			for _, resource := range list.APIResources {
+				if !resource.Namespaced {
+					clusterScopedSkipped++
+					continue
+				}
+				namespacedChecked++
+				key := group + "/" + resource.Name
+				for _, verb := range resource.Verbs {
+					verbsChecked++
+					if !granted[key][verb] {
+						t.Errorf("%s serves %q for verb %q, which no capability role of the %s model grants — add it to a role under templates/rbacv2/use/capabilities, in both branches (a served endpoint nobody can be granted is unusable)",
+							list.GroupVersion, resource.Name, verb, scheme)
+					}
 				}
 			}
 		}
 	}
 
-	t.Logf("checked %d namespaced subresource(s) and %d verb(s) advertised by the aggregated discovery documents against %d capability role file(s); skipped %d cluster-scoped entry(ies)",
-		namespacedChecked, verbsChecked, len(capabilityFiles), clusterScopedSkipped)
+	t.Logf("checked %d namespaced subresource(s) and %d verb(s) advertised by the aggregated discovery documents against %d capability role file(s) in %d model(s); skipped %d cluster-scoped entry(ies)",
+		namespacedChecked, verbsChecked, len(capabilityFiles), len(rbacSchemes), clusterScopedSkipped)
 	if verbsChecked == 0 {
 		t.Fatal("no namespaced subresource verb checked — zero findings means discovery stopped being read, not that every route is covered")
 	}
@@ -1008,7 +1341,7 @@ func capabilityRolesDir(t *testing.T) string {
 	return filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2", "use", "capabilities")
 }
 
-// aggregateRolesDir holds the roles that COLLECT capabilities instead of granting them. It is a
+// aggregateRolesDir holds the legacy role that COLLECTS capabilities instead of granting them. It is a
 // helper of its own and not a second entry in capabilityRolesDir: that one feeds the guards which
 // count and pin capabilities, and a collector is not a capability — folding the two would break those
 // counts and pull the collector into a coverage comparison it has no place in.
@@ -1017,34 +1350,163 @@ func aggregateRolesDir(t *testing.T) string {
 	return filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2", "use", "roles")
 }
 
-// clusterRolesFromTemplate parses every document of an RBAC template file. The templates under
-// templates/rbacv2/use are plain YAML with no Helm actions in them, which is what lets them be read as
-// objects here.
+// backupAgentRoleDir holds the collecting role of the new model. It is outside templates/rbacv2 because
+// the role is outside the role model: the platform's contract reads that tree as capabilities and
+// roles of its own, and this one is neither.
+func backupAgentRoleDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(filepath.Clean("../../../../.."), "templates", "backup-agent")
+}
+
+// rbacv2CompatDir holds the alias that keeps the legacy name of the collecting role alive on a 1.78
+// cluster.
+func rbacv2CompatDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2-compat")
+}
+
+// templateBranch returns the text of an RBAC template that the chart renders in the given model. The
+// templates read by these guards are plain YAML behind one gate on the model, in one of three shapes:
+//
+//	eq-gate, new object, else, legacy object, end — both models ship the role (what the migration script writes)
+//	eq-gate, new object, end                      — the new model only
+//	ne-gate, legacy object, end                   — the legacy model only
+//
+// Each gate line must be one of the exact lines above and the only Helm actions in the file. Anything
+// else fails the read instead of being stripped: a Helm action this reader does not model can put a
+// label, a rule or a whole document into what the cluster gets, and a guard that dropped it would be
+// describing a file the chart does not render. A file with no gate fails too — it would ship the same
+// object into both models, and one of them then carries labels its platform does not read.
+func templateBranch(t *testing.T, path string, scheme rbacScheme) string {
+	t.Helper()
+
+	branch, err := splitTemplateBranch(readTemplate(t, path), scheme)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return branch
+}
+
+// splitTemplateBranch is templateBranch over the text of a template, so the reader can be pinned
+// against planted shapes without a file or a failing test in between.
+func splitTemplateBranch(content string, scheme rbacScheme) (string, error) {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	var actions []int
+	for i, line := range lines {
+		if strings.Contains(line, "{{") || strings.Contains(line, "}}") {
+			actions = append(actions, i)
+		}
+	}
+	last := len(lines) - 1
+	join := func(part []string) string {
+		if len(part) == 0 {
+			return ""
+		}
+		return strings.Join(part, "\n") + "\n"
+	}
+
+	switch {
+	case len(actions) == 3 && actions[0] == 0 && actions[2] == last &&
+		lines[0] == rbacGateNewScheme && lines[actions[1]] == rbacGateElse && lines[last] == rbacGateEnd:
+		if scheme == schemeNew {
+			return join(lines[1:actions[1]]), nil
+		}
+		return join(lines[actions[1]+1 : last]), nil
+	case len(actions) == 2 && actions[0] == 0 && actions[1] == last &&
+		lines[0] == rbacGateNewScheme && lines[last] == rbacGateEnd:
+		if scheme == schemeNew {
+			return join(lines[1:last]), nil
+		}
+		return "", nil
+	case len(actions) == 2 && actions[0] == 0 && actions[1] == last &&
+		lines[0] == rbacGateLegacyScheme && lines[last] == rbacGateEnd:
+		if scheme == schemeLegacy {
+			return join(lines[1:last]), nil
+		}
+		return "", nil
+	}
+
+	var found []string
+	for _, i := range actions {
+		found = append(found, strings.TrimSpace(lines[i]))
+	}
+	return "", fmt.Errorf("the Helm actions %q are not one of the model gates these guards read (%q [+ %q] + %q, or %q + %q) — a template here is plain YAML behind exactly one such gate, and anything else would be stripped from what the guards see while it still reaches the cluster",
+		found, rbacGateNewScheme, rbacGateElse, rbacGateEnd, rbacGateLegacyScheme, rbacGateEnd)
+}
+
+// TestTemplateBranchReadsOnlyTheGateShapesItModels pins the reader every guard above stands on,
+// against the shapes it must take apart and the ones it must refuse. The refusals are the point: a
+// reader that silently accepted an unmodelled action would make every guard above describe a file the
+// chart does not render.
+func TestTemplateBranchReadsOnlyTheGateShapesItModels(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body                string
+		wantNew, wantLegacy string
+	}{
+		"both models": {rbacGateNewScheme + "\nkind: New\n" + rbacGateElse + "\nkind: Legacy\n" + rbacGateEnd + "\n", "kind: New\n", "kind: Legacy\n"},
+		"new only":    {rbacGateNewScheme + "\nkind: New\n" + rbacGateEnd + "\n", "kind: New\n", ""},
+		"legacy only": {rbacGateLegacyScheme + "\nkind: Legacy\n" + rbacGateEnd + "\n", "", "kind: Legacy\n"},
+	} {
+		for scheme, want := range map[rbacScheme]string{schemeNew: tc.wantNew, schemeLegacy: tc.wantLegacy} {
+			got, err := splitTemplateBranch(tc.body, scheme)
+			if err != nil || got != want {
+				t.Errorf("%s, %s branch: got %q (error %v), want %q", name, scheme, got, err, want)
+			}
+		}
+	}
+
+	refusals := map[string]string{
+		"no gate":                    "kind: Both\n",
+		"an action inside a branch":  rbacGateNewScheme + "\nkind: New\n  {{- include \"labels\" . }}\n" + rbacGateEnd + "\n",
+		"a gate on something else":   "{{- if .Values.enabled }}\nkind: New\n" + rbacGateEnd + "\n",
+		"a document after the gate":  rbacGateNewScheme + "\nkind: New\n" + rbacGateEnd + "\n---\nkind: Both\n",
+		"an else behind the ne-gate": rbacGateLegacyScheme + "\nkind: Legacy\n" + rbacGateElse + "\nkind: New\n" + rbacGateEnd + "\n",
+	}
+	for name, body := range refusals {
+		for _, scheme := range rbacSchemes {
+			if got, err := splitTemplateBranch(body, scheme); err == nil {
+				t.Errorf("%s: the %s branch was read as %q — a template this reader does not model must fail the read, not be stripped", name, scheme, got)
+			}
+		}
+	}
+}
+
+// clusterRolesFromTemplate parses every document of one model's branch of an RBAC template file (see
+// templateBranch); a branch the file does not ship yields no role.
 //
 // A document that is not a ClusterRole fails the read instead of being skipped, and that is the whole
 // point of the check: the guards above count roles and files, so a second document appended to a file
 // they already pin — a ClusterRoleBinding handing a capability to every authenticated subject, say —
 // would otherwise pass through all of them unseen. Something else genuinely belonging here means
 // teaching these guards about it, not widening this parse.
-func clusterRolesFromTemplate(t *testing.T, path string) []rbacv1.ClusterRole {
+func clusterRolesFromTemplate(t *testing.T, path string, scheme rbacScheme) []rbacv1.ClusterRole {
 	t.Helper()
 
 	var roles []rbacv1.ClusterRole
-	for i, doc := range strings.Split(readTemplate(t, path), "\n---") {
+	for i, doc := range strings.Split(templateBranch(t, path, scheme), "\n---") {
 		if strings.TrimSpace(doc) == "" {
 			continue
 		}
 		var role rbacv1.ClusterRole
 		if err := yaml.Unmarshal([]byte(doc), &role); err != nil {
-			t.Fatalf("parse %s: %v", path, err)
+			t.Fatalf("parse %s (%s): %v", path, scheme, err)
 		}
 		if role.Kind != "ClusterRole" {
-			t.Fatalf("%s: document %d is a %q named %q, and these RBAC templates hold ClusterRoles only — a document of any other kind is invisible to the guards that count roles and files here",
-				path, i+1, role.Kind, role.Name)
+			t.Fatalf("%s (%s): document %d is a %q named %q, and these RBAC templates hold ClusterRoles only — a document of any other kind is invisible to the guards that count roles and files here",
+				path, scheme, i+1, role.Kind, role.Name)
 		}
 		roles = append(roles, role)
 	}
 	return roles
+}
+
+func sortedLabelLines(labels map[string]string) []string {
+	lines := make([]string, 0, len(labels))
+	for key, value := range labels {
+		lines = append(lines, key+"="+value)
+	}
+	sort.Strings(lines)
+	return lines
 }
 
 // flattenPolicyRules turns rules into one "<apiGroup>/<resource>" key per granted pair with its verbs
