@@ -80,6 +80,13 @@ linters:
         text: 'exported: .*'
       - path: (.+)\.go$
         text: QF1008.*
+      # controller-runtime v0.22 marks Result.Requeue as deprecated in favour of
+      # RequeueAfter, but still honours it. Requeue: true is an immediate,
+      # rate-limited requeue; switching the controllers to RequeueAfter would change
+      # their retry behaviour and is a separate change.
+      - linters:
+          - staticcheck
+        text: 'SA1019: \(sigs\.k8s\.io/controller-runtime\.Result\)\.Requeue is deprecated'
     paths:
       - third_party$
       - builtin$

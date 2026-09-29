@@ -586,8 +586,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.IsZero()).To(BeTrue())
 
 			// Verify status unchanged (terminal MCR is immutable)
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
@@ -733,8 +732,7 @@ var _ = Describe("ManifestCaptureRequest TTL", func() {
 			}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
-			Expect(result.RequeueAfter).To(BeZero())
+			Expect(result.IsZero()).To(BeTrue())
 
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}
 			Expect(finalizeClient.Get(ctx, types.NamespacedName{Name: mcr.Name, Namespace: mcr.Namespace}, updatedMCR)).To(Succeed())
@@ -1195,7 +1193,7 @@ var _ = Describe("ManifestCaptureRequest Status Update and Checkpoint Name", fun
 			}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.IsZero()).To(BeTrue())
 
 			// Terminal state: controller must not modify status on subsequent reconciles
 			updatedMCR := &storagev1alpha1.ManifestCaptureRequest{}

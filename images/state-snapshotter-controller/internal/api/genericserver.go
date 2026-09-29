@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
-	utilversion "k8s.io/component-base/version"
+	utilcompatibility "k8s.io/apiserver/pkg/util/compatibility"
 	openapihandler "k8s.io/kube-openapi/pkg/handler"
 	openapihandler3 "k8s.io/kube-openapi/pkg/handler3"
 	"k8s.io/kube-openapi/pkg/validation/spec"
@@ -78,7 +78,7 @@ func buildAggregatedAPIServer(name, addr, certFile, keyFile string, delegate htt
 	codecs := serializer.NewCodecFactory(scheme)
 
 	config := genericapiserver.NewConfig(codecs)
-	config.EffectiveVersion = utilversion.DefaultBuildEffectiveVersion()
+	config.EffectiveVersion = utilcompatibility.DefaultBuildEffectiveVersion()
 
 	// WithLoopback is required: genericapiserver.New() rejects a config whose LoopbackClientConfig is nil
 	// ("Genericapiserver.New() called with config.LoopbackClientConfig == nil"). Only the loopback variant's

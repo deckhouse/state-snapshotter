@@ -37,8 +37,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	utilcompatibility "k8s.io/apiserver/pkg/util/compatibility"
 	"k8s.io/client-go/rest"
-	utilversion "k8s.io/component-base/version"
 )
 
 // The kube-apiserver OpenAPI aggregation controllers poll /openapi/v2 and /openapi/v3 of every
@@ -70,7 +70,7 @@ var _ = Describe("aggregated apiserver OpenAPI endpoints", func() {
 		codecs := serializer.NewCodecFactory(scheme)
 
 		config := genericapiserver.NewConfig(codecs)
-		config.EffectiveVersion = utilversion.DefaultBuildEffectiveVersion()
+		config.EffectiveVersion = utilcompatibility.DefaultBuildEffectiveVersion()
 		// Stand-ins for what secure serving provides in production: Complete() derives the external
 		// address from the bound port, and New() rejects a nil LoopbackClientConfig.
 		config.ExternalAddress = "127.0.0.1:8443"
@@ -318,7 +318,7 @@ var _ = Describe("the aggregated group this module still serves", func() {
 		codecs := serializer.NewCodecFactory(scheme)
 
 		config := genericapiserver.NewConfig(codecs)
-		config.EffectiveVersion = utilversion.DefaultBuildEffectiveVersion()
+		config.EffectiveVersion = utilcompatibility.DefaultBuildEffectiveVersion()
 		config.ExternalAddress = "127.0.0.1:8443"
 		config.LoopbackClientConfig = &rest.Config{Host: "https://127.0.0.1:8443"}
 

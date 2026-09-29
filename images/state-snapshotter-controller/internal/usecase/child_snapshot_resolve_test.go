@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -36,7 +37,7 @@ func TestResolveChildSnapshotRefToBoundContentName_SameNameDifferentKinds(t *tes
 	gvkB := schema.GroupVersionKind{Group: "generic.state-snapshotter.test", Version: "v1", Kind: "FixtureDomainSnapshotB"}
 	a := childSnapUnstructured(ns, name, gvkA, "content-a")
 	b := childSnapUnstructured(ns, name, gvkB, "content-b")
-	cl := fake.NewClientBuilder().WithRuntimeObjects(a, b).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(a, b).Build()
 
 	refA := storagev1alpha1.SnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
@@ -67,7 +68,7 @@ func TestResolveChildSnapshotRefToBoundContentName_UsesParentNamespace(t *testin
 		Version: "v1",
 		Kind:    "FixtureDomainSnapshotA",
 	}, "content-x")
-	cl := fake.NewClientBuilder().WithRuntimeObjects(child).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(child).Build()
 	got, err := ResolveChildSnapshotRefToBoundContentName(ctx, cl, storagev1alpha1.SnapshotChildRef{
 		APIVersion: "generic.state-snapshotter.test/v1",
 		Kind:       "FixtureDomainSnapshotA",

@@ -23,6 +23,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -57,7 +58,7 @@ func refDemoDisk(name string) storagev1alpha1.SnapshotChildRef {
 func TestSummarizeChildSnapshotTerminalFailures_InvalidRefFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cl := fake.NewClientBuilder().Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		{APIVersion: "", Kind: "X", Name: "n"},
 	}, "ns")
@@ -75,7 +76,7 @@ func TestSummarizeChildSnapshotTerminalFailures_TerminalChildFailed(t *testing.T
 	ns := "ns1"
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "c1", metav1.ConditionFalse, "VolumeCaptureFailed")
-	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(u).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-a"),
 	}, ns)
@@ -93,7 +94,7 @@ func TestSummarizeChildSnapshotTerminalFailures_CompletedChildNotFailed(t *testi
 	ns := "ns1"
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "content-1", metav1.ConditionTrue, snapshot.ReasonCompleted)
-	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(u).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-a"),
 	}, ns)
@@ -108,7 +109,7 @@ func TestSummarizeChildSnapshotTerminalFailures_CompletedChildNotFailed(t *testi
 func TestSummarizeChildSnapshotTerminalFailures_NotFoundIsNotTerminal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	cl := fake.NewClientBuilder().Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("missing"),
 	}, "ns")
@@ -127,7 +128,7 @@ func TestSummarizeChildSnapshotTerminalFailures_PendingChildIsNotTerminal(t *tes
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	// Unbound child (no boundSnapshotContentName) classifies as pending, not terminal.
 	u := demoSnapshotUnstructuredReady(ns, "disk-a", gvk, "", "", "")
-	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(u).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-a"),
 	}, ns)
@@ -147,7 +148,7 @@ func TestSummarizeChildSnapshotTerminalFailures_DoesNotReadOtherNamespace(t *tes
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	// A terminally-failed child living only in another namespace must be invisible to the parent.
 	other := demoSnapshotUnstructuredReady(nsOther, "disk-a", gvk, "c1", metav1.ConditionFalse, "VolumeCaptureFailed")
-	cl := fake.NewClientBuilder().WithRuntimeObjects(other).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(other).Build()
 	ref := storagev1alpha1.SnapshotChildRef{APIVersion: "demo.example.com/v1", Kind: "DemoDiskSnapshot", Name: "disk-a"}
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{ref}, nsParent)
 	if err != nil {
@@ -196,7 +197,7 @@ func TestSummarizeChildSnapshotTerminalFailures_VolumeCaptureFailedIsTerminal(t 
 	ns := "ns1"
 	gvk := schema.GroupVersionKind{Group: "demo.example.com", Version: "v1", Kind: "DemoDiskSnapshot"}
 	u := demoSnapshotUnstructuredReady(ns, "disk-fail", gvk, "c1", metav1.ConditionFalse, snapshot.ReasonVolumeCaptureFailed)
-	cl := fake.NewClientBuilder().WithRuntimeObjects(u).Build()
+	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).WithRuntimeObjects(u).Build()
 	sum, err := SummarizeChildSnapshotTerminalFailures(ctx, cl, []storagev1alpha1.SnapshotChildRef{
 		refDemoDisk("disk-fail"),
 	}, ns)
