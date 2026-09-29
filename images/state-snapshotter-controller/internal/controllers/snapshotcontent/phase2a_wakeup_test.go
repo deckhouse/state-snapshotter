@@ -46,7 +46,7 @@ func TestContentPlanMCPNotFoundPending(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-gone")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestContentPlanMCPFailedTerminal(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-bad")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestContentPlanMCPNonTerminalFalsePending(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-wip")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestContentPlanChunkMissingTerminal(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-chunks")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestContentPlanChunkPresentReady(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-chunks-ok")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestContentPlanChunkTransientErrorRequeues(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-chunks-flaky")
-	if _, err := r.buildCommonSnapshotContentStatusPlan(ctx, content); err == nil {
+	if _, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil); err == nil {
 		t.Fatalf("transient chunk GET error must propagate as a reconcile error (requeue), got nil")
 	} else if strings.Contains(err.Error(), "missing chunk") {
 		t.Fatalf("transient error must not be reported as a missing chunk: %v", err)

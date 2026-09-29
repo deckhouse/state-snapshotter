@@ -766,3 +766,50 @@ func TestReconcileDataLegProjection_GenericImportReapedDataImportBackfillsSize(t
 		t.Fatalf("a latched pass rewrote status.data (churn): resourceVersion %q -> %q", rvLatched, got)
 	}
 }
+
+func TestReconcileDataLegProjection_GenericImportHoldsIdentityOnNewArtifact(t *testing.T) {
+	ctx := context.Background()
+	content := projContentTyped()
+	content.Status.Data = &storagev1alpha1.SnapshotDataBinding{
+		SourceRef: storagev1alpha1.SnapshotSubjectRef{
+			APIVersion: importLeafAPIVer, Kind: importLeafKind,
+			Namespace: projTestNS, Name: importLeafObjName, UID: types.UID("leaf-uid-1"),
+		},
+		ArtifactRef: storagev1alpha1.SnapshotDataArtifactRef{
+			APIVersion: "snapshot.storage.k8s.io/v1", Kind: snapshot.KindVolumeSnapshotContent,
+			Name: projTestVSCName, UID: "vsc-uid",
+		},
+		VolumeMode:       string(corev1.PersistentVolumeFilesystem),
+		Size:             "500Mi",
+		StorageClassName: importScratchStorageClass,
+		FsType:           importObservedFsType,
+	}
+	scheme := projScheme(t)
+	scheme.AddKnownTypeWithName(dataImportListGVK, &unstructured.UnstructuredList{})
+	di := importDataImportForLeaf("vsc-other")
+	otherVSC := projVSCUnowned()
+	otherVSC.SetName("vsc-other")
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&storagev1alpha1.SnapshotContent{}).
+		WithObjects(content, projVSCWithRestoreSize(), otherVSC, di).
+		Build()
+	reg := snapshot.NewGVKRegistry()
+	reg.MarkRequiresDataArtifact(importLeafKind, true)
+	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: reg}
+
+	requeue, termReason, _, _, err := r.reconcileDataLegProjection(ctx, projContentObj(), importOwnerLeaf(), projTestNS, true)
+	if err != nil {
+		t.Fatalf("divergence must not abort reconcile: %v", err)
+	}
+	if termReason != "" {
+		t.Fatalf("holding identity must not be terminal, got %q", termReason)
+	}
+	if requeue {
+		t.Fatalf("a complete published identity must not requeue")
+	}
+	got := projContentData(t, cl)
+	if got.ArtifactRef.Name != projTestVSCName {
+		t.Fatalf("published artifact identity must not move, got %q", got.ArtifactRef.Name)
+	}
+}

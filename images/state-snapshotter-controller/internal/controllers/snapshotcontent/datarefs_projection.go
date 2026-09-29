@@ -163,7 +163,11 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 		return false, "", "", "", nil
 	}
 	if failed, reason, msg := vcctrl.VolumeCaptureRequestFailed(vcr); failed {
-		// Core-owned terminal: make the content terminal on the failed VCR so it propagates upward.
+		// A leftover failed request after the identity is frozen must not terminal the content or
+		// move the binding. Before the first publish, a failed VCR is still a core-owned terminal.
+		if held, heldRequeue, heldErr := r.holdPublishedDataIfDiverged(ctx, contentObj, content, nil); held {
+			return heldRequeue, "", "", "", heldErr
+		}
 		detail := msg
 		if reason != "" {
 			detail = fmt.Sprintf("%s: %s", reason, msg)
@@ -194,6 +198,9 @@ func (r *SnapshotContentController) projectContentDataLegFromVCR(ctx context.Con
 	if len(bindings) != 1 {
 		// Zero bindings on a ready+valid VCR: not representable yet, hold pending.
 		return true, "", "", "", nil
+	}
+	if held, heldRequeue, heldErr := r.holdPublishedDataIfDiverged(ctx, contentObj, content, &bindings[0]); held {
+		return heldRequeue, "", "", "", heldErr
 	}
 	// A domain capture leg attests no import metadata (zero value): everything it publishes beyond the refs is
 	// read off the live source PVC by the enricher.
@@ -285,6 +292,9 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		// PVC and must run no import logic at all.
 		importMeta = importVolumeMetadataFromPublished(content.Status.Data)
 	}
+	if held, heldRequeue, heldErr := r.holdPublishedDataIfDiverged(ctx, contentObj, content, &binding); held {
+		return heldRequeue, "", "", "", heldErr
+	}
 	if content.Status.Data != nil && content.Status.Data.ArtifactRef.Name == vscName && content.Status.Data.Size != "" &&
 		importMeta.matchesPublished(content.Status.Data) {
 		// Already published, bound to the same VSC, AND the durable restore size captured: latched.
@@ -294,6 +304,9 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		// precede the fork's status.restoreSize. Latching on the VSC name alone would freeze status.data
 		// without size forever; re-enriching until size is captured backfills it once the driver publishes
 		// restoreSize (PublishSnapshotContentDataRef is a no-op once equal, so no churn after it lands).
+		// uid is filled on the same enrich pass when the live VolumeSnapshotContent has one; it is not a
+		// latch term, so a fixture (or a name-only first publish) cannot wedge the reconcile. A later live
+		// VSC with a different name is refused above by holdPublishedDataIfDiverged.
 		//
 		// The import-metadata terms exist so that contents published before a field was projected self-heal;
 		// each field contributes a term only while its own value is known (see matchesPublished). For a
@@ -304,6 +317,28 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 	}
 	requeue, err = r.publishDataBindings(ctx, contentName, []storagev1alpha1.SnapshotDataBinding{binding}, importMeta)
 	return requeue, "", "", "", err
+}
+
+// fillEmptyVolumeMetadataFromPublished restores the captured volume's shape into the fields the enricher
+// left empty, and ONLY those. It is not applyTo: that one overwrites, and overwriting would put a stale
+// value over a fresh reading of the very volume the snapshot was taken from — the enricher is the authority
+// whenever it was allowed to read.
+func fillEmptyVolumeMetadataFromPublished(published *storagev1alpha1.SnapshotDataBinding, bindings []storagev1alpha1.SnapshotDataBinding) {
+	if published == nil {
+		return
+	}
+	for i := range bindings {
+		b := &bindings[i]
+		if b.StorageClassName == "" {
+			b.StorageClassName = published.StorageClassName
+		}
+		if b.VolumeMode == "" {
+			b.VolumeMode = published.VolumeMode
+		}
+		if b.FsType == "" {
+			b.FsType = published.FsType
+		}
+	}
 }
 
 // importVolumeMetadata is the volume metadata that exists only on the import side, and only for as long as
@@ -409,15 +444,38 @@ func (m importVolumeMetadata) matchesPublished(published *storagev1alpha1.Snapsh
 // downgrades the (stale-empty) volume leg to DataCapturePending for the pass, so Ready cannot escalate before
 // the bound VolumeSnapshotContent's readyToUse is validated on the next pass.
 func (r *SnapshotContentController) publishDataBindings(ctx context.Context, contentName string, bindings []storagev1alpha1.SnapshotDataBinding, importMeta importVolumeMetadata) (requeue bool, err error) {
-	bindings, err = EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
-	if err != nil {
-		return false, err
-	}
-	importMeta.applyTo(bindings)
+	// The published uids go onto the bindings BEFORE the enricher sees them. The enricher reads volume
+	// metadata off the live PVC of the captured name and refuses when that PVC's uid contradicts the
+	// binding's — that refusal is what stops a recreated namesake from supplying the volumeMode of a
+	// different volume. It can only refuse what it can see: a binding still carrying the LIVE uid matches
+	// the live PVC and is enriched from it, and the writer then publishes those foreign fields under the
+	// frozen identity. The content read moves up for this; the writer honours the same rule again, which by
+	// then is a no-op.
 	content := &storagev1alpha1.SnapshotContent{}
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return false, cErr
 	}
+	for i := range bindings {
+		carryPublishedUIDsForward(content.Status.Data, &bindings[i])
+	}
+	bindings, err = EnrichDataBindingsWithVolumeMetadata(ctx, r.Client, r.APIReader, bindings)
+	if err != nil {
+		return false, err
+	}
+	// What the enricher declined to read must not come back as a blank. Its refusal means the live claim of
+	// the captured name is a stranger, so there is nothing left to read the captured volume's shape from —
+	// except what this content published when the claim was still itself. Publishing empty instead would
+	// turn "we cannot see it any more" into "it had none", and a restore reads volumeMode to decide whether
+	// it is handing back a block device or a filesystem. applyTo only fills what is empty, so an enrichment
+	// that DID happen stays untouched.
+	//
+	// Capture legs only. On an import leg the DataImport is the authority and is allowed to say a field is
+	// EMPTY — a Block volume has no filesystem, and importMeta clears fsType to state that. Re-filling it
+	// from a previous publish would overrule the only party that knows.
+	if importMeta == (importVolumeMetadata{}) {
+		fillEmptyVolumeMetadataFromPublished(content.Status.Data, bindings)
+	}
+	importMeta.applyTo(bindings)
 	if handoffErr := EnsureVolumeSnapshotContentsOwnedByContent(ctx, r.Client, content, bindings); handoffErr != nil {
 		// Retryable handoff; coverage still holds via the pending source until dataRefs are published. It is
 		// logged rather than returned because a requeue is the right response, but it MUST be logged: a

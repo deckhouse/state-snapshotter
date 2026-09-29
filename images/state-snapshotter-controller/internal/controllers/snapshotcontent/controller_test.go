@@ -120,7 +120,7 @@ func TestBuildCommonSnapshotContentStatusPlanUsesPersistedRefsOnly(t *testing.T)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

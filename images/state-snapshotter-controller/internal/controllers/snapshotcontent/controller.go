@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -76,6 +77,7 @@ import (
 type SnapshotContentController struct {
 	client.Client
 	APIReader      client.Reader // Required: for reading resources directly from API server
+	Recorder       record.EventRecorder
 	Scheme         *runtime.Scheme
 	Config         *config.Options
 	RESTMapper     meta.RESTMapper
@@ -211,6 +213,7 @@ func NewSnapshotContentController(
 		}
 	}
 
+	registerSnapshotContentMetrics()
 	return &SnapshotContentController{
 		Client:                 client,
 		APIReader:              apiReader,
@@ -606,7 +609,7 @@ func (r *SnapshotContentController) reconcileCommonSnapshotContentStatus(ctx con
 	// only a liveness optimization).
 	r.selfHealDataArtifactOwnerRefs(ctx, obj)
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj, owner)
 	if err != nil {
 		return false, err
 	}
@@ -813,7 +816,7 @@ func (r *SnapshotContentController) ReconcileCommonSnapshotContentStatus(ctx con
 // gate is gone: the orphan wave is now gated through ChildrenReady (ChildrenLinkPending, fail-closed
 // against declared-but-unlinked orphan volume child content — see validateCommonContentChildren).
 // PlanningReady is NOT part of this formula; it is only a gate/barrier upstream.
-func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured) (commonContentStatusPlan, error) {
+func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx context.Context, obj *unstructured.Unstructured, owner *unstructured.Unstructured) (commonContentStatusPlan, error) {
 	plan := commonContentStatusPlan{
 		manifestsReady:   metav1.ConditionFalse,
 		manifestsReason:  snapshot.ReasonManifestCapturePending,
@@ -828,7 +831,7 @@ func (r *SnapshotContentController) buildCommonSnapshotContentStatusPlan(ctx con
 		childrenMessage: "no child content",
 	}
 
-	if err := r.fillOwnLegs(ctx, obj, &plan); err != nil {
+	if err := r.fillOwnLegs(ctx, obj, owner, &plan); err != nil {
 		return plan, err
 	}
 
@@ -1106,6 +1109,30 @@ var terminalDataFailureReasons = map[string]struct{}{
 	snapshot.ReasonArtifactMissing:          {},
 }
 
+// manifestPendingMessage tells the two waits apart while ManifestsReady is pending with the single reason
+// ManifestCapturePending (no new reason is introduced: the reason set is a contract, the message is not).
+//
+// Waiting for the DECLARATION is not waiting for a capture: the leg latch is absent, so either the owning
+// snapshot has not reached the planning barrier yet, or its capture state was replaced by a writer without
+// the field and the core is restoring it from the published artifact. The domain SDK creates no request in
+// that window, so "waiting for the checkpoint to be published" would send a reader looking for a capture
+// that has not been asked for. Only domain-capture owners declare the latch — for an import or generic
+// owner its absence means nothing, so those keep the plain wait.
+func (r *SnapshotContentController) manifestPendingMessage(owner *unstructured.Unstructured) string {
+	const waitingForCapture = "waiting for manifest capture checkpoint to be published"
+	if owner == nil {
+		return waitingForCapture
+	}
+	if !r.isDomainCaptureKind(owner.GetObjectKind().GroupVersionKind()) {
+		return waitingForCapture
+	}
+	if _, found, _ := unstructured.NestedBool(owner.Object, "status", "captureState", "commonController", "manifestCaptured"); found {
+		return waitingForCapture
+	}
+	return "waiting for the manifest capture leg to be declared on " + owner.GetKind() + " " + owner.GetNamespace() + "/" + owner.GetName() +
+		" (not past the planning barrier, or its capture state was replaced and is being restored)"
+}
+
 func isTerminalDataFailure(reason string) bool {
 	_, ok := terminalDataFailureReasons[reason]
 	return ok
@@ -1116,7 +1143,7 @@ func isTerminalDataFailure(reason string) bool {
 // only evaluated once the manifest leg is Ready; until then DataReady stays at its initial
 // Unknown/ManifestCapturePending (not evaluated yet — not a volume failure). Independent leg evaluation
 // is a future follow-up.
-func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstructured.Unstructured, plan *commonContentStatusPlan) error {
+func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj, owner *unstructured.Unstructured, plan *commonContentStatusPlan) error {
 	mcpName, _, err := unstructured.NestedString(obj.Object, "status", "manifestCheckpointName")
 	if err != nil {
 		return err
@@ -1124,7 +1151,7 @@ func (r *SnapshotContentController) fillOwnLegs(ctx context.Context, obj *unstru
 	if mcpName == "" {
 		plan.manifestsReady = metav1.ConditionFalse
 		plan.manifestsReason = snapshot.ReasonManifestCapturePending
-		plan.manifestsMessage = "waiting for manifest capture checkpoint to be published"
+		plan.manifestsMessage = r.manifestPendingMessage(owner)
 		return nil
 	}
 
@@ -1482,6 +1509,13 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 	if published == mcr.Status.CheckpointName {
 		return false, nil
 	}
+	if published != "" {
+		// Once published the name is a durable pointer: a later ManifestCaptureRequest (a recapture
+		// attempt after the owner's captureState was wiped) must not move it. Divergence is diagnostic
+		// only — returning an error here would abort the whole content status reconcile.
+		r.notePublishedIdentityHeld(ctx, contentObj)
+		return false, nil
+	}
 	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcr.Status.CheckpointName); pubErr != nil {
 		return false, pubErr
 	}
@@ -1511,6 +1545,10 @@ func (r *SnapshotContentController) projectImportManifestCheckpointName(ctx cont
 		return false, getErr
 	}
 	if published == mcpName {
+		return false, nil
+	}
+	if published != "" {
+		r.notePublishedIdentityHeld(ctx, contentObj)
 		return false, nil
 	}
 	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcpName); pubErr != nil {
@@ -2154,6 +2192,10 @@ func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, sna
 // Registers watches for all registered SnapshotContent GVKs
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("state-snapshotter-snapshot-content")
+	}
+	registerSnapshotContentMetrics()
 	r.watchMu.Lock()
 	defer r.watchMu.Unlock()
 	gvkStrings := make([]string, 0, len(r.SnapshotContentGVKs))

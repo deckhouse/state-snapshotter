@@ -49,6 +49,17 @@ const (
 // CEL can read both self.spec and self.status.
 // +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the bound Snapshot is deleted (recycle-bin restore)"
 // +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
+//
+// A published artifact is set-once: once this content names a ManifestCheckpoint, a data binding or its
+// complete child set, that identity is the durable answer to "what does this snapshot consist of" and no
+// later writer may replace it. The rules on those fields refuse a CHANGE; they cannot refuse a REMOVAL,
+// because a transition rule does not run at all when the field is absent from the new object — which is
+// precisely what a writer whose model has no such field produces when it replaces the whole status. Each
+// axis therefore has a companion rule here, on the ROOT: only the root can compare presence across the
+// update, and only the root survives `status: null` (a rule anchored under status disappears with it).
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.manifestCheckpointName) || (has(self.status) && has(self.status.manifestCheckpointName))",message="SnapshotContent status.manifestCheckpointName is set-once: a published ManifestCheckpoint name cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.data) || (has(self.status) && has(self.status.data))",message="SnapshotContent status.data is set-once: a published data binding cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.childrenSnapshotContentRefs) || (has(self.status) && has(self.status.childrenSnapshotContentRefs))",message="SnapshotContent status.childrenSnapshotContentRefs is frozen once set: a published child set cannot be removed"
 type SnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -163,7 +174,15 @@ type SnapshotDataBinding struct {
 // +k8s:deepcopy-gen=true
 type SnapshotContentStatus struct {
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name once manifest capture has persisted.
+	//
+	// It is SET-ONCE. The checkpoint it names holds the manifests of the very moment this content's data was
+	// captured, so re-pointing it at a checkpoint produced by a later capture would silently pair one
+	// snapshot's data with another's manifests. The name is therefore a durable pointer, not a projection of
+	// whatever ManifestCaptureRequest exists right now: the first publish passes, every later change is
+	// rejected, and the root-level companion rule refuses its removal.
 	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="SnapshotContent status.manifestCheckpointName is set-once: the published ManifestCheckpoint name cannot be replaced"
 	ManifestCheckpointName string `json:"manifestCheckpointName,omitempty"`
 
 	// ChildrenSnapshotContentRefs lists direct child SnapshotContent objects in the snapshot tree.
@@ -196,7 +215,30 @@ type SnapshotContentStatus struct {
 	// represented as separate child volume nodes (childrenSnapshotContentRefs), never as a list here.
 	// It is the durable, self-contained {sourceRef, artifactRef, volume metadata} block the core mirrors
 	// onto the namespaced snapshot's top-level status.data.
+	//
+	// Its IDENTITY is set-once, and identity is narrower than the block: the two refs' apiVersion, kind and
+	// name (plus sourceRef.namespace) say WHICH volume was captured into WHICH artifact, and a rewrite there
+	// would move the snapshot onto a different artifact — while size, the volume metadata, and a uid that was
+	// not known at first publish are enrichment that still has to be able to land. Hence one rule per axis
+	// rather than `self == oldSelf` on the whole block. The uid rules are one-directional on purpose: an
+	// absent uid may be filled in later, a published one can be neither changed nor dropped. Removal of the
+	// whole block is refused by the root-level companion rule.
+	//
+	// These rules are here and not on SnapshotSubjectRef / SnapshotDataArtifactRef, because the very same
+	// SnapshotSubjectRef type is spec.snapshotRef, which MUST stay re-pointable for the recycle-bin restore.
+	//
+	// sourceRef.namespace is spelled __namespace__ because `namespace` is a CEL reserved word: Kubernetes
+	// exposes such a property under its escaped name, and the plain spelling does not resolve to this string
+	// field at all. It does not fail as a typo would — the apiserver refuses the whole CRD with "estimated
+	// rule cost exceeds budget by factor of more than 100x", because an unresolved selection is costed as an
+	// arbitrarily large value. Do not "simplify" the escaping away; the integration test that asserts a
+	// namespace rewrite is rejected is what keeps this honest.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="self.artifactRef.apiVersion == oldSelf.artifactRef.apiVersion && self.artifactRef.kind == oldSelf.artifactRef.kind && self.artifactRef.name == oldSelf.artifactRef.name",message="SnapshotContent status.data.artifactRef identity (apiVersion, kind, name) is set-once: a published data artifact cannot be replaced"
+	// +kubebuilder:validation:XValidation:rule="!has(oldSelf.artifactRef.uid) || (has(self.artifactRef.uid) && self.artifactRef.uid == oldSelf.artifactRef.uid)",message="SnapshotContent status.data.artifactRef.uid is set-once: it may be filled in after the first publish, but not changed or removed"
+	// +kubebuilder:validation:XValidation:rule="self.sourceRef.apiVersion == oldSelf.sourceRef.apiVersion && self.sourceRef.kind == oldSelf.sourceRef.kind && self.sourceRef.name == oldSelf.sourceRef.name",message="SnapshotContent status.data.sourceRef identity (apiVersion, kind, name) is set-once: the captured source of a published data binding cannot be replaced"
+	// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sourceRef.__namespace__) || (has(self.sourceRef.__namespace__) && self.sourceRef.__namespace__ == oldSelf.sourceRef.__namespace__)",message="SnapshotContent status.data.sourceRef.namespace is part of the set-once identity of a published data binding: it may not be changed or removed"
+	// +kubebuilder:validation:XValidation:rule="!has(oldSelf.sourceRef.uid) || (has(self.sourceRef.uid) && self.sourceRef.uid == oldSelf.sourceRef.uid)",message="SnapshotContent status.data.sourceRef.uid is set-once: it may be filled in after the first publish, but not changed or removed"
 	Data *SnapshotDataBinding `json:"data,omitempty"`
 
 	// BoundSnapshotDeleted is a one-shot internal latch set by the binder when the bound namespaced

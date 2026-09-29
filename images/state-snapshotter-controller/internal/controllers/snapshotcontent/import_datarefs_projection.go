@@ -112,6 +112,10 @@ func (r *SnapshotContentController) projectContentDataLegFromDataImport(ctx cont
 	// finishes an incomplete one from the published copy).
 	importMeta := importVolumeMetadataFromDataImport(di)
 
+	if held, heldRequeue, heldErr := r.holdPublishedDataIfDiverged(ctx, contentObj, content, binding); held {
+		return heldRequeue, "", "", "", heldErr
+	}
+
 	// Fast-path latch: skip re-enriching/re-publishing when the published dataRef already matches the artifact,
 	// the durable restore size has been captured, AND every import-metadata field we know is published as such
 	// (a content bound before one of them was projected therefore self-heals instead of keeping the gap

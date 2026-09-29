@@ -112,6 +112,16 @@ type CoreCaptureState struct {
 	ManifestCaptured *bool
 	// DataCaptured is the data-leg latch (declared only where a data line exists).
 	DataCaptured *bool
+	// DataLegExpected says whether this KIND has a data line at all, which is the one thing the latches
+	// cannot say for themselves. A nil DataCaptured is two different facts depending on it: on a
+	// manifest-only node it means "there is no data leg here, and never will be", and on a data node it
+	// means "the core has not declared it yet" — the same absence, opposite conclusions about whether the
+	// capture is finished. The adapter knows which kind it maps and is the only one that can say.
+	//
+	// It defaults to false, which reads every nil as "no such leg" — the behaviour every adapter had before
+	// this field existed. A domain whose kind carries a data line MUST set it; leaving it false there lets a
+	// half-declared status pass for a finished capture, and a finished capture is never recomputed.
+	DataLegExpected bool
 	// ChildrenSettled is the core-computed "every direct child has gone terminal (captured-OK or failed)"
 	// latch (captureState.commonController.childrenSettled). It is NOT a capture leg: it does NOT participate
 	// in AllLegsCaptured or CoreCaptureOutcome (the subtree-scoped latches are orthogonal to this node's own
@@ -130,13 +140,34 @@ type CoreCaptureState struct {
 	ChildSubtreesManifestsPersisted *bool
 }
 
-// manifestCaptured reports whether the manifest leg is captured (nil latch => not captured).
+// manifestCaptured reports whether the manifest leg is latched captured. A nil latch is NOT captured, but
+// it is not "not captured yet" either — it is "the core has not declared this leg", which no caller may
+// answer by creating a request. Suppression therefore reads manifestLegOpen, never this; this one is for
+// the outcome the domain waits on (AllLegsCaptured / CoreCaptureOutcome), where an undeclared leg is
+// correctly not a captured one.
 func (c CoreCaptureState) manifestCaptured() bool {
 	return c.ManifestCaptured != nil && *c.ManifestCaptured
 }
 
-// dataCaptured reports whether the data leg is captured (nil latch => not captured).
+// dataCaptured reports whether the data leg is latched captured. Same caveat as manifestCaptured: a nil
+// latch means "no such leg on this node, or not declared yet", not "go ahead and capture".
 func (c CoreCaptureState) dataCaptured() bool { return c.DataCaptured != nil && *c.DataCaptured }
+
+// manifestLegOpen reports whether a manifest capture request may be created: the core declared the leg
+// (non-nil) and has not latched it captured. A nil latch is closed — an undeclared leg is one the core is
+// about to declare false, or one whose captureState was replaced by a writer without the field and which
+// the core will restore from the published artifact. Creating in that window is exactly the recapture this
+// three-valued latch exists to prevent.
+func (c CoreCaptureState) manifestLegOpen() bool {
+	return c.ManifestCaptured != nil && !*c.ManifestCaptured
+}
+
+// dataLegOpen reports whether a volume capture request may be created. Symmetrical to manifestLegOpen, and
+// a nil latch is closed for a second reason too: a node with no data line at all carries nil forever, so
+// "wait for the declaration" is also the correct answer for it.
+func (c CoreCaptureState) dataLegOpen() bool {
+	return c.DataCaptured != nil && !*c.DataCaptured
+}
 
 // childrenSettled reports whether every direct child has gone terminal (captured-OK or failed). A nil latch
 // (no direct children, or not computed yet) reads as false. It is deliberately NOT consulted by
@@ -145,25 +176,35 @@ func (c CoreCaptureState) childrenSettled() bool {
 	return c.ChildrenSettled != nil && *c.ChildrenSettled
 }
 
-// AllLegsCaptured reports whether every declared (non-nil) leg is captured. It requires at least one
-// declared leg: with no leg declared yet (both nil) capture has not started, so it returns false — this
-// distinguishes "nothing to wait for" (never happens; the core always declares the manifest leg) from
-// "not started yet". The core eager-initializes applicable legs to false, so the domain stays leg-agnostic.
+// AllLegsCaptured reports whether this node's capture is complete: every leg this kind has, latched
+// captured. It is what a domain waits on before its terminal phase, and a terminal phase is never
+// recomputed — so every honest doubt here has to answer "not complete".
+//
+// Both legs are required to be DECLARED, not merely non-false, and an absent latch is never read as a leg
+// that does not exist:
+//
+//   - the manifest leg exists on every capture node, so a nil latch only ever means the core has not
+//     written it yet;
+//   - the data leg exists where DataLegExpected says it does, and there a nil latch means the same thing.
+//     Where it does not, nil is the steady state of a manifest-only node and says nothing is owed.
+//
+// Both readings are load-bearing and both were wrong before. Reading a nil manifest latch as "nothing to
+// wait for" deadlocked a snapshot outright: the domain went terminal in the window before the core declared
+// the leg, so it never created the capture request the core then asked for, and the content sat at
+// ManifestCapturePending with no writer left to move it. Reading a nil data latch the same way on a data
+// node ends the capture one leg early — the core declares both legs in one write, but nothing guarantees an
+// apiserver or a foreign writer keeps both halves of it, and half of that write is exactly this state.
+//
+// It answers only about THIS node's own legs: the subtree-scoped latches (childrenSettled,
+// childSubtreesManifestsPersisted) are deliberately not consulted.
 func (c CoreCaptureState) AllLegsCaptured() bool {
-	declared := false
-	if c.ManifestCaptured != nil {
-		declared = true
-		if !*c.ManifestCaptured {
-			return false
-		}
+	if !c.manifestCaptured() {
+		return false
 	}
-	if c.DataCaptured != nil {
-		declared = true
-		if !*c.DataCaptured {
-			return false
-		}
+	if c.DataLegExpected {
+		return c.dataCaptured()
 	}
-	return declared
+	return c.DataCaptured == nil || *c.DataCaptured
 }
 
 // ChildSpec is the child-builder seam: the domain constructs the fully-formed child snapshot object
@@ -175,6 +216,28 @@ type ChildSpec struct {
 	// SnapshotChildRef from the object's GVK and name and stamps the parent owner reference on it.
 	Object client.Object
 }
+
+// CaptureLegDecision is the three-valued answer to "what should this domain do about a capture leg right
+// now". It exists because the leg latch itself is three-valued (nil / false / true) and collapsing it to a
+// bool loses the one distinction that matters for a set-once artifact: "the core has not declared this leg
+// yet" is not the same as "the leg is already established". A domain that reads the first as the second
+// creates a second capture request — which, for a snapshot whose status was replaced by a writer without
+// extension fields, means capturing again from a cluster that has moved on.
+type CaptureLegDecision int
+
+const (
+	// CaptureLegWaitDeclaration: the core has not declared the leg yet (nil latch). Do NOT create a request
+	// and do NOT treat the leg as done — wait for the declaration. This is also what a snapshot whose
+	// captureState was wiped looks like until the core restores it from the published artifact.
+	CaptureLegWaitDeclaration CaptureLegDecision = iota
+	// CaptureLegPlan: the core declared the leg and nothing has been captured or planned yet (latch false,
+	// no request name published). This is the only state in which a request may be created.
+	CaptureLegPlan
+	// CaptureLegSuppressed: the leg is already established — the request name is published (the
+	// point-in-time plan is frozen) or the latch is captured. Never create; a caller that skips expensive
+	// target computation on this is correct.
+	CaptureLegSuppressed
+)
 
 // CaptureOutcome is the tri-state the SDK derives for the domain from the core's leg latches plus the
 // terminal Ready reason. The domain switches its wait loop on it: Captured -> publish phase=Finished via

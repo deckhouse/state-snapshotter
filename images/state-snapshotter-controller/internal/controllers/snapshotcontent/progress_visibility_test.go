@@ -73,7 +73,7 @@ func TestContentPlanAlreadyReadyThenArtifactMissing(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentReadyWithMCPAndDataRefs("c", "vsc-gone")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestContentPlanDataCapturePendingProgress(t *testing.T) {
 	}}
 	content.SetGroupVersionKind(unifiedbootstrap.CommonSnapshotContentGVK())
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

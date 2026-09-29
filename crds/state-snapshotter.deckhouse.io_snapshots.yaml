@@ -34,7 +34,14 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Snapshot requests a namespace state/configuration snapshot.
+        description: |-
+          Snapshot requests a namespace state/configuration snapshot.
+
+          The binding to a SnapshotContent is set-once (see status.boundSnapshotContentName). The field rule there
+          refuses a change; it cannot refuse a removal, because a transition rule does not run when the field is
+          absent from the new object — what a writer whose model has no such field produces when it replaces the
+          whole status. The companion that does refuse it is on the ROOT: only the root can compare presence across
+          the update, and only the root survives `status: null`.
         properties:
           apiVersion:
             description: |-
@@ -143,7 +150,19 @@ spec:
                 description: |-
                   BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
                   The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
+
+                  It is SET-ONCE: this snapshot's content is the artifact it consists of, and re-pointing the binding
+                  would hand the snapshot somebody else's data. The name is derived from this object's own name and uid,
+                  so the binder recomputes the same value and its re-publish after a status replace is not a change. A
+                  content recovered from the recycle bin is adopted by a NEWLY created Snapshot, whose status starts
+                  empty — so the first publish passes and the carve-out lives on the content's spec.snapshotRef, not
+                  here. The root-level companion rule refuses removal.
+                maxLength: 253
                 type: string
+                x-kubernetes-validations:
+                - message: 'Snapshot status.boundSnapshotContentName is set-once:
+                    the bound SnapshotContent name cannot be replaced'
+                  rule: self == oldSelf
               captureState:
                 description: |-
                   CaptureState collects internal capture signals. On the namespace-root Snapshot the core-written
@@ -453,6 +472,11 @@ spec:
                 type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: 'Snapshot status.boundSnapshotContentName is set-once: the bound
+            SnapshotContent name cannot be removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.boundSnapshotContentName)
+            || (has(self.status) && has(self.status.boundSnapshotContentName))'
     served: true
     storage: true
     subresources:

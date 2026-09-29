@@ -349,13 +349,29 @@ func (r *SnapshotReconciler) reconcileNamespaceManifestLeg(
 	if manifestLegCaptured(nsSnap) {
 		return ctrl.Result{}, nil
 	}
-	// Point-in-time freeze gate: once the manifest leg is planned (its MCR name is published) the plan is
-	// frozen — do NOT re-list the live namespace or recompute spec.targets. This (not just the captured latch
-	// above) is what keeps the root off the API server between MCR creation and the captured latch, and it
-	// means the root never re-declares a shifted set to EnsureManifestCapture (so it never trips the drift
-	// signal). The idempotent name-publish inside EnsureManifestCapture already made this durable.
-	if !snapshotsdk.ManifestCaptureNeeded(adapter) {
+	// Two reasons not to plan, and they are not the same fact — hence the three-valued decision rather than
+	// !ManifestCaptureNeeded, which collapses them:
+	//
+	//   - Suppressed: the leg is planned (its MCR name is published) so the point-in-time plan is frozen —
+	//     do NOT re-list the live namespace or recompute spec.targets. This (not just the captured latch
+	//     above) is what keeps the root off the API server between MCR creation and the captured latch, and
+	//     it means the root never re-declares a shifted set to EnsureManifestCapture (so it never trips the
+	//     drift signal). The idempotent name-publish inside EnsureManifestCapture already made it durable.
+	//   - WaitDeclaration: the core has not declared the leg yet (it declares it once this root is bound and
+	//     past Planned), or this root's captureState was replaced and the core is restoring it from the
+	//     published checkpoint. Planning now would be wasted work at best; the SDK would refuse to create
+	//     the request anyway.
+	//
+	// Both requeue, but the log line says which one, because "the plan is frozen" and "the core has not
+	// spoken yet" look identical in a status and lead to very different debugging.
+	switch snapshotsdk.ManifestCaptureDecision(adapter) {
+	case snapshotsdk.CaptureLegSuppressed:
 		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	case snapshotsdk.CaptureLegWaitDeclaration:
+		log.FromContext(ctx).V(1).Info("manifest leg not declared by the core yet; not planning the namespace manifest capture",
+			"snapshot", nsSnap.Namespace+"/"+nsSnap.Name)
+		return ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	case snapshotsdk.CaptureLegPlan:
 	}
 	if r.Dynamic == nil || r.Discovery == nil {
 		return ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic/Discovery client is nil")

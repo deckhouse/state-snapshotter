@@ -90,6 +90,20 @@ func TestIsMCRSafeToDeleteRequiresContentLinkedReadyOwnedMCP(t *testing.T) {
 			name: "safe when content links Ready MCP owned by content",
 			want: true,
 		},
+		{
+			name: "safe when MCR CheckpointName does not match the published MCP",
+			want: true,
+			mutate: func(mcr *ssv1alpha1.ManifestCaptureRequest, _ *storagev1alpha1.SnapshotContent, _ *ssv1alpha1.ManifestCheckpoint) {
+				mcr.Status.CheckpointName = "other-mcp"
+			},
+		},
+		{
+			name: "safe when MCR has empty CheckpointName and content already holds Ready MCP",
+			want: true,
+			mutate: func(mcr *ssv1alpha1.ManifestCaptureRequest, _ *storagev1alpha1.SnapshotContent, _ *ssv1alpha1.ManifestCheckpoint) {
+				mcr.Status.CheckpointName = ""
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -166,6 +166,42 @@ func readArtifactRestoreSizeAndUID(ctx context.Context, c client.Client, artifac
 	return resource.NewQuantity(bytes, resource.BinarySI).String(), uid, nil
 }
 
+// carryPublishedUIDsForward replaces the uids of a binding assembled THIS pass with the ones already
+// published, when the identity around them is the same. Both uids are set-once at the API boundary, and a
+// binding is reassembled from live objects on every pass while status.data.Size is empty — so an object
+// deleted and recreated under the captured name hands the writer a uid that contradicts the published one.
+// Handing that to the apiserver is not a lost field: it is a rejection this content never gets past, on
+// every pass, forever.
+//
+// Identity is spelled the way the set-once rules spell it — apiVersion, kind and name, plus the namespace
+// for the namespaced source. A divergent identity is decided upstream (holdPublishedDataIfDiverged) and is
+// not supposed to reach a writer at all; matching the full identity here means neither caller depends on
+// every other caller having gone through that guard.
+//
+// It runs BEFORE the volume-metadata enrichment as well as inside the writer. The enricher refuses to read
+// a live PVC whose uid contradicts the binding's (see EnrichDataBindingsWithVolumeMetadata), and that
+// refusal is the only thing standing between a recreated namesake and a volumeMode read off the wrong
+// volume — so the binding must already carry the PUBLISHED uid when the enricher compares. Running it in
+// the writer too costs nothing: the second call finds the values already equal.
+func carryPublishedUIDsForward(published, cp *storagev1alpha1.SnapshotDataBinding) {
+	if published == nil || cp == nil {
+		return
+	}
+	if published.ArtifactRef.UID != "" &&
+		published.ArtifactRef.APIVersion == cp.ArtifactRef.APIVersion &&
+		published.ArtifactRef.Kind == cp.ArtifactRef.Kind &&
+		published.ArtifactRef.Name == cp.ArtifactRef.Name {
+		cp.ArtifactRef.UID = published.ArtifactRef.UID
+	}
+	if published.SourceRef.UID != "" &&
+		published.SourceRef.APIVersion == cp.SourceRef.APIVersion &&
+		published.SourceRef.Kind == cp.SourceRef.Kind &&
+		published.SourceRef.Name == cp.SourceRef.Name &&
+		published.SourceRef.Namespace == cp.SourceRef.Namespace {
+		cp.SourceRef.UID = published.SourceRef.UID
+	}
+}
+
 // PublishSnapshotContentDataRefs copies the durable data binding onto a logical SnapshotContent (N5 PR-4).
 //
 // Variant A (cardinality ≤1): a SnapshotContent holds at most one dataRef. Domain leaves own exactly one
@@ -184,7 +220,14 @@ func PublishSnapshotContentDataRefs(ctx context.Context, c client.Client, conten
 }
 
 // PublishSnapshotContentDataRef writes the single durable data binding onto a logical SnapshotContent.
-// A nil binding clears status.data. The write is idempotent under optimistic retry.
+// The write is idempotent under optimistic retry.
+//
+// A nil ref clears status.data, and nothing in this repository asks for that: the only caller is
+// PublishSnapshotContentDataRefs, which returns before this point on an empty slice, and otherwise passes
+// a binding. That is a checked fact, not an accident of the current call graph — the API now refuses to
+// clear a published binding (a set-once companion rule on the SnapshotContent root), so a future caller
+// that reaches for the nil to un-publish would get an admission rejection rather than an empty status.
+// Clearing before the first publish is what remains legal, and it is a no-op.
 func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, contentName string, ref *storagev1alpha1.SnapshotDataBinding) error {
 	if contentName == "" {
 		return nil
@@ -202,6 +245,7 @@ func PublishSnapshotContentDataRef(ctx context.Context, c client.Client, content
 			content.Status.Data = nil
 		} else {
 			cp := *ref
+			carryPublishedUIDsForward(content.Status.Data, &cp)
 			content.Status.Data = &cp
 		}
 		return c.Status().Patch(ctx, content, client.MergeFrom(base))

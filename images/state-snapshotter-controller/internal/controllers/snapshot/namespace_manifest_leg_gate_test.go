@@ -77,12 +77,34 @@ func TestReconcileNamespaceManifestLegFreezeGate(t *testing.T) {
 		}
 	})
 
-	t.Run("unplanned leg proceeds to planning (hits the nil-client guard)", func(t *testing.T) {
-		nsSnap := newRoot() // no MCR name, not captured -> ManifestCaptureNeeded=true
+	t.Run("no latch at all: waits for the core to declare the leg", func(t *testing.T) {
+		// A root with no commonController is NOT an unplanned leg to get on with: the core has not declared
+		// the manifest leg yet, or this root's captureState was replaced by a writer without the field and
+		// the core is restoring it from the published checkpoint. Planning here would re-list the live
+		// namespace to build a target set the SDK then refuses to turn into a request — and, before the
+		// three-valued latch, this is the state in which a snapshot got captured a second time. Nil
+		// Dynamic/Discovery prove the reconciler returns BEFORE reaching any planning dependency.
+		nsSnap := newRoot()
+		r := &SnapshotReconciler{}
+		res, err := r.reconcileNamespaceManifestLeg(ctx, nsSnap, nil, NewNamespaceSnapshotAdapter(nsSnap), nil)
+		if err != nil {
+			t.Fatalf("an undeclared leg must wait, not error, got %v", err)
+		}
+		if res.RequeueAfter != 500*time.Millisecond {
+			t.Fatalf("an undeclared leg must requeue (500ms) until the core declares it, got %+v", res)
+		}
+	})
+
+	t.Run("declared open leg proceeds to planning (hits the nil-client guard)", func(t *testing.T) {
+		// The one state that plans: the core declared the leg false and no MCR name is published.
+		nsSnap := newRoot()
+		nsSnap.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{
+			CommonController: &storagev1alpha1.CommonControllerCaptureState{ManifestCaptured: boolPtrV(false)},
+		}
 		r := &SnapshotReconciler{}
 		_, err := r.reconcileNamespaceManifestLeg(ctx, nsSnap, nil, NewNamespaceSnapshotAdapter(nsSnap), nil)
 		if err == nil {
-			t.Fatal("unplanned leg with nil Dynamic/Discovery must fail on the client guard (the gate must NOT swallow it)")
+			t.Fatal("a declared open leg with nil Dynamic/Discovery must fail on the client guard (the gate must NOT swallow it)")
 		}
 	})
 }

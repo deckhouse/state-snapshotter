@@ -49,7 +49,7 @@ func TestSubtreeManifestsPersistedLeafTrueWhenManifestReady(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestSubtreeManifestsPersistedFalseWhenManifestPending(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(aggScheme(t)).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", ""))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", ""), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestSubtreeManifestsPersistedFalseWhenOwnManifestFailed(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-bad"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-bad"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSubtreeManifestsPersistedRecursionParentFalseUntilChildPersisted(t *tes
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, child).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSubtreeManifestsPersistedRecursionParentTrueWhenChildPersisted(t *testi
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, child).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSubtreeManifestsPersistedLatchHoldsTrueOnDegradation(t *testing.T) {
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	obj := withCurrentSubtreePersisted(commonContentWithStatus("c", ""))
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, obj, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

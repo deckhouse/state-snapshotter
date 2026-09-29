@@ -221,7 +221,7 @@ func TestContentPlanChildrenFailed_DomainCaptureFailedChild(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, failedChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("root", "mcp-ok", "vm-child"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("root", "mcp-ok", "vm-child"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

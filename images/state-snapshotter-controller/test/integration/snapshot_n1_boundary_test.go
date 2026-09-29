@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,8 +35,16 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 )
 
+// N1 boundary recovery: a Snapshot whose status was damaged converges back to Bound + Ready=True against
+// the SnapshotContent it is still bound to.
+//
+// What "damaged" can mean here got narrower once the binding became set-once: the apiserver now refuses to
+// clear status.boundSnapshotContentName at all (asserted below, and from the admission side in the set-once
+// spec), so the binding cannot be lost in the first place. The damage that remains possible is a writer
+// that drops the conditions, and the recovery this spec pins is that Ready is recomputed from the bound
+// content rather than left stale.
 var _ = Describe("Integration: Snapshot N1 boundary (recovery)", func() {
-	It("recovers Bound and Ready after status is cleared while SnapshotContent still matches", func() {
+	It("keeps its binding through a status wipe and recomputes Ready", func() {
 		ctx := context.Background()
 
 		ns := &corev1.Namespace{
@@ -83,11 +92,23 @@ var _ = Describe("Integration: Snapshot N1 boundary (recovery)", func() {
 			contentName = fresh.Status.BoundSnapshotContentName
 		}).WithTimeout(90 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
-		fresh := &storagev1alpha1.Snapshot{}
-		Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
-		fresh.Status.BoundSnapshotContentName = ""
-		fresh.Status.Conditions = nil
-		Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
+		// The wholesale wipe a damaged or foreign writer would attempt: refused, because the binding is
+		// set-once and its companion rule forbids removal.
+		wiped := &storagev1alpha1.Snapshot{}
+		Expect(k8sClient.Get(ctx, key, wiped)).To(Succeed())
+		wiped.Status.BoundSnapshotContentName = ""
+		wiped.Status.Conditions = nil
+		Expect(apierrors.IsInvalid(k8sClient.Status().Update(ctx, wiped))).To(BeTrue(),
+			"clearing a published binding must be refused by admission")
+
+		// What such a writer CAN still do: drop the conditions and keep the binding. That is the damage the
+		// recovery below is about.
+		Eventually(func(g Gomega) {
+			fresh := &storagev1alpha1.Snapshot{}
+			g.Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+			fresh.Status.Conditions = nil
+			g.Expect(k8sClient.Status().Update(ctx, fresh)).To(Succeed())
+		}).WithTimeout(30 * time.Second).WithPolling(300 * time.Millisecond).Should(Succeed())
 
 		Eventually(func(g Gomega) {
 			again := &storagev1alpha1.Snapshot{}

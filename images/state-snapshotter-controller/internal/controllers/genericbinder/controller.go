@@ -437,8 +437,10 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 
 	// Step 3 (projection barrier): the content shell exists + is bound (eager, above). Publish the status
 	// legs / init capture legs / mirror Ready ONLY after the domain reached capture barrier 1
-	// (phase>=Planned: child refs published, MCR/VCR created). Before Planned there is nothing to project;
-	// the eager shell is what breaks the create cycle.
+	// (phase>=Planned: child refs published and the plan frozen). Before Planned there is nothing to
+	// project; the eager shell is what breaks the create cycle. The domain's MCR/VCR are NOT part of
+	// barrier 1 any more — a capture request is created only after the core declared the leg, which happens
+	// on the far side of this barrier, so the requests follow Planned rather than precede it.
 	if !isDomainPlanningComplete(obj) {
 		logger.V(1).Info("Content shell created+bound; waiting for domain controller to reach capture phase Planned before projecting status legs")
 		return ctrl.Result{}, nil

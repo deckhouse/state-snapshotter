@@ -29,6 +29,13 @@ import (
 // +kubebuilder:printcolumn:name="Content",type=string,JSONPath=`.status.boundSnapshotContentName`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // Snapshot requests a namespace state/configuration snapshot.
+//
+// The binding to a SnapshotContent is set-once (see status.boundSnapshotContentName). The field rule there
+// refuses a change; it cannot refuse a removal, because a transition rule does not run when the field is
+// absent from the new object — what a writer whose model has no such field produces when it replaces the
+// whole status. The companion that does refuse it is on the ROOT: only the root can compare presence across
+// the update, and only the root survives `status: null`.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.boundSnapshotContentName) || (has(self.status) && has(self.status.boundSnapshotContentName))",message="Snapshot status.boundSnapshotContentName is set-once: the bound SnapshotContent name cannot be removed"
 type Snapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -99,6 +106,15 @@ func (s *Snapshot) IsImportMode() bool {
 type SnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
 	// The content kind is defined by the snapshot line (e.g. SnapshotContent), not by this field name.
+	//
+	// It is SET-ONCE: this snapshot's content is the artifact it consists of, and re-pointing the binding
+	// would hand the snapshot somebody else's data. The name is derived from this object's own name and uid,
+	// so the binder recomputes the same value and its re-publish after a status replace is not a change. A
+	// content recovered from the recycle bin is adopted by a NEWLY created Snapshot, whose status starts
+	// empty — so the first publish passes and the carve-out lives on the content's spec.snapshotRef, not
+	// here. The root-level companion rule refuses removal.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Snapshot status.boundSnapshotContentName is set-once: the bound SnapshotContent name cannot be replaced"
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
 
 	// SourceRef is the provenance of what this root Snapshot captured. On the namespace-root Snapshot

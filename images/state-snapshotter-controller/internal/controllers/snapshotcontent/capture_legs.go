@@ -19,8 +19,11 @@ package snapshotcontent
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -32,7 +35,6 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/manifestcapture"
 	vcctrl "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/volumecapture"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
-	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 )
 
@@ -50,8 +52,10 @@ import (
 //     the VCR. A FAILED VCR is NOT surfaced here anymore: core makes the CONTENT terminal in
 //     reconcileDataLegProjection (DataReady=VolumeCaptureFailed, decision D2), which the mirror reflects
 //     onto the owning snapshot and which propagates up the content tree; the leg just does not latch;
-//   - data leg (native-CSI VolumeSnapshot owners): no VCR — latch dataCaptured once the
-//     content carries a published status.data (the projection performs the VSC handoff first);
+//   - data leg (published status.data, any domain kind): latch dataCaptured once the content
+//     carries a published status.data. Native-CSI VolumeSnapshot has no VCR; a wiped domain owner
+//     whose volumeCaptureRequestName did not survive is the same path. The projection performs
+//     the artifact handoff first, so data-present ⇒ durable.
 //   - childSubtreesManifestsPersisted: eager-declare false, then monotonically latch true, the children-only
 //     aggregate onto the owner's commonController — "the subtrees of ALL declared direct children are fully
 //     persisted" — so a parent aggregator reads it namespaced as the SDK manifest-exclude pre-gate. It is
@@ -125,9 +129,22 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 		return false, nil
 	}
 
-	// Eager-init the applicable legs (presence declares the leg; value = captured or not).
-	if initErr := r.eagerInitOwnerCaptureLegs(ctx, owner); initErr != nil {
-		return false, initErr
+	// Declare every applicable core leg from the durable SnapshotContent, in ONE write: a leg the durable
+	// artifact proves captured goes in as true, an applicable leg it does not prove goes in as false, and
+	// they land together. Splitting this in two was wrong in both directions — the pass could publish a
+	// false for a leg the artifact proves true, and between the two writes the owner carried one leg
+	// latched with the other not declared at all, which a domain reads as a finished capture.
+	//
+	// settled=false means a leg the artifact proves captured did not survive the write (a schema that
+	// prunes it, or a writer that replaced the status again). Nothing is declared in that case: the legs
+	// stay absent, which the domain reads as "wait", and the next pass tries again. durable is the content
+	// this pass read to decide all of it (nil when every leg was already latched and nothing was read).
+	durable, settled, declErr := r.declareOwnerCaptureLegsFromDurable(ctx, owner, contentObj.GetName())
+	if declErr != nil {
+		return false, declErr
+	}
+	if !settled {
+		return true, nil
 	}
 
 	contentName := contentObj.GetName()
@@ -210,21 +227,26 @@ func (r *SnapshotContentController) reconcileOwnerCaptureLegs(
 			if delErr := r.reapVolumeCaptureRequest(ctx, vcrKey); delErr != nil {
 				return false, delErr
 			}
-		case ownerGVK.Kind == snapshot.KindVolumeSnapshot:
-			// Native-CSI data leg: a VolumeSnapshot owner has NO VCR — the fork binds it to
-			// a VSC and the data projection publishes content.status.data only after the Retain + ownerRef
-			// handoff, so data-present ⇒ handoff durable. No request to reap.
-			hasData, hErr := r.contentHasPublishedData(ctx, contentName)
+		case r.GVKRegistry.RequiresDataArtifact(ownerGVK.Kind):
+			// A data-artifact kind with no request name to observe: latch off the content's published
+			// status.data, because the projection publishes it only after the artifact handoff, so
+			// data-present ⇒ durable. Covers native-CSI VolumeSnapshot (which never has a VCR) and a
+			// wiped domain owner whose volumeCaptureRequestName did not survive the replace.
+			hasData, hErr := r.contentHasPublishedData(ctx, contentName, durable)
 			if hErr != nil {
 				return false, hErr
 			}
-			if hasData {
-				if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "dataCaptured"); mErr != nil {
-					return false, mErr
-				}
-			} else {
+			if !hasData {
 				requeue = true
+				break
 			}
+			if mErr := r.setOwnerCaptureLegCaptured(ctx, owner, "dataCaptured"); mErr != nil {
+				return false, mErr
+			}
+		default:
+			// Manifest-only kind: eager-init declares no data leg at all (absent = no leg), so there is
+			// nothing to latch and nothing to wait for. Reading the content here would be a round-trip
+			// per pass for every namespace/root snapshot in the cluster.
 		}
 	} else if vcrName := ownerDomainCaptureStateString(owner, "volumeCaptureRequestName"); vcrName != "" {
 		// Recovery reap (idempotent): dataCaptured was latched in a PRIOR pass, but the domain VCR still
@@ -508,7 +530,12 @@ func (r *SnapshotContentController) observeOwnerDataLegVCR(
 
 // contentHasPublishedData reports whether the content carries a published status.data binding (the
 // projection publishes it only after the VSC handoff succeeds, so data-present ⇒ handoff durable).
-func (r *SnapshotContentController) contentHasPublishedData(ctx context.Context, contentName string) (bool, error) {
+func (r *SnapshotContentController) contentHasPublishedData(ctx context.Context, contentName string, alreadyRead *storagev1alpha1.SnapshotContent) (bool, error) {
+	// alreadyRead is this pass's uncached copy from the latch restore; re-reading it would buy nothing
+	// but a second round-trip on every pass of an in-flight capture.
+	if alreadyRead != nil {
+		return alreadyRead.Status.Data != nil, nil
+	}
 	content := &storagev1alpha1.SnapshotContent{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
 		return false, err
@@ -516,19 +543,100 @@ func (r *SnapshotContentController) contentHasPublishedData(ctx context.Context,
 	return content.Status.Data != nil, nil
 }
 
-// eagerInitOwnerCaptureLegs declares the applicable core-owned capture legs on the owner snapshot:
-// commonController.manifestCaptured=false (every capture node has a manifest leg) and, for data-artifact
-// kinds, commonController.dataCaptured=false. Presence of the field declares the leg (nil = no leg); the
-// leg is later monotonically flipped true by setOwnerCaptureLegCaptured. This lets the SDK distinguish
-// "not started yet" from "nothing to wait for" when computing CoreCaptureOutcome. Sideways write onto the
-// owner (main-owned commonController) under an optimistic-lock merge patch: the domain
-// co-writes domainSpecificController in the same status, so a concurrent write yields 409 and the retry
-// re-reads.
-func (r *SnapshotContentController) eagerInitOwnerCaptureLegs(ctx context.Context, owner *unstructured.Unstructured) error {
-	requiresDataArtifact := r.GVKRegistry.RequiresDataArtifact(owner.GetObjectKind().GroupVersionKind().Kind)
+// declareOwnerCaptureLegsFromDurable brings the owner's core-owned capture legs
+// (status.captureState.commonController) to what the durable SnapshotContent proves, in a single status
+// patch: a leg the published artifact proves captured is written true, an applicable leg it does not prove
+// is declared false, and an already-declared value is never overwritten. Presence of the field declares the
+// leg; absence means the core has not spoken, which every domain reads as "wait", never as "capture it".
+//
+// One write, not two, and that is the whole point. Restoring a latch and declaring the remaining legs used
+// to be separate patches, which was wrong in both directions:
+//
+//   - a restore that did not stick was followed by the declaration writing false for the very leg the
+//     durable artifact proves captured — the intermediate false this recovery exists to prevent, and the
+//     domain's cue to capture the same manifests again against a cluster that has moved on;
+//   - between the two writes the owner carried one leg latched true with the other not declared at all,
+//     and a domain reading that window sees every declared leg captured and publishes its terminal phase.
+//     A terminal phase is never recomputed, so the node stops there for good.
+//
+// settled reports whether this pass may continue. It is false when any leg this pass wrote did not come
+// back with the value it was written with — a structural schema that prunes the field, or a writer that
+// replaced the status again in the meantime. Part of the write may well have landed; what is guaranteed is
+// only that no leg the artifact proves captured was written false, so whatever is there reads as "captured"
+// or as "not declared", and never as an invitation to capture it again. The caller requeues and the next
+// pass recomputes the whole declaration from the same artifact.
+//
+// Only a leg that went from missing-or-false to a CONFIRMED true counts as a restore: it is the one that
+// increments the metric and names itself in the event. A declaration is not a restore, and neither is a
+// patch the apiserver accepted and then pruned — confirmation is an uncached Get after the write.
+//
+// It returns the content it read so the callers that need the same durable copy this pass do not pay a
+// second uncached round-trip; nil means every leg was already latched and nothing was read at all — the
+// steady state of a completed content, which reconciles on every watch event of its subtree.
+func (r *SnapshotContentController) declareOwnerCaptureLegsFromDurable(
+	ctx context.Context,
+	owner *unstructured.Unstructured,
+	contentName string,
+) (*storagev1alpha1.SnapshotContent, bool, error) {
+	requiresData := r.GVKRegistry != nil && r.GVKRegistry.RequiresDataArtifact(owner.GetObjectKind().GroupVersionKind().Kind)
+	manifestLatched := ownerCommonLegCaptured(owner, "manifestCaptured")
+	dataLatched := !requiresData || ownerCommonLegCaptured(owner, "dataCaptured")
+	if manifestLatched && dataLatched {
+		return nil, true, nil
+	}
+
+	content := &storagev1alpha1.SnapshotContent{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
+		return nil, false, err
+	}
+
+	// What the durable artifact proves, decided once from one read of one content — and decided about the
+	// ARTIFACT alone, never conditioned on what the owner looked like when this reconcile started. The owner
+	// read above is a cache-age snapshot; the object this pass actually writes is read fresh inside the
+	// retry below, and a writer can replace the status between the two. Deriving the proof from the stale
+	// copy meant a leg that was latched then and gone now had no proof attached to it, and the loop below
+	// would take the only other branch open to it and declare the leg false — with the checkpoint that
+	// proves it captured sitting right there in the content.
+	//
+	// The stale copy is therefore used for exactly one thing: the fast path above, where every leg is
+	// already latched and there is nothing to decide. A wipe that lands after that check costs one more
+	// reconcile, not a false.
+	restoreManifest := false
+	if content.Status.ManifestCheckpointName != "" {
+		complete, cErr := r.publishedManifestHandoffComplete(ctx, content)
+		if cErr != nil {
+			return content, false, cErr
+		}
+		restoreManifest = complete
+	}
+	restoreData := requiresData && publishedDataIdentityFrozen(content.Status.Data)
+
+	legs := []struct {
+		name       string
+		restore    bool
+		applicable bool
+	}{
+		{name: "manifestCaptured", restore: restoreManifest, applicable: true},
+		{name: "dataCaptured", restore: restoreData, applicable: requiresData},
+	}
+
+	type legWrite struct {
+		name  string
+		value bool
+		// wasAbsent records that the leg carried no value at all when this pass read the owner. It is what
+		// separates a restore from the ordinary latch: the core declares a leg (false) before the domain may
+		// create its capture request, so on a healthy node the leg is always declared before it is captured,
+		// and the false -> true step is that node finishing its capture. A leg that is ABSENT beside a
+		// durable artifact is the signature of a status replace, and only that is worth an event.
+		wasAbsent bool
+	}
 	gvk := owner.GetObjectKind().GroupVersionKind()
 	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: owner.GetName()}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	var written []legWrite
+	patched := false
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		written = nil
+		patched = false
 		fresh := &unstructured.Unstructured{}
 		fresh.SetGroupVersionKind(gvk)
 		if err := r.APIReader.Get(ctx, key, fresh); err != nil {
@@ -536,25 +644,114 @@ func (r *SnapshotContentController) eagerInitOwnerCaptureLegs(ctx context.Contex
 		}
 		base := fresh.DeepCopy()
 		changed := false
-		if _, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "manifestCaptured"); !found {
-			if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", "manifestCaptured"); err != nil {
-				return err
-			}
-			changed = true
-		}
-		if requiresDataArtifact {
-			if _, found, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", "dataCaptured"); !found {
-				if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", "dataCaptured"); err != nil {
+		for _, leg := range legs {
+			_, declared, _ := unstructured.NestedBool(fresh.Object, "status", "captureState", "commonController", leg.name)
+			switch {
+			case leg.restore && !ownerCommonLegCaptured(fresh, leg.name):
+				if err := unstructured.SetNestedField(fresh.Object, true, "status", "captureState", "commonController", leg.name); err != nil {
 					return err
 				}
+				written = append(written, legWrite{name: leg.name, value: true, wasAbsent: !declared})
+				changed = true
+			case leg.applicable && !declared:
+				if err := unstructured.SetNestedField(fresh.Object, false, "status", "captureState", "commonController", leg.name); err != nil {
+					return err
+				}
+				written = append(written, legWrite{name: leg.name, value: false})
 				changed = true
 			}
 		}
 		if !changed {
+			owner.Object = fresh.Object
 			return nil
 		}
-		return r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
-	})
+		if err := r.Status().Patch(ctx, fresh, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		patched = true
+		owner.Object = fresh.Object
+		return nil
+	}); err != nil {
+		return content, false, err
+	}
+	if !patched {
+		return content, true, nil
+	}
+
+	confirmed := &unstructured.Unstructured{}
+	confirmed.SetGroupVersionKind(gvk)
+	if err := r.APIReader.Get(ctx, key, confirmed); err != nil {
+		return content, false, err
+	}
+	owner.Object = confirmed.Object
+
+	// Every leg this pass wrote has to still be there, with the value it was written with — the declared
+	// falses as much as the restored trues. One patch is what this code controls; whether the apiserver and
+	// the writers around it keep all of it is not, and half of this write is a state that reads as something
+	// it is not: a manifest leg latched beside a data leg that is simply absent looks, to anything that does
+	// not know the kind, like a node with no data line and a finished capture.
+	var restored []string
+	settled := true
+	for _, w := range written {
+		value, declared, _ := unstructured.NestedBool(confirmed.Object, "status", "captureState", "commonController", w.name)
+		if !declared || value != w.value {
+			settled = false
+			continue
+		}
+		// Only a leg that was missing is a restore. A declared false that this pass turned true is the
+		// ordinary latch, and counting it would make the metric a capture counter with no way to tell the
+		// two apart.
+		if w.value && w.wasAbsent {
+			restored = append(restored, w.name)
+		}
+	}
+	if !settled {
+		// Part of the write did not survive. Report it rather than carrying on: the next pass recomputes the
+		// whole declaration from the same durable artifact and writes it again, and until then the missing
+		// legs are absent, which every domain reads as "wait".
+		return content, false, nil
+	}
+	if len(restored) == 0 {
+		return content, true, nil
+	}
+	registerSnapshotContentMetrics()
+	captureStateRestoredTotal.Inc()
+	msg := "restored " + strings.Join(restored, ", ")
+	if r.Recorder != nil {
+		r.Recorder.Event(confirmed, corev1.EventTypeNormal, EventReasonCaptureStateRestored, msg)
+	}
+	return content, true, nil
+}
+
+// publishedManifestHandoffComplete reports whether content.status.manifestCheckpointName is a durable
+// pointer that may be copied onto the owner's manifestCaptured latch. A Ready ManifestCheckpoint owned
+// by the content is the completed-handoff case. A published name whose checkpoint is already gone is
+// still durable (do not recapture). A name whose checkpoint exists but is not Ready / not owned is the
+// in-flight first capture — restoring the latch then would reap a live ManifestCaptureRequest.
+func (r *SnapshotContentController) publishedManifestHandoffComplete(ctx context.Context, content *storagev1alpha1.SnapshotContent) (bool, error) {
+	if content == nil || content.Status.ManifestCheckpointName == "" {
+		return false, nil
+	}
+	mcp := &ssv1alpha1.ManifestCheckpoint{}
+	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: content.Status.ManifestCheckpointName}, mcp); err != nil {
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	ready := meta.FindStatusCondition(mcp.Status.Conditions, ssv1alpha1.ManifestCheckpointConditionTypeReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		return false, nil
+	}
+	for _, ref := range mcp.OwnerReferences {
+		if ref.APIVersion != storagev1alpha1.SchemeGroupVersion.String() || ref.Kind != "SnapshotContent" || ref.Name != content.Name {
+			continue
+		}
+		if content.UID == "" || ref.UID == "" || ref.UID == content.UID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // setOwnerCaptureLegCaptured monotonically flips a core-owned capture-leg success latch

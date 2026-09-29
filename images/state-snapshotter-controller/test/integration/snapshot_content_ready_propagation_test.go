@@ -21,7 +21,6 @@ package integration
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -74,26 +73,22 @@ var _ = Describe("Integration: SnapshotContent Ready propagates to bound Snapsho
 		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
 		contentKey := client.ObjectKey{Name: contentName}
-		mcpName := "mcp-prop-" + strings.TrimPrefix(contentName, "ns-")
 
-		// Content not ready yet (no MCP).
-		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Let the real capture flow finish first: the content's Ready is core-computed from its own
+		// artifacts, and this spec is about the WAKE-UP, not about faking readiness. (It used to fabricate
+		// status.manifestCheckpointName to get here; it cannot any more, and should not — the published
+		// pointer is set-once, so a fabricated name would freeze the content onto a checkpoint that does not
+		// exist and it could never become Ready.)
+		Eventually(func(g Gomega) {
 			c := &storagev1alpha1.SnapshotContent{}
-			if err := k8sClient.Get(ctx, contentKey, c); err != nil {
-				return err
-			}
-			c.Status.ManifestCheckpointName = ""
-			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
-				Type:               snapshot.ConditionReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             snapshot.ReasonManifestCapturePending,
-				Message:            "waiting for SnapshotContent.status.manifestCheckpointName",
-				ObservedGeneration: c.Generation,
-			})
-			return k8sClient.Status().Update(ctx, c)
-		})).To(Succeed())
+			g.Expect(k8sClient.Get(ctx, contentKey, c)).To(Succeed())
+			ready := meta.FindStatusCondition(c.Status.Conditions, snapshot.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		}, 120*time.Second, 200*time.Millisecond).Should(Succeed())
 
-		// Simulate stuck mirror from run 20260525-134758 (content later becomes Ready without Snapshot update).
+		// Simulate the stuck mirror: force a stale Ready=False onto the Snapshot while its bound content is
+		// Ready=True.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			s := &storagev1alpha1.Snapshot{}
 			if err := k8sClient.Get(ctx, snapKey, s); err != nil {
@@ -103,24 +98,24 @@ var _ = Describe("Integration: SnapshotContent Ready propagates to bound Snapsho
 				Type:               snapshot.ConditionReady,
 				Status:             metav1.ConditionFalse,
 				Reason:             snapshot.ReasonManifestCapturePending,
-				Message:            "waiting for SnapshotContent.status.manifestCheckpointName",
+				Message:            "stale mirror: waiting for SnapshotContent",
 				ObservedGeneration: s.Generation,
 			})
 			return k8sClient.Status().Update(ctx, s)
 		})).To(Succeed())
 
-		// Status-only SnapshotContent update — must enqueue bound Snapshot (no Snapshot spec/metadata change).
+		// The event under test: a STATUS-ONLY SnapshotContent write (same Ready verdict, new message — no
+		// spec or metadata change anywhere) must enqueue the bound Snapshot through the content watch.
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			c := &storagev1alpha1.SnapshotContent{}
 			if err := k8sClient.Get(ctx, contentKey, c); err != nil {
 				return err
 			}
-			c.Status.ManifestCheckpointName = mcpName
 			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
 				Type:               snapshot.ConditionReady,
 				Status:             metav1.ConditionTrue,
 				Reason:             snapshot.ReasonCompleted,
-				Message:            "manifest, data, and child content are ready",
+				Message:            "manifest, data, and child content are ready (status-only re-write)",
 				ObservedGeneration: c.Generation,
 			})
 			return k8sClient.Status().Update(ctx, c)

@@ -58,9 +58,12 @@ limitations under the License.
 //
 // # Lifecycle (capture-only, v1)
 //
-// A typical domain Reconcile resolves its source, then drives the three planning legs, publishes the
-// source, marks barrier 1 (Planned), and later switches on CoreCaptureOutcome to confirm consistency
-// (barrier 2 = Finished). All phase/reason/message writes go through DomainCaptureStatus:
+// A typical domain Reconcile resolves its source, declares its children, publishes the source, marks
+// barrier 1 (Planned), and only THEN drives its capture requests — the core declares a capture leg once
+// the snapshot is bound and past Planned, and Ensure* creates nothing while a leg is undeclared, so a
+// request published before Planned would simply not happen. Later it switches on CoreCaptureOutcome to
+// confirm consistency (barrier 2 = Finished). All phase/reason/message writes go through
+// DomainCaptureStatus:
 //
 //	status := sdk.DomainCaptureStatus(t)
 //	if !valid {
@@ -71,10 +74,16 @@ limitations under the License.
 //	if err := sdk.EnsureChildren(ctx, t, children, excludedRefs); err != nil {
 //	    return status.Phase(PhaseFailed).Reason("GraphPlanningFailed").Message(err.Error()).Apply(ctx)
 //	}
-//	if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
-//	if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
 //	_ = sdk.PublishSnapshotSource(ctx, t, SnapshotSource{...})
 //	if err := status.Phase(PhasePlanned).Apply(ctx); err != nil { return err }
+//	// The capture legs, on this pass or a later one. Gate on the decision, never on a bool: an undeclared
+//	// leg has to be waited for, and reading that wait as "already captured" is what recaptures a snapshot.
+//	if VolumeCaptureDecision(t) == CaptureLegPlan {
+//	    if err := sdk.EnsureVolumeCapture(ctx, t, VolumeCaptureSpec{DataRef: dataRef}); err != nil { ... }
+//	}
+//	if ManifestCaptureDecision(t) == CaptureLegPlan {
+//	    if err := sdk.EnsureManifestCapture(ctx, t, ManifestCaptureSpec{...}); err != nil { ... }
+//	}
 //	switch o := CoreCaptureOutcome(t); o.Outcome {
 //	case CaptureOutcomeCaptured:
 //	    return status.Phase(PhaseFinished).Apply(ctx) // after any consistency action (e.g. fs unfreeze)

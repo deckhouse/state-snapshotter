@@ -158,7 +158,7 @@ func TestContentPlanAllReadyNoChildren(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestContentPlanManifestsPending(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(aggScheme(t)).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", ""))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", ""), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestContentPlanChildrenPending(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, pendingChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child-pending"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child-pending"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestContentPlanChildrenFailed(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, brokenChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child-broken"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-ok", "child-broken"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestContentPlanReadyPriorityManifestsFailedWins(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mcp, brokenChild).Build()
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-bad", "child-broken"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "mcp-bad", "child-broken"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestContentPlanReadyPriorityChildrenFailedOverManifestsPending(t *testing.T
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	// No manifestCheckpointName -> manifest leg pending (non-terminal); a terminal child must still surface.
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "", "child-broken"))
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, commonContentWithStatus("c", "", "child-broken"), nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestComputeSubtreeManifestsPersisted_DeclaredButUnlinkedChildPends(t *testi
 
 	// Own MCP ready, but the declared child (child-snap -> child-content) is not in childrenSnapshotContentRefs.
 	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestComputeSubtreeManifestsPersisted_DeclaredChildLinkedAndPersistedLatches
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	parent := contentWithSnapshotRef("parent-content", "mcp-ok", "owner", "child-content")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestComputeSubtreeManifestsPersisted_LeafLatchesWithSnapshotRef(t *testing.
 	r := &SnapshotContentController{Client: cl, APIReader: cl, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	parent := contentWithSnapshotRef("leaf-content", "mcp-ok", "owner")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, parent, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

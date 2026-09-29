@@ -49,7 +49,7 @@ func TestManifestCheckpointReadFromCacheChunkStaysOnAPIReader(t *testing.T) {
 	r := &SnapshotContentController{Client: cache, APIReader: apiReader, Scheme: scheme, GVKRegistry: snapshot.NewGVKRegistry()}
 
 	content := commonContentWithStatus("c", "mcp-x")
-	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content)
+	plan, err := r.buildCommonSnapshotContentStatusPlan(ctx, content, nil)
 	if err != nil {
 		t.Fatalf("build plan: %v", err)
 	}

@@ -92,8 +92,10 @@ func ManifestCheckpointNameFromRequest(mcr *ssv1alpha1.ManifestCaptureRequest) s
 	return ""
 }
 
-// isMCRSafeToDelete encodes the full handoff invariant: the SnapshotContent has durably taken over the
-// manifest (see isManifestCheckpointDurable) AND the MCR references that same MCP.
+// isMCRSafeToDelete reports whether a ManifestCaptureRequest can be deleted because the SnapshotContent
+// already durably owns a Ready ManifestCheckpoint. The request need not name that same checkpoint: a
+// leftover request created after the pointer was published is still safe to delete, otherwise it would
+// requeue forever once the published name is frozen.
 func isMCRSafeToDelete(
 	mcr *ssv1alpha1.ManifestCaptureRequest,
 	content *storagev1alpha1.SnapshotContent,
@@ -102,10 +104,7 @@ func isMCRSafeToDelete(
 	if !isManifestCheckpointDurable(content, mcp) {
 		return false
 	}
-	if mcr == nil {
-		return false
-	}
-	return mcr.Status.CheckpointName != "" && mcr.Status.CheckpointName == mcp.Name
+	return mcr != nil
 }
 
 // isManifestCheckpointDurable reports whether the SnapshotContent has durably taken over the manifest:

@@ -69,22 +69,33 @@ type Planning interface {
 	EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error
 
 	// EnsureVolumeCapture ensures the data-leg capture request for the snapshot's single PVC (VolumeCaptureSpec.DataRef)
-	// and publishes its name. A nil DataRef is a manifest-only snapshot (no request, no published name). The
-	// operation is suppressed once the core controller has stamped the data leg captured. It depends ONLY on
-	// VolumeCaptureSpec and never reads the manifest leg.
+	// and publishes its name. A nil DataRef is a manifest-only snapshot (no request, no published name). It
+	// depends ONLY on VolumeCaptureSpec and never reads the manifest leg.
+	//
+	// It creates only while the core has the data leg DECLARED and open (latch present and false). Once the
+	// latch is captured the call is a no-op, and so it is while the latch is still ABSENT: an absent latch
+	// means the core has not declared the leg — the node may have no data line at all, or its captureState
+	// was replaced by a writer without the field and the core is about to restore it from the published
+	// artifact. Creating a request in that window would capture the volume a second time.
+	// VolumeCaptureDecision is the same three-valued reading, for a caller that wants to gate its own work.
 	EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in VolumeCaptureSpec) error
 
 	// EnsureManifestCapture ensures the per-snapshot ManifestCaptureRequest from the domain's declared
 	// target SET (ManifestCaptureSpec.Targets) and publishes its name. It depends ONLY on ManifestCaptureSpec:
 	// the SDK never reads the data-leg VCR to derive or inject targets, so EnsureManifestCapture and
 	// EnsureVolumeCapture are two independent declarations whose call order does not affect the result. A
-	// domain that wants a PVC's YAML captured lists that PVC in Targets explicitly. The operation is
-	// suppressed once the core controller has stamped the manifest leg captured.
+	// domain that wants a PVC's YAML captured lists that PVC in Targets explicitly.
+	//
+	// Like EnsureVolumeCapture it creates only while the core has the leg DECLARED and open: captured is a
+	// no-op, and an ABSENT latch is a no-op too (the core has not declared the leg yet, or is restoring a
+	// replaced captureState from the published checkpoint — capturing manifests then would pair a snapshot's
+	// data with manifests of a cluster that has moved on). ManifestCaptureDecision is the same reading for a
+	// caller's own gate.
 	//
 	// The target set MUST be non-empty: every snapshot captures at least its own source object's manifest
 	// (the SDK does not inject it). An empty ManifestCaptureSpec.Targets returns ErrEmptyManifest before any
-	// cluster mutation; the MCR CRD enforces the same invariant via CEL. The captured-latch suppression wins
-	// over this guard: once the leg is captured the call is a no-op (nil) regardless of input.
+	// cluster mutation; the MCR CRD enforces the same invariant via CEL. The leg-latch suppression wins over
+	// this guard: while the leg is not open the call is a no-op (nil) regardless of input.
 	//
 	// The request is created ONCE with the frozen point-in-time target set. When the MCR already exists the
 	// SDK ADOPTS it — it (idempotently) publishes the name into status and never patches spec.targets — and
@@ -92,7 +103,8 @@ type Planning interface {
 	// (compared as a set). Drift is a signal, not a decision: the name is already published, so the leg is
 	// established; the caller decides (a domain typically Fails; the namespace root ignores it and freezes to
 	// the first plan). Immutability of spec.targets is separately enforced at the apiserver via a CEL rule.
-	// Callers that want to skip building targets once the leg is planned gate on ManifestCaptureNeeded.
+	// Callers that want to skip building targets gate on ManifestCaptureDecision (or, for the single
+	// question "may I create it now", ManifestCaptureNeeded).
 	EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error
 }
 
@@ -111,8 +123,13 @@ type SourcePublisher interface {
 //
 // Under the current persisted-subtree protocol, a subtree-gated aggregator freezes child/excluded
 // membership at Planned, waits for complete persisted descendant identities, and only then publishes its
-// own MCR. This late-own-MCR order is a compatibility exception for aggregators, not guidance for regular
-// domains: they publish their MCR/VCR before Planned.
+// own MCR. That late-own-MCR order used to be described here as an aggregator-only exception, with regular
+// domains publishing their MCR/VCR BEFORE Planned. They no longer can: a capture request is created only
+// once the core declared the leg, and the core declares it after the domain publishes Planned (it gates on
+// bound + phase>=Planned). So every domain now publishes Planned first and its requests on a later pass —
+// one extra round-trip on a fresh capture, in exchange for never re-capturing a snapshot whose
+// captureState was replaced. Planned itself must stay independent of the MCR, or the three would wait on
+// each other in a circle.
 type ManifestExclude interface {
 	// SubtreeManifestIdentities returns the union of object identities captured across this snapshot's
 	// DIRECT children subtrees — the exclude set for the aggregator's own manifest MCR. It resolves each
@@ -231,13 +248,56 @@ var ErrEmptyManifest = errors.New("snapshotsdk: manifest capture requires at lea
 // with errors.Is(err, ErrManifestTargetsDrift).
 var ErrManifestTargetsDrift = errors.New("snapshotsdk: manifest capture targets differ from the frozen ManifestCaptureRequest (point-in-time plan already set)")
 
-// ManifestCaptureNeeded reports whether the manifest leg still needs planning: true iff the
-// ManifestCaptureRequest name has not been published yet AND the core has not latched the manifest leg
-// captured. A caller uses it to skip the (potentially expensive) target computation once the leg is
-// established — e.g. the namespace-root gates its live-namespace re-list on it. Pure read of the adapter
-// status; no cluster access.
+// ManifestCaptureDecision answers what the domain should do about this node's manifest leg. It is the
+// three-valued gate: a published ManifestCaptureRequest name means the point-in-time plan is frozen
+// (Suppressed), a nil latch means the core has not declared the leg yet (WaitDeclaration), a declared
+// latch means captured (Suppressed) or open (Plan). Pure read of the adapter status; no cluster access.
+//
+// Prefer this over ManifestCaptureNeeded for anything except "may I create the request now": only the
+// three values distinguish waiting for the core from a leg that is already established, and a domain that
+// confuses those two recaptures a snapshot whose status was replaced.
+func ManifestCaptureDecision(t SnapshotAdapter) CaptureLegDecision {
+	if t.GetDomainCaptureState().ManifestCaptureRequestName != "" {
+		return CaptureLegSuppressed
+	}
+	core := t.CoreCaptureState()
+	switch {
+	case core.ManifestCaptured == nil:
+		return CaptureLegWaitDeclaration
+	case core.manifestCaptured():
+		return CaptureLegSuppressed
+	default:
+		return CaptureLegPlan
+	}
+}
+
+// VolumeCaptureDecision is ManifestCaptureDecision for the data leg (VolumeCaptureRequest name + the
+// dataCaptured latch). A node with no data line carries a nil latch forever and therefore reads as
+// WaitDeclaration: it never plans a volume capture, which is the intended answer for it.
+func VolumeCaptureDecision(t SnapshotAdapter) CaptureLegDecision {
+	if t.GetDomainCaptureState().VolumeCaptureRequestName != "" {
+		return CaptureLegSuppressed
+	}
+	core := t.CoreCaptureState()
+	switch {
+	case core.DataCaptured == nil:
+		return CaptureLegWaitDeclaration
+	case core.dataCaptured():
+		return CaptureLegSuppressed
+	default:
+		return CaptureLegPlan
+	}
+}
+
+// ManifestCaptureNeeded reports the ONE thing a bool can carry here: may this reconcile create the
+// manifest capture request. True iff ManifestCaptureDecision is CaptureLegPlan.
+//
+// It is NOT the negation of "the leg is done": false covers both CaptureLegSuppressed (planned or
+// captured) and CaptureLegWaitDeclaration (the core has not declared the leg yet). A caller that skips
+// work on !Needed is correct — skipping is safe in both — but a caller that reads !Needed as "already
+// captured, move on" is not; it must ask ManifestCaptureDecision instead.
 func ManifestCaptureNeeded(t SnapshotAdapter) bool {
-	return t.GetDomainCaptureState().ManifestCaptureRequestName == "" && !t.CoreCaptureState().manifestCaptured()
+	return ManifestCaptureDecision(t) == CaptureLegPlan
 }
 
 func (s *sdk) EnsureChildren(ctx context.Context, t SnapshotAdapter, desired []ChildSpec, excluded []ExcludedObjectRef) error {
@@ -335,7 +395,12 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 		return nil
 	}
 	obj := t.Object()
-	if t.CoreCaptureState().dataCaptured() {
+	// Three-valued gate, not a captured-check: the request may be created only while the core has the leg
+	// DECLARED and open. A nil latch is the core's silence — it has not declared the leg yet, or this
+	// snapshot's captureState was replaced by a writer without the field and the core is about to restore it
+	// from the published artifact — and creating a request then is what re-captures data that already
+	// exists. Waiting costs one round-trip on a fresh capture; guessing costs the snapshot.
+	if !t.CoreCaptureState().dataLegOpen() {
 		return nil
 	}
 	namespace := obj.GetNamespace()
@@ -359,7 +424,7 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 			}
 			return err
 		}
-		if t.CoreCaptureState().dataCaptured() {
+		if !t.CoreCaptureState().dataLegOpen() {
 			return nil
 		}
 		snapshotRefreshed = true
@@ -391,10 +456,13 @@ func (s *sdk) EnsureVolumeCapture(ctx context.Context, t SnapshotAdapter, in Vol
 
 func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in ManifestCaptureSpec) error {
 	obj := t.Object()
-	// Suppression first: once the core has stamped the manifest leg captured the call is a no-op — even for
-	// invalid input. Nothing can be created anymore, so a late (post-capture) empty recomputation by a
-	// domain that skipped the ManifestCaptureNeeded gate must not fail a captured snapshot.
-	if t.CoreCaptureState().manifestCaptured() {
+	// Suppression first, and three-valued: the call is a no-op — even for invalid input — unless the core
+	// has the leg DECLARED and open. Once captured, nothing can be created anymore, so a late
+	// (post-capture) empty recomputation by a domain that skipped the ManifestCaptureNeeded gate must not
+	// fail a captured snapshot. While the latch is nil the core has not declared the leg yet (or is
+	// restoring a replaced captureState from the published checkpoint), and creating a request then would
+	// capture the manifests of a cluster that has moved on since the data was taken.
+	if !t.CoreCaptureState().manifestLegOpen() {
 		return nil
 	}
 	// A manifest capture must always carry at least the snapshotted object's own manifest; the SDK never
@@ -426,7 +494,7 @@ func (s *sdk) EnsureManifestCapture(ctx context.Context, t SnapshotAdapter, in M
 			}
 			return err
 		}
-		if t.CoreCaptureState().manifestCaptured() {
+		if !t.CoreCaptureState().manifestLegOpen() {
 			return nil
 		}
 		snapshotRefreshed = true
