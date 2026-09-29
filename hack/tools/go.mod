@@ -16,8 +16,7 @@
 // crds/ in the same commit, which is exactly where it should be reviewed.
 module state-snapshotter-codegen-tools
 
-go 1.26.5
-
+go 1.27.1
 tool (
 	github.com/deckhouse/deckhouse/pkg/crd-enricher/cmd/crd-enricher
 	sigs.k8s.io/controller-tools/cmd/controller-gen
