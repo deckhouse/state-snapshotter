@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -118,16 +117,12 @@ func main() {
 	flag.Parse()
 
 	// Print the build version unconditionally, before the logger exists and independent of the configurable
-	// logrus level (LOG_LEVEL defaults to warn=3 in production, which would suppress an Info-level version
+	// log level (LOG_LEVEL set below info=2 would suppress an Info-level version
 	// log). This guarantees the running build is always identifiable in `kubectl logs`.
 	fmt.Printf("[main] Version: %s\n", version)
 	if buildTime, ok := buildTimeFromVersion(version); ok {
 		fmt.Printf("[main] Build time: %s UTC\n", buildTime.Format("2006-01-02 15:04:05"))
 	}
-
-	// Enable controller-runtime logs FIRST, before any manager/recorder creation
-	// This prevents the warning: "[controller-runtime] log.SetLogger(...) was never called; logs will not be displayed"
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -148,6 +143,8 @@ func main() {
 		cancel() // Ensure cleanup before exit
 		os.Exit(1)
 	}
+
+	ctrl.SetLogger(log.GetLogger())
 
 	// One sub-logger for everything main() itself writes; `log` stays the base one,
 	// which is what the manager and the controllers below are handed.
