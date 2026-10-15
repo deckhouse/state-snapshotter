@@ -10,6 +10,14 @@ properties:
       - TRACE
     description: Module log level.
     default: INFO
+  highAvailability:
+    type: boolean
+    x-examples: [true, false]
+    description: |
+      Manually enable the high availability (HA) mode.
+
+      By default, Deckhouse automatically decides whether to enable the HA mode.
+      To learn more about the HA mode, refer to [High reliability and availability](/products/kubernetes-platform/documentation/v1/admin/configuration/high-reliability-and-availability/enable.html#enabling-ha-mode-for-individual-components).
   snapshotTtlAfterDelete:
     type: string
     default: ""
