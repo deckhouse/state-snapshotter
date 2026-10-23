@@ -154,7 +154,10 @@ var _ = Describe("DomainRestoreClient.RestoreDomainSubtree", func() {
 		_, err := client.RestoreDomainSubtree(context.Background(), volumeSnapshotDelegateGVK(), "src-ns", "vs-1")
 		Expect(err).To(HaveOccurred())
 		Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
-		Expect(count.Load()).To(Equal(int32(1)))
+		// At most once, not exactly once: the budget also covers dialing, so on a busy runner it can run
+		// out before the request reaches the handler. What this spec pins is the abort and that the
+		// timed-out call is not repeated; the first spec already shows the call reaches the owner.
+		Expect(count.Load()).To(BeNumerically("<=", int32(1)))
 	})
 
 	It("does not retry a Retry-After refusal, however inviting the header", func() {

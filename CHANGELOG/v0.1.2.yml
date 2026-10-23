@@ -1,6 +1,5 @@
 Changes:
-- Controller: TTL processing moved to MCR; IRetainer replaced with ObjectKeeper
+- "Controller: TTL processing moved to MCR; IRetainer replaced with ObjectKeeper"
 - Mount points in distroless images; updating base images, Go and lib-helm
-- CI changes: DistroPackagesProxy and env proxy in werf, improvements to CVE scans
-    and auxiliary workflows
+- "CI changes: DistroPackagesProxy and env proxy in werf, improvements to CVE scans and auxiliary workflows"
 - Added user-authz cluster roles in templates

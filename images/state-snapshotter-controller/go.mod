@@ -1,6 +1,6 @@
 module github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller
 
-go 1.27.2
+go 1.27.3
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-00010101000000-000000000000
@@ -15,7 +15,6 @@ require (
 	k8s.io/apimachinery v0.34.8
 	k8s.io/apiserver v0.34.8
 	k8s.io/client-go v0.34.8
-	k8s.io/component-base v0.34.8
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
 	sigs.k8s.io/controller-runtime v0.22.4
@@ -101,7 +100,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
@@ -117,6 +116,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	k8s.io/component-base v0.34.8 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kms v0.34.8 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
