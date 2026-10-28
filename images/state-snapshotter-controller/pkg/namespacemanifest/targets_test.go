@@ -71,6 +71,13 @@ func defaultGVRs() []gvrEntry {
 		{gvr: schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}, kind: "RoleBinding", listKind: "RoleBindingList"},
 		{gvr: schema.GroupVersionResource{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Resource: "manifestcapturerequests"}, kind: "ManifestCaptureRequest", listKind: "ManifestCaptureRequestList"},
 		{gvr: schema.GroupVersionResource{Group: "kafka.example.com", Version: "v1", Resource: "kafkas"}, kind: "Kafka", listKind: "KafkaList"},
+		{gvr: schema.GroupVersionResource{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "dataimports"}, kind: "DataImport", listKind: "DataImportList"},
+		{gvr: schema.GroupVersionResource{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Resource: "volumerestorerequests"}, kind: "VolumeRestoreRequest", listKind: "VolumeRestoreRequestList"},
+		{gvr: schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "backups"}, kind: "Backup", listKind: "BackupList"},
+		{gvr: schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "backupplans"}, kind: "BackupPlan", listKind: "BackupPlanList"},
+		{gvr: schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "backuprestores"}, kind: "BackupRestore", listKind: "BackupRestoreList"},
+		// A kind of the shared storage.deckhouse.io group that is not backup machinery stays in.
+		{gvr: schema.GroupVersionResource{Group: "storage.deckhouse.io", Version: "v1alpha1", Resource: "exampleclaims"}, kind: "ExampleClaim", listKind: "ExampleClaimList"},
 	}
 }
 
@@ -185,10 +192,17 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"heritage": "deckhouse"}
 	})
 	kafka := obj("kafka.example.com/v1", "Kafka", "my-kafka", nil)
+	dataImport := obj("storage-foundation.deckhouse.io/v1alpha1", "DataImport", "di-a", nil)
+	vrr := obj("storage-foundation.deckhouse.io/v1alpha1", "VolumeRestoreRequest", "vrr-a", nil)
+	backup := obj("storage.deckhouse.io/v1alpha1", "Backup", "nightly", nil)
+	backupPlan := obj("storage.deckhouse.io/v1alpha1", "BackupPlan", "every-night", nil)
+	backupRestore := obj("storage.deckhouse.io/v1alpha1", "BackupRestore", "restore-a", nil)
+	exampleClaim := obj("storage.deckhouse.io/v1alpha1", "ExampleClaim", "claim-a", nil)
 
 	dyn := dynamicFromEntries(entries,
 		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
 		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, userRB, captureRB, kafka,
+		dataImport, vrr, backup, backupPlan, backupRestore, exampleClaim,
 	)
 
 	targets, unreadable, err := BuildManifestCaptureTargets(
@@ -214,6 +228,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"Pod/standalone",
 		"RoleBinding/app-binding", // user-authored RBAC is desired-state and must be kept
 		"Kafka/my-kafka",          // arbitrary CR with no CSD mapping — the headline feature
+		"ExampleClaim/claim-a",    // storage.deckhouse.io is shared: only the backup kinds of it are machinery
 	}
 	for _, k := range mustInclude {
 		if _, ok := got[k]; !ok {
@@ -232,6 +247,11 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"VolumeSnapshot/vs-a",
 		"ManifestCaptureRequest/root-mcr",
 		"RoleBinding/d8-state-snapshotter-capture", // Deckhouse-managed transient capture RBAC (heritage=deckhouse)
+		"DataImport/di-a",                          // storage-foundation data transfer
+		"VolumeRestoreRequest/vrr-a",               // storage-foundation volume request
+		"Backup/nightly",                           // backup operations: restored, they would run again
+		"BackupPlan/every-night",
+		"BackupRestore/restore-a",
 	}
 	for _, k := range mustExclude {
 		if _, ok := got[k]; ok {

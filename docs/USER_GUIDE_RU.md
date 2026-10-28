@@ -49,7 +49,8 @@ weight: 20
 | Control-plane noise | `Event`, `Endpoints`, `Lease`, `CiliumEndpoint`, `ConfigMap/kube-root-ca.crt`, `ServiceAccount/default`, service-account-token `Secret` | регенерируется контрол-плейном / CNI, не пользовательский desired-state |
 | Виртуальные / вычисляемые | `metrics.k8s.io` (`PodMetrics`/`NodeMetrics`), `custom`/`external.metrics.k8s.io` | не хранятся (нет verb `watch`), невосстановимы |
 | Снапшотная машинерия | CSI `VolumeSnapshot`, snapshot/content-виды, создаваемые самим модулем | self-referential |
-| Машинерия модуля | вся группа `state-snapshotter.deckhouse.io` и request/transfer-виды `state-snapshotter.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution-объекты |
+| Машинерия модуля | вся группа `state-snapshotter.deckhouse.io`; request/transfer-виды `storage-foundation.deckhouse.io` (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | внутренние execution-объекты |
+| Операции бэкапа | `Backup`, `BackupPlan`, `BackupRestore` модуля `backup` (`storage.deckhouse.io`) | после restore запустились бы снова против восстановленного namespace |
 
 > Специального правила «исключать объекты, управляемые Deckhouse» нет. Deckhouse-managed объекты отсекаются теми же общими сигналами (controller-owned, control-plane noise или машинерия модуля). Всё остальное в namespace — в том числе ресурсы, которые вы лишь *настроили* поверх модулей, — считается desired-state и попадает в снимок.
 
