@@ -487,6 +487,10 @@ const (
 	// templates/rbacv2/use/roles below 1.78 and kept from 1.78 on as a deprecated alias in
 	// templates/rbacv2-compat, so the bindings made before the upgrade keep granting.
 	legacyBackupAgentRoleName = legacyCapabilityRolePrefix + "backup_agent"
+
+	// backupAgentSystemRoleName is the cluster-scoped counterpart of backupAgentRoleName, bound with a
+	// ClusterRoleBinding. It lives in templates/backup-agent-system and is the same object in both models.
+	backupAgentSystemRoleName = "d8:state-snapshotter:backup-agent-system"
 )
 
 // capabilityI18nAnnotations are the annotations the console shows next to a capability of the new
@@ -1161,6 +1165,73 @@ func TestBackupAgentAxisIsCarriedByExactlyThePinnedRoles(t *testing.T) {
 	}
 }
 
+// TestBackupAgentSystemRoleGrantsOnlyDefinitionReads pins the one role of this chart an external backup
+// product is bound to cluster-wide. Whatever it grants reaches every namespace at once, so its content is
+// compared whole rather than checked for what it must contain: one rule, reading
+// customsnapshotdefinitions, and nothing else. A definition names resource kinds and no object or data,
+// which is why this read and no other is safe to hand out at that scope; the snapshot contents and the
+// manifest checkpoints stay out of it, as TestUseRolesDoNotGrantClusterScopedSnapshotLayer keeps them
+// out of the user roles.
+//
+// No aggregationRule, no label beyond heritage and module, no annotation: an aggregationRule would pour
+// into this role whatever roles carry its selector, and a label or annotation is a road onto a platform
+// level or into a project owner's delegation set, either of which hands the role out with nobody binding
+// it. The two models must render the same object, since the document gives one binding for both.
+//
+// LIMIT: this describes the chart. That the role is bound only by whoever connects a backup product, and
+// that the live object matches the template, are past what a guard over a template can answer.
+func TestBackupAgentSystemRoleGrantsOnlyDefinitionReads(t *testing.T) {
+	files := templateYAMLFiles(t, backupAgentSystemRoleDir(t))
+	if len(files) != 1 {
+		t.Fatalf("%s holds %d file(s), want exactly the one pinned here: %v — a role added there is unpinned, and being published from this directory it may already be named to a reader of the backup integration document",
+			backupAgentSystemRoleDir(t), len(files), files)
+	}
+	file := files[0]
+
+	wantLabels := map[string]string{"heritage": "deckhouse", "module": "state-snapshotter"}
+	wantRules := []rbacv1.PolicyRule{{
+		APIGroups: []string{"state-snapshotter.deckhouse.io"},
+		Resources: []string{"customsnapshotdefinitions"},
+		Verbs:     []string{"get", "list", "watch"},
+	}}
+
+	rendered := map[rbacScheme]rbacv1.ClusterRole{}
+	for _, scheme := range rbacSchemes {
+		roles := clusterRolesFromTemplate(t, file, scheme)
+		if len(roles) != 1 {
+			t.Fatalf("%s: the %s branch holds %d ClusterRole(s), want exactly one — the document gives one binding for every platform version, so both models must ship the role", file, scheme, len(roles))
+		}
+		role := roles[0]
+		rendered[scheme] = role
+
+		if role.Name != backupAgentSystemRoleName {
+			t.Errorf("%s (%s): role is named %q, want %q — the name is what a reader of the document binds", file, scheme, role.Name, backupAgentSystemRoleName)
+		}
+		if !reflect.DeepEqual(role.Labels, wantLabels) {
+			t.Errorf("%s (%s): carries labels %v, want exactly %v — a role bound cluster-wide must not be reachable through an aggregation axis or a delegation set",
+				file, scheme, sortedLabelLines(role.Labels), sortedLabelLines(wantLabels))
+		}
+		for key, value := range role.Annotations {
+			t.Errorf("%s (%s): carries annotation %q=%q — a platform hook turns an access-level annotation into bindings, which would hand a cluster-wide role to subjects nobody bound it to", file, scheme, key, value)
+		}
+		if role.AggregationRule != nil {
+			t.Errorf("%s (%s): declares an aggregationRule — its rules would be replaced by those of every role its selector matches, and every one of them would reach every namespace", file, scheme)
+		}
+		if !reflect.DeepEqual(role.Rules, wantRules) {
+			t.Errorf("%s (%s): grants %v, want exactly %v — whatever this role grants, it grants in every namespace at once", file, scheme, role.Rules, wantRules)
+		}
+	}
+
+	if !reflect.DeepEqual(rendered[schemeNew], rendered[schemeLegacy]) {
+		t.Errorf("%s: the two models render different objects — the document names one role and one binding for every platform version", file)
+	}
+
+	t.Logf("checked %q in %s across %d model(s): %d label(s), %d rule(s)", backupAgentSystemRoleName, file, len(rendered), len(wantLabels), len(wantRules))
+	if len(rendered) != len(rbacSchemes) {
+		t.Fatalf("read the role in %d of %d model(s) — a model not read is not a model checked", len(rendered), len(rbacSchemes))
+	}
+}
+
 // TestUseRolesDoNotGrantClusterScopedSnapshotLayer keeps the cluster-scoped layer of this module out
 // of the roles handed to users, in both models. A client reads and writes namespaced objects and
 // namespaced subresources; the snapshot contents, the manifest checkpoints and their chunks, and the
@@ -1356,6 +1427,14 @@ func aggregateRolesDir(t *testing.T) string {
 func backupAgentRoleDir(t *testing.T) string {
 	t.Helper()
 	return filepath.Join(filepath.Clean("../../../../.."), "templates", "backup-agent")
+}
+
+// backupAgentSystemRoleDir holds the cluster-scoped role of an external backup product. It is outside
+// templates/rbacv2 for the reason backupAgentRoleDir is, and apart from it because that directory's
+// file count is pinned to the collecting role alone.
+func backupAgentSystemRoleDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(filepath.Clean("../../../../.."), "templates", "backup-agent-system")
 }
 
 // rbacv2CompatDir holds the alias that keeps the legacy name of the collecting role alive on a 1.78

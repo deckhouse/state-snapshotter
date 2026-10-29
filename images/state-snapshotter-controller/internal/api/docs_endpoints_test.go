@@ -33,6 +33,11 @@ package api //nolint:revive // package name matches internal/api directory
 //   - the volume node's endpoints are served by another module and are DECLARED here
 //     (docsVolumeNodeSubresources), with the limit that entails written on that function.
 //   - a segment written as a {placeholder} is opaque, so whatever it stands for is not checked.
+//   - a path TEMPLATE — the group written with a shell variable, as in an example that walks nodes of
+//     any kind — is checked by its subresource name and scope only: it must address a namespace, and some
+//     served group must serve that subresource on a namespaced resource. Which group, version and resource
+//     the template expands to is not checked; nothing in the document pins them. A template that stops
+//     short of a subresource is skipped as a partial reference, scope included.
 //   - only the core Snapshot kind's spec is pinned. A field of another kind must be written qualified
 //     (DataImport.spec.snapshotRef); qualified references are counted and skipped.
 //
@@ -76,8 +81,11 @@ const docsCoreDiscoveryPath = "/apis/subresources.state-snapshotter.deckhouse.io
 // named subresources.* are matched: a path into the CRD group (/apis/state-snapshotter.deckhouse.io/...)
 // addresses stored objects, is served by the main API server, and is none of this guard's business.
 // A query string cannot be part of a match (? is outside the class), and docsParseAggregatedPath cuts
-// one off defensively anyway.
-var docsAggregatedPathRE = regexp.MustCompile(`/apis/subresources\.[A-Za-z0-9.-]+(?:/[A-Za-z0-9.{}-]+)*`)
+// one off defensively anyway. A shell variable, ${VARIABLE} or $VARIABLE, is matched as a unit so that a
+// path template such as /apis/subresources.${GROUP}/... is matched instead of silently falling outside
+// every guard, while a bare $ after a path (end of a regexp, a shell prompt) is not glued onto its last
+// segment.
+var docsAggregatedPathRE = regexp.MustCompile(`/apis/subresources\.(?:\$\{[A-Za-z0-9_]+\}|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z0-9.-])+(?:/(?:\$\{[A-Za-z0-9_]+\}|\$[A-Za-z_][A-Za-z0-9_]*|[A-Za-z0-9.{}-])+)*`)
 
 // docsSpecFieldRE matches spec.<field> with an optional Kind. qualifier, e.g. "spec.mode",
 // "Snapshot.spec.mode", "DataImport.spec.snapshotRef".
@@ -110,7 +118,7 @@ func TestDocsNameOnlyServedSubresources(t *testing.T) {
 	served := docsServedSubresources(t)
 	files := docsMarkdownFiles(t)
 
-	var pathsFound, tuplesChecked, placeholdersSkipped int
+	var pathsFound, tuplesChecked, templatesChecked, placeholdersSkipped int
 	for _, file := range files {
 		name := filepath.Base(file)
 		for _, raw := range docsAggregatedPathRE.FindAllString(docsReadFile(t, file), -1) {
@@ -118,6 +126,26 @@ func TestDocsNameOnlyServedSubresources(t *testing.T) {
 			parsed, err := docsParseAggregatedPath(raw)
 			if err != nil {
 				t.Errorf("%s: %v", name, err)
+				continue
+			}
+
+			if docsIsTemplateGroup(parsed.group) {
+				if !parsed.hasSubresource || docsIsPlaceholder(parsed.subresource) {
+					placeholdersSkipped++
+					continue
+				}
+				// Every node of a snapshot tree lives in a namespace, and the scope alone would not catch a
+				// cluster-scoped template: manifests-download is also served on cluster-scoped SnapshotContent.
+				if !parsed.namespaced {
+					t.Errorf("%s: path template %q addresses a node outside a namespace", name, parsed.raw)
+					continue
+				}
+				if !docsServesSubresourceAnywhere(served, parsed.subresource, true) {
+					t.Errorf("%s: path template %q names subresource %q, which no served group serves on a namespaced resource",
+						name, parsed.raw, parsed.subresource)
+					continue
+				}
+				templatesChecked++
 				continue
 			}
 
@@ -166,8 +194,8 @@ func TestDocsNameOnlyServedSubresources(t *testing.T) {
 		}
 	}
 
-	t.Logf("scanned %d document(s) under docs/, found %d aggregated path(s), fully checked %d resource/subresource pair(s), skipped %d placeholder/partial reference(s)",
-		len(files), pathsFound, tuplesChecked, placeholdersSkipped)
+	t.Logf("scanned %d document(s) under docs/, found %d aggregated path(s), fully checked %d resource/subresource pair(s), checked %d path template(s) by subresource, skipped %d placeholder/partial reference(s)",
+		len(files), pathsFound, tuplesChecked, templatesChecked, placeholdersSkipped)
 	if pathsFound == 0 {
 		t.Fatal("no aggregated API path found in docs/ — zero findings means the extractor stopped matching, not that the documents are clean")
 	}
@@ -478,7 +506,25 @@ func docsServesResource(groupVersion map[string]bool, resource string) bool {
 }
 
 func docsIsPlaceholder(segment string) bool {
-	return strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}")
+	return strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") || strings.HasPrefix(segment, "$")
+}
+
+// docsIsTemplateGroup reports a group written with a shell variable, e.g. subresources.${GROUP}.
+func docsIsTemplateGroup(group string) bool {
+	return strings.Contains(group, "$")
+}
+
+// docsServesSubresourceAnywhere reports whether some served group/version serves subresource on some
+// resource with the given scope.
+func docsServesSubresourceAnywhere(served docsServedSet, subresource string, namespaced bool) bool {
+	for _, resources := range served {
+		for key, servedNamespaced := range resources {
+			if _, sub, found := strings.Cut(key, "/"); found && sub == subresource && servedNamespaced == namespaced {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // docsMarkdownFiles returns the user-facing documents of this repository.
@@ -549,9 +595,10 @@ var partnerDocGroupVersions = []string{
 // role models — the capability/scope names of DKP 1.78 and later and the legacy manage/use ones the
 // documents give for older clusters: a document that starts naming a role of a third module must
 // surface rather than pass unnoticed, and a mirror that kept only one family of names must fail the
-// comparison. The collecting role of the new model sits outside the role model and has no capability
-// prefix, so its name is spelled out.
-var docsRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|namespace-capability):[a-z0-9-]+:[a-z0-9_]+|d8:state-snapshotter:backup-agent`)
+// comparison. The collecting role of the new model and the cluster-scoped role sit outside the role
+// model and have no capability prefix, so their names are spelled out — the cluster-scoped one first,
+// since it starts with the other.
+var docsRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|namespace-capability):[a-z0-9-]+:[a-z0-9_]+|d8:state-snapshotter:backup-agent-system|d8:state-snapshotter:backup-agent`)
 
 // TestPartnerDocCoveredByDocsGuards pins that the guards in this file actually read the backup
 // integration document. They scan docs/*.md and fail only when the WHOLE directory yields nothing, so
@@ -584,6 +631,17 @@ func TestPartnerDocCoveredByDocsGuards(t *testing.T) {
 		endpoints := docsAggregatedEndpointSet(t, body)
 		if len(endpoints) == 0 {
 			t.Errorf("%s names no complete aggregated endpoint, so TestDocsNameOnlyServedSubresources checks nothing in it", name)
+		}
+		templated := false
+		for endpoint := range endpoints {
+			if docsIsTemplateGroup(endpoint) {
+				templated = true
+				break
+			}
+		}
+		if !templated {
+			t.Errorf("%s names no path template, so the example that walks nodes of any kind was removed or stopped matching %s",
+				name, docsAggregatedPathRE)
 		}
 		for _, groupVersion := range partnerDocGroupVersions {
 			named := false
@@ -791,7 +849,11 @@ func docsAggregatedEndpointSet(t *testing.T, body string) map[string]bool {
 		if err != nil || !parsed.hasSubresource || parsed.version == "" {
 			continue
 		}
-		if docsIsPlaceholder(parsed.resource) || docsIsPlaceholder(parsed.subresource) {
+		if docsIsPlaceholder(parsed.subresource) {
+			continue
+		}
+		// A path template is compared as written, variables included: both files carry the same example.
+		if docsIsPlaceholder(parsed.resource) && !docsIsTemplateGroup(parsed.group) {
 			continue
 		}
 		endpoints[parsed.groupVersion()+" "+parsed.resource+"/"+parsed.subresource] = true

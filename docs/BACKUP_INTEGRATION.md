@@ -29,7 +29,10 @@ library is required.
 
 A snapshot is created by a Snapshot object and captures the namespace in which the object is created, once. The Snapshot
 spec is immutable: a new capture requires a new Snapshot. The external system addresses only namespaced objects and
-their subresources.
+their subresources, with two exceptions: it reads the cluster-scoped CustomSnapshotDefinition objects to learn which
+resources can be [captured individually](#snapshots-of-individual-resources), and it requests the API discovery of the
+API group of a node kind, `GET /apis/{group}/{version}`, which every authenticated client may call without additional
+roles.
 
 ### What the integration does not cover
 
@@ -45,9 +48,10 @@ The following is not part of the integration:
   to the [`storage-foundation`](/modules/storage-foundation/) module and are described in
   [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http).
 - **The contents of nodes contributed by other modules.** A subtree created by another Deckhouse Platform module, for
-  example virtual machines and their disks, is traversed through the endpoint group of its kind, as described in
-  [Snapshot tree and node API](#snapshot-tree-and-node-api). What such nodes contain and how their data is transferred
-  is described in the documentation of that module.
+  example virtual machines and their disks, is traversed, downloaded and loaded through the endpoint group of its kind,
+  as described in [Snapshot tree and node API](#snapshot-tree-and-node-api) and [Nodes of kinds not known in
+  advance](#nodes-of-kinds-not-known-in-advance), and its volume data is transferred in the same way as the data of a
+  VolumeSnapshot node. What such nodes contain is described in the documentation of that module.
 - **Renaming nodes while loading.** Load the tree under the node names it was captured with. Loading with other
   node names is not described.
 - **The internal objects of the module.** The cluster-scoped objects that hold the captured data, their format and their
@@ -94,9 +98,11 @@ roleRef:
 
 Replace `<BACKUP_AGENT_CLUSTER_ROLE>` with the ClusterRole name for the installed Deckhouse Platform version. This role
 grants the `state-snapshotter` permissions to create and read snapshots, download and upload snapshot nodes, and read
-snapshot contents for restoration. Volume-data transfer additionally requires the `storage-foundation` capability
-`transfer_volume_data` (a named set of module permissions granted by a separate ClusterRole). If the external system
-needs only some operations, bind the individual roles from the table:
+snapshot contents for restoration. The role also grants the same permissions for snapshots of other kinds, such as
+snapshots of virtual machines and their disks, if the modules that provide these snapshot kinds are enabled. Volume-data
+transfer additionally requires the `storage-foundation` capability `transfer_volume_data` (a named set of module
+permissions granted by a separate ClusterRole). If the external system needs only some operations, bind the individual
+roles from the table:
 
 | Rights | Deckhouse Platform 1.78 and later | Deckhouse Platform 1.76.9 through 1.77 |
 |---|---|---|
@@ -117,6 +123,26 @@ After an upgrade to Deckhouse Platform 1.78, bindings to the former ClusterRole
 `d8:use:capability:module:state-snapshotter:backup_agent` keep working as a deprecated alias. Use
 `d8:state-snapshotter:backup-agent` for new bindings. The `roleRef` field of a RoleBinding cannot be changed, so to
 switch to the new name, create a new RoleBinding and then delete the old one.
+
+CustomSnapshotDefinition objects, used to [discover the resources that can be captured individually](#snapshots-of-individual-resources),
+are cluster-scoped, and a RoleBinding does not grant access to them. Bind the `d8:state-snapshotter:backup-agent-system`
+ClusterRole with a ClusterRoleBinding. It only grants reading CustomSnapshotDefinition objects, and its name is the
+same in all supported Deckhouse Platform versions:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backup-agent-system
+subjects:
+  - kind: ServiceAccount
+    name: backup-agent
+    namespace: my-app
+roleRef:
+  kind: ClusterRole
+  name: d8:state-snapshotter:backup-agent-system
+  apiGroup: rbac.authorization.k8s.io
+```
 
 {{< alert level="warning" >}}
 Bind the roles only in the namespaces the external system must access, and only the roles it uses. The full set allows
@@ -192,8 +218,9 @@ The following node operations are available:
 - `manifests-with-data-restoration` (`GET`): get a subtree with manifests prepared for applying.
 
 For nodes contributed by other Deckhouse Platform modules, the endpoint group is determined by the `apiVersion` of the
-child node reference.
-For virtual machines, their disks, and other such nodes, the `subresources.` prefix is added to the node's API group.
+child node reference. For virtual machines, their disks, and other such nodes, the `subresources.` prefix is added to
+the node's API group, and the version stays the same as the node's. The API resource of the node kind is found through
+API discovery, as described in [Nodes of kinds not known in advance](#nodes-of-kinds-not-known-in-advance).
 
 {{< alert level="warning" >}}
 This rule does not apply to VolumeSnapshot. VolumeSnapshot belongs to the `snapshot.storage.k8s.io` API group, but its
@@ -318,16 +345,80 @@ where `<NODE_NAME>` is the name of the child node from the parent node's `status
 The endpoint names are the same for Snapshot nodes and volume nodes, but the API group, version and resource differ.
 Snapshot nodes use version `v1alpha1`, volume nodes use `v1`. A path with the wrong version is not served.
 
-Nodes contributed by other Deckhouse Platform modules, such as virtual machines and their disks, are served by the
-endpoint groups of those modules. The addressing rule for such nodes is described in
-[Snapshot tree and node API](#snapshot-tree-and-node-api).
+#### Nodes of kinds not known in advance
+
+Besides Snapshot and VolumeSnapshot, a snapshot tree can contain nodes of the snapshot kinds of other Deckhouse Platform
+modules, such as snapshots of virtual machines and their disks. A module can add a new snapshot kind in any release, and
+from then on namespace snapshots contain nodes of that kind, with no change on the client side. Do not keep a list of
+supported kinds in the client: process every child node by the same rules, using only the `apiVersion`, `kind` and
+`name` of its reference in `status.childrenSnapshotRefs`.
+
+For each child node reference:
+
+1. Find the API resource of the node kind. Request the API discovery of the API group and version from the `apiVersion`
+   of the reference, `GET /apis/{group}/{version}`, and take the `name` of the entry in `resources` whose `kind` equals
+   the `kind` of the reference and whose `name` contains no `/`. An entry with a `/`, such as `{resource}/status`, is a
+   subresource of the same kind. If the API group is not served or no entry matches, the kind is not served in the
+   cluster: stop the download and report the node.
+2. Read the node object: `GET /apis/{group}/{version}/namespaces/{namespace}/{resource}/{name}`. Its
+   `status.childrenSnapshotRefs` field lists the child nodes of this node, and its `status.data` field is used in
+   step 4.
+3. Get the manifests of the node through `manifests-download` in the endpoint group of the node, as described in
+   [Snapshot tree and node API](#snapshot-tree-and-node-api), with the API resource found in step 1.
+4. If the node has `status.data`, transfer its volume data as described in [Transferring volume
+   data](#transferring-volume-data).
+5. Process the child nodes from step 2 in the same way.
+
+If one of these requests fails for a node with an error that [Errors and retries](#errors-and-retries) does not tell you
+to retry, stop the download and report the node: the downloaded snapshot is incomplete without it.
+
+The following example processes a child node of a fictional kind `DatabaseSnapshot` from the API group
+`databases.example.com`, version `v1alpha1`. Its reference in `status.childrenSnapshotRefs` of the parent node:
+
+```yaml
+status:
+  childrenSnapshotRefs:
+    - apiVersion: databases.example.com/v1alpha1
+      kind: DatabaseSnapshot
+      name: <NODE_NAME>
+```
+
+The commands take only the values of the reference, so they work the same way for a node of any kind except
+VolumeSnapshot:
+
+```shell
+NAMESPACE=my-app
+API_VERSION=databases.example.com/v1alpha1
+KIND=DatabaseSnapshot
+NAME="<NODE_NAME>"
+
+GROUP="${API_VERSION%/*}"
+VERSION="${API_VERSION#*/}"
+
+# Step 1: the API resource of the node kind, databasesnapshots in this example.
+RESOURCE=$(d8 k get --raw "/apis/${GROUP}/${VERSION}" \
+  | jq -r --arg kind "$KIND" '.resources[] | select(.kind == $kind and (.name | contains("/") | not)) | .name')
+
+# Step 2: the child nodes and the volume data of the node.
+d8 k get --raw "/apis/${GROUP}/${VERSION}/namespaces/${NAMESPACE}/${RESOURCE}/${NAME}" \
+  | jq '{children: .status.childrenSnapshotRefs, data: .status.data}'
+
+# Step 3: the manifests of the node.
+d8 k get --raw "/apis/subresources.${GROUP}/${VERSION}/namespaces/${NAMESPACE}/${RESOURCE}/${NAME}/manifests-download" | jq 'length'
+```
+
+Replace `<NODE_NAME>` with the `name` of the reference. If `data` in the output of step 2 is not `null`, create a
+DataExport whose `targetRef` contains the group `databases.example.com`, the kind `DatabaseSnapshot` and the name of
+the node. Repeat the commands for each reference in `children`, with the values of that reference.
 
 ### Transferring volume data
 
-If a VolumeSnapshot node contains volume data, manifests are not enough: transfer the volume data through a DataExport
-from the `storage-foundation` module. Create a DataExport for the corresponding VolumeSnapshot, wait until it is ready,
-and download the data from the address in the DataExport status. In `DataExport.spec.targetRef`, specify the
-VolumeSnapshot node, not the source PVC:
+A node contains volume data if it has the `status.data` field, whatever its kind: a VolumeSnapshot node or a node of
+another module, such as a snapshot of a virtual machine disk. Manifests are not enough for such a node: transfer the
+volume data through a DataExport from the `storage-foundation` module. Create a DataExport for the node, wait until it
+is ready, and download the data from the address in the DataExport status. In `DataExport.spec.targetRef`, specify the
+node itself, not the source PVC: the API group from the `apiVersion` of the node, its `kind` and its `name`. Example for
+a VolumeSnapshot node:
 
 ```yaml
 apiVersion: storage-foundation.deckhouse.io/v1alpha1
@@ -349,11 +440,12 @@ in
 [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http)
 in the `storage-foundation` module documentation.
 
-Save the volume size from the node's `status.data.size` field: you will need it when loading the backup. The rules for
-determining the size are described in [Volume size](#volume-size).
+Save the volume size, mode and StorageClass from the node's `status.data.size`, `status.data.volumeMode` and
+`status.data.storageClassName` fields: you will need them when loading the backup. The rules for determining the size
+are described in [Volume size](#volume-size).
 
 {{< alert level="warning" >}}
-If the `storage-foundation` module is not enabled, VolumeSnapshot node data cannot be downloaded or uploaded. Namespace
+If the `storage-foundation` module is not enabled, the volume data of nodes cannot be downloaded or uploaded. Namespace
 state snapshots without volumes remain available.
 {{< /alert >}}
 
@@ -370,24 +462,93 @@ compared, not its notation: for example, `10Gi` and `10240Mi` are considered equ
 Do not determine the size from the `PersistentVolumeClaim.spec.resources.requests.storage` field of the downloaded
 manifest. It is the requested size of the volume, and it may be smaller than the provisioned one.
 
-The value is passed on unchanged and is never recomputed:
+Save the size when you download the node, and when you load the backup, take the saved value: the source node may no
+longer exist by then. In the archive format, the saved value is `volumes[].size` in `snapshot.yaml`. The value is
+passed on unchanged and is never recomputed:
 
 ```text
 status.data.size of the node  →  volumes[].size in snapshot.yaml  →  DataImport.spec.storageParams.size
 ```
-
-If the node status is not available, for example when you assemble an archive yourself, use the `volumes[].size` value
-from the archive.
-
-For a block volume, the size can also be obtained from the `Content-Length` header of the response to a `HEAD` request
-to the block export endpoint. A filesystem volume has no such source: the exporter reports the sizes of individual
-files, but not the volume capacity. Do not add up the file sizes: the volume capacity may be larger than their total.
 
 On a VolumeSnapshot, the `status.data` field is a Deckhouse Platform extension that is absent from the CSI API. It
 contains data from the SnapshotContent, which the client cannot access, and lets you get the description of a captured
 volume with an ordinary `GET` request in the snapshot's namespace.
 
 Archive assembly is described in [Working with snapshot archives](snapshot_archives.html).
+
+### Snapshots of individual resources
+
+Besides a whole namespace, other Deckhouse Platform modules can capture a single resource, for example a virtual
+machine. Such a module registers the pair "resource kind → snapshot kind" with a cluster-scoped CustomSnapshotDefinition
+object. Read the list of these objects to learn which resources can be captured individually, instead of hardcoding the
+kinds in the external system:
+
+```text
+GET /apis/state-snapshotter.deckhouse.io/v1alpha1/customsnapshotdefinitions
+```
+
+The read requires the role described in
+[Configuring external-system access to the cluster](#configuring-external-system-access-to-the-cluster).
+
+| Field | Meaning |
+|---|---|
+| `CustomSnapshotDefinition.spec.source.apiVersion`, `CustomSnapshotDefinition.spec.source.kind` | The kind of the resource that can be captured |
+| `CustomSnapshotDefinition.spec.apiVersion`, `CustomSnapshotDefinition.spec.kind` | The kind of its snapshot |
+
+Use only the definitions whose `status.conditions` contain `Ready=True`. The other fields of the object are not part of
+the integration. Example of a definition registered by the virtualization module:
+
+```yaml
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+kind: CustomSnapshotDefinition
+metadata:
+  name: virtualization-virtual-machine-snapshot
+spec:
+  apiVersion: virtualization.deckhouse.io/v1alpha2
+  kind: VirtualMachineSnapshot
+  requiresDataArtifact: false
+  source:
+    apiVersion: virtualization.deckhouse.io/v1alpha2
+    kind: VirtualMachine
+status:
+  conditions:
+    - type: Ready
+      status: "True"
+```
+
+To capture a resource, create an object of the snapshot kind in the namespace of the resource. The API resource of the
+snapshot kind, needed in the request path, is found as described in [Nodes of kinds not known in
+advance](#nodes-of-kinds-not-known-in-advance), with the group, version and kind taken from
+`CustomSnapshotDefinition.spec.apiVersion` and `CustomSnapshotDefinition.spec.kind`. Every snapshot kind registered with
+a CustomSnapshotDefinition accepts the same spec: the `mode` field with the value `Capture` and the `sourceRef` field
+with the `apiVersion`, `kind` and `name` of the resource from the same namespace. The other spec fields are optional,
+and their meaning is described in the documentation of the module that owns the snapshot kind:
+
+```yaml
+apiVersion: virtualization.deckhouse.io/v1alpha2
+kind: VirtualMachineSnapshot
+metadata:
+  name: my-vm-snapshot
+  namespace: my-app
+spec:
+  mode: Capture
+  sourceRef:
+    apiVersion: virtualization.deckhouse.io/v1alpha2
+    kind: VirtualMachine
+    name: my-vm
+```
+
+Use the `fieldValidation=Strict` parameter when creating it, as for a Snapshot. The created object is the root node of
+its own snapshot tree. Track its state and download it in the same way as a Snapshot: the condition `Ready=True` with
+reason `Completed` in `status.conditions` means a completed capture, the child nodes are listed in
+`status.childrenSnapshotRefs`, and the node endpoints are addressed as described in
+[Snapshot tree and node API](#snapshot-tree-and-node-api).
+
+A snapshot of an individual resource is loaded back in the same way as a namespace snapshot, as described in
+[Loading a backup into a cluster](#loading-a-backup-into-a-cluster), except that the root node is an object of the
+snapshot kind with `spec.mode: Import` instead of a Snapshot. The `d8 snapshot download` command does not download
+such a snapshot yet, and `d8 snapshot upload` accepts only a Snapshot as the root of a whole archive: a node with volume data can be
+uploaded as a root of its own only with `--node`.
 
 ## Loading a backup into a cluster
 
@@ -443,6 +604,12 @@ supplied by the external system and does not capture the live namespace.
    mode, this scenario does not work.
    {{< /alert >}}
 
+   For a node of another module, create an object of its kind in the same way: with `spec.mode: Import` and an
+   `ownerReferences` entry pointing to its parent node. Every child node needs this entry, not only for deletion: the
+   module uses it to link the node to its parent. A child node without it is loaded as a separate root, and its parent
+   never reaches `Ready=True`. The API resource of the node kind, needed in the request path, is found as described in
+   [Nodes of kinds not known in advance](#nodes-of-kinds-not-known-in-advance).
+
 1. Upload each node's manifests and the references to its direct child nodes to `manifests-and-children-refs-upload`.
    The request body contains the JSON arrays `manifests` and `childRefs`. For a node without child nodes, `childRefs`
    is empty. The endpoint of the root Snapshot:
@@ -452,7 +619,10 @@ supplied by the external system and does not capture the live namespace.
    ```
 
    For a VolumeSnapshot, use the `subresources.storage-foundation.deckhouse.io/v1` group and the `volumesnapshots`
-   resource. The request format is given in [Request and response bodies](#request-and-response-bodies). If the node
+   resource. For a node of another module, use the API group of the node with the `subresources.` prefix, as described
+   in [Snapshot tree and node API](#snapshot-tree-and-node-api), and the resource of its kind, found as described in
+   [Nodes of kinds not known in advance](#nodes-of-kinds-not-known-in-advance). The request format is
+   given in [Request and response bodies](#request-and-response-bodies). If the node
    is not bound to the stored content yet, the server may return `409`. Retry the request after a delay. Uploading the
    same data again is allowed.
 
@@ -480,17 +650,21 @@ supplied by the external system and does not capture the live namespace.
 
    Requirements for the DataImport:
 
-   - `DataImport.spec.snapshotRef` points to the imported node, not to the source PVC.
+   - `DataImport.spec.snapshotRef` points to the imported node, not to the source PVC. For a node of another module,
+     specify its `apiVersion`, `kind` and `name`.
    - Create only one DataImport per node. Several DataImports for the same node prevent the node from being linked to
      the imported data.
-   - The `storageClassName` and `size` fields are required. Take the size from the captured node's `status.data.size`
-     or from `volumes[].size` in `snapshot.yaml` according to the rules in [Volume size](#volume-size).
-   - Preserve the original `volumeMode` (`Block` or `Filesystem`). The field is optional in the DataImport schema, but
-     without it `Filesystem` is used. **For a block volume, always set `Block` explicitly.**
+   - The `storageClassName` and `size` fields are required. Take the size saved when downloading the node, as described
+     in [Volume size](#volume-size).
+   - Preserve the original `volumeMode` (`Block` or `Filesystem`): take the value saved from the captured node's
+     `status.data.volumeMode`, in the archive format `volumes[].volumeMode` in `snapshot.yaml`. The field is optional
+     in the DataImport schema, but without it `Filesystem` is used. **For a block volume, always set `Block`
+     explicitly.**
    - Choose a StorageClass in the target cluster that supports snapshots and has the
-     `storage.deckhouse.io/volumesnapshotclass` annotation linking it to a VolumeSnapshotClass. If the original
-     StorageClass is unavailable, choose a suitable one. The configuration is described in the
-     [storage-foundation documentation](/modules/storage-foundation/).
+     `storage.deckhouse.io/volumesnapshotclass` annotation linking it to a VolumeSnapshotClass. The original
+     StorageClass is the value saved from the captured node's `status.data.storageClassName`, in the archive format
+     `volumes[].storageClassName` in `snapshot.yaml`. If it is unavailable, choose a suitable one. The configuration is
+     described in the [storage-foundation documentation](/modules/storage-foundation/).
 
    After the data transfer, call the `finished` endpoint of the DataImport. Transferring the last byte does not by
    itself complete the import.

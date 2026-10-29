@@ -55,9 +55,10 @@ var partnerDocForeignRoles = map[rbacScheme]string{
 // partnerDocRoleNameRE matches a capability role name of ANY module, in either model, not just this
 // module's prefixes: a third module's role appearing in the document is the case that must surface,
 // and a pattern anchored on this module's prefix would skip it silently. The collecting role of the new
-// model is outside the role model and has no capability prefix to match on, so its name is spelled out;
-// the legacy one is matched by the capability pattern, as it always was.
-var partnerDocRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|namespace-capability):[a-z0-9-]+:[a-z0-9_]+|d8:state-snapshotter:backup-agent`)
+// model and the cluster-scoped role are outside the role model and have no capability prefix to match on,
+// so their names are spelled out — the cluster-scoped one first, since it starts with the other; the
+// legacy collecting role is matched by the capability pattern, as it always was.
+var partnerDocRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|namespace-capability):[a-z0-9-]+:[a-z0-9_]+|d8:state-snapshotter:backup-agent-system|d8:state-snapshotter:backup-agent`)
 
 // TestPartnerDocRoleNamesExist checks every role the backup integration document names, in both
 // models: the document gives the names of DKP 1.78 and later as the primary ones and the legacy names
@@ -67,7 +68,8 @@ var partnerDocRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|names
 // directories the document has reason to name: templates/rbacv2/use/capabilities, where one role
 // grants one capability (both models), templates/backup-agent (the collecting role of the new model)
 // and templates/rbacv2/use/roles (the collecting role of the legacy model), where one role collects
-// several so that a reader binds once instead of six times. The single foreign role must be one of its
+// several so that a reader binds once instead of six times, and templates/backup-agent-system, the
+// cluster-scoped role both models ship under one name, which must therefore be published in both. The single foreign role must be one of its
 // two pinned names; anything else fails. The roles are read from the templates, so renaming one without
 // updating the document is caught here rather than by the reader of the document.
 //
@@ -88,8 +90,8 @@ var partnerDocRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|names
 func TestPartnerDocRoleNamesExist(t *testing.T) {
 	published := map[rbacScheme]map[string]bool{}
 	for scheme, dirs := range map[rbacScheme][]string{
-		schemeNew:    {capabilityRolesDir(t), backupAgentRoleDir(t)},
-		schemeLegacy: {capabilityRolesDir(t), aggregateRolesDir(t)},
+		schemeNew:    {capabilityRolesDir(t), backupAgentRoleDir(t), backupAgentSystemRoleDir(t)},
+		schemeLegacy: {capabilityRolesDir(t), aggregateRolesDir(t), backupAgentSystemRoleDir(t)},
 	} {
 		published[scheme] = map[string]bool{}
 		for _, dir := range dirs {
@@ -126,6 +128,16 @@ func TestPartnerDocRoleNamesExist(t *testing.T) {
 		}
 	mentions:
 		for _, roleName := range partnerDocRoleNameRE.FindAllString(string(data), -1) {
+			if roleName == backupAgentSystemRoleName {
+				for _, scheme := range rbacSchemes {
+					ownChecked[scheme]++
+					if !published[scheme][roleName] {
+						t.Errorf("%s names role %q, which this module does not publish in the %s model — the document gives one binding for every platform version (published there: %s)",
+							name, roleName, scheme, sortedRoleNames(published[scheme]))
+					}
+				}
+				continue
+			}
 			if scheme, own := schemeOfOwnName(roleName); own {
 				ownChecked[scheme]++
 				if !published[scheme][roleName] {

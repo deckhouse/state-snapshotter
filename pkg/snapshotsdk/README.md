@@ -144,6 +144,14 @@ its orchestration.
 Everything else (ownerRefs, creating capture requests, optimistic-lock status patching, the
 lifecycle phase and its barriers, idempotency, restart-safety, freeze/drift) is done by the SDK.
 
+**The spec of your snapshot CR is a shared contract, not only yours.** A backup product learns about
+your snapshot kind from its CustomSnapshotDefinition and creates a snapshot knowing nothing else about
+your domain: it fills only `spec.mode: Capture` and `spec.sourceRef` with the `apiVersion`, `kind` and
+`name` of the source in the same namespace. So your CR must accept `spec.mode` (`Capture` by default,
+and `Import`) and `spec.sourceRef` with exactly these three fields, and every other spec field must be
+optional — defaulted in the CRD or not required by your controller. A required field of your own makes
+your kind impossible to capture for every backup product that follows the integration document.
+
 ## What the SDK removes from your code
 
 The domain team **no longer implements by hand**:

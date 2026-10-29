@@ -1,0 +1,52 @@
+{{- if eq (include "state-snapshotter.rbacv2_new_scheme" .) "true" }}
+# The cluster-scoped half of what an external backup product needs. d8:state-snapshotter:backup-agent
+# is bound per namespace through a RoleBinding, and a RoleBinding grants nothing on a cluster-scoped
+# resource, so the reads that cannot be namespaced live here and are bound once, with a
+# ClusterRoleBinding.
+#
+# Today that is one read: the CustomSnapshotDefinition list, from which a client learns which resource
+# kinds have a snapshot kind of their own and offers to create one. A definition names kinds and
+# nothing else — no namespace, no object, no captured data — which is what makes a cluster-wide read of
+# it safe to hand out.
+#
+# Both models ship the same object under the same name, so the document gives one binding for every
+# supported platform version.
+#
+# Everything bound here reaches every namespace at once, so the role is pinned by
+# TestBackupAgentSystemRoleGrantsOnlyDefinitionReads to exactly these rules, no aggregation and no
+# label or annotation beyond the module's own. When a second cluster-scoped read is needed, this role
+# becomes an aggregate under the same name: the existing ClusterRoleBindings keep pointing at it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+  name: d8:state-snapshotter:backup-agent-system
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - customsnapshotdefinitions
+    verbs:
+      - get
+      - list
+      - watch
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: state-snapshotter
+  name: d8:state-snapshotter:backup-agent-system
+rules:
+  - apiGroups:
+      - state-snapshotter.deckhouse.io
+    resources:
+      - customsnapshotdefinitions
+    verbs:
+      - get
+      - list
+      - watch
+{{- end }}
