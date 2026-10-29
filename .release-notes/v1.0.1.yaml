@@ -1,0 +1,38 @@
+date: "2026-10-29"
+
+summary: "Namespace snapshots no longer carry objects that break a restore or repeat work on it, a published snapshot keeps the artifact it was taken with, and the module log level is applied as set."
+
+highlights:
+  - "A namespace snapshot no longer captures objects that a restore cannot create or that start their work again once restored: objects of the namespace's Project, data transfer requests of storage-foundation and operations of the backup module."
+  - "A published snapshot can no longer be silently repointed to an artifact taken at another moment."
+  - "The `logLevel` setting is applied as set, and Prometheus collects the controller metrics."
+
+new_features:
+  - "The `highAvailability` setting in `ModuleConfig` turns the high availability mode of the controller on or off. Before, the mode always followed the global setting or the number of master nodes, and on a cluster with three master nodes and a single system node the second controller replica stayed `Pending`."
+  - "On DKP 1.78 and later the module creates its roles in the RBACv2 model: the ClusterRoles `d8:system-capability:state-snapshotter:view` and `:edit`, and `d8:namespace-capability:state-snapshotter:view`, `:edit`, `:view_snapshots`, `:manage_snapshots`, `:download_snapshots`, `:restore_snapshots` and `:upload_snapshots`. The role for an external backup product is `d8:state-snapshotter:backup-agent`. On DKP below 1.78 the existing roles are created unchanged."
+
+improvements:
+  - "Prometheus now collects the controller metrics through a `ServiceMonitor`: the reconcile and work queue metrics of controller-runtime, the client-go request latency and the module's own `state_snapshotter_unified_runtime_*` metrics. The metrics are served through `kube-rbac-proxy`, and the controller's health port is no longer published through the module's Service."
+
+fixes:
+  - "The `logLevel` setting was applied two levels stricter than set: with `INFO` only errors were logged, with `DEBUG` only warnings and errors, and with `TRACE` debug messages were still dropped. The level is now applied as set, including the logs of controller-runtime."
+  - "On a fresh install, where storage-foundation installs the `VolumeSnapshot` CRDs after this module starts, a `VolumeSnapshot` never got a `SnapshotContent` and could not be exported until the controller was restarted. The controller now picks these CRDs up when they appear."
+  - "A namespace snapshot no longer captures the objects that the multitenancy manager creates for the namespace's Project (labelled `heritage=multitenancy-manager`), such as `AvailableClusterResource`, which the platform refuses to create on restore. The user's own objects in a project namespace are still captured."
+  - "A namespace snapshot no longer captures `VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport` and `DataImport` of storage-foundation, nor `Backup`, `BackupPlan` and `BackupRestore` of the backup module. Once restored, these objects started their data transfer or backup again."
+  - "A restored Pod no longer keeps `spec.nodeName`. With it, the scheduler skipped the Pod, and a restored PersistentVolumeClaim with the `WaitForFirstConsumer` binding mode stayed `Pending`."
+  - "A published snapshot could be repointed to an artifact taken at another moment while staying `Ready`: when a status update erased the capture state of a domain snapshot (the snapshot object of the module that owns the resource, such as `VolumeSnapshot`), the module captured again and published the new checkpoint over the old one. The reference to the published artifact is now set once, the capture state is restored from the stored artifact, and the domain snapshot gets a `CaptureStateRestored` event."
+
+security:
+  - "`golang.org/x/net` is raised to v0.62.0 in the controller, the webhooks and the hooks, closing CVE-2026-56851, CVE-2026-78659, CVE-2026-78660, CVE-2026-78661, CVE-2026-78663, CVE-2026-78669, CVE-2026-97032 and CVE-2026-97045."
+  - "OpenTelemetry is raised to v1.45.0 in the controller, closing CVE-2026-81870."
+  - "The `k8s.io` libraries are raised to v0.34 in the controller to take `cel-go` v0.29.0, closing GHSA-gcjh-h69q-9w9g."
+  - "`github.com/klauspost/compress` is raised to v1.18.7 in the hooks, closing CVE-2026-63209."
+  - "`github.com/docker/distribution` is removed from the hooks, closing CVE-2026-85747."
+
+upgrade_notes:
+  - "The default `logLevel` is now `INFO` instead of `DEBUG`. Together with the fixed level mapping, a module that leaves `logLevel` unset now logs info messages, where before it logged only warnings and errors."
+  - "On DKP 1.78 and later the legacy roles of the module are no longer created and the RBACv2 roles take their place, so a RoleBinding or ClusterRoleBinding that refers to a legacy role by name has to be pointed at the new one. The legacy backup agent role `d8:use:capability:module:state-snapshotter:backup_agent` stays as a deprecated alias of `d8:state-snapshotter:backup-agent`, so existing bindings to it keep working. On DKP below 1.78 nothing needs to be done."
+
+docs:
+  - "The documentation is restructured, with new pages on the module's custom resources and on snapshot archives. The custom resource reference is fully translated into Russian and now describes `ManifestCaptureRequest`, `ManifestCheckpoint` and `ManifestCheckpointContentChunk`."
+  - "The backup integration guide describes backing up snapshot nodes of any kind and snapshots of individual resources."
