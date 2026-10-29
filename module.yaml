@@ -3,8 +3,8 @@ stage: "General Availability"
 subsystems:
   - storage
 descriptions:
-  en: "State snapshotter module"
-  ru: "Модуль State snapshotter"
+  en: "Creates and restores snapshots of Kubernetes resource state."
+  ru: "Создаёт и восстанавливает снимки состояния ресурсов Kubernetes."
 requirements:
   deckhouse: ">= 1.76.9"
 namespace: d8-state-snapshotter

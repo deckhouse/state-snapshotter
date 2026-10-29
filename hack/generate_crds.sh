@@ -14,7 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Regenerates crds/ from the Go types in api/.
+# Regenerates the CRDs in crds/ and crds/internal from the Go types in api/.
+#
+# Snapshot and CustomSnapshotDefinition are the module's user-facing API and go
+# into crds/; the other kinds are internal and go into crds/internal, which the
+# docs-builder does not publish.
 #
 # controller-gen renders the OpenAPI schema from the kubebuilder markers;
 # crd-enricher then folds in what controller-gen cannot emit -- the x-doc-*
@@ -119,7 +123,13 @@ if [ ${#rendered_files[@]} -eq 0 ]; then
     exit 1
 fi
 
-echo "Installing the CRDs into crds/"
+echo "Installing the CRDs into crds and crds/internal"
 for rendered in "${rendered_files[@]}"; do
-    cp "${rendered}" "${root_dir}/crds/$(basename "${rendered}")"
+    name=$(basename "${rendered}")
+    case "${name}" in
+    state-snapshotter.deckhouse.io_snapshots.yaml | state-snapshotter.deckhouse.io_customsnapshotdefinitions.yaml)
+        dest="${root_dir}/crds" ;;
+    *) dest="${root_dir}/crds/internal" ;;
+    esac
+    cp "${rendered}" "${dest}/${name}"
 done

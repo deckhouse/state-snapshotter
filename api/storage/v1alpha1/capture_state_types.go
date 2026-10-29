@@ -50,13 +50,19 @@ const (
 // sub-structures split strictly by writer, so each is patched independently by exactly one controller
 // (nobody replaces the whole captureState): commonController is written by the core, domainSpecificController
 // by the domain (via the SDK). It is present only in Capture mode (absent on Import).
+
+// Capture progress exposed in status during Capture mode.
 // +k8s:deepcopy-gen=true
 type CaptureStateStatus struct {
 	// CommonController holds the core-written capture-leg success latches. Single writer: core.
+
+	// Core capture progress for this node.
 	// +optional
 	CommonController *CommonControllerCaptureState `json:"commonController,omitempty"`
 
 	// DomainSpecificController holds the domain-written planning refs and lifecycle. Single writer: domain (SDK).
+
+	// Domain-specific capture progress for this node.
 	// +optional
 	DomainSpecificController *DomainSpecificControllerCaptureState `json:"domainSpecificController,omitempty"`
 }
@@ -68,16 +74,24 @@ type CaptureStateStatus struct {
 // There is no rollup field; "all legs captured" is computed by the SDK over the declared legs.
 // It also carries the non-leg ChildSubtreesManifestsPersisted children-only latch (a manifest-exclude
 // pre-gate), see below.
+
+// Core capture progress for a snapshot node.
 // +k8s:deepcopy-gen=true
 type CommonControllerCaptureState struct {
 	// ManifestCaptured is the manifest-leg success latch (declared on every capture node). nil = no leg;
 	// false = declared, not captured yet; true = captured. On the root Snapshot the RBAC hook reads it.
+
+	// Shows whether this node’s manifests have been captured.
 	// +optional
 	ManifestCaptured *bool `json:"manifestCaptured,omitempty"`
 
 	// DataCaptured is the data-leg success latch, declared only where a data line exists (absent = nil on
 	// nodes without data, e.g. the namespace root or a manifest-only aggregate). The parent reads a
 	// child's dataCaptured to time freeze/unfreeze.
+
+	// Shows whether this node’s volume data has been captured.
+	//
+	// Omitted for nodes without volume data.
 	// +optional
 	DataCaptured *bool `json:"dataCaptured,omitempty"`
 
@@ -99,6 +113,10 @@ type CommonControllerCaptureState struct {
 	// the first pass) — it is deliberately NOT left nil past barrier 1, since a nil field disables the SDK
 	// pre-gate (nil = pre-gate off). Written sideways onto the snapshot. nil = not yet computed / no bound
 	// content, or an adapter that does not map it (SDK pre-gate off, backward compatible). Monotonic (false -> true).
+
+	// Shows whether manifests for all declared child subtrees have been persisted.
+	//
+	// This node’s own manifests are tracked separately by `manifestCaptured`.
 	// +optional
 	ChildSubtreesManifestsPersisted *bool `json:"childSubtreesManifestsPersisted,omitempty"`
 
@@ -112,6 +130,8 @@ type CommonControllerCaptureState struct {
 	// evaluated only once every declared subtree's coverage is fully computable (no premature root exclude).
 	// It is NOT a capture leg (not part of CoreCaptureOutcome). Domains only READ it. nil = subtree not
 	// planned yet. Monotonic (nil/false -> true; the spec is immutable, so no recapture flips it back).
+
+	// Shows whether planning is complete for this node and all child subtrees.
 	// +optional
 	SubtreePlanned *bool `json:"subtreePlanned,omitempty"`
 
@@ -123,7 +143,6 @@ type CommonControllerCaptureState struct {
 	// this role — its terminal False collapses "one child failed, others still in flight" and "one failed, all
 	// done" into an indistinguishable False, and a parent's own Ready=True is derived only AFTER its domain
 	// reaches phase=Finished, a circular dependency for a consumer that must act BEFORE finishing.)
-	//
 	// It is snapshot-native and main-written, computed by resolving the owner's DIRECT children from
 	// status.childrenSnapshotRefs and reading each child's Ready condition AND domain phase, then written
 	// SIDEWAYS onto this snapshot (like SubtreePlanned; a SnapshotContent has no phase, so this cannot live on
@@ -139,19 +158,29 @@ type CommonControllerCaptureState struct {
 	// data snapshot failed; a child that HANGS (never terminal) is covered by a domain-side deadline, not by
 	// this latch. nil = no direct children (leaf) or not computed yet. Monotonic (nil/false -> true; the spec
 	// is immutable, so no recapture flips it back).
+
+	// Shows whether all direct child nodes have finished processing, successfully or with an error that is not retried.
+	//
+	// A `true` value indicates completion, not success. Omitted for a node without direct children or until the value is calculated.
 	// +optional
 	ChildrenSettled *bool `json:"childrenSettled,omitempty"`
 }
 
 // DomainSpecificControllerCaptureState is the domain-written half of captureState: execution-request
 // handles plus the lifecycle phase and failure detail. Single writer: the domain controller via the SDK.
+
+// Domain-specific capture progress for a snapshot node.
 // +k8s:deepcopy-gen=true
 type DomainSpecificControllerCaptureState struct {
 	// ManifestCaptureRequestName is the temporary MCR owned by the domain node while own-scope capture runs.
+
+	// Name of the temporary ManifestCaptureRequest used to capture this node’s manifests.
 	// +optional
 	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty"`
 
 	// VolumeCaptureRequestName is the temporary VCR owned by a data-leaf domain node while the data leg runs.
+
+	// Name of the temporary request used to capture this node’s volume data.
 	// +optional
 	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty"`
 
@@ -159,17 +188,23 @@ type DomainSpecificControllerCaptureState struct {
 	// child/excluded membership and enables core-side capture projection. A regular domain publishes its
 	// MCR/VCR before Planned; the current subtree-gated aggregator flow may publish its own MCR afterwards,
 	// once descendant manifests are persisted and the complete exclusion set is available.
+
+	// Current domain capture phase.
 	// +optional
 	Phase SnapshotCapturePhase `json:"phase,omitempty"`
 
 	// Reason is a short, machine-readable detail for the current Phase (free-form domain string):
 	// progress codes while Planning (e.g. Snapshotting), failure reason when Failed. Cleared on
 	// Planned/Finished.
+
+	// Machine-readable reason for the current phase.
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
 	// Message is a human-readable detail for the current Phase (progress while Planning, failure detail
 	// when Failed). Cleared on Planned/Finished.
+
+	// Description of the current phase.
 	// +optional
 	Message string `json:"message,omitempty"`
 
@@ -182,6 +217,8 @@ type DomainSpecificControllerCaptureState struct {
 	// distinguishable from "domain has not planned yet" (domainSpecificController absent). A data-leaf
 	// (e.g. a disk) never enumerates children, so it always writes []. Absent in Import
 	// (no live capture happens).
+
+	// Source objects excluded directly by this node during capture.
 	// +optional
 	// +listType=atomic
 	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs"`
@@ -192,18 +229,29 @@ type DomainSpecificControllerCaptureState struct {
 // is self-contained for import-mode recreation (d8-cli reads it as a single block, without joining
 // spec.sourceRef and a separate uid). On the namespace-root Snapshot it references the captured Namespace
 // (kind=Namespace), written by the in-process namespace-domain.
+
+// Reference to the live source object whose state was captured.
 // +k8s:deepcopy-gen=true
 type SnapshotSourceObjectRef struct {
+	// API version of the source resource.
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
+	// Kind of the source resource.
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
+	// Name of the source object.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+
 	// Namespace of the source object (namespaced sources only).
+
+	// Namespace of the source object.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+
 	// UID of the captured live source object (best-effort; used by d8-cli for import-mode recreation).
+
+	// UID of the source object.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
 }

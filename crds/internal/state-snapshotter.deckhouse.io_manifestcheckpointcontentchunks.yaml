@@ -31,8 +31,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: ManifestCheckpointContentChunk is one chunk of the data of a
-          ManifestCheckpoint.
+        description: Stores one chunk of compressed ManifestCheckpoint data.
         properties:
           apiVersion:
             description: |-
@@ -41,6 +40,7 @@ spec:
               may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
           kind:
             description: |-
               Kind is a string value representing the REST resource this object represents.
@@ -49,30 +49,29 @@ spec:
               In CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
           metadata:
             type: object
+            x-doc-skip: true
           spec:
+            description: Stored chunk data and its metadata.
             properties:
               checkpointName:
-                description: CheckpointName is the name of the ManifestCheckpoint
-                  this chunk belongs to
+                description: Name of the ManifestCheckpoint this chunk belongs to.
                 type: string
               checksum:
-                description: |-
-                  Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
-                  Used for integrity validation and debugging
+                description: SHA-256 checksum of the compressed chunk data, encoded
+                  in Base64.
                 type: string
               data:
-                description: |-
-                  Data contains the gzipped JSON array of objects, base64 encoded
-                  Format: base64(gzip(json[]))
+                description: Gzip-compressed JSON array of objects, encoded in Base64.
                 maxLength: 1048576
                 type: string
               index:
-                description: Index is the 0-based index of this chunk
+                description: Zero-based chunk index.
                 type: integer
               objectsCount:
-                description: ObjectsCount is the number of objects in this chunk
+                description: Number of objects in this chunk.
                 type: integer
             required:
             - checkpointName

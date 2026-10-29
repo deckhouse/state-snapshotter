@@ -28,9 +28,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          ManifestCheckpoint is the immutable checkpoint of manifest state created for a
-          ManifestCaptureRequest.
+        description: Stores an immutable checkpoint of captured object manifests.
         properties:
           apiVersion:
             description: |-
@@ -39,6 +37,7 @@ spec:
               may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
           kind:
             description: |-
               Kind is a string value representing the REST resource this object represents.
@@ -47,40 +46,36 @@ spec:
               In CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
           metadata:
             type: object
+            x-doc-skip: true
           spec:
-            description: |-
-              ManifestCheckpointSpec is intentionally empty.
-
-              A ManifestCheckpoint is a name-addressed, controller-created artifact: it is looked up by name
-              (from SnapshotContent and the aggregated API), never by a spec field. Source provenance — the
-              name of the originating (short-lived) ManifestCaptureRequest — is recorded on the
-              state-snapshotter.deckhouse.io/source-request label. There is deliberately no source-namespace
-              field or label so the type stays correct for future cluster-wide capture sources.
+            description: No user-configurable fields.
             type: object
           status:
+            description: Current storage and readiness state of the checkpoint.
             properties:
               chunks:
-                description: Chunks contains information about all chunks
+                description: Stored chunks that make up the checkpoint.
                 items:
+                  description: Information about one stored checkpoint chunk.
                   properties:
                     checksum:
-                      description: |-
-                        Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
-                        Used for integrity validation and debugging
+                      description: SHA-256 checksum of the compressed chunk data,
+                        encoded in Base64.
                       type: string
                     index:
-                      description: Index of the chunk (0-based)
+                      description: Zero-based chunk index.
                       type: integer
                     name:
-                      description: Name of the chunk
+                      description: Name of the ManifestCheckpointContentChunk object.
                       type: string
                     objectsCount:
-                      description: ObjectsCount is the number of objects in this chunk
+                      description: Number of objects in this chunk.
                       type: integer
                     sizeBytes:
-                      description: SizeBytes is the size of this chunk in bytes (compressed)
+                      description: Compressed size of this chunk in bytes.
                       format: int64
                       type: integer
                   required:
@@ -91,53 +86,39 @@ spec:
                   type: object
                 type: array
               conditions:
-                description: |-
-                  Conditions represent the latest available observations of the checkpoint state
-                  Expected condition types: Ready
+                description: Current checkpoint conditions.
                 items:
-                  description: Condition contains details for one aspect of the current
-                    state of this API Resource.
+                  description: Current condition.
                   properties:
                     lastTransitionTime:
-                      description: |-
-                        lastTransitionTime is the last time the condition transitioned from one status to another.
-                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      description: Time of the last condition status change.
                       format: date-time
                       type: string
                     message:
-                      description: |-
-                        message is a human readable message indicating details about the transition.
-                        This may be an empty string.
+                      description: Human-readable details about the condition.
                       maxLength: 32768
                       type: string
                     observedGeneration:
-                      description: |-
-                        observedGeneration represents the .metadata.generation that the condition was set based upon.
-                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
-                        with respect to the current state of the instance.
+                      description: Object generation observed when this condition
+                        was set.
                       format: int64
                       minimum: 0
                       type: integer
                     reason:
-                      description: |-
-                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
-                        Producers of specific condition types may define expected values and meanings for this field,
-                        and whether the values are considered a guaranteed API.
-                        The value should be a CamelCase string.
-                        This field may not be empty.
+                      description: Programmatic reason for the last condition transition.
                       maxLength: 1024
                       minLength: 1
                       pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
                       type: string
                     status:
-                      description: status of the condition, one of True, False, Unknown.
+                      description: Condition status.
                       enum:
                       - "True"
                       - "False"
                       - Unknown
                       type: string
                     type:
-                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      description: Condition type.
                       maxLength: 316
                       pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
                       type: string
@@ -150,11 +131,10 @@ spec:
                   type: object
                 type: array
               totalObjects:
-                description: TotalObjects is the total number of objects captured
+                description: Total number of captured objects.
                 type: integer
               totalSizeBytes:
-                description: TotalSizeBytes is the total size of all chunks in bytes
-                  (compressed)
+                description: Total compressed size of all chunks in bytes.
                 format: int64
                 type: integer
             type: object

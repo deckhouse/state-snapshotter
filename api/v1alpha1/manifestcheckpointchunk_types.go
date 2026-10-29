@@ -21,13 +21,17 @@ import (
 )
 
 // ManifestCheckpointContentChunk is one chunk of the data of a ManifestCheckpoint.
-//
+
+// Stores one chunk of compressed ManifestCheckpoint data.
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=mcpchunk
 // +kubebuilder:metadata:labels=module=state-snapshotter
 // +kubebuilder:printcolumn:name="Checkpoint",type=string,JSONPath=`.spec.checkpointName`
 // +kubebuilder:printcolumn:name="Index",type=integer,JSONPath=`.spec.index`
 // +kubebuilder:printcolumn:name="Objects",type=integer,JSONPath=`.spec.objectsCount`
+// +crd-enricher:raw:properties.apiVersion.x-doc-skip=true
+// +crd-enricher:raw:properties.kind.x-doc-skip=true
+// +crd-enricher:raw:properties.metadata.x-doc-skip=true
 type ManifestCheckpointContentChunk struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -42,23 +46,34 @@ type ManifestCheckpointContentChunkList struct {
 	Items           []ManifestCheckpointContentChunk `json:"items"`
 }
 
+// Stored chunk data and its metadata.
 // +k8s:deepcopy-gen=true
 type ManifestCheckpointContentChunkSpec struct {
 	// CheckpointName is the name of the ManifestCheckpoint this chunk belongs to
+
+	// Name of the ManifestCheckpoint this chunk belongs to.
 	CheckpointName string `json:"checkpointName"`
 
 	// Index is the 0-based index of this chunk
+
+	// Zero-based chunk index.
 	Index int `json:"index"`
 
 	// Data contains the gzipped JSON array of objects, base64 encoded
 	// Format: base64(gzip(json[]))
+
+	// Gzip-compressed JSON array of objects, encoded in Base64.
 	// +kubebuilder:validation:MaxLength=1048576
 	Data string `json:"data"`
 
 	// ObjectsCount is the number of objects in this chunk
+
+	// Number of objects in this chunk.
 	ObjectsCount int `json:"objectsCount"`
 
 	// Checksum is the SHA256 hash of the compressed chunk data (base64 encoded)
 	// Used for integrity validation and debugging
+
+	// SHA-256 checksum of the compressed chunk data, encoded in Base64.
 	Checksum string `json:"checksum,omitempty"`
 }

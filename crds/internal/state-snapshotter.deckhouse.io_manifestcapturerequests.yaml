@@ -1,0 +1,147 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
+  name: manifestcapturerequests.state-snapshotter.deckhouse.io
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: ManifestCaptureRequest
+    listKind: ManifestCaptureRequestList
+    plural: manifestcapturerequests
+    shortNames:
+    - mcr
+    singular: manifestcapturerequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.checkpointName
+      name: Checkpoint
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Requests capture of the listed Kubernetes object manifests into
+          a checkpoint.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+            x-doc-skip: true
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+            x-doc-skip: true
+          metadata:
+            type: object
+            x-doc-skip: true
+          spec:
+            description: Defines the immutable set of object manifests to capture.
+            properties:
+              targets:
+                description: |-
+                  Objects whose manifests are captured into the checkpoint.
+
+                  All targets must be in the request namespace except the Namespace object for that namespace. The list is immutable and must contain at least one target.
+                items:
+                  description: Reference to an object whose manifest is captured.
+                  properties:
+                    apiVersion:
+                      description: API version of the target resource.
+                      type: string
+                    kind:
+                      description: Kind of the target resource.
+                      type: string
+                    name:
+                      description: Name of the target object.
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+            type: object
+            x-kubernetes-validations:
+            - message: spec.targets must list at least one object to capture (at minimum
+                the snapshotted object's own manifest)
+              rule: has(self.targets) && size(self.targets) > 0
+            - message: 'spec.targets is immutable: the capture plan is frozen once
+                the ManifestCaptureRequest is created'
+              rule: self.targets == oldSelf.targets
+          status:
+            description: Current checkpoint and completion state of the request.
+            properties:
+              checkpointName:
+                description: Name of the ManifestCheckpoint created for this request.
+                type: string
+              completionTimestamp:
+                description: Time when processing finished.
+                format: date-time
+                type: string
+              conditions:
+                description: Current request conditions.
+                items:
+                  description: Current condition.
+                  properties:
+                    lastTransitionTime:
+                      description: Time of the last condition status change.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Human-readable details about the condition.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: Object generation observed when this condition
+                        was set.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: Programmatic reason for the last condition transition.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: Condition status.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Condition type.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

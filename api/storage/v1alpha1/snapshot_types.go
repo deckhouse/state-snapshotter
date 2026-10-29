@@ -20,6 +20,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Snapshot requests a namespace state/configuration snapshot.
+//
+// The binding to a SnapshotContent is set-once (see status.boundSnapshotContentName). The field rule there
+// refuses a change; it cannot refuse a removal, because a transition rule does not run when the field is
+// absent from the new object — what a writer whose model has no such field produces when it replaces the
+// whole status. The companion that does refuse it is on the ROOT: only the root can compare presence across
+// the update, and only the root survives `status: null`.
+
+// Snapshot captures or imports the state of one namespace as an immutable snapshot tree.
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=snap
@@ -28,14 +37,10 @@ import (
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Content",type=string,JSONPath=`.status.boundSnapshotContentName`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// Snapshot requests a namespace state/configuration snapshot.
-//
-// The binding to a SnapshotContent is set-once (see status.boundSnapshotContentName). The field rule there
-// refuses a change; it cannot refuse a removal, because a transition rule does not run when the field is
-// absent from the new object — what a writer whose model has no such field produces when it replaces the
-// whole status. The companion that does refuse it is on the ROOT: only the root can compare presence across
-// the update, and only the root survives `status: null`.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.boundSnapshotContentName) || (has(self.status) && has(self.status.boundSnapshotContentName))",message="Snapshot status.boundSnapshotContentName is set-once: the bound SnapshotContent name cannot be removed"
+// +crd-enricher:raw:properties.apiVersion.x-doc-skip=true
+// +crd-enricher:raw:properties.kind.x-doc-skip=true
+// +crd-enricher:raw:properties.metadata.x-doc-skip=true
 type Snapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -64,24 +69,31 @@ const (
 	SnapshotModeImport SnapshotMode = "Import"
 )
 
-// +k8s:deepcopy-gen=true
 // SnapshotSpec is the capture/import mode selector and is fully immutable after creation. A
 // snapshot is a one-shot artifact: manifests for the namespace subtree are captured exactly once, so the
 // spec must never change. The spec-level transition rule (self == oldSelf) freezes the entire spec on any
 // UPDATE while passing through CREATE; consequently metadata.generation never advances and there is
 // no recapture (a new capture requires a new Snapshot).
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
+//
 // The rule below rejects the removed resourceSelector input. It exists because DELETING the field from the
 // schema would NOT reject it: the apiserver prunes fields it does not know BEFORE validation runs, so a
 // client still sending a selector would be answered "created" and silently get a snapshot of the whole
 // namespace instead of the subset it asked for. Keeping the field declared and refusing it is the only way
 // to turn that silent widening into an error. Verified against a live apiserver, not assumed.
+
+// Defines how snapshot content is obtained.
+// +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.resourceSelector)",message="spec.resourceSelector was removed: a Snapshot captures its whole namespace. Drop the field (and update d8: the -l/--selector flag is gone); to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude"
 type SnapshotSpec struct {
 	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
 	//   - Capture (default): dynamic namespace capture from the live cluster.
 	//   - Import: the Snapshot is materialized from an uploaded payload (manifests-and-children-refs-upload)
 	//     plus, for data leaves, a DataImport — the controller does NOT capture the live namespace.
+
+	// Selects whether content is captured from the live namespace or imported.
+	//
+	// Capture reads live namespace state. Import waits for content supplied through the upload API and does not capture live state.
 	// +kubebuilder:default=Capture
 	// +optional
 	Mode SnapshotMode `json:"mode,omitempty"`
@@ -92,7 +104,13 @@ type SnapshotSpec struct {
 	//
 	// Deprecated: never read and never set this field. It is a rejection stub kept for one deprecation
 	// cycle, after which it is dropped from the schema together with the rule that refuses it.
+
+	// Removed field. A Snapshot with this field is rejected.
+	// To exclude objects from capture, use the `state-snapshotter.deckhouse.io/exclude` label.
+	//
+	// Deprecated: never read and never set this field.
 	// +optional
+	// +crd-enricher:raw:x-doc-skip=true
 	ResourceSelector *metav1.LabelSelector `json:"resourceSelector,omitempty"`
 }
 
@@ -102,6 +120,7 @@ func (s *Snapshot) IsImportMode() bool {
 	return s != nil && s.Spec.Mode == SnapshotModeImport
 }
 
+// Current binding, tree, and readiness state of the Snapshot.
 // +k8s:deepcopy-gen=true
 type SnapshotStatus struct {
 	// BoundSnapshotContentName is the cluster-scoped name of the bound snapshot content object for this root.
@@ -113,6 +132,8 @@ type SnapshotStatus struct {
 	// content recovered from the recycle bin is adopted by a NEWLY created Snapshot, whose status starts
 	// empty — so the first publish passes and the carve-out lives on the content's spec.snapshotRef, not
 	// here. The root-level companion rule refuses removal.
+
+	// Name of the SnapshotContent bound to this Snapshot.
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Snapshot status.boundSnapshotContentName is set-once: the bound SnapshotContent name cannot be replaced"
 	BoundSnapshotContentName string `json:"boundSnapshotContentName,omitempty"`
@@ -123,6 +144,8 @@ type SnapshotStatus struct {
 	// and a separate uid); it is NOT a restore directive — an imported snapshot lives in the namespace it
 	// was created in, and what is restored from it is addressed there, never at this field. (This is the status-side source reference, present on every
 	// snapshot kind; the optional spec.sourceRef on domain snapshots is a distinct lighter ref.)
+
+	// Reference to the source object whose state this snapshot node represents.
 	// +optional
 	SourceRef *SnapshotSourceObjectRef `json:"sourceRef,omitempty"`
 
@@ -131,6 +154,8 @@ type SnapshotStatus struct {
 	// domainSpecificController, written by the in-process namespace-domain (SDK): manifestCaptureRequestName
 	// (the namespace MCR) and phase, plus the core-published excludedRefs aggregate input. There is no
 	// volumeCaptureRequestName on the root (a namespace has no data leg of its own).
+
+	// Capture progress exposed in status during Capture mode.
 	// +optional
 	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
 
@@ -139,6 +164,8 @@ type SnapshotStatus struct {
 	// branching and no registry scan for child selection); it is not limited to Snapshot.
 	// Child namespace is implicit and always equals parent Snapshot namespace.
 	// Populated by domain controllers or merge helpers that own graph edges.
+
+	// Direct child snapshot nodes in the same namespace.
 	// +optional
 	ChildrenSnapshotRefs []SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
 
@@ -146,10 +173,21 @@ type SnapshotStatus struct {
 	// (the whole-subtree set of source objects vetoed out of this snapshot). It is written ONLY by the
 	// core, exactly as it mirrors Ready from the bound content. It is a user-facing audit view — the
 	// durable truth lives on the cluster-scoped SnapshotContent (which outlives this namespaced object).
+
+	// Source objects excluded from this snapshot subtree.
 	// +optional
 	// +listType=atomic
 	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs,omitempty"`
 
 	// Conditions represent the latest observations (Ready, Bound, Failed, etc.).
+
+	// Current Snapshot conditions.
+	// +crd-enricher:raw:items.description="Current condition."
+	// +crd-enricher:raw:items.properties.lastTransitionTime.description="Time of the last condition status change."
+	// +crd-enricher:raw:items.properties.message.description="Human-readable details about the condition."
+	// +crd-enricher:raw:items.properties.observedGeneration.description="Object generation observed when this condition was set."
+	// +crd-enricher:raw:items.properties.reason.description="Programmatic reason for the last condition transition."
+	// +crd-enricher:raw:items.properties.status.description="Condition status."
+	// +crd-enricher:raw:items.properties.type.description="Condition type."
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

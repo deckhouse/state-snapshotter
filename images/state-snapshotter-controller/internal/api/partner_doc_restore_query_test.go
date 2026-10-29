@@ -76,7 +76,7 @@ import (
 
 // partnerDocRestoreHeadingEN opens the section of the canonical document that describes the restoration
 // read. The check is scoped there so a code span of the same shape elsewhere cannot be mistaken for it.
-const partnerDocRestoreHeadingEN = "## Restoration, in brief"
+const partnerDocRestoreHeadingEN = "## Reading a snapshot for restoration"
 
 // partnerDocQueryParamRE matches a query parameter the document names: a name in a code span next to the
 // word for "parameter", in either order. It catches a parameter of ANY name, which no literal can do.
@@ -127,7 +127,7 @@ var partnerDocQueryParamControls = map[string]string{
 // partnerDocRestoreHeadingRU opens the same section of the mirror. Every check below runs over both files:
 // a client author works from one of them, not from the pair, so a property that holds for the canonical
 // file alone is not a property of the contract.
-const partnerDocRestoreHeadingRU = "## Восстановление, коротко"
+const partnerDocRestoreHeadingRU = "## Чтение снимка для восстановления"
 
 // partnerDocStatusCodeRE matches an HTTP status code written the way both files write one: in a code
 // span. Prose digits are deliberately not matched — a code the document states as contract is marked up

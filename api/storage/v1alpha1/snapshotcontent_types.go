@@ -27,16 +27,6 @@ const (
 	SnapshotContentDeletionPolicyDelete = "Delete"
 )
 
-// +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster,shortName=stsnapct
-// +kubebuilder:metadata:labels=module=state-snapshotter
-// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="Manifests",type=string,JSONPath=`.status.conditions[?(@.type=="ManifestsReady")].status`
-// +kubebuilder:printcolumn:name="Data",type=string,JSONPath=`.status.conditions[?(@.type=="DataReady")].status`
-// +kubebuilder:printcolumn:name="Children",type=string,JSONPath=`.status.conditions[?(@.type=="ChildrenReady")].status`
-// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
-// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // SnapshotContent holds the result of a snapshot (shared carrier for multiple snapshot root kinds).
 //
 // The spec is immutable EXCEPT for the snapshotRef back-reference, which may be re-pointed onto a freshly
@@ -47,8 +37,6 @@ const (
 // (the automated restore flow is not yet defined; recovery is done by manual intervention).
 // deletionPolicy stays immutable in all cases. The rules live on the root object (not the spec field) so
 // CEL can read both self.spec and self.status.
-// +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the bound Snapshot is deleted (recycle-bin restore)"
-// +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
 //
 // A published artifact is set-once: once this content names a ManifestCheckpoint, a data binding or its
 // complete child set, that identity is the durable answer to "what does this snapshot consist of" and no
@@ -57,9 +45,27 @@ const (
 // precisely what a writer whose model has no such field produces when it replaces the whole status. Each
 // axis therefore has a companion rule here, on the ROOT: only the root can compare presence across the
 // update, and only the root survives `status: null` (a rule anchored under status disappears with it).
+
+// SnapshotContent stores the captured content of one node of a snapshot tree.
+// It links the snapshot node to captured manifests and, when present, captured volume data.
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Cluster,shortName=stsnapct
+// +kubebuilder:metadata:labels=module=state-snapshotter
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Manifests",type=string,JSONPath=`.status.conditions[?(@.type=="ManifestsReady")].status`
+// +kubebuilder:printcolumn:name="Data",type=string,JSONPath=`.status.conditions[?(@.type=="DataReady")].status`
+// +kubebuilder:printcolumn:name="Children",type=string,JSONPath=`.status.conditions[?(@.type=="ChildrenReady")].status`
+// +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status) && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)",message="SnapshotContent spec.snapshotRef is immutable until the bound Snapshot is deleted (recycle-bin restore)"
+// +kubebuilder:validation:XValidation:rule="has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy) && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)",message="SnapshotContent spec.deletionPolicy is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.manifestCheckpointName) || (has(self.status) && has(self.status.manifestCheckpointName))",message="SnapshotContent status.manifestCheckpointName is set-once: a published ManifestCheckpoint name cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.data) || (has(self.status) && has(self.status.data))",message="SnapshotContent status.data is set-once: a published data binding cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.childrenSnapshotContentRefs) || (has(self.status) && has(self.status.childrenSnapshotContentRefs))",message="SnapshotContent status.childrenSnapshotContentRefs is frozen once set: a published child set cannot be removed"
+// +crd-enricher:raw:properties.apiVersion.x-doc-skip=true
+// +crd-enricher:raw:properties.kind.x-doc-skip=true
+// +crd-enricher:raw:properties.metadata.x-doc-skip=true
 type SnapshotContent struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -75,9 +81,12 @@ type SnapshotContentList struct {
 	Items           []SnapshotContent `json:"items"`
 }
 
+// Desired ownership and retention settings for the stored snapshot content.
 // +k8s:deepcopy-gen=true
 type SnapshotContentSpec struct {
 	// DeletionPolicy controls whether the controller may delete this SnapshotContent when the root snapshot is removed.
+
+	// Controls whether the controller deletes the content when its snapshot tree is removed.
 	// +kubebuilder:validation:Enum=Retain;Delete
 	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 
@@ -91,33 +100,51 @@ type SnapshotContentSpec struct {
 	// only once status.boundSnapshotDeleted latched true (see the object-level XValidation rules). The
 	// anti-spoofing check is not weakened by this: recovery proceeds by re-pointing the ref onto the new
 	// subject's identity, not by bypassing the handshake.
+
+	// Reference to the snapshot resource that owns this content.
+	//
+	// The reference is normally immutable while the snapshot exists. It can be updated when retained content is rebound to a recreated snapshot after the previous owner was deleted.
 	// +kubebuilder:validation:Required
 	SnapshotRef *SnapshotSubjectRef `json:"snapshotRef"`
 }
 
+// Reference to a namespaced resource.
 // +k8s:deepcopy-gen=true
 type SnapshotSubjectRef struct {
-	APIVersion string    `json:"apiVersion"`
-	Kind       string    `json:"kind"`
-	Name       string    `json:"name"`
-	Namespace  string    `json:"namespace,omitempty"`
-	UID        types.UID `json:"uid,omitempty"`
+	// API version of the referenced resource.
+	APIVersion string `json:"apiVersion"`
+	// Kind of the referenced resource.
+	Kind string `json:"kind"`
+	// Name of the referenced object.
+	Name string `json:"name"`
+	// Namespace of the referenced object.
+	Namespace string `json:"namespace,omitempty"`
+	// UID of the referenced object.
+	UID types.UID `json:"uid,omitempty"`
 }
 
 // SnapshotDataArtifactRef points to a durable data artifact produced by the data path.
 // It MUST reference a final artifact such as VolumeSnapshotContent or equivalent.
 // It MUST NOT reference execution requests such as VolumeCaptureRequest.
+
+// Reference to the artifact that stores captured volume data.
 // +k8s:deepcopy-gen=true
 type SnapshotDataArtifactRef struct {
+	// API version of the data artifact resource.
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
+	// Kind of the data artifact resource.
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
+	// Name of the data artifact object.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+
 	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
 	// artifact reference self-contained, symmetric with sourceRef.uid. Optional: the artifact may be
 	// referenced before its UID is known, so producers fill it best-effort.
+
+	// UID of the data artifact object.
 	// +optional
 	UID types.UID `json:"uid,omitempty"`
 }
@@ -134,31 +161,43 @@ type SnapshotDataArtifactRef struct {
 // divergable copy. spec.accessModes is the worked example of what does NOT qualify: it round-trips through the
 // manifest untouched, and the transient export volume does not inherit the source modes (the provisioner
 // treats them as optional and defaults to ReadWriteOnce), so it was dropped before this schema was released.
+
+// Describes the source volume and the artifact that stores its captured data.
 // +k8s:deepcopy-gen=true
 type SnapshotDataBinding struct {
 	// SourceRef identifies the captured PersistentVolumeClaim (apiVersion/kind/name/namespace + uid) backing
 	// this node's data. Its uid is the single volume identity — it replaces the former standalone targetUID.
 	// This is the backing-PVC reference (status.data.sourceRef); it is distinct from the top-level
 	// status.sourceRef (SnapshotSourceObjectRef), which references the captured live domain object.
+
+	// Reference to the captured PersistentVolumeClaim that owns this node’s volume data.
 	SourceRef SnapshotSubjectRef `json:"sourceRef"`
 
 	// ArtifactRef references the cluster-scoped durable data artifact (for example VolumeSnapshotContent).
+
+	// Reference to the artifact that stores the captured volume data.
 	ArtifactRef SnapshotDataArtifactRef `json:"artifactRef"`
 
 	// VolumeMode records the source volume mode (Block or Filesystem). CSI snapshots are
 	// mode-agnostic, so this is persisted here to drive the unified export (VolumeRestoreRequest)
 	// and to recreate the PVC on import. Typed as a string to keep the api module dependency-free;
 	// controllers convert it to corev1.PersistentVolumeMode.
+
+	// Source volume mode.
 	// +kubebuilder:validation:Enum=Block;Filesystem
 	// +optional
 	VolumeMode string `json:"volumeMode,omitempty"`
 
 	// FsType records the source filesystem type (Filesystem volumes only).
+
+	// Source filesystem type for Filesystem volumes.
 	// +optional
 	FsType string `json:"fsType,omitempty"`
 
 	// StorageClassName records the source StorageClass of the captured volume. Used by the
 	// aggregated /index and by import StorageClass mapping.
+
+	// Source StorageClass name.
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
@@ -167,10 +206,13 @@ type SnapshotDataBinding struct {
 	// be persisted here to recreate the volume on restore/export (the export VolumeRestoreRequest sizes
 	// the target PVC from it). Stored as a resource.Quantity string (e.g. "10Gi") to keep the api module
 	// dependency-free; controllers parse it via resource.ParseQuantity.
+
+	// Allocated size of the captured volume as a Kubernetes quantity.
 	// +optional
 	Size string `json:"size,omitempty"`
 }
 
+// Current binding, stored data, and readiness state of SnapshotContent.
 // +k8s:deepcopy-gen=true
 type SnapshotContentStatus struct {
 	// ManifestCheckpointName is the cluster-scoped ManifestCheckpoint name once manifest capture has persisted.
@@ -180,6 +222,8 @@ type SnapshotContentStatus struct {
 	// snapshot's data with another's manifests. The name is therefore a durable pointer, not a projection of
 	// whatever ManifestCaptureRequest exists right now: the first publish passes, every later change is
 	// rejected, and the root-level companion rule refuses its removal.
+
+	// Name of the ManifestCheckpoint that stores this node’s captured manifests.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="SnapshotContent status.manifestCheckpointName is set-once: the published ManifestCheckpoint name cannot be replaced"
@@ -205,6 +249,8 @@ type SnapshotContentStatus struct {
 	// this is why the O(1) size-monotonic predecessor rule capped nothing). MaxItems=8192 is a generous
 	// per-node direct-child ceiling (far beyond any realistic fan-out) chosen to keep the cost well under
 	// budget. Not marked Required: a volume LEAF legitimately has no children (empty/omitted).
+
+	// Direct child SnapshotContent objects.
 	// +optional
 	// +kubebuilder:validation:MaxItems=8192
 	// +kubebuilder:validation:XValidation:rule="oldSelf.size() == 0 || self == oldSelf",message="childrenSnapshotContentRefs is frozen once set: the complete child SnapshotContent set is immutable (no add, remove, reorder, or replace)"
@@ -233,6 +279,8 @@ type SnapshotContentStatus struct {
 	// rule cost exceeds budget by factor of more than 100x", because an unresolved selection is costed as an
 	// arbitrarily large value. Do not "simplify" the escaping away; the integration test that asserts a
 	// namespace rewrite is rejected is what keeps this honest.
+
+	// Captured volume data for this node, when present.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self.artifactRef.apiVersion == oldSelf.artifactRef.apiVersion && self.artifactRef.kind == oldSelf.artifactRef.kind && self.artifactRef.name == oldSelf.artifactRef.name",message="SnapshotContent status.data.artifactRef identity (apiVersion, kind, name) is set-once: a published data artifact cannot be replaced"
 	// +kubebuilder:validation:XValidation:rule="!has(oldSelf.artifactRef.uid) || (has(self.artifactRef.uid) && self.artifactRef.uid == oldSelf.artifactRef.uid)",message="SnapshotContent status.data.artifactRef.uid is set-once: it may be filled in after the first publish, but not changed or removed"
@@ -246,6 +294,8 @@ type SnapshotContentStatus struct {
 	// the SnapshotContent controller no longer re-adds the parent-protect finalizer (the snapshot is gone)
 	// and GC may proceed. Monotonic (false -> true only); it replaces the former
 	// snapshot.deckhouse.io/parent-deleted annotation.
+
+	// Shows whether the bound namespaced snapshot has been deleted while retained content still exists.
 	// +optional
 	BoundSnapshotDeleted bool `json:"boundSnapshotDeleted,omitempty"`
 
@@ -260,11 +310,15 @@ type SnapshotContentStatus struct {
 	// => no 409 double-capture; identities served by the subtree-manifest-identities subresource),
 	// (3) monotonicity (never re-opens after the first Ready). It never expresses failure — a terminal
 	// manifest failure surfaces via the Ready reason (IsReasonTerminal).
+
+	// Shows whether manifests for this node and all declared child subtrees have been stored.
 	// +optional
 	SubtreeManifestsPersisted bool `json:"subtreeManifestsPersisted,omitempty"`
 
 	// CaptureState optionally carries core-written suppression leaves for a domain reader; on a
 	// core-owned SnapshotContent aggregator this is normally unset.
+
+	// Capture progress exposed in status during Capture mode.
 	// +optional
 	CaptureState *CaptureStateStatus `json:"captureState,omitempty"`
 
@@ -275,10 +329,19 @@ type SnapshotContentStatus struct {
 	// recycle bin) and is what the top-level status.excludedRefs mirrors. It is an aggregate rather
 	// than direct edges (like childrenSnapshotContentRefs) because an excluded object is non-navigable: no
 	// snapshot node is created for it, so per-node reconstruction is impossible after the fact.
+
+	// Source objects excluded from this content subtree.
 	// +optional
 	// +listType=atomic
 	ExcludedRefs []ExcludedObjectRef `json:"excludedRefs,omitempty"`
-
+	// Current SnapshotContent conditions.
+	// +crd-enricher:raw:items.description="Current condition."
+	// +crd-enricher:raw:items.properties.lastTransitionTime.description="Time of the last condition status change."
+	// +crd-enricher:raw:items.properties.message.description="Human-readable details about the condition."
+	// +crd-enricher:raw:items.properties.observedGeneration.description="Object generation observed when this condition was set."
+	// +crd-enricher:raw:items.properties.reason.description="Programmatic reason for the last condition transition."
+	// +crd-enricher:raw:items.properties.status.description="Condition status."
+	// +crd-enricher:raw:items.properties.type.description="Condition type."
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 

@@ -119,7 +119,7 @@ func TestDegradedAndTerminalReasonsDisjoint(t *testing.T) {
 // root.
 var partnerDocs = struct{ canonical, mirror string }{
 	canonical: "../../../docs/BACKUP_INTEGRATION.md",
-	mirror:    "../../../docs/BACKUP_INTEGRATION_RU.md",
+	mirror:    "../../../docs/BACKUP_INTEGRATION.ru.md",
 }
 
 // partnerDocClassTranslations pairs each class word of the canonical document with the word its mirror

@@ -1,42 +1,42 @@
 ---
 title: "The state-snapshotter module"
 description: "About what the state-snapshotter module does, why it's needed, and how to use it."
-d8Edition: ee
 ---
 
-## What is the state-snapshotter module?
+The `state-snapshotter` module is a critical infrastructure component of Deckhouse Platform designed to create and
+restore snapshots of Kubernetes resource state. It is used by other Deckhouse Platform components that need to work
+with state snapshots.
 
-The `state-snapshotter` module is a **critical infrastructure component** in Deckhouse that provides state capture and restoration capabilities for Kubernetes resources. It allows you to create point-in-time snapshots of specific Kubernetes objects and restore them later.
+## Main features
 
-### What does it do?
+The module lets you:
 
-The module provides:
+- Capture the state of Kubernetes resources in a namespace, including custom resources, ConfigMap, Secret, and other
+  objects.
+- Store the captured state for subsequent reading and restoration.
+- Split large volumes of stored data into chunks.
+- Restore resources from a previously created snapshot.
+- Manage the retention period and cleanup of snapshot data.
+- Use snapshots for backup, disaster recovery, and migrating state between clusters.
+- Provide other Deckhouse Platform components with a mechanism for capturing and restoring resource state.
 
-1. **State Capture**: Captures the current state of specific Kubernetes resources (CRDs, ConfigMap, Secret, etc.) into immutable checkpoints
-2. **State Storage**: Stores captured state in a distributed format with chunking, optimized for large datasets
-3. **State Restoration**: Retrieves and restores captured state through a native Kubernetes API
-4. **Automatic Lifecycle Management**: Automatically manages checkpoint storage and cleanup using TTL-based retainers
+## How the module works
 
-### Why is it needed?
+To create a snapshot, the user creates a Snapshot object in the required namespace. The module determines the objects
+to include in the snapshot, captures their state, and stores the result for subsequent reading or restoration.
 
-The `state-snapshotter` module is essential for:
+More on working with the module:
 
-- **Backup and Restore Operations**: Create backups of application state before important operations (upgrades, migrations, etc.)
-- **Disaster Recovery**: Maintain point-in-time snapshots for disaster recovery scenarios
-- **State Migration**: Capture state from one cluster and restore it in another
-- **Audit and Compliance**: Maintain historical records of resource states for audit purposes
-- **Integration with Other Modules**: Used by other Deckhouse modules (e.g., `virtualization`, `backup`) to capture and restore application state
+- [Working with Snapshots](user_guide.html): creating, downloading, uploading, and restoring snapshots with Snapshot
+  and `d8`;
+- [Backup integration](backup_integration.html): the HTTP API contract for external systems;
+- [Working with snapshot archives](snapshot_archives.html): the archive format shared by `d8` and the Deckhouse web UI.
 
-### How to use it
+## Limitations
 
-See the **[User Guide](USER_GUIDE.md)** for how the `Snapshot` resource works: what it captures, its lifecycle, and how to create, track, read, and restore a snapshot.
+The module captures resources of its namespace. Of the cluster-wide resources, only the Namespace is captured.
 
-### Why you should NOT disable it
-
-⚠️ **Important**: The `state-snapshotter` module should **NOT** be disabled because:
-
-1. **Critical Infrastructure**: It's a foundational component used by other Deckhouse modules for state management
-2. **No Performance Impact**: The module only activates when explicitly requested via `ManifestCaptureRequest` resources - it doesn't run background processes
-3. **Resource Efficient**: Uses minimal resources and only processes explicit capture requests
-4. **Required for Operations**: Many Deckhouse operations (backups, snapshots) depend on this module
-5. **Automatic Cleanup**: Automatically manages its own resources and cleans up old checkpoints based on TTL
+{{< alert level="warning" >}}
+Do not disable the `state-snapshotter` module: it is used by other Deckhouse Platform components that work with state
+snapshots.
+{{< /alert >}}

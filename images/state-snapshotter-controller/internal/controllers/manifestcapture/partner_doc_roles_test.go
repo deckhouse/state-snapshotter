@@ -38,7 +38,7 @@ import (
 // partnerDocFiles are the two files of the backup integration document — the contract an external
 // backup product implements against. Its permissions section tells a reader which roles to bind, so a
 // role name that is wrong there grants nothing and fails at a moment nobody connects to a typo.
-var partnerDocFiles = []string{"BACKUP_INTEGRATION.md", "BACKUP_INTEGRATION_RU.md"}
+var partnerDocFiles = []string{"BACKUP_INTEGRATION.md", "BACKUP_INTEGRATION.ru.md"}
 
 // partnerDocForeignRoles is the ONE role of another module that document may name, under the name of
 // each model: the volume-data transfer capability, without which a client can neither read a volume's

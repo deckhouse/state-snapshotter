@@ -531,7 +531,7 @@ func docsSortedGroupVersions(served docsServedSet) string {
 // external backup product implements against. The English file is canonical, the other mirrors it.
 const (
 	partnerDocEN = "BACKUP_INTEGRATION.md"
-	partnerDocRU = "BACKUP_INTEGRATION_RU.md"
+	partnerDocRU = "BACKUP_INTEGRATION.ru.md"
 )
 
 // partnerDocGroupVersions are the aggregated group/versions that document is about. They are spelled
@@ -664,13 +664,19 @@ func TestPartnerDocRuMirrorMatchesEn(t *testing.T) {
 	}
 }
 
-// partnerDocArchiveHeadingEN and partnerDocArchiveHeadingRU open the section describing the file tree a
-// stored snapshot is handed to a person as. Unlike the rest of the document that section is not about
-// this module's HTTP API at all, so none of the guards above reach a single name in it.
+// archiveDocEN and archiveDocRU are the two files of the snapshot archive document: the file tree a
+// stored snapshot is handed to a person as. Unlike the backup integration document it is not about this
+// module's HTTP API at all, so none of the guards above reach a single name in it. The English file is
+// canonical, the other mirrors it.
 const (
-	partnerDocArchiveHeadingEN = "## The snapshot archive"
-	partnerDocArchiveHeadingRU = "## Архив снимка"
+	archiveDocEN = "SNAPSHOT_ARCHIVES.md"
+	archiveDocRU = "SNAPSHOT_ARCHIVES.ru.md"
 )
+
+// archiveDocMinSpans is the floor on the code spans the canonical archive document must yield. The
+// document names well over a hundred; a count near zero means it was emptied, reduced to a pointer, or
+// the extractor stopped matching — every one of which would leave an equality check green.
+const archiveDocMinSpans = 50
 
 // docsFencedBlockRE matches a fenced code block, fences included.
 var docsFencedBlockRE = regexp.MustCompile("(?s)```.*?```")
@@ -683,57 +689,56 @@ var docsInlineCodeRE = regexp.MustCompile("`([^`\n]+)`")
 // (`<kind in lower case>` against `<kind в нижнем регистре>`), while the shape around it is contract.
 var docsPlaceholderRE = regexp.MustCompile(`<[^<>]*>`)
 
-// TestPartnerDocArchiveSectionMirrored compares the archive section of the two files on every inline
-// code span in it: file and directory names, envelope field names, digest constants, the domain string
-// of the children digest, and the client invocations a reader copies out. A span is compared with its
-// <placeholders> collapsed, so the prose inside a placeholder may be translated while the shape around
-// it may not.
+// TestSnapshotArchivesDocMirrored compares the two files of the snapshot archive document on every
+// inline code span outside fenced blocks: file and directory names, envelope field names, digest
+// constants, the domain string of the children digest, and the client invocations a reader copies out.
+// A span is compared with its <placeholders> collapsed, so the prose inside a placeholder may be
+// translated while the shape around it may not.
 //
-// The section is a format specification written from someone else's code, which is the failure mode
+// The document is a format specification written from someone else's code, which is the failure mode
 // this guards against: the two files drift the moment one of them is corrected against that code and
 // the other is not, and a reader of the stale one assembles an archive that is refused with no hint of
 // which half of the document lied.
 //
 // LIMITS:
-//   - the wide one: the names and rules in that section belong to the `d8` command-line client and to
+//   - the wide one: the names and rules in that document belong to the `d8` command-line client and to
 //     the web console, both of which live in OTHER repositories that no test here can read. So this
 //     pins that the two files say the same thing, NOT that either of them still matches the format
 //     those tools implement. Nothing local can establish the latter; only running `d8 snapshot local
-//     describe` against a real archive can, and the section says so to its reader as well.
+//     describe` against a real archive can, and the document says so to its reader as well.
 //   - SETS are compared, not occurrences. A span dropped from one of several places it appears in is
-//     invisible here — what is pinned is the vocabulary of the section, not each sentence in it.
+//     invisible here — what is pinned is the vocabulary of the document, not each sentence in it.
 //   - only what is written in backticks. A translated rule that inverts its meaning while keeping the
 //     identifiers is an editorial defect no comparison of names can see. Concretely: a numeric bound
-//     stated in prose rather than in a code span is invisible here, which is why the limits table
-//     writes its values as code spans — as a plain table it compared nothing but the three file names
-//     in its own row labels, and dropping the whole table from one file left this test green.
-func TestPartnerDocArchiveSectionMirrored(t *testing.T) {
+//     stated in prose rather than in a code span is invisible here.
+func TestSnapshotArchivesDocMirrored(t *testing.T) {
 	scanned := map[string]string{}
 	for _, file := range docsMarkdownFiles(t) {
 		scanned[filepath.Base(file)] = file
 	}
-	canonical, mirror := scanned[partnerDocEN], scanned[partnerDocRU]
+	canonical, mirror := scanned[archiveDocEN], scanned[archiveDocRU]
 	if canonical == "" || mirror == "" {
-		t.Fatalf("both files of the backup integration document must be under docs/ (found canonical=%q mirror=%q)", canonical, mirror)
+		t.Fatalf("both files of the snapshot archive document must be under docs/ (found canonical=%q mirror=%q)", canonical, mirror)
 	}
 
-	want := docsInlineCodeSet(docsSection(t, partnerDocEN, docsReadFile(t, canonical), partnerDocArchiveHeadingEN))
-	got := docsInlineCodeSet(docsSection(t, partnerDocRU, docsReadFile(t, mirror), partnerDocArchiveHeadingRU))
+	want := docsInlineCodeSet(docsFencedBlockRE.ReplaceAllString(docsReadFile(t, canonical), ""))
+	got := docsInlineCodeSet(docsFencedBlockRE.ReplaceAllString(docsReadFile(t, mirror), ""))
 
 	for span := range want {
 		if !got[span] {
-			t.Errorf("%s: the archive section names %q, which its mirror does not", partnerDocEN, span)
+			t.Errorf("%s names %q, which its mirror does not", archiveDocEN, span)
 		}
 	}
 	for span := range got {
 		if !want[span] {
-			t.Errorf("%s: the archive section names %q, which is absent from %s (the canonical file is the one to change first)", partnerDocRU, span, partnerDocEN)
+			t.Errorf("%s names %q, which is absent from %s (the canonical file is the one to change first)", archiveDocRU, span, archiveDocEN)
 		}
 	}
 
-	t.Logf("compared %d code span(s) of the archive section against %d in the mirror", len(want), len(got))
-	if len(want) == 0 {
-		t.Fatal("the archive section of the canonical file names nothing in backticks — zero spans means the section was emptied or the extractor stopped matching, not that the mirror is faithful")
+	t.Logf("compared %d code span(s) of %s against %d in the mirror", len(want), archiveDocEN, len(got))
+	if len(want) < archiveDocMinSpans {
+		t.Fatalf("%s names only %d distinct code span(s), fewer than %d — the specification was emptied or reduced to a pointer, or the extractor stopped matching; either way the mirror comparison checks next to nothing",
+			archiveDocEN, len(want), archiveDocMinSpans)
 	}
 }
 

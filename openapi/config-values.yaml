@@ -22,6 +22,6 @@ properties:
     type: string
     default: ""
     description: |
-      Recycle-bin retention window: how long a snapshot's durable data is kept after the Snapshot is deleted,
-      during which it remains recoverable. Go duration, e.g. "24h", "168h".
-      Empty = omit env; controller uses the built-in default of 30 days (720h).
+      Retention period for durable snapshot data after the Snapshot object is deleted. During this period, the snapshot remains recoverable.
+
+      Specify a Go duration, for example 24h or 168h. If the value is empty, the controller uses the default retention period of 30 days (720h).

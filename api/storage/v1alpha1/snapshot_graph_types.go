@@ -23,23 +23,30 @@ package v1alpha1
 // Snapshot-run tree is namespace-local to the root Snapshot: the child object MUST live
 // in the same namespace as that parent. Namespace is implicit and always taken from parent
 // Snapshot namespace. Cross-namespace refs are not part of this model.
-//
+
+// Reference to a direct child snapshot node in the same namespace.
 // +k8s:deepcopy-gen=true
 type SnapshotChildRef struct {
+	// API version of the child snapshot resource.
 	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
+	// Kind of the child snapshot resource.
+	Kind string `json:"kind"`
+	// Name of the child snapshot object.
+	Name string `json:"name"`
 }
 
 // SnapshotContentChildRef identifies one child common SnapshotContent in the target content graph.
 // SnapshotContent is cluster-scoped, so the ref is name-only and MUST NOT carry namespace.
-//
+
+// Reference to a direct child SnapshotContent.
 // +k8s:deepcopy-gen=true
 type SnapshotContentChildRef struct {
 	// Name is the cluster-scoped child SnapshotContent name. MaxLength=253 is the Kubernetes object-name
 	// ceiling (a DNS subdomain), so it constrains nothing real; it is REQUIRED here to bound the CEL
 	// estimated cost of the childrenSnapshotContentRefs frozen-set immutability rule (self == oldSelf), which
 	// otherwise assumes an unbounded per-element string and blows the apiserver cost budget (CRD rejected).
+
+	// Name of the child SnapshotContent.
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 }
@@ -53,12 +60,16 @@ type SnapshotContentChildRef struct {
 // Unlike childrenSnapshotRefs (direct edges), the durable aggregate on SnapshotContent collects the
 // excluded refs of the WHOLE subtree, because an excluded object is non-navigable: no snapshot CR is
 // created for it, so it cannot be descended into to recover a per-node view later.
-//
+
+// Reference to a source object excluded from the snapshot.
 // +k8s:deepcopy-gen=true
 type ExcludedObjectRef struct {
+	// API version of the excluded source resource.
 	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
+	// Kind of the excluded source resource.
+	Kind string `json:"kind"`
+	// Name of the excluded source object.
+	Name string `json:"name"`
 }
 
 // SnapshotSourceRef is the single source-of-truth identifying the namespace-local source object that a
@@ -68,13 +79,17 @@ type ExcludedObjectRef struct {
 // object ref (including uid) is published separately on the snapshot status (status.sourceRef).
 //
 // This is the canonical definition shared across API groups (the demo API group aliases it).
-//
+
+// Reference to the namespace-local source object whose state is captured by this snapshot node.
 // +k8s:deepcopy-gen=true
 type SnapshotSourceRef struct {
+	// API version of the source resource.
 	// +kubebuilder:validation:MinLength=1
 	APIVersion string `json:"apiVersion"`
+	// Kind of the source resource.
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
+	// Name of the source object.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }

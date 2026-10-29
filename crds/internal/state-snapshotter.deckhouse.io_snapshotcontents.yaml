@@ -1,0 +1,418 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  labels:
+    module: state-snapshotter
+  name: snapshotcontents.state-snapshotter.deckhouse.io
+spec:
+  group: state-snapshotter.deckhouse.io
+  names:
+    kind: SnapshotContent
+    listKind: SnapshotContentList
+    plural: snapshotcontents
+    shortNames:
+    - stsnapct
+    singular: snapshotcontent
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ManifestsReady")].status
+      name: Manifests
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="DataReady")].status
+      name: Data
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ChildrenReady")].status
+      name: Children
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SnapshotContent stores the captured content of one node of a snapshot tree.
+          It links the snapshot node to captured manifests and, when present, captured volume data.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+            x-doc-skip: true
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+            x-doc-skip: true
+          metadata:
+            type: object
+            x-doc-skip: true
+          spec:
+            description: Desired ownership and retention settings for the stored snapshot
+              content.
+            properties:
+              deletionPolicy:
+                description: Controls whether the controller deletes the content when
+                  its snapshot tree is removed.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              snapshotRef:
+                description: |-
+                  Reference to the snapshot resource that owns this content.
+
+                  The reference is normally immutable while the snapshot exists. It can be updated when retained content is rebound to a recreated snapshot after the previous owner was deleted.
+                properties:
+                  apiVersion:
+                    description: API version of the referenced resource.
+                    type: string
+                  kind:
+                    description: Kind of the referenced resource.
+                    type: string
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                  namespace:
+                    description: Namespace of the referenced object.
+                    type: string
+                  uid:
+                    description: UID of the referenced object.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            required:
+            - snapshotRef
+            type: object
+          status:
+            description: Current binding, stored data, and readiness state of SnapshotContent.
+            properties:
+              boundSnapshotDeleted:
+                description: Shows whether the bound namespaced snapshot has been
+                  deleted while retained content still exists.
+                type: boolean
+              captureState:
+                description: Capture progress exposed in status during Capture mode.
+                properties:
+                  commonController:
+                    description: Core capture progress for this node.
+                    properties:
+                      childSubtreesManifestsPersisted:
+                        description: |-
+                          Shows whether manifests for all declared child subtrees have been persisted.
+
+                          This node’s own manifests are tracked separately by `manifestCaptured`.
+                        type: boolean
+                      childrenSettled:
+                        description: |-
+                          Shows whether all direct child nodes have finished processing, successfully or with an error that is not retried.
+
+                          A `true` value indicates completion, not success. Omitted for a node without direct children or until the value is calculated.
+                        type: boolean
+                      dataCaptured:
+                        description: |-
+                          Shows whether this node’s volume data has been captured.
+
+                          Omitted for nodes without volume data.
+                        type: boolean
+                      manifestCaptured:
+                        description: Shows whether this node’s manifests have been
+                          captured.
+                        type: boolean
+                      subtreePlanned:
+                        description: Shows whether planning is complete for this node
+                          and all child subtrees.
+                        type: boolean
+                    type: object
+                  domainSpecificController:
+                    description: Domain-specific capture progress for this node.
+                    properties:
+                      excludedRefs:
+                        description: Source objects excluded directly by this node
+                          during capture.
+                        items:
+                          description: Reference to a source object excluded from
+                            the snapshot.
+                          properties:
+                            apiVersion:
+                              description: API version of the excluded source resource.
+                              type: string
+                            kind:
+                              description: Kind of the excluded source resource.
+                              type: string
+                            name:
+                              description: Name of the excluded source object.
+                              type: string
+                          required:
+                          - apiVersion
+                          - kind
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      manifestCaptureRequestName:
+                        description: Name of the temporary ManifestCaptureRequest
+                          used to capture this node’s manifests.
+                        type: string
+                      message:
+                        description: Description of the current phase.
+                        type: string
+                      phase:
+                        description: Current domain capture phase.
+                        enum:
+                        - Planning
+                        - Planned
+                        - Finished
+                        - Failed
+                        type: string
+                      reason:
+                        description: Machine-readable reason for the current phase.
+                        type: string
+                      volumeCaptureRequestName:
+                        description: Name of the temporary request used to capture
+                          this node’s volume data.
+                        type: string
+                    type: object
+                type: object
+              childrenSnapshotContentRefs:
+                description: Direct child SnapshotContent objects.
+                items:
+                  description: Reference to a direct child SnapshotContent.
+                  properties:
+                    name:
+                      description: Name of the child SnapshotContent.
+                      maxLength: 253
+                      type: string
+                  required:
+                  - name
+                  type: object
+                maxItems: 8192
+                type: array
+                x-kubernetes-validations:
+                - message: 'childrenSnapshotContentRefs is frozen once set: the complete
+                    child SnapshotContent set is immutable (no add, remove, reorder,
+                    or replace)'
+                  rule: oldSelf.size() == 0 || self == oldSelf
+              conditions:
+                description: Current SnapshotContent conditions.
+                items:
+                  description: Current condition.
+                  properties:
+                    lastTransitionTime:
+                      description: Time of the last condition status change.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Human-readable details about the condition.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: Object generation observed when this condition
+                        was set.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: Programmatic reason for the last condition transition.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: Condition status.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Condition type.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              data:
+                description: Captured volume data for this node, when present.
+                properties:
+                  artifactRef:
+                    description: Reference to the artifact that stores the captured
+                      volume data.
+                    properties:
+                      apiVersion:
+                        description: API version of the data artifact resource.
+                        minLength: 1
+                        type: string
+                      kind:
+                        description: Kind of the data artifact resource.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name of the data artifact object.
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: UID of the data artifact object.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: Source filesystem type for Filesystem volumes.
+                    type: string
+                  size:
+                    description: Allocated size of the captured volume as a Kubernetes
+                      quantity.
+                    type: string
+                  sourceRef:
+                    description: Reference to the captured PersistentVolumeClaim that
+                      owns this node’s volume data.
+                    properties:
+                      apiVersion:
+                        description: API version of the referenced resource.
+                        type: string
+                      kind:
+                        description: Kind of the referenced resource.
+                        type: string
+                      name:
+                        description: Name of the referenced object.
+                        type: string
+                      namespace:
+                        description: Namespace of the referenced object.
+                        type: string
+                      uid:
+                        description: UID of the referenced object.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: Source StorageClass name.
+                    type: string
+                  volumeMode:
+                    description: Source volume mode.
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifactRef
+                - sourceRef
+                type: object
+                x-kubernetes-validations:
+                - message: 'SnapshotContent status.data.artifactRef identity (apiVersion,
+                    kind, name) is set-once: a published data artifact cannot be replaced'
+                  rule: self.artifactRef.apiVersion == oldSelf.artifactRef.apiVersion
+                    && self.artifactRef.kind == oldSelf.artifactRef.kind && self.artifactRef.name
+                    == oldSelf.artifactRef.name
+                - message: 'SnapshotContent status.data.artifactRef.uid is set-once:
+                    it may be filled in after the first publish, but not changed or
+                    removed'
+                  rule: '!has(oldSelf.artifactRef.uid) || (has(self.artifactRef.uid)
+                    && self.artifactRef.uid == oldSelf.artifactRef.uid)'
+                - message: 'SnapshotContent status.data.sourceRef identity (apiVersion,
+                    kind, name) is set-once: the captured source of a published data
+                    binding cannot be replaced'
+                  rule: self.sourceRef.apiVersion == oldSelf.sourceRef.apiVersion
+                    && self.sourceRef.kind == oldSelf.sourceRef.kind && self.sourceRef.name
+                    == oldSelf.sourceRef.name
+                - message: 'SnapshotContent status.data.sourceRef.namespace is part
+                    of the set-once identity of a published data binding: it may not
+                    be changed or removed'
+                  rule: '!has(oldSelf.sourceRef.__namespace__) || (has(self.sourceRef.__namespace__)
+                    && self.sourceRef.__namespace__ == oldSelf.sourceRef.__namespace__)'
+                - message: 'SnapshotContent status.data.sourceRef.uid is set-once:
+                    it may be filled in after the first publish, but not changed or
+                    removed'
+                  rule: '!has(oldSelf.sourceRef.uid) || (has(self.sourceRef.uid) &&
+                    self.sourceRef.uid == oldSelf.sourceRef.uid)'
+              excludedRefs:
+                description: Source objects excluded from this content subtree.
+                items:
+                  description: Reference to a source object excluded from the snapshot.
+                  properties:
+                    apiVersion:
+                      description: API version of the excluded source resource.
+                      type: string
+                    kind:
+                      description: Kind of the excluded source resource.
+                      type: string
+                    name:
+                      description: Name of the excluded source object.
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              manifestCheckpointName:
+                description: Name of the ManifestCheckpoint that stores this node’s
+                  captured manifests.
+                maxLength: 253
+                type: string
+                x-kubernetes-validations:
+                - message: 'SnapshotContent status.manifestCheckpointName is set-once:
+                    the published ManifestCheckpoint name cannot be replaced'
+                  rule: self == oldSelf
+              subtreeManifestsPersisted:
+                description: Shows whether manifests for this node and all declared
+                  child subtrees have been stored.
+                type: boolean
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: SnapshotContent spec.snapshotRef is immutable until the bound Snapshot
+            is deleted (recycle-bin restore)
+          rule: self.spec.snapshotRef == oldSelf.spec.snapshotRef || (has(self.status)
+            && has(self.status.boundSnapshotDeleted) && self.status.boundSnapshotDeleted)
+        - message: SnapshotContent spec.deletionPolicy is immutable
+          rule: has(self.spec.deletionPolicy) == has(oldSelf.spec.deletionPolicy)
+            && (!has(self.spec.deletionPolicy) || self.spec.deletionPolicy == oldSelf.spec.deletionPolicy)
+        - message: 'SnapshotContent status.manifestCheckpointName is set-once: a published
+            ManifestCheckpoint name cannot be removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.manifestCheckpointName)
+            || (has(self.status) && has(self.status.manifestCheckpointName))'
+        - message: 'SnapshotContent status.data is set-once: a published data binding
+            cannot be removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.data) || (has(self.status)
+            && has(self.status.data))'
+        - message: 'SnapshotContent status.childrenSnapshotContentRefs is frozen once
+            set: a published child set cannot be removed'
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.childrenSnapshotContentRefs)
+            || (has(self.status) && has(self.status.childrenSnapshotContentRefs))'
+    served: true
+    storage: true
+    subresources:
+      status: {}

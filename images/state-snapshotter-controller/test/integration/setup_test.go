@@ -235,7 +235,8 @@ var _ = BeforeSuite(func() {
 		GinkgoWriter.Printf("Warning: CRDs path not verified, using: %s\n", crdsPath)
 	}
 
-	crdPaths := []string{crdsPath}
+	// Internal kinds live in crds/internal so the docs-builder does not publish them.
+	crdPaths := []string{crdsPath, filepath.Join(crdsPath, "internal")}
 	if foundationCRDs, foundationSource, ok := integrationResolveFoundationCRDDir(crdsPath); ok {
 		crdPaths = append(crdPaths, foundationCRDs)
 		GinkgoWriter.Printf("integration: storage-foundation CRDs from %s (%s)\n", foundationCRDs, foundationSource)

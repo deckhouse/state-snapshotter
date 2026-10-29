@@ -1,200 +1,421 @@
 ---
 title: "Working with Snapshots"
-description: "How the Snapshot resource works: what it captures, its lifecycle, how to create one, track it, read the captured state, and restore it."
-d8Edition: ee
+description: "How to create, inspect, download, upload, and restore namespace snapshots with Snapshot and d8."
 weight: 20
 ---
 
-## What is a Snapshot?
+The `state-snapshotter` module lets you create snapshots of namespace state and use the saved state for subsequent
+reading or restoration.
 
-A `Snapshot` (`state-snapshotter.deckhouse.io/v1alpha1`, short name `snap`) is a namespaced, **point-in-time capture of a namespace's desired state**. You create a `Snapshot` in a namespace, and the module captures the manifests of the user-owned objects in that namespace into an immutable, durably stored artifact that you can read back later or restore into another namespace.
+## Snapshot overview
 
-A `Snapshot` is **one-shot and immutable**: the spec is frozen on creation, the namespace is captured exactly once, and there is no re-capture. To take a new snapshot, create a new `Snapshot`.
+A snapshot is created after a [Snapshot](cr.html#snapshot-v1alpha1-spec) object appears in the cluster. A snapshot
+records the desired state of a namespace at a specific point in time. The module captures manifests of user objects and
+stores them in an immutable form for later reading or restoration. The namespace state is captured once. To create a new
+snapshot, create a new Snapshot object.
 
-| Property | Value |
-|----------|-------|
-| API group / version | `state-snapshotter.deckhouse.io/v1alpha1` |
-| Kind | `Snapshot` (short name `snap`) |
-| Scope | Namespaced (captures its own namespace) |
-| Spec | Immutable after creation |
+## Snapshot operation
 
-## How it works
+When a snapshot is created, the module:
 
-When you create a `Snapshot`, the controller:
+1. **Discovers** all namespaced resources in the cluster through the Kubernetes discovery API instead of using a fixed
+   list. This also allows arbitrary custom resources to be captured.
+1. **Plans the capture** of namespace objects. It creates child snapshots for objects whose snapshots are managed by
+   other modules. It selects the remaining objects according to the rules in [What gets captured](#what-gets-captured).
+1. **Captures and stores** manifests and, where supported, volume data. Retention of snapshot data after a Snapshot is
+   deleted is described in [Lifecycle and retention](#lifecycle-and-retention).
+1. **Publishes the readiness status** of the snapshot. Status checks are described in
+   [Tracking status](#tracking-status).
 
-1. **Discovers** every namespaced resource type in the cluster via the Kubernetes discovery API (not a hardcoded list), so even arbitrary custom resources are captured.
-2. **Lists** the objects of each type in the snapshot's namespace and **selects** the ones that represent user desired-state (see [What gets captured](#what-gets-captured)).
-3. **Stores** the selected manifests in a durable, cluster-scoped artifact (`SnapshotContent` + an internal `ManifestCheckpoint`, chunked for large payloads).
-4. **Publishes status**: when the capture is complete and stored, the `Snapshot` becomes `Ready=True` and `status.boundSnapshotContentName` points at the stored content.
-5. **Retains** the stored content after the `Snapshot` is deleted for a configurable TTL, so a captured state survives the deletion of the request object.
+If any resource kind cannot be read, the module does not create a partial snapshot. The Snapshot does not reach
+`Ready=True`, and capture is retried until the resource becomes readable. This happens if RBAC permissions have not
+been applied yet or an aggregated API is unavailable.
 
-The capture is **fail-closed**: if some resource type cannot be listed (e.g. RBAC not yet propagated, or a broken aggregated API), the controller does not produce a partial snapshot — the `Snapshot` simply never reaches `Ready=True`, and the capture is retried until the type becomes readable. The diagnosis is published in two places: `status.captureState.domainSpecificController.message` names the resource types that could not be read, and a `Warning` event with reason `NamespacePlanUnreadable` is emitted on the `Snapshot`.
+The module records the cause in
+[`status.captureState.domainSpecificController.message`](cr.html#snapshot-v1alpha1-status-capturestate-domainspecificcontroller-message)
+and in a `Warning` event with reason `NamespacePlanUnreadable`.
+
+### Snapshots managed by other modules
+
+For some Kubernetes objects, a manifest alone is not sufficient to restore their state. The module managing those
+objects can define its own snapshot kind and its contents. To do this, the module registers a mapping from the source
+object kind to the snapshot kind using
+[CustomSnapshotDefinition](cr.html#customsnapshotdefinition-v1alpha1-spec). `state-snapshotter` uses the definition only
+when the `Accepted=True` and `AccessGranted=True` conditions are set for its current generation.
+
+For example, the [`virtualization`](/modules/virtualization/) module can register VirtualMachineSnapshot as the snapshot kind for VirtualMachine
+objects. During planning, `state-snapshotter` creates a child VirtualMachineSnapshot for each virtual machine (VM). The
+`virtualization` module then determines the contents of that snapshot. This may include the VirtualMachine manifest,
+manifests and data of attached VirtualDisks, manifests of Secrets with cloud-init settings, and manifests of other
+related objects, such as disk attachment or IP address assignment objects. The exact contents depend on the
+`virtualization` module's implementation.
+
+If no CustomSnapshotDefinition for an object kind meets the conditions above, `state-snapshotter` does not create a
+child snapshot for objects of that kind. The regular namespace capture can save the object's manifest, and related
+objects are captured by the general rules: through their own child snapshots, if their kinds have such
+definitions, or as namespace manifests and PVC volume snapshots. A saved VirtualMachine manifest therefore does not
+guarantee that the full state of the VM is saved.
+
+If an object is already covered by a child snapshot, such as a disk included in a VirtualMachineSnapshot, no separate
+child snapshot is created for it. The root Snapshot saves namespace manifests not already captured by child snapshots.
+Object selection also considers the exclusion label. For details, see
+[Excluding objects from a snapshot](#excluding-objects-from-a-snapshot).
 
 ## What gets captured
 
-The model is **default-include**: every namespaced object in the target namespace is captured **unless** a provable exclusion signal applies. There is no "capture only these" allowlist.
+Objects of the target namespace are captured unless they are excluded by built-in rules or explicitly. Objects with
+their own snapshot logic are captured through child snapshots of the corresponding modules. How to exclude an object is
+described in [Excluding objects from a snapshot](#excluding-objects-from-a-snapshot). There is no separate include list
+of objects.
+
+The tables below describe automatic selection of namespace manifests. Each module determines the contents of its child
+snapshots, so these tables do not cover all of their capture rules.
 
 **Captured (examples):**
 
-- User config and data objects: `ConfigMap`, `Secret` (any type except service-account tokens), `Service`, `PersistentVolumeClaim`, `ServiceAccount` (except `default`), standalone `Pod` (without a controller owner).
-- Top-level workloads you create: `Deployment`, `StatefulSet`, `DaemonSet`, `Job`, `CronJob`, etc. Their derived objects (`ReplicaSet`/`Pod`) are excluded because the owner recreates them on restore.
-- Any **custom resources** in the namespace, including aggregated APIs backed by real storage.
-- Networking and RBAC: `Ingress`, `NetworkPolicy`, `Role`, `RoleBinding`, etc.
+| Category | Examples |
+|----------|----------|
+| Configuration and data objects | ConfigMap, Secret, Service, PersistentVolumeClaim (PVC), ServiceAccount, standalone Pod |
+| Top-level workloads | Deployment, StatefulSet, DaemonSet, Job, CronJob |
+| Custom resources | Namespaced custom resources |
+| Networking and RBAC | Ingress, NetworkPolicy, Role, RoleBinding |
+
+A standalone Pod is captured only if it has no controller owner. To save manifests, the module selects resource kinds
+that support the `get`, `list`, and `watch` operations. Resources of aggregated APIs with persistent storage can also be
+captured if they meet this condition. Secrets of type `kubernetes.io/service-account-token` and `ServiceAccount/default`
+are not captured.
 
 **Not captured:**
 
-| Category | Examples | Why |
-|----------|----------|-----|
-| Controller-owned derivatives | objects with `ownerReference.controller: true` (`ReplicaSet`/`Pod` of a `Deployment`) | the owner recreates them on restore |
-| Control-plane noise | `Event`, `Endpoints`, `Lease`, `CiliumEndpoint`, `ConfigMap/kube-root-ca.crt`, `ServiceAccount/default`, service-account-token `Secret` | regenerated by the control plane / CNI, not user desired-state |
-| Virtual / computed | `metrics.k8s.io` (`PodMetrics`/`NodeMetrics`), `custom`/`external.metrics.k8s.io` | not stored (no `watch` verb), cannot be restored |
-| Snapshot machinery | CSI `VolumeSnapshot`, snapshot/content kinds created by the module itself | self-referential |
-| Module machinery | the `state-snapshotter.deckhouse.io` group; the `storage-foundation.deckhouse.io` request/transfer kinds (`VolumeCaptureRequest`, `VolumeRestoreRequest`, `DataExport`, `DataImport`) | internal execution objects |
-| Backup operations | `Backup`, `BackupPlan`, `BackupRestore` of the `backup` module (`storage.deckhouse.io`) | restored, they would run again against the restored namespace |
+| Category | Examples | Reason for exclusion |
+|----------|----------|----------------------|
+| Controller-managed objects | Objects with `ownerReference.controller: true` | Recreated by the controller on restore |
+| Kubernetes and CNI system objects | Event, Endpoints, Lease, CiliumEndpoint, `ConfigMap/kube-root-ca.crt` | Regenerated by the control plane or CNI, not part of user desired state |
+| Computed objects | PodMetrics, NodeMetrics, and metrics API objects without `watch` | Not stored and cannot be restored |
+| Snapshot machinery | CSI VolumeSnapshot and objects of registered snapshot kinds, regardless of who created them | Excluded to avoid capturing the snapshot machinery itself |
+| Objects managed by Deckhouse Platform | Objects with the `heritage: deckhouse` or `heritage: multitenancy-manager` label | Created and restored by Deckhouse Platform modules |
+| Module machinery | The `state-snapshotter.deckhouse.io` group and the request and transfer kinds of the `storage-foundation.deckhouse.io` group | Used for internal operations |
+| Backup operations | Backup, BackupPlan, and BackupRestore of the `backup` module (`storage.deckhouse.io` group) | Restored, they would run again against the restored namespace |
 
-> There is no special "exclude objects managed by Deckhouse" rule. Deckhouse-managed objects are filtered out by the same generic signals (controller-owned, control-plane noise, or module machinery). Everything else in the namespace — including resources you merely *configured* on top of modules — is treated as desired-state and captured.
+Controller-managed objects include, for example, ReplicaSets created by Deployments and Pods created by those
+ReplicaSets. Computed objects without `watch` support include resources from the `metrics.k8s.io`,
+`custom.metrics.k8s.io`, and `external.metrics.k8s.io` APIs. The `storage-foundation.deckhouse.io` request and
+transfer kinds are VolumeCaptureRequest, VolumeRestoreRequest, DataExport, and DataImport.
 
-## Excluding objects from a snapshot
+Objects with the `heritage: deckhouse` or `heritage: multitenancy-manager` label are not captured: they are created by
+Deckhouse Platform modules. All other objects in the namespace, including objects configured on top of modules, are
+treated as desired state and captured.
 
-A `Snapshot` captures its whole namespace. To keep an object out of the capture, label it with `state-snapshotter.deckhouse.io/exclude` **before** creating the `Snapshot` — a capture is one-shot, so labeling an object later does not change an existing snapshot:
+### Excluding objects from a snapshot
+
+A snapshot covers the entire namespace state. To keep an object out of the snapshot, add the
+`state-snapshotter.deckhouse.io/exclude` label **before** creating the snapshot. A capture is one-shot, so adding the
+label later does not change an existing snapshot:
 
 ```shell
 d8 k -n myns label configmap scratch-cache state-snapshotter.deckhouse.io/exclude=""
 ```
 
-The label's **presence** is what excludes the object; the value is ignored (`""`, `true` — anything works).
+{{< alert level="info" >}}
+The label's value is ignored: the object is excluded whatever the value is, including `false`. To include the object in
+snapshots again, remove the label.
+{{< /alert >}}
 
-The exclusion works at every level of the snapshot tree:
+The exclusion label is considered at several levels of the snapshot tree, but different components are responsible for
+excluding objects:
 
-- **A plain namespaced object** (`ConfigMap`, `Secret`, ...) is dropped from the captured namespace manifests.
-- **A domain resource** (for example a `VirtualMachine`) is not expanded into a child snapshot at all — its whole subtree is skipped.
-- **An object inside a domain subtree** (for example one `VirtualDisk` of a captured VM, or a companion `Secret`) is dropped alone; the owning node is still captured.
-- **A `PersistentVolumeClaim`** is not captured by the volume-data leg, and a user-created CSI `VolumeSnapshot` over an excluded PVC is left as a plain CSI snapshot — the module does not adopt it.
+- **A regular object**, such as a ConfigMap or a Secret, is excluded from the captured namespace manifests.
+- **An object with its own snapshot kind**, such as a VirtualMachine, is excluded during planning. If a
+  VirtualMachine object carries the label, its VirtualMachineSnapshot is not created.
+- **Exclusion of an object inside a child snapshot**, such as a VirtualDisk or a VM's Secret, is handled by the module
+  forming that snapshot.
+- **PVCs not covered by child snapshots of other modules** are captured neither as manifests nor as volume data if they
+  carry the exclusion label. A user-created CSI VolumeSnapshot for such a PVC remains an ordinary CSI snapshot; the
+  module does not adopt it.
 
-The exclusion is **not inherited**: excluding a domain resource removes its snapshot subtree, but objects the other capture legs see on their own — its `PersistentVolumeClaim`s, companion objects — keep being captured unless they carry the label themselves.
+`state-snapshotter` itself enforces exclusion for top-level objects with their own snapshot kind, namespace manifests,
+and PVCs not covered by child snapshots of other modules.
 
-An excluded object is **recorded, not silently dropped**: the excluding snapshot node lists it in `status.captureState.domainSpecificController.excludedRefs` (exact `apiVersion`/`kind`/`name`), and the bound `SnapshotContent` aggregates the whole tree's exclusions in `status.excludedRefs`. Check there to confirm the exclusion took effect.
+**The exclusion is not inherited.** If a VirtualMachine carries the exclusion label, `state-snapshotter` does not create
+a VirtualMachineSnapshot for it. Related VirtualDisks, PVCs, Secrets, and other objects are not excluded automatically.
+They can still be captured through their own child snapshots or as namespace manifests and PVC volume snapshots. To
+exclude them, add the label to each of them.
 
-> Like the built-in exclusions above, the label can only **narrow** the capture. There is no per-snapshot include list: a capture is always "the namespace minus exclusions". To capture different subsets, use separate namespaces.
+**Some exclusions are recorded in the snapshot status.** Excluded objects with their own snapshot kind, such as
+VirtualMachine, and objects excluded by modules inside their child snapshots are listed in the root Snapshot's
+[`status.excludedRefs`](cr.html#snapshot-v1alpha1-status-excludedrefs). Not all exclusions appear in this field: for
+example, a ConfigMap excluded during namespace manifest selection is not listed. The absence of an entry does not mean
+the label was ignored.
 
-## Creating a Snapshot
+**Like the built-in exclusions, the label can only exclude objects from the capture.** There is no separate mechanism
+for including objects in a snapshot: a snapshot contains the objects of the namespace except the excluded ones. To get
+snapshots with different sets of objects, use different namespaces.
 
-Create a `Snapshot` in the namespace you want to capture. The default mode (`spec.mode: Capture`) performs dynamic namespace capture:
+## Required permissions
+
+Starting with Deckhouse Platform 1.78, namespace roles provide the following permissions:
+
+| Role | Snapshot operations |
+|---|---|
+| `viewer` | View snapshots and their status |
+| `manager` | Create snapshots and download manifests, but not transfer volume data |
+| `admin` | Upload and restore snapshots and transfer volume data. Required for full snapshot download and upload with `d8` |
+
+Volume data is transferred through the [`storage-foundation`](/modules/storage-foundation/) module, so downloading or uploading a snapshot that contains
+volumes also requires its `transfer_volume_data` capability (a named set of module permissions granted by a separate
+ClusterRole). The `manager` role does not include it. Starting with
+Deckhouse Platform 1.78, the capability is included in the namespace `admin` role. To grant it without the `admin` role,
+bind the `d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole in the namespace. In Deckhouse
+Platform 1.76.9 through 1.77, the capability is not included in namespace user roles: bind the
+`d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole in the namespace.
+
+The `d8 snapshot restore` command needs the following permissions:
+
+- To apply application objects: `patch` on existing objects and `create` on objects to be created of the corresponding
+  kinds. The command creates objects other than PVCs through Server-Side Apply and creates missing PVCs separately. The
+  `update` permission alone is insufficient.
+- For restore checks: `get` on PVCs, child volume snapshots, and PersistentVolumes.
+- For the `--wait` flag: `get` on StorageClasses, `list` on StorageClasses to find the default one, and `list` on Pods
+  and Events when checking volumes with the `WaitForFirstConsumer` mode.
+
+Grant these permissions in the target namespace or at cluster scope depending on the object kind.
+
+## Creating a snapshot
+
+Create a Snapshot in the namespace whose state you want to capture:
+
+```shell
+d8 snapshot create my-namespace-snapshot -n my-app --wait
+```
+
+With the `--wait` flag, the command waits until the Snapshot reaches the `Ready` state. Without it, the command returns
+right after the object is created, and you can track readiness as described in [Tracking status](#tracking-status).
+
+The command creates a Snapshot equivalent to the following one. The same object can be created with `d8 k apply`:
 
 ```yaml
-d8 k apply -f - <<EOF
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: Snapshot
 metadata:
   name: my-namespace-snapshot
   namespace: my-app
 spec: {}
-EOF
 ```
 
-> The spec is immutable. `spec: {}` selects dynamic capture of the `my-app` namespace. Do not add a target-namespace field — a `Snapshot` always captures its own namespace.
+The Snapshot spec is immutable. An empty `spec: {}` starts dynamic capture of the state of the namespace where the
+Snapshot is created. In the example, this is `my-app`. The default mode is
+[`spec.mode`](cr.html#snapshot-v1alpha1-spec-mode) `Capture`. There is no need to specify the target namespace
+separately.
+
+{{< alert level="warning" >}}
+Do not use the `-l`/`--selector` flag of `d8 snapshot create`: a Snapshot always captures the whole namespace, and the
+API server rejects a Snapshot with a resource selector. To keep objects out of a snapshot, label them as described in
+[Excluding objects from a snapshot](#excluding-objects-from-a-snapshot).
+{{< /alert >}}
+
+## Snapshot modes
+
+The source of a Snapshot's content is set by the `spec.mode` field. It is immutable, like the rest of the spec:
+
+| Mode | `spec` | Behavior |
+|------|--------|----------|
+| `Capture` (default) | `spec: {}`, or `spec.mode: Capture` explicitly | The module captures the current state of the namespace |
+| `Import` | `spec.mode: Import` | The Snapshot gets its content from a previously downloaded snapshot. The objects of the namespace are not captured |
+
+You do not need to create a Snapshot in `Import` mode yourself: `d8 snapshot upload` creates it, as described in
+[Moving a snapshot to another namespace or cluster](#moving-a-snapshot-to-another-namespace-or-cluster).
 
 ## Tracking status
 
-```bash
+Use the following command to view snapshots in the target namespace:
+
+```shell
 d8 k -n my-app get snap
 ```
 
-```console
+Example output:
+
+```console {.nowrap-default}
 NAME                    READY   REASON      CONTENT                        AGE
 my-namespace-snapshot   True    Completed   nss-content-1f4b0c9d2a3e5f76   30s
 ```
 
-Inspect conditions for details:
+To inspect a particular snapshot and its tree, use:
 
-```bash
+```shell
+d8 snapshot describe my-namespace-snapshot -n my-app
+```
+
+Detailed information about the captured state is available in
+[`status.conditions`](cr.html#snapshot-v1alpha1-status-conditions):
+
+```shell
 d8 k -n my-app get snap my-namespace-snapshot -o jsonpath='{.status.conditions}' | jq
 ```
 
-Key status fields:
+A snapshot is ready when the `Ready` condition is `True` with reason `Completed`. Only this combination means that the
+capture is finished and its result is stored. While the
+[`status.boundSnapshotContentName`](cr.html#snapshot-v1alpha1-status-boundsnapshotcontentname) field is empty, the
+snapshot cannot yet be downloaded.
 
-- `status.conditions[type=Ready]` — overall readiness. `Ready=True` means the capture is complete and stored.
-- `status.boundSnapshotContentName` — the durable, cluster-scoped content holding the captured state.
-- `status.childrenSnapshotRefs` — child snapshots when domain controllers contribute a snapshot tree (e.g. virtual machines/disks).
+When the `Ready` condition is `False`, act according to its reason:
 
-## Reading the captured state
+| Reason | What it means | What to do |
+|---|---|---|
+| `ArtifactMissing`, `ChildSnapshotLost`, `ChildrenFailed`, `CreateChildFailed`, `DomainCaptureFailed`, `DuplicateCoveredPVCUID`, `GraphPlanningFailed`, `ListFailed`, `ManifestCheckpointFailed`, `NamespaceNotFound`, `VolumeCaptureFailed` | The capture failed and will not be retried. The snapshot will not become ready | Read the condition message, eliminate the cause, delete the Snapshot and create a new one |
+| `ChildSnapshotDeleted` | The object of a tree node was deleted. The stored data is kept, but the snapshot is degraded and does not recover by itself | Create a new snapshot if you need a complete one. To avoid this state, do not delete tree nodes directly, see [Delete protection](#delete-protection) |
+| Any other reason | The capture is in progress | Wait. If the status does not change for a long time, check the condition message and the events of the Snapshot |
 
-Captured manifests are read through a controlled aggregated subresource (raw payloads in internal chunks are never exposed directly):
+While a capture is waiting for a resource kind that cannot be read, for example because RBAC permissions have not been
+applied yet, the cause is reported in
+[`status.captureState.domainSpecificController.message`](cr.html#snapshot-v1alpha1-status-capturestate-domainspecificcontroller-message)
+and in a `Warning` event with reason `NamespacePlanUnreadable`. The detailed meaning of each reason is given in
+[Checking the snapshot state](backup_integration.html#checking-the-snapshot-state).
 
-```bash
-d8 k get --raw \
-  "/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/my-app/snapshots/my-namespace-snapshot/manifests-download" \
-  | jq 'length'
+## Restoring a snapshot
+
+The `d8 snapshot restore` command applies captured application objects in the namespace that contains a ready Snapshot.
+First check that the restored manifests can be applied without saving any changes:
+
+```shell
+d8 snapshot restore my-namespace-snapshot -n my-app --dry-run
 ```
 
-`manifests-download` returns the manifests of **that node only** — it does not walk the snapshot tree — and returns them **as they were captured**, including `status` and other runtime fields. Read the rest of the tree one request per node: `status.childrenSnapshotRefs` names the direct children of the node you just read, each child is read the same way through the aggregated group of its own kind, and its own `status.childrenSnapshotRefs` continues the walk.
+With the `--dry-run` flag, the Kubernetes API server checks the manifests with validation and admission checks but does
+not save them. The command does not show the differences between the current and the restored objects. Before restoring
+without `--dry-run`, review the restored manifests and the existing objects separately. Then restore the application
+objects:
 
-The group **and the version** to address a child with follow that child's own kind, not the group you used for its parent. A child of kind CSI `VolumeSnapshot` — the node a plain PVC's data is captured into — has its node endpoints served by the module that owns that kind: group `subresources.storage-foundation.deckhouse.io`, version `v1`, resource `volumesnapshots` (`{name}` below is the child's name, taken from the parent's `status.childrenSnapshotRefs`):
-
-```bash
-d8 k get --raw \
-  "/apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/my-app/volumesnapshots/{name}/manifests-download" \
-  | jq 'length'
+```shell
+d8 snapshot restore my-namespace-snapshot -n my-app --wait
 ```
 
-The endpoint names are the same in both groups, so the group, the version and the resource are the only things that change between a `Snapshot` node and a volume node. Mind the version — the `Snapshot` node group is `v1alpha1` and the volume-node group is `v1`; addressing one with the other's version does not fall back to anything, it is simply a path the API server does not serve. A node contributed by a domain module instead — a virtual machine and its disks, say — is served by that module's own endpoint group, which is not the volume node's and cannot be derived from it. The whole table of groups, versions and endpoints is in [Backup integration](BACKUP_INTEGRATION.md).
+The command prepares the captured manifests and applies them without their original service metadata.
+Restored PVCs refer to the corresponding volume snapshots through `PersistentVolumeClaim.spec.dataSourceRef`.
+The storage driver creates volumes with data from those snapshots.
+With the `--wait` flag, the command waits for the corresponding PVCs to become `Bound`. The command does not check that
+the application is ready.
 
-## Restoring
+Restoration cannot target a different namespace directly. To restore in another namespace or cluster, follow
+[Moving a snapshot to another namespace or cluster](#moving-a-snapshot-to-another-namespace-or-cluster).
+Do not create internal module objects such as VolumeRestoreRequest manually.
 
-A captured namespace is restored through the module's controlled read path — you do **not** create internal request objects (such as `VolumeRestoreRequest`) by hand; those are module machinery and are not exposed to users.
+External clients can retrieve prepared manifests without applying them through the endpoint described in
+[Reading a snapshot for restoration](backup_integration.html#reading-a-snapshot-for-restoration).
+The endpoint only returns the objects, while `d8 snapshot restore` also applies them.
 
-- **Manifests** — read the captured objects node by node via the `manifests-download` endpoint above and apply them into the target namespace.
-- **State with data** — to restore objects together with their persistent data, read the snapshot through the data-restoration path `/apis/subresources.state-snapshotter.deckhouse.io/v1alpha1/namespaces/{namespace}/snapshots/{name}/manifests-with-data-restoration` (`GET`). Unlike `manifests-download`, it is **recursive** — the addressed node and its children come back in one response — and the manifests are cleaned up for applying: runtime metadata (`uid`, `resourceVersion`, `ownerReferences`, `managedFields`, ...) and `status` are stripped, and the objects are addressed into the namespace of the snapshot you asked for.
+## Moving a snapshot to another namespace or cluster
 
-  The recursion crosses the module boundary for you: a volume node inside the tree is compiled by the module that owns the `VolumeSnapshot` kind, and its objects come back in the same response — you address this endpoint once, on the `Snapshot` node, and never assemble the tree yourself. It is **fail-closed**: if any node of the addressed subtree is not ready, the request fails instead of answering with a partial namespace.
+A snapshot is moved through a directory on the machine where `d8` runs: you download the snapshot from the source
+namespace, upload it into the target namespace, and restore it there. The downloaded directory can also be kept as a
+copy outside the cluster: in that case, perform steps 1 and 2 now and the remaining steps when you need to restore.
 
-  There is no parameter for choosing where the objects land: they always come back addressed into the namespace of the `Snapshot` you asked for, and a request that tries to address them into any other namespace is refused with `400` rather than quietly answered in the snapshot's own. To restore a namespace's contents somewhere else, move the snapshot there first — download it and load it into the destination — and then read it there. A claim holding data could not be moved by re-addressing anyway: it reaches its data through `PersistentVolumeClaim.spec.dataSourceRef`, which carries no namespace and so is read inside the claim's own, while the `VolumeSnapshot` it names stays with the snapshot.
+To move a snapshot, follow these steps:
 
-  The body is a **plain JSON array of objects** — not a `List` object and not a YAML stream — so a client iterates the array and applies the elements itself instead of piping the body into `apply -f -`. The module materializes the data into that namespace internally; you consume the result through the aggregated API, not by creating data-transfer objects yourself.
+1. Download a ready snapshot:
 
-## Snapshot modes
+   ```shell
+   d8 snapshot download my-namespace-snapshot -n my-app -o ./my-snapshot
+   ```
 
-How a `Snapshot` obtains its content is selected by `spec.mode`, immutable like the rest of the spec:
+   The command downloads the whole snapshot tree, including captured manifests and volume data, rather than only the
+   root node's objects. When run outside the cluster, the command chooses the way to access the volume exporter itself.
+   The published endpoint requires token-based authentication.
 
-| Mode | `spec` | Behavior |
-|------|--------|----------|
-| `Capture` (default) | `spec: {}`, or `spec.mode: Capture` explicitly | The controller captures the live namespace. |
-| `Import` | `spec.mode: Import` | The Snapshot is materialized from an uploaded payload instead of the live namespace — used by cross-cluster migration / restore tooling. The live namespace is never captured. |
+1. Check the downloaded directory without connecting to the cluster:
 
-> Spell the field name exactly. The API server **prunes unknown fields before validation**, so a misspelled or obsolete field is not rejected: the object is accepted, the field is dropped, and the snapshot silently falls back to `Capture` — a live namespace capture where an import was intended. Read the mode back from the created object to confirm what was stored:
->
-> ```bash
-> d8 k -n my-app get snap my-namespace-snapshot -o jsonpath='{.spec.mode}'
-> ```
+   ```shell
+   d8 snapshot local describe ./my-snapshot
+   ```
+
+   What this check covers and what it does not is described in
+   [Checking an archive before uploading](snapshot_archives.html#checking-an-archive-before-uploading).
+
+1. Upload the directory into the target namespace. For another cluster, use a context configured for it:
+
+   ```shell
+   d8 snapshot upload -n my-app-restored -i ./my-snapshot
+   ```
+
+   The target namespace must exist. Use a namespace without conflicting application objects. The `-i` flag accepts a
+   directory, not a ZIP file. The command creates a Snapshot in `Import` mode and recreates its tree, including volume
+   snapshots and volume data. The command does not capture the state of the target namespace and does not apply the
+   application manifests.
+
+1. Check that the uploaded Snapshot is ready as described in [Tracking status](#tracking-status):
+
+   ```shell
+   d8 snapshot describe my-namespace-snapshot -n my-app-restored
+   ```
+
+1. Restore the application objects in the target namespace as described in [Restoring a snapshot](#restoring-a-snapshot):
+
+   ```shell
+   d8 snapshot restore my-namespace-snapshot -n my-app-restored --dry-run
+   d8 snapshot restore my-namespace-snapshot -n my-app-restored --wait
+   ```
+
+The archive structure and compatibility requirements are described in
+[Working with snapshot archives](snapshot_archives.html). For developers of their own backup systems, the node API
+contract and the volume size rules are described in [Backup integration](backup_integration.html).
 
 ## Lifecycle and retention
 
-- **One-shot / immutable.** The spec is frozen at creation; `metadata.generation` never advances; there is no re-capture.
-- **Retention after deletion.** The stored `SnapshotContent` is retained for a TTL (configured on the controller) after the `Snapshot` object is deleted, anchored by an `ObjectKeeper`. This lets a captured state outlive the request object. After the TTL expires, the content and its checkpoints are garbage-collected.
-- **No background load.** The module only does work in response to explicit requests; it runs no continuous background capture.
+Snapshot lifecycle is defined by immutability and retention of stored content after the Snapshot object is deleted:
 
-## Delete protection
+- **One-shot / immutable.** The spec is frozen at creation. `metadata.generation` never advances, and there is no
+  re-capture.
+- **Retention after deletion.** After the Snapshot is deleted, its stored data is kept for the period set in the
+  [`snapshotTtlAfterDelete`](configuration.html#parameters-snapshotttlafterdelete) module parameter (30 days by
+  default) and then removed.
+- **No background load.** The module captures only in response to explicit requests. It runs no continuous background
+  capture; the only scheduled work is removing data whose retention period has expired.
 
-The internal objects that make up a snapshot tree are protected from accidental direct deletion by an
-admission delete-guard. This closes an incident class where deleting a child object (e.g. a managed CSI
-`VolumeSnapshot`) from a UI silently degrades the root `Snapshot` while the durable data still exists.
+### Deleting a snapshot
 
-- **What is protected.** The namespaced nodes inside a tree: child `Snapshot`s and the managed CSI
-  `VolumeSnapshot`. They carry the marker `state-snapshotter.deckhouse.io/delete-protected: "true"`.
-- **What is NOT protected.** The **root `Snapshot`** is not marked — deleting it is the normal way to tear
-  down the whole tree (the controllers then remove the internal objects for you). The cluster-scoped
-  objects of a tree (`SnapshotContent`, `ManifestCheckpoint` and its chunks, `ObjectKeeper`, the managed CSI
-  `VolumeSnapshotContent`) are not marked either: they are not reachable from a namespace, and damage there
-  surfaces as a degraded tree rather than being blocked by admission. Objects that are not part of a snapshot
-  tree are never affected.
-- **Force-delete (break-glass).** To delete a protected object directly, set the annotation
-  `deckhouse.io/allow-delete: "true"` on it, then delete. The marker itself cannot be removed or changed by
-  regular users; the annotation is the only supported override and is reversible until the delete happens.
-- **Always enforced.** There is no module setting that disables or weakens the guard. Use the break-glass
-  annotation above for an exceptional direct deletion.
+Delete the root Snapshot to delete the whole snapshot tree:
+
+```shell
+d8 snapshot delete my-namespace-snapshot -n my-app --wait
+```
+
+With the `--wait` flag, the command waits until the module deletes the Snapshot and its tree. The module deletes the
+child nodes of the tree together with the root Snapshot. The stored data is kept for the period set in the
+`snapshotTtlAfterDelete` parameter, as described above. Do not delete the child nodes directly: they are protected as
+described in [Delete protection](#delete-protection).
+
+### Delete protection
+
+The internal objects that make up a snapshot tree are protected from accidental direct deletion by an admission
+delete-guard. Without it, deleting a child object, such as a managed CSI VolumeSnapshot, in the Deckhouse web UI puts
+the root Snapshot into a degraded state. The stored data remains in place.
+
+The protection works as follows:
+
+- **What is protected.** Namespaced objects that represent tree nodes: child Snapshots and the managed CSI
+  VolumeSnapshot. They carry the `state-snapshotter.deckhouse.io/delete-protected: "true"` label.
+- **What is NOT protected.** The root Snapshot does not have this label: deleting the root Snapshot is the normal way
+  to delete the whole tree. The label is not set on the following cluster-scoped objects either:
+  - SnapshotContent
+  - ManifestCheckpoint and its chunks
+  - ObjectKeeper
+  - The managed CSI VolumeSnapshotContent
+
+  Deleting these objects directly is not blocked by the admission policy and can degrade the snapshot tree. Objects
+  outside a snapshot tree are not covered by this protection.
+- **Force-delete.** To delete a protected object directly, set the `deckhouse.io/allow-delete: "true"` annotation,
+  then delete the object. A regular user cannot remove or change the label itself. The annotation is the only supported
+  way to bypass the protection. The annotation can be removed as long as the object is not deleted.
+- **Always enabled.** There is no module parameter that disables or weakens the protection. Use the annotation above
+  for an exceptional direct deletion.
 
 ## Notes and limitations
 
-- A `Snapshot` captures **only namespaced** resources in its own namespace; the cluster-scoped `Namespace` object itself is not captured.
-- Manifests are captured **as-is** (including `status`); field-level sanitization (stripping `status`, `resourceVersion`, `uid`, etc.) happens on the restore read-path, not on capture.
-- `Secret` objects are captured **verbatim** (their data is stored as-is), except service-account-token secrets, which are excluded by the inclusion rule. At-rest encryption of the snapshot store is a separate, future concern.
+Keep the following limitations in mind when using snapshots:
+
+- A Snapshot captures objects only in its own namespace. The only cluster-scoped object included in the snapshot is
+  the corresponding Namespace object.
+- Manifests are stored as-is, including `status`. Service fields such as `status`, `resourceVersion` and `uid` are
+  removed only when manifests are read for restore.
+- Secret objects are stored as-is. The exception is service-account-token Secrets: they are not included in the
+  snapshot, according to the capture rules.
