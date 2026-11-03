@@ -1,0 +1,18 @@
+date: "2026-11-03"
+
+summary: "A standalone snapshot uploaded back into a cluster now completes its import, and the backup integration guide describes how to work with every snapshot kind and with any part of a snapshot tree."
+
+highlights:
+  - "Importing a standalone `VolumeSnapshot` (`spec.mode: Import` without a parent snapshot) now completes. Before, the import waited for a parent that never appeared."
+  - "An imported root snapshot of a kind that carries volume data, such as a disk snapshot, now gets `status.data`, so its volume can be downloaded again."
+  - "The backup integration guide now explains how to create and restore `VolumeSnapshot` and other snapshot kinds registered through `CustomSnapshotDefinition`, and how to upload any selected subtree of a snapshot."
+
+fixes:
+  - "Importing a standalone `VolumeSnapshot` now completes: its `SnapshotContent` is created and bound without a parent snapshot. Before, such an import never reached `Ready=True`."
+  - "An imported root snapshot of a kind whose `CustomSnapshotDefinition` has `requiresDataArtifact: true` now publishes `status.data` in the same way as a child node. Before, the field stayed empty on such a root, and its volume could not be downloaded."
+  - "The message that rejects `spec.resourceSelector` in `Snapshot` no longer says that `d8` dropped the `-l/--selector` flag; it says not to use the flag with `d8 snapshot create`."
+
+docs:
+  - "The backup integration guide describes the obligations of an external backup system: support every snapshot kind registered through `CustomSnapshotDefinition` for both download and upload, and discover the list of kinds before each operation, since it differs between clusters."
+  - "The guide describes how to create a standalone `VolumeSnapshot` or a snapshot of a domain kind, such as `VirtualMachineSnapshot`, how to check that it is ready, and how to upload it back."
+  - "The guide describes how to upload any selected subtree of a snapshot, including several independent subtrees in one operation, and when a node carries volume data."
