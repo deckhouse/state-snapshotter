@@ -84,7 +84,7 @@ const (
 // Defines how snapshot content is obtained.
 // +k8s:deepcopy-gen=true
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(self.resourceSelector)",message="spec.resourceSelector was removed: a Snapshot captures its whole namespace. Drop the field (and update d8: the -l/--selector flag is gone); to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude"
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceSelector)",message="spec.resourceSelector is not supported: a Snapshot captures its whole namespace. Remove the field and do not use -l/--selector with d8 snapshot create; to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude"
 type SnapshotSpec struct {
 	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
 	//   - Capture (default): dynamic namespace capture from the live cluster.

@@ -173,12 +173,17 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	}
 
 	if isRoot {
-		// Root import: the binder is ONLY the creator (content object + spec + root ownerRef + bind). The
-		// namespace Snapshot orchestrator (reconcileImport) mirrors the bound content's Ready and the
-		// aggregator projects the manifest leg + children edges — the same division of labor as the capture
-		// root. The leaf-only tail below (MCP-gate wait, DataImport data leg, Ready mirror) does NOT apply to
-		// the structural root (no data leg; Ready is mirrored by the orchestrator, not co-written here), so
-		// return after create+bind to avoid a second writer on the root snapshot's Ready.
+		// A root can be a data-bearing domain snapshot, not just a namespace aggregator. Publish the
+		// same descriptor as for a child so a subsequent namespaced download includes its volume.
+		// Readiness remains owned by the content aggregator; do not run the child readiness path here.
+		if r.GVKRegistry.RequiresDataArtifact(gvk.Kind) {
+			if content.Status.Data == nil {
+				return ctrl.Result{RequeueAfter: importContentPollInterval}, nil
+			}
+			if err := r.mirrorLeafDataFromContent(ctx, obj, contentName); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 

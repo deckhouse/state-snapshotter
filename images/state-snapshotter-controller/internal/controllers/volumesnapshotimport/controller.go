@@ -164,18 +164,22 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// Content owner: an imported VS leaf is a child of its parent snapshot (d8 sets child->parent
-	// ownerRefs); its SnapshotContent is owned by the parent's SnapshotContent. Wait for the parent.
+	// A child content belongs to its parent content. A standalone root has no parent: the generic
+	// binder creates its content and anchors it on a root ObjectKeeper. Wait for that binding rather
+	// than waiting for a parent that will never exist or creating a competing root content here.
 	ownerRef, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, vs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if pending || ownerRef == nil {
+	if pending {
 		return ctrl.Result{RequeueAfter: importPollInterval}, nil
 	}
 
 	contentName, _, _ := unstructured.NestedString(vs.Object, "status", "boundSnapshotContentName")
 	if contentName == "" {
+		if ownerRef == nil {
+			return ctrl.Result{RequeueAfter: importPollInterval}, nil
+		}
 		contentName = snapshotbinding.StableContentName(vs.GetName(), vs.GetUID())
 		content := &storagev1alpha1.SnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
@@ -203,10 +207,12 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if cErr := r.Get(ctx, client.ObjectKey{Name: contentName}, content); cErr != nil {
 		return ctrl.Result{}, cErr
 	}
-	if changed, eErr := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, *ownerRef); eErr != nil {
-		return ctrl.Result{}, eErr
-	} else if changed {
-		return ctrl.Result{Requeue: true}, nil
+	if ownerRef != nil {
+		if changed, eErr := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, *ownerRef); eErr != nil {
+			return ctrl.Result{}, eErr
+		} else if changed {
+			return ctrl.Result{Requeue: true}, nil
+		}
 	}
 
 	// Manifest leg moved to the SnapshotContentController aggregator (INV-CONTENT-WRITER-1):

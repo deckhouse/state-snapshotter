@@ -125,9 +125,10 @@ spec:
             x-kubernetes-validations:
             - message: spec is immutable
               rule: self == oldSelf
-            - message: 'spec.resourceSelector was removed: a Snapshot captures its
-                whole namespace. Drop the field (and update d8: the -l/--selector
-                flag is gone); to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude'
+            - message: 'spec.resourceSelector is not supported: a Snapshot captures
+                its whole namespace. Remove the field and do not use -l/--selector
+                with d8 snapshot create; to keep objects out of a snapshot, label
+                them state-snapshotter.deckhouse.io/exclude'
               rule: '!has(self.resourceSelector)'
           status:
             description: Current binding, tree, and readiness state of the Snapshot.

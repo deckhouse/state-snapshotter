@@ -93,7 +93,7 @@ var _ = Describe("Integration: an imported leaf keeps mirroring after its DataIm
 		return binder
 	}
 
-	It("carries a content-side change onto the leaf with no DataImport in the namespace", func() {
+	DescribeTable("carries a content-side change onto an imported node with no DataImport", func(standalone bool) {
 		ctx := context.Background()
 
 		nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "ss-import-steady-"}}
@@ -145,9 +145,11 @@ var _ = Describe("Integration: an imported leaf keeps mirroring after its DataIm
 		leaf.SetGroupVersionKind(testSnapshotGVK)
 		leaf.SetNamespace(ns)
 		leaf.SetName("import-steady-leaf")
-		leaf.SetOwnerReferences([]metav1.OwnerReference{{
-			APIVersion: importSnapshotAPI, Kind: importSnapshotKind, Name: parent.GetName(), UID: parentUID,
-		}})
+		if !standalone {
+			leaf.SetOwnerReferences([]metav1.OwnerReference{{
+				APIVersion: importSnapshotAPI, Kind: importSnapshotKind, Name: parent.GetName(), UID: parentUID,
+			}})
+		}
 		Expect(unstructured.SetNestedField(leaf.Object, string(storagev1alpha1.SnapshotModeImport), "spec", "mode")).To(Succeed())
 		Expect(k8sClient.Create(ctx, leaf)).To(Succeed())
 		leafUID := leaf.GetUID()
@@ -175,6 +177,10 @@ var _ = Describe("Integration: an imported leaf keeps mirroring after its DataIm
 					Name: leaf.GetName(), Namespace: ns, UID: leafUID,
 				},
 			},
+		}
+		if standalone {
+			// The binder anchors the root on its ObjectKeeper; it must not adopt a child owned by another tree.
+			leafContent.OwnerReferences = nil
 		}
 		Expect(k8sClient.Create(ctx, leafContent)).To(Succeed())
 		DeferCleanup(func() {
@@ -260,7 +266,11 @@ var _ = Describe("Integration: an imported leaf keeps mirroring after its DataIm
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(leafClass(g)).To(Equal(classAfterFix))
 		}, 60*time.Second, 200*time.Millisecond).Should(Succeed())
-	})
+		GinkgoWriter.Printf("checked 2 public descriptor updates; standalone=%t\n", standalone)
+	},
+		Entry("child with a parent snapshot", false),
+		Entry("standalone domain root without a parent snapshot", true),
+	)
 })
 
 // snaphelpersContentOwnerRefForTest builds the lifecycle ownerRef the binder expects a child content to

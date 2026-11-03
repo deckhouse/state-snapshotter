@@ -27,9 +27,9 @@ In addition, the module lets you read a snapshot subtree prepared for applying. 
 All operations are ordinary HTTP requests to the Kubernetes API server and ordinary Kubernetes objects. No client
 library is required.
 
-A snapshot is created by a Snapshot object and captures the namespace in which the object is created, once. The Snapshot
+A namespace snapshot is created by a Snapshot object and captures the namespace in which the object is created, once. The Snapshot
 spec is immutable: a new capture requires a new Snapshot. The external system addresses only namespaced objects and
-their subresources, with two exceptions: it reads the cluster-scoped CustomSnapshotDefinition objects to learn which
+their subresources, with two exceptions: it reads the cluster-scoped CustomSnapshotDefinition (CSD) objects to learn which
 resources can be [captured individually](#snapshots-of-individual-resources), and it requests the API discovery of the
 API group of a node kind, `GET /apis/{group}/{version}`, which every authenticated client may call without additional
 roles.
@@ -46,7 +46,7 @@ The following is not part of the integration:
 - **The protocol for transferring volume bytes.** This page describes creating a DataExport or DataImport and tracking
   their state. The HTTP endpoints, the transfer modes, the `finished` call and the status fields with the address belong
   to the [`storage-foundation`](/modules/storage-foundation/) module and are described in
-  [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http).
+  [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data).
 - **The contents of nodes contributed by other modules.** A subtree created by another Deckhouse Platform module, for
   example virtual machines and their disks, is traversed, downloaded and loaded through the endpoint group of its kind,
   as described in [Snapshot tree and node API](#snapshot-tree-and-node-api) and [Nodes of kinds not known in
@@ -109,7 +109,7 @@ roles from the table:
 | Read Snapshot, VolumeSnapshot and their statuses to walk the snapshot tree | `d8:namespace-capability:state-snapshotter:view_snapshots` | `d8:use:capability:module:state-snapshotter:view_snapshots` |
 | Create and delete a Snapshot. Update is not supported because the Snapshot spec is immutable. Deleting a Snapshot deletes the whole snapshot tree | `d8:namespace-capability:state-snapshotter:manage_snapshots` | `d8:use:capability:module:state-snapshotter:manage_snapshots` |
 | Read a node's manifests through the endpoints of both groups | `d8:namespace-capability:state-snapshotter:download_snapshots` | `d8:use:capability:module:state-snapshotter:download_snapshots` |
-| Upload node manifests through the endpoints of both groups and create VolumeSnapshot objects during import | `d8:namespace-capability:state-snapshotter:upload_snapshots` | `d8:use:capability:module:state-snapshotter:upload_snapshots` |
+| Upload node manifests through the endpoints of both groups and create VolumeSnapshot objects for PVC snapshots and during import | `d8:namespace-capability:state-snapshotter:upload_snapshots` | `d8:use:capability:module:state-snapshotter:upload_snapshots` |
 | Read a snapshot subtree for restoration through the endpoints of both groups | `d8:namespace-capability:state-snapshotter:restore_snapshots` | `d8:use:capability:module:state-snapshotter:restore_snapshots` |
 | Create DataExport and DataImport objects and transfer volume data through their HTTP endpoints | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
 
@@ -165,7 +165,16 @@ way as data from the source namespace.
 The snapshot API is intended for reading and transferring snapshot contents through aggregated Kubernetes API
 endpoints. External backup systems and other clients that need to work with snapshot contents directly use it.
 
-To create snapshots and track their state, use Snapshot.
+The external backup system must support creating, checking, downloading and uploading namespace snapshots (Snapshot),
+individual PVC snapshots (VolumeSnapshot), and every snapshot kind advertised by a ready CustomSnapshotDefinition in
+the connected cluster. Snapshot and VolumeSnapshot are built-in kinds: their support must not depend on finding them
+in CustomSnapshotDefinition. The available domain kinds depend on the Deckhouse Platform and module versions and on
+the enabled modules; discover them separately in each cluster and refresh discovery before an operation. Do not use a
+fixed list of domain kinds or reuse one cluster's list in another cluster.
+
+Creation of individual snapshots is described in [Snapshots of individual resources](#snapshots-of-individual-resources).
+The backup system must also let the user select nodes and subtrees to upload, as specified in
+[Selecting nodes and subtrees to upload](#selecting-nodes-and-subtrees-to-upload).
 
 ### Snapshot object operations
 
@@ -190,8 +199,9 @@ creation, read back the stored `spec.mode` value and check `status.conditions`.
 
 ### Snapshot tree and node API
 
-A snapshot is a tree of linked nodes. The root node is a Snapshot in the snapshot namespace. Child nodes are created
-during state capture and are listed in
+A snapshot is a tree of linked nodes in one namespace. A namespace snapshot has a Snapshot root. The root of an
+individual-resource snapshot or a selected subtree can be a VolumeSnapshot or a domain snapshot kind. Only the namespace
+Snapshot node owns the Namespace manifest. Child nodes are created during state capture and are listed in
 [`status.childrenSnapshotRefs`](cr.html#snapshot-v1alpha1-status-childrensnapshotrefs). All nodes in the tree are in the
 same namespace, so a child reference contains only `apiVersion`, `kind`, and `name`. Nodes that contain the data of
 regular PersistentVolumeClaim (PVC) objects are represented by VolumeSnapshot objects.
@@ -362,10 +372,11 @@ For each child node reference:
    cluster: stop the download and report the node.
 2. Read the node object: `GET /apis/{group}/{version}/namespaces/{namespace}/{resource}/{name}`. Its
    `status.childrenSnapshotRefs` field lists the child nodes of this node, and its `status.data` field is used in
-   step 4.
+   step 4. Before downloading, check this node's readiness and wait for the expected data descriptor as described in
+   [Transferring volume data](#transferring-volume-data).
 3. Get the manifests of the node through `manifests-download` in the endpoint group of the node, as described in
    [Snapshot tree and node API](#snapshot-tree-and-node-api), with the API resource found in step 1.
-4. If the node has `status.data`, transfer its volume data as described in [Transferring volume
+4. If the node kind requires volume data, wait for complete `status.data` and transfer its data as described in [Transferring volume
    data](#transferring-volume-data).
 5. Process the child nodes from step 2 in the same way.
 
@@ -407,14 +418,24 @@ d8 k get --raw "/apis/${GROUP}/${VERSION}/namespaces/${NAMESPACE}/${RESOURCE}/${
 d8 k get --raw "/apis/subresources.${GROUP}/${VERSION}/namespaces/${NAMESPACE}/${RESOURCE}/${NAME}/manifests-download" | jq 'length'
 ```
 
-Replace `<NODE_NAME>` with the `name` of the reference. If `data` in the output of step 2 is not `null`, create a
-DataExport whose `targetRef` contains the group `databases.example.com`, the kind `DatabaseSnapshot` and the name of
-the node. Repeat the commands for each reference in `children`, with the values of that reference.
+Replace `<NODE_NAME>` with the `name` of the reference. If the kind's CSD requires volume data, wait for complete
+`data` in the output of step 2 and create a DataExport whose `targetRef` contains the group `databases.example.com`,
+the kind `DatabaseSnapshot` and the name of the node. Repeat the commands for each reference in `children`, with the
+values of that reference.
 
 ### Transferring volume data
 
-A node contains volume data if it has the `status.data` field, whatever its kind: a VolumeSnapshot node or a node of
-another module, such as a snapshot of a virtual machine disk. Manifests are not enough for such a node: transfer the
+Expected volume data is determined by the node kind: a VolumeSnapshot always carries volume data, a domain kind does
+so when its CustomSnapshotDefinition has `requiresDataArtifact: true`, and a Snapshot has no volume data of its own.
+The `status.data` field supplies parameters of the expected data; it does not determine whether the node has a volume.
+
+Check every node before downloading it (`Ready=True` with reason `Completed`). For VolumeSnapshot and kinds with
+`CustomSnapshotDefinition.spec.requiresDataArtifact: true`, also wait for a complete `status.data`, including `size`,
+`volumeMode`, and `storageClassName`. A missing expected descriptor means preparation is incomplete or has failed;
+it does not mean the node has no volume data.
+Fail the operation on timeout.
+
+Manifests are not enough for a node with volume data: transfer the
 volume data through a DataExport from the `storage-foundation` module. Create a DataExport for the node, wait until it
 is ready, and download the data from the address in the DataExport status. In `DataExport.spec.targetRef`, specify the
 node itself, not the source PVC: the API group from the `apiVersion` of the node, its `kind` and its `name`. Example for
@@ -437,7 +458,7 @@ spec:
 
 The export addresses, the publication mode for access from outside the cluster and certificate validation are described
 in
-[Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http)
+[Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data)
 in the `storage-foundation` module documentation.
 
 Save the volume size, mode and StorageClass from the node's `status.data.size`, `status.data.volumeMode` and
@@ -478,6 +499,50 @@ Archive assembly is described in [Working with snapshot archives](snapshot_archi
 
 ### Snapshots of individual resources
 
+#### Individual PVC: VolumeSnapshot without CustomSnapshotDefinition
+
+VolumeSnapshot (`snapshot.storage.k8s.io/v1`) is not registered through CustomSnapshotDefinition. Offer PVC snapshots
+as a separate option even when the CSD list is empty. This integration requires the `storage-foundation` module and
+its extended VolumeSnapshot API, as well as a CSI driver with snapshot support.
+
+Create a new VolumeSnapshot in the source PVC's namespace. Unlike domain kinds from CSD, it uses
+`VolumeSnapshot.spec.source.persistentVolumeClaimName`, not `sourceRef`. Specify a VolumeSnapshotClass compatible with
+the PVC's CSI driver; choosing the class is described in the `storage-foundation`
+[snapshot usage documentation](/modules/storage-foundation/usage.html#using-snapshots).
+
+```text
+POST /apis/snapshot.storage.k8s.io/v1/namespaces/{namespace}/volumesnapshots?fieldValidation=Strict
+GET  /apis/snapshot.storage.k8s.io/v1/namespaces/{namespace}/volumesnapshots/{name}
+```
+
+Example object (send its JSON representation in the POST request):
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-pvc-snapshot
+  namespace: my-app
+spec:
+  volumeSnapshotClassName: <VOLUME_SNAPSHOT_CLASS>
+  source:
+    persistentVolumeClaimName: my-pvc
+```
+
+Replace `<VOLUME_SNAPSHOT_CLASS>` with the chosen class. Create the object after enabling `storage-foundation`, and
+ensure the source PVC does not carry the `state-snapshotter.deckhouse.io/exclude` label: an excluded PVC produces a
+plain CSI snapshot without the manifest capture needed by this integration. For a standalone root, do not set an
+`ownerReferences` entry that points to a snapshot node: the module treats it as a parent reference.
+The `upload_snapshots` role in the role table grants `create` on `volumesnapshots` for both PVC snapshots and imports.
+For backup readiness, wait for `Ready=True` with reason `Completed` in `status.conditions`; CSI `status.readyToUse`
+alone does not confirm that the captured manifests are ready. Also wait for complete `status.data` as described in
+[Transferring volume data](#transferring-volume-data). Download the node's manifests through
+`subresources.storage-foundation.deckhouse.io/v1` and its data through DataExport, as described in
+[Transferring volume data](#transferring-volume-data). Upload it as an independent VolumeSnapshot in import mode using
+[the selected-node upload contract](#selecting-nodes-and-subtrees-to-upload).
+
+#### Domain kinds from CustomSnapshotDefinition
+
 Besides a whole namespace, other Deckhouse Platform modules can capture a single resource, for example a virtual
 machine. Such a module registers the pair "resource kind → snapshot kind" with a cluster-scoped CustomSnapshotDefinition
 object. Read the list of these objects to learn which resources can be captured individually, instead of hardcoding the
@@ -494,15 +559,19 @@ The read requires the role described in
 |---|---|
 | `CustomSnapshotDefinition.spec.source.apiVersion`, `CustomSnapshotDefinition.spec.source.kind` | The kind of the resource that can be captured |
 | `CustomSnapshotDefinition.spec.apiVersion`, `CustomSnapshotDefinition.spec.kind` | The kind of its snapshot |
+| `CustomSnapshotDefinition.spec.requiresDataArtifact` | When `true`, nodes of this kind carry volume data |
 
-Use only the definitions whose `status.conditions` contain `Ready=True`. The other fields of the object are not part of
-the integration. Example of a definition registered by the virtualization module:
+Use a definition only when `status.conditions[type=Ready].status` is `True` and
+`status.conditions[type=Ready].observedGeneration` equals `metadata.generation`.
+
+Example of a definition registered by the virtualization module:
 
 ```yaml
 apiVersion: state-snapshotter.deckhouse.io/v1alpha1
 kind: CustomSnapshotDefinition
 metadata:
   name: virtualization-virtual-machine-snapshot
+  generation: 1
 spec:
   apiVersion: virtualization.deckhouse.io/v1alpha2
   kind: VirtualMachineSnapshot
@@ -514,6 +583,7 @@ status:
   conditions:
     - type: Ready
       status: "True"
+      observedGeneration: 1
 ```
 
 To capture a resource, create an object of the snapshot kind in the namespace of the resource. The API resource of the
@@ -521,8 +591,10 @@ snapshot kind, needed in the request path, is found as described in [Nodes of ki
 advance](#nodes-of-kinds-not-known-in-advance), with the group, version and kind taken from
 `CustomSnapshotDefinition.spec.apiVersion` and `CustomSnapshotDefinition.spec.kind`. Every snapshot kind registered with
 a CustomSnapshotDefinition accepts the same spec: the `mode` field with the value `Capture` and the `sourceRef` field
-with the `apiVersion`, `kind` and `name` of the resource from the same namespace. The other spec fields are optional,
-and their meaning is described in the documentation of the module that owns the snapshot kind:
+with the `apiVersion`, `kind` and `name` of the resource from the same namespace. Other spec fields may not need explicit values,
+but their defaults affect capture. For example, VirtualMachineSnapshot defaults to `requiredConsistency: true`:
+a snapshot of a running machine without an agent is not created; the machine must be powered off or its agent must
+successfully freeze it. Field meanings are described in the documentation of the module that owns the snapshot kind:
 
 ```yaml
 apiVersion: virtualization.deckhouse.io/v1alpha2
@@ -549,6 +621,114 @@ A snapshot of an individual resource is loaded back in the same way as a namespa
 snapshot kind with `spec.mode: Import` instead of a Snapshot. The `d8 snapshot download` command does not download
 such a snapshot yet, and `d8 snapshot upload` accepts only a Snapshot as the root of a whole archive: a node with volume data can be
 uploaded as a root of its own only with `--node`.
+
+## Selecting nodes and subtrees to upload
+
+The backup system must let the user browse the saved snapshot tree and select any node as the root of an upload,
+including a VolumeSnapshot, a virtual-machine snapshot, or another domain kind. In a graphical interface, provide
+checkboxes or an equivalent explicit selection. Uploading the entire namespace tree must not be the only option.
+Support selecting several independent subtrees in one operation as well.
+
+A subtree consists of the selected node and all its descendants. Selecting a leaf uploads that node only; selecting
+a non-leaf also selects all its descendants, including their volume data. Show this complete selection before starting
+the upload. Selecting both an ancestor and its descendant must not upload the descendant twice. Unselected ancestors
+and sibling branches are not uploaded. For example, selecting one virtual machine from a namespace backup uploads its
+snapshot and its disk subtrees, without uploading the namespace Snapshot or other virtual machines; selecting one disk
+uploads that disk's snapshot alone.
+
+The target procedure for each selected subtree uses [Loading a backup into a cluster](#loading-a-backup-into-a-cluster)
+with these rules:
+
+1. Create the selected root in the target namespace with its saved `apiVersion`, `kind` and name and with
+   `spec.mode: Import`. Do not carry over from the backup the fields that pointed to the captured object: `sourceRef`,
+   `VolumeSnapshot.spec.source`, and for kinds of the virtualization module, `virtualMachineName` and `virtualDiskName`.
+   An upload takes the data from the backup, not from a live object. Do not copy the original parent `ownerReferences`
+   or create an artificial parent Snapshot.
+
+   For example, the saved VirtualMachineSnapshot from the example above has `mode: Capture` and a `sourceRef` to the
+   machine in its `spec`, while the object created for the upload has only `mode: Import`:
+
+   ```yaml
+   apiVersion: virtualization.deckhouse.io/v1alpha2
+   kind: VirtualMachineSnapshot
+   metadata:
+     name: my-vm-snapshot
+     namespace: my-app-restored
+   spec:
+     mode: Import
+   ```
+
+2. Recreate the descendants in the same namespace, with `ownerReferences` pointing to their newly created parents.
+   Use the new parents' UIDs, not UIDs from the backup.
+3. Upload each node's own saved manifests and its direct `childRefs`; upload volume data for every node with saved
+   volume data. Preserve the selected subtree's internal links and names. Do not retain references to nodes outside
+   the uploaded subtree, and do not omit a descendant while keeping a reference to it.
+4. Wait for each selected root to reach `Ready=True` with reason `Completed`. Check every subtree node, including
+   complete `status.data` for every node with saved volume data, as described in
+   [Transferring volume data](#transferring-volume-data). Report an error or an incomplete upload explicitly for each
+   subtree.
+
+For example, create a standalone VolumeSnapshot root without `ownerReferences` or `VolumeSnapshot.spec.source`:
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: standalone-volume
+  namespace: my-app-restored
+spec:
+  mode: Import
+```
+
+Wait for the node to be bound and upload its own saved manifests with empty `childRefs`:
+
+```text
+POST /apis/subresources.storage-foundation.deckhouse.io/v1/namespaces/my-app-restored/volumesnapshots/standalone-volume/manifests-and-children-refs-upload
+```
+
+```json
+{
+  "manifests": [
+    {"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "my-pvc", "namespace": "my-app"}}
+  ],
+  "childRefs": []
+}
+```
+
+The PVC manifest in the example is abbreviated. Set `manifests` to the complete unchanged array of objects from
+this node's `manifests-download`.
+Create one DataImport with `snapshotRef` pointing to this VolumeSnapshot:
+
+```yaml
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
+kind: DataImport
+metadata:
+  name: import-standalone-volume
+  namespace: my-app-restored
+spec:
+  mode: PopulateData
+  ttl: 1h
+  snapshotRef:
+    apiVersion: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshot
+    name: standalone-volume
+  storageParams:
+    storageClassName: my-storage-class
+    size: 10Gi
+    volumeMode: Block
+```
+
+Use the saved volume size and mode and a suitable StorageClass in the target cluster. Transfer data through the
+`storage-foundation` HTTP API, call `finished` and wait for `DataImport.status.phase: Completed`, as described in
+[Loading a backup into a cluster](#loading-a-backup-into-a-cluster). Then wait for `Ready=True` with reason `Completed`
+and complete `status.data`, including `size`, `volumeMode` and `storageClassName`; fail the operation on timeout.
+This example requires the extended VolumeSnapshot API from
+`storage-foundation` described in the same section.
+
+Selection operates on snapshot nodes, not on individual manifests inside a node. Do not trim a domain snapshot's
+manifests or remove its required descendants to implement checkboxes: a virtual-machine snapshot may depend on its
+disk snapshots. These requirements concern the backup system's integration through the node API; the archive commands
+and their supported upload modes are documented separately in [Working with snapshot archives](snapshot_archives.html).
 
 ## Loading a backup into a cluster
 
@@ -606,8 +786,12 @@ supplied by the external system and does not capture the live namespace.
 
    For a node of another module, create an object of its kind in the same way: with `spec.mode: Import` and an
    `ownerReferences` entry pointing to its parent node. Every child node needs this entry, not only for deletion: the
-   module uses it to link the node to its parent. A child node without it is loaded as a separate root, and its parent
-   never reaches `Ready=True`. The API resource of the node kind, needed in the request path, is found as described in
+   module uses it to link the node to its parent.
+   Supply the new parent's `apiVersion`, `kind`, `name` and UID: a UID from the backup does not bind the node.
+   A child without this entry is loaded as a standalone root; attaching its content to the parent is rejected.
+   A fresh parent does not reach `Ready=True`, and deleting the parent does not delete such a child. The client must
+   check the created nodes' `ownerReferences`: a successful upload and a previously published `Ready=True` do not
+   confirm the correct structure. The API resource of the node kind, needed in the request path, is found as described in
    [Nodes of kinds not known in advance](#nodes-of-kinds-not-known-in-advance).
 
 1. Upload each node's manifests and the references to its direct child nodes to `manifests-and-children-refs-upload`.
@@ -623,8 +807,9 @@ supplied by the external system and does not capture the live namespace.
    in [Snapshot tree and node API](#snapshot-tree-and-node-api), and the resource of its kind, found as described in
    [Nodes of kinds not known in advance](#nodes-of-kinds-not-known-in-advance). The request format is
    given in [Request and response bodies](#request-and-response-bodies). If the node
-   is not bound to the stored content yet, the server may return `409`. Retry the request after a delay. Uploading the
-   same data again is allowed.
+   is not bound to the stored content yet, the server may return `409`. Retry after a delay within a bounded waiting
+   period; fail the upload on timeout.
+   Uploading the same data again is allowed.
 
 1. For each node with volume data, create one DataImport in the target namespace, then transfer its bytes through the
    `storage-foundation` HTTP API. For example, for a VolumeSnapshot child named `my-volume-node`:
@@ -670,9 +855,11 @@ supplied by the external system and does not capture the live namespace.
    itself complete the import.
    Wait until `DataImport.status.phase` becomes `Completed`, then check the root Snapshot.
    The details of the HTTP upload, TTL and error handling are given in
-   [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http).
+   [Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data).
 
-1. Wait until the root Snapshot reaches `Ready=True` with reason `Completed`.
+1. Wait until the root Snapshot reaches `Ready=True` with reason `Completed`. Before verification by downloading,
+   check every node's readiness and complete expected `status.data` as described in
+   [Transferring volume data](#transferring-volume-data).
 
 Before loading an archive compatible with `d8`, validate it according to
 [Working with snapshot archives](snapshot_archives.html).
@@ -818,7 +1005,7 @@ The responses of the node endpoints `manifests-download`, `manifests-and-childre
 `manifests-with-data-restoration` are listed below. Creating a snapshot and reading its status follow the general rules
 of the Kubernetes API server. Volume data is transferred through the HTTP server of the `storage-foundation` module, and
 its response codes are described in
-[Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data-over-http)
+[Exporting and importing volume data over HTTP](/modules/storage-foundation/usage.html#exporting-and-importing-volume-data)
 in that module's documentation.
 
 | Code | When it is returned | What to do |
@@ -827,8 +1014,8 @@ in that module's documentation.
 | `403` | Insufficient rights, a wrong HTTP method or a mistake in the address. Also returned when a node references a SnapshotContent that does not reference the node back | Check the method, the address and the role bindings. If the cause is an inconsistent SnapshotContent reference, retrying will not help |
 | `404` | No object with the specified name exists in the namespace | Check the namespace and the object name |
 | `405` | A wrong HTTP method from a caller that has rights for both methods. Reads use `GET`, uploads use `POST` | Fix the method |
-| `409` | The node is not ready for the operation yet, or there is a state conflict. Possible causes: the SnapshotContent is not bound yet, the object is not in `Import` mode, the node's stored manifests are not readable yet, one object appears twice in the node's manifests. Before the SnapshotContent is bound, an upload returns `reason: ImportContentNotBound` and a read returns `reason: Conflict` | Retry the request with a delay. If an object appears twice, fix the content |
-| `413` | The upload request body exceeds 64 MiB | Reduce the request body. Retrying without changes will not help |
+| `409` | The node is not ready for the operation yet, or there is a state conflict. Possible causes: the SnapshotContent is not bound yet, the object is not in `Import` mode, the node's stored manifests are not readable yet, one object appears twice in the node's manifests. Before the SnapshotContent is bound, an upload returns `reason: ImportContentNotBound` and a read returns `reason: Conflict` | For temporary unavailability, retry with a delay within a bounded period, then fail. If the object is not in `Import`, create a new object in that mode. Duplicate objects or incorrect stored manifests require a new import with corrected content: retrying does not change stored manifests |
+| `413` | The upload request body exceeds 64 MiB | JSON whitespace can be removed without changing the content. If the body still exceeds the limit, fail the operation. Do not remove manifests or split one node's upload across requests |
 | `500` | An internal error of the module while serving the request, with `reason: InternalError` | Retry the request with a delay. If the error repeats, check the logs of the `state-snapshotter` controller |
 | `502` | Only for VolumeSnapshot nodes and nodes of other modules: the module serving the node got no response from the `state-snapshotter` aggregated API | Retry the request with a delay |
 | `503` | The aggregated API is temporarily not serving requests: the module is starting, restarting, or has not loaded its snapshot registry yet | Retry the request with a delay |

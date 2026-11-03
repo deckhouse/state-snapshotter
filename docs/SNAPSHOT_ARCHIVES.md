@@ -67,8 +67,8 @@ my-namespace-snapshot/                      # The root node.
   rejected during upload.
 - Store in the `manifests/` directory, unchanged, all objects from the array that
   [`manifests-download`](backup_integration.html#reading-node-manifests) returned for this node, and only them. Store
-  each object in a separate file. The `manifests/` directory must be present in every node and cannot be empty: the root
-  node holds at least the Namespace manifest, and a VolumeSnapshot node holds exactly one manifest of the captured
+  each object in a separate file. The `manifests/` directory must be present in every node and cannot be empty: the namespace
+  Snapshot node holds at least the Namespace manifest, and a VolumeSnapshot node holds exactly one manifest of the captured
   PersistentVolumeClaim (PVC). Upload does not check this requirement: a node without manifests is accepted without
   an error.
 - Use manifest file names that end in exactly `.yaml`. Files with the `.yml` extension or any other suffix are not
@@ -334,8 +334,11 @@ archives. The `--allow-unauthenticated-legacy` flag permits inspection or import
 cannot distinguish a genuinely old archive from tampered metadata.
 
 **`apiVersion`, `kind`, `name`, `namespace`, `uid`.** For a child node, `apiVersion`, `kind` and `name` must match the
-values in the parent node's reference. For the root node, the values of the Snapshot object whose snapshot the archive
-represents are used. If `namespace` and `uid` are specified, their values must match the ones the parent node's
+values in the parent node's reference. For the root node, use the node's own values: Snapshot for a namespace
+snapshot, or VolumeSnapshot or a domain kind for an individual-resource snapshot or a selected subtree.
+Only the namespace Snapshot node owns the Namespace manifest. The whole-archive restriction of `d8 snapshot upload`
+is described in [Archive tree](#archive-tree). If `namespace` and `uid` are specified, their values must match the ones
+the parent node's
 `childrenChecksum` was computed with. The requirements for the content of Snapshot and VolumeSnapshot nodes are given in
 [Archive tree](#archive-tree), and the `childrenChecksum` algorithm in [Computing checksums](#computing-checksums).
 
