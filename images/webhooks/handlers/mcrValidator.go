@@ -31,8 +31,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 )
 
@@ -64,7 +64,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 	// Get Kubernetes client
 	clientset, err := getKubernetesClient()
 	if err != nil {
-		klog.Errorf("Failed to create Kubernetes client: %v", err)
+		handlerLog.Error("Failed to create Kubernetes client", logger.Err(err))
 		return &kwhvalidating.ValidatorResult{
 			Valid:   false,
 			Message: fmt.Sprintf("Internal error: failed to create Kubernetes client: %v", err),
@@ -132,7 +132,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			}
 			result, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
 			if err != nil {
-				klog.Errorf("Failed to create SubjectAccessReview for target %d (Namespace/%s): %v", i, target.Name, err)
+				handlerLog.Error(fmt.Sprintf("Failed to create SubjectAccessReview for target %d (Namespace/%s)", i, target.Name), logger.Err(err))
 				return &kwhvalidating.ValidatorResult{
 					Valid:   false,
 					Message: fmt.Sprintf("internal error: failed to check permissions for namespaces/%s", target.Name),
@@ -143,7 +143,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 				if reason == "" {
 					reason = "forbidden by RBAC"
 				}
-				klog.Infof("User %s does not have GET permission for Namespace/%s: %s", arReview.UserInfo.Username, target.Name, reason)
+				handlerLog.Info(fmt.Sprintf("User %s does not have GET permission for Namespace/%s: %s", arReview.UserInfo.Username, target.Name, reason))
 				return &kwhvalidating.ValidatorResult{
 					Valid:   false,
 					Message: fmt.Sprintf("user %q cannot GET namespaces/%s: %s", arReview.UserInfo.Username, target.Name, reason),
@@ -155,7 +155,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 		// Use Discovery API to get resource information (namespaced, plural name)
 		resourceInfo, err := getResourceInfo(ctx, clientset, gv, target.Kind)
 		if err != nil {
-			klog.Errorf("Failed to discover resource info for target %d (%s/%s): %v", i, target.APIVersion, target.Kind, err)
+			handlerLog.Error(fmt.Sprintf("Failed to discover resource info for target %d (%s/%s)", i, target.APIVersion, target.Kind), logger.Err(err))
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("Target %d: failed to discover resource %s/%s: %v", i, target.APIVersion, target.Kind, err),
@@ -175,7 +175,7 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 		// MCR API requires all targets to be in the same namespace as the MCR
 		actualNamespace, err := findResourceNamespace(ctx, gv, resourceInfo.Name, target.Name, mcr.Namespace)
 		if err != nil {
-			klog.Errorf("Failed to check resource namespace for target %d (%s/%s/%s): %v", i, target.APIVersion, target.Kind, target.Name, err)
+			handlerLog.Error(fmt.Sprintf("Failed to check resource namespace for target %d (%s/%s/%s)", i, target.APIVersion, target.Kind, target.Name), logger.Err(err))
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("Target %d: failed to check resource %s/%s: %v", i, target.APIVersion, target.Kind, err),
@@ -223,8 +223,8 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 		// Perform the authorization check
 		result, err := clientset.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
 		if err != nil {
-			klog.Errorf("Failed to create SubjectAccessReview for target %d (%s/%s/%s in namespace %s): %v",
-				i, target.APIVersion, target.Kind, target.Name, actualNamespace, err)
+			handlerLog.Error(fmt.Sprintf("Failed to create SubjectAccessReview for target %d (%s/%s/%s in namespace %s)",
+				i, target.APIVersion, target.Kind, target.Name, actualNamespace), logger.Err(err))
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("internal error: failed to check permissions for %s/%s in namespace %q", resourceInfo.Name, target.Name, actualNamespace),
@@ -238,16 +238,16 @@ func MCRValidate(ctx context.Context, arReview *model.AdmissionReview, obj metav
 			if reason == "" {
 				reason = "forbidden by RBAC"
 			}
-			klog.Infof("User %s does not have GET permission for %s/%s/%s in namespace %s: %s",
-				arReview.UserInfo.Username, target.APIVersion, target.Kind, target.Name, actualNamespace, reason)
+			handlerLog.Info(fmt.Sprintf("User %s does not have GET permission for %s/%s/%s in namespace %s: %s",
+				arReview.UserInfo.Username, target.APIVersion, target.Kind, target.Name, actualNamespace, reason))
 			return &kwhvalidating.ValidatorResult{
 				Valid:   false,
 				Message: fmt.Sprintf("user %q cannot GET %s/%s in namespace %q: %s", arReview.UserInfo.Username, resourceInfo.Name, target.Name, actualNamespace, reason),
 			}, nil
 		}
 
-		klog.V(4).Infof("User %s has GET permission for %s/%s/%s in namespace %s",
-			arReview.UserInfo.Username, target.APIVersion, target.Kind, target.Name, actualNamespace)
+		handlerLog.Trace(fmt.Sprintf("User %s has GET permission for %s/%s/%s in namespace %s",
+			arReview.UserInfo.Username, target.APIVersion, target.Kind, target.Name, actualNamespace))
 	}
 
 	return &kwhvalidating.ValidatorResult{Valid: true}, nil
@@ -286,7 +286,7 @@ func getResourceInfo(_ context.Context, clientset kubernetes.Interface, gv schem
 
 	// Resource not found in discovery - fall back to heuristics
 	// This can happen for CRDs that are not yet fully registered
-	klog.V(4).Infof("Resource %s/%s not found in discovery, using fallback heuristics", gv.String(), kind)
+	handlerLog.Trace(fmt.Sprintf("Resource %s/%s not found in discovery, using fallback heuristics", gv.String(), kind))
 	return &resourceInfo{
 		Name:       kindToResourceNameFallback(kind),
 		Namespaced: true, // Assume namespaced if we can't discover (safer default)
@@ -439,6 +439,6 @@ func findResourceNamespace(ctx context.Context, gv schema.GroupVersion, resource
 	// Any other failure (e.g. API server temporary unavailability) is not treated as an authoritative
 	// answer either, but it stays non-fatal here: the caller rejects the MCR and the request can be
 	// retried once the API server recovers.
-	klog.Warningf("Failed to check resource %s/%s in namespace %s (non-NotFound error): %v, treating as not found", resourceName, targetName, mcrNamespace, err)
+	handlerLog.Warn(fmt.Sprintf("Failed to check resource %s/%s in namespace %s (non-NotFound error), treating as not found", resourceName, targetName, mcrNamespace), logger.Err(err))
 	return "", nil
 }
