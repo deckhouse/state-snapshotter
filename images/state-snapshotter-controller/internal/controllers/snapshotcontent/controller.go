@@ -105,6 +105,9 @@ type SnapshotContentController struct {
 	// callers that mark the binder (unifiedruntime.Syncer, main.go). Guarded by domainCaptureMu.
 	domainCaptureMu   sync.RWMutex
 	domainCaptureGVKs map[string]struct{}
+
+	// heldNotes keeps the PublishedIdentityHeld Event to one per refusal; see notePublishedIdentityHeld.
+	heldNotes heldIdentityNotes
 }
 
 // MarkDomainCaptureKind records that snapshot GVK is reconciled by a dedicated domain controller for
@@ -279,6 +282,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 		// SnapshotContent not found in any registered GVK - object was deleted or doesn't exist
 		// This is normal after finalizer removal when GC deletes the object
 		logger.V(1).Info("SnapshotContent not found in any registered GVK, skipping")
+		r.heldNotes.forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -1513,7 +1517,8 @@ func (r *SnapshotContentController) reconcileManifestCheckpointNameProjection(ct
 		// Once published the name is a durable pointer: a later ManifestCaptureRequest (a recapture
 		// attempt after the owner's captureState was wiped) must not move it. Divergence is diagnostic
 		// only — returning an error here would abort the whole content status reconcile.
-		r.notePublishedIdentityHeld(ctx, contentObj)
+		r.notePublishedIdentityHeld(ctx, contentObj, heldLegManifests,
+			fmt.Sprintf("status.manifestCheckpointName stays %q, not %q", published, mcr.Status.CheckpointName))
 		return false, nil
 	}
 	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcr.Status.CheckpointName); pubErr != nil {
@@ -1548,7 +1553,8 @@ func (r *SnapshotContentController) projectImportManifestCheckpointName(ctx cont
 		return false, nil
 	}
 	if published != "" {
-		r.notePublishedIdentityHeld(ctx, contentObj)
+		r.notePublishedIdentityHeld(ctx, contentObj, heldLegManifests,
+			fmt.Sprintf("status.manifestCheckpointName stays %q, not %q", published, mcpName))
 		return false, nil
 	}
 	if pubErr := PublishSnapshotContentManifestCheckpointName(ctx, r.Client, contentObj.GetName(), mcpName); pubErr != nil {
