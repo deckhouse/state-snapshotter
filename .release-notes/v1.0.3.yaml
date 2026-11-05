@@ -1,0 +1,9 @@
+date: "2026-11-05"
+
+summary: "A SnapshotContent that refuses to repoint a published artifact no longer floods its Events."
+
+highlights:
+  - "The `PublishedIdentityHeld` Warning event of a `SnapshotContent` is recorded once per refusal instead of on every reconcile pass."
+
+improvements:
+  - "A `SnapshotContent` that refuses to repoint an already published manifest checkpoint or data artifact now records its `Warning` event with reason `PublishedIdentityHeld` once per refusal instead of on every reconcile pass, which for a content that is not yet `Ready` meant every half second. The event now names the published identity and the one it refused, and a refusal of another candidate is a new event. The reasons of the events the module records (`NamespacePlanUnreadable`, `PublishedIdentityHeld`, `CaptureStateRestored`) are unchanged."
