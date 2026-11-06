@@ -399,7 +399,7 @@ func TestWebhookRBACDoesNotUseWildcardResourceReads(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // User capability roles and the roles that collect them —
-// templates/rbacv2/use/capabilities/*.yaml, templates/rbacv2/use/roles/*.yaml,
+// templates/rbacv2/use/*.yaml, templates/rbacv2/use/roles/*.yaml,
 // templates/backup-agent/*.yaml and templates/rbacv2-compat/*.yaml
 //
 // Plain testing guards reading the chart from disk rather than Ginkgo specs over embedded fixtures:
@@ -613,9 +613,9 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 		},
 	}
 
-	files := templateYAMLFiles(t, capabilityRolesDir(t))
+	files := capabilityRoleFiles(t)
 	if len(files) != len(expected) {
-		t.Fatalf("templates/rbacv2/use/capabilities holds %d file(s) but %d capability role(s) are pinned here: %v",
+		t.Fatalf("templates/rbacv2/use holds %d capability file(s) but %d capability role(s) are pinned here: %v",
 			len(files), len(expected), files)
 	}
 
@@ -669,7 +669,7 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 		}
 	}
 
-	t.Logf("checked %d capability role file(s) in %d model(s) and %d grant(s) under templates/rbacv2/use/capabilities", len(files), len(rbacSchemes), grantsChecked)
+	t.Logf("checked %d capability role file(s) in %d model(s) and %d grant(s) under templates/rbacv2/use", len(files), len(rbacSchemes), grantsChecked)
 	if grantsChecked == 0 {
 		t.Fatal("no grant checked — zero findings means the roles stopped being read, not that they are correct")
 	}
@@ -1326,7 +1326,7 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 // advertises, so nothing checks those against a server; their presence is pinned by name in
 // TestUserCapabilityRolesGrantExactRulesAndLabels and their reachability by the end-to-end suite.
 func TestEveryNamespacedSubresourceRouteHasCapabilityRole(t *testing.T) {
-	capabilityFiles := templateYAMLFiles(t, capabilityRolesDir(t))
+	capabilityFiles := capabilityRoleFiles(t)
 	served := servedAggregatedResources(t)
 
 	var namespacedChecked, verbsChecked, clusterScopedSkipped int
@@ -1357,7 +1357,7 @@ func TestEveryNamespacedSubresourceRouteHasCapabilityRole(t *testing.T) {
 				for _, verb := range resource.Verbs {
 					verbsChecked++
 					if !granted[key][verb] {
-						t.Errorf("%s serves %q for verb %q, which no capability role of the %s model grants — add it to a role under templates/rbacv2/use/capabilities, in both branches (a served endpoint nobody can be granted is unusable)",
+						t.Errorf("%s serves %q for verb %q, which no capability role of the %s model grants — add it to a capability under templates/rbacv2/use, in both branches (a served endpoint nobody can be granted is unusable)",
 							list.GroupVersion, resource.Name, verb, scheme)
 					}
 				}
@@ -1409,7 +1409,27 @@ func servedAggregatedResources(t *testing.T) []metav1.APIResourceList {
 
 func capabilityRolesDir(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2", "use", "capabilities")
+	return filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2", "use")
+}
+
+// capabilityRoleFiles lists the templates of the capabilities of their own: the files directly under
+// templates/rbacv2/use, where rbac.yaml writes them, without the view and edit levels beside them and
+// without the collecting role under roles/.
+func capabilityRoleFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(capabilityRolesDir(t))
+	if err != nil {
+		t.Fatalf("read %s: %v", capabilityRolesDir(t), err)
+	}
+	var files []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".yaml") || name == "view.yaml" || name == "edit.yaml" {
+			continue
+		}
+		files = append(files, filepath.Join(capabilityRolesDir(t), name))
+	}
+	return files
 }
 
 // aggregateRolesDir holds the legacy role that COLLECTS capabilities instead of granting them. It is a

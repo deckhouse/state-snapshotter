@@ -65,7 +65,7 @@ var partnerDocRoleNameRE = regexp.MustCompile(`d8:(?:use:capability:module|names
 // for clusters below it, and a binding to either kind of name that is wrong grants nothing.
 //
 // Names of this module must be published by the chart in the model their prefix belongs to, from the
-// directories the document has reason to name: templates/rbacv2/use/capabilities, where one role
+// directories the document has reason to name: templates/rbacv2/use, where one role
 // grants one capability (both models), templates/backup-agent (the collecting role of the new model)
 // and templates/rbacv2/use/roles (the collecting role of the legacy model), where one role collects
 // several so that a reader binds once instead of six times, and templates/backup-agent-system, the

@@ -1,0 +1,706 @@
+# The module RBAC declaration, read from the RBAC objects the module renders. Review it: every TODO is a
+# decision "dmt lint" reports; then run "dmt lint --linter rbac --fix" to bring the templates in line with it.
+# Objects rendered only under values other than the defaults are not here: lint with --values-file (or
+# --matrix) before the first --fix of the templates if the module has such templates, and declare them with when.
+#
+# Notes:
+# - ClusterRole/d8:use:capability:module:state-snapshotter:backup_agent (templates/rbacv2/use/roles/backup_agent.yaml, under `ne (include "state-snapshotter.rbacv2_new_scheme" .) "true"`) is in the templates but did not render with the linter's values, so this declaration does not hold it -- add it (with its `when`), or lint with --values-file values that render it, before --fix rewrites the templates
+# - ServiceAccount controller mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+# - ServiceAccount webhooks mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+#
+# Not described by the declaration (stays hand-written, as it is):
+# - ClusterRole/d8:state-snapshotter:backup-agent-system (templates/backup-agent-system/rbac-for-us.yaml): written in several branches of a block ({{ if }} / {{ else }}) inside one document, so which one rendered is not known -- put --- between the branches
+# - ClusterRole/d8:state-snapshotter:backup-agent (templates/backup-agent/rbac-for-us.yaml): bound to nothing the declaration describes
+# - ClusterRole/d8:use:capability:module:state-snapshotter:backup_agent (templates/rbacv2-compat/backup_agent.yaml): bound to nothing the declaration describes
+apiVersion: rbac.deckhouse.io/v1alpha1
+resources:
+  - group: snapshot.storage.k8s.io
+    resource: volumesnapshots
+    scope: Namespaced
+    namespace:
+      upload_snapshots:
+        - create
+      view_snapshots:
+        - get
+        - list
+        - watch
+  - group: state-snapshotter.deckhouse.io
+    resource: manifestcapturerequests
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: state-snapshotter.deckhouse.io
+    resource: manifestcheckpoints
+    system:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: state-snapshotter.deckhouse.io
+    resource: snapshotcontents
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+  - group: state-snapshotter.deckhouse.io
+    resource: snapshotcontents/status
+    legacy:
+      ClusterEditor:
+        - get
+        - patch
+        - update
+  - group: state-snapshotter.deckhouse.io
+    resource: snapshots
+    namespace:
+      manage_snapshots:
+        - create
+        - delete
+      view_snapshots:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - get
+        - list
+        - patch
+        - update
+        - watch
+  - group: state-snapshotter.deckhouse.io
+    resource: snapshots/status
+    namespace:
+      view_snapshots:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - get
+        - patch
+        - update
+  - group: subresources.snapshot.storage.k8s.io
+    resource: volumesnapshots/manifests-and-children-refs-upload
+    scope: Namespaced
+    namespace:
+      upload_snapshots:
+        - create
+  - group: subresources.snapshot.storage.k8s.io
+    resource: volumesnapshots/manifests-download
+    scope: Namespaced
+    namespace:
+      download_snapshots:
+        - get
+  - group: subresources.snapshot.storage.k8s.io
+    resource: volumesnapshots/manifests-with-data-restoration
+    scope: Namespaced
+    namespace:
+      restore_snapshots:
+        - get
+  - group: subresources.state-snapshotter.deckhouse.io
+    resource: snapshots/manifests-and-children-refs-upload
+    scope: Namespaced
+    namespace:
+      upload_snapshots:
+        - create
+  - group: subresources.state-snapshotter.deckhouse.io
+    resource: snapshots/manifests-download
+    scope: Namespaced
+    namespace:
+      download_snapshots:
+        - get
+  - group: subresources.state-snapshotter.deckhouse.io
+    resource: snapshots/manifests-with-data-restoration
+    scope: Namespaced
+    namespace:
+      restore_snapshots:
+        - get
+  - group: subresources.storage-foundation.deckhouse.io
+    resource: volumesnapshots/manifests-and-children-refs-upload
+    scope: Namespaced
+    namespace:
+      upload_snapshots:
+        - create
+  - group: subresources.storage-foundation.deckhouse.io
+    resource: volumesnapshots/manifests-download
+    scope: Namespaced
+    namespace:
+      download_snapshots:
+        - get
+  - group: subresources.storage-foundation.deckhouse.io
+    resource: volumesnapshots/manifests-with-data-restoration
+    scope: Namespaced
+    namespace:
+      restore_snapshots:
+        - get
+  - group: state-snapshotter.deckhouse.io
+    resource: customsnapshotdefinitions
+    noAccess: 'the registrations other platform modules ship for their snapshot kinds; the controller reads them, and nothing in them is for users'
+  - group: state-snapshotter.deckhouse.io
+    resource: manifestcheckpointcontentchunks
+    noAccess: 'internal storage of the compressed data of a ManifestCheckpoint, written and read by the controller only'
+capabilities:
+  namespace.download_snapshots:
+    level: manager
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module state-snapshotter: download snapshot manifests'
+      ru: 'Модуль state-snapshotter: выгрузка манифестов снимков'
+    description:
+      en: Read the manifests of a snapshot node as they were captured, one node per request, for both Snapshot and VolumeSnapshot nodes in a namespace.
+      ru: Чтение манифестов узла снимка в том виде, в каком они были сохранены, по одному узлу за запрос, для узлов Snapshot и VolumeSnapshot в пространстве имён.
+  namespace.manage_snapshots:
+    level: manager
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module state-snapshotter: create and delete snapshots'
+      ru: 'Модуль state-snapshotter: создание и удаление снимков'
+    description:
+      en: Create and delete Snapshot objects in a namespace; the controller creates and removes the child nodes of the tree.
+      ru: Создание и удаление объектов Snapshot в пространстве имён; дочерние узлы дерева создаёт и удаляет контроллер.
+  namespace.restore_snapshots:
+    level: admin
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module state-snapshotter: read snapshots for restoration'
+      ru: 'Модуль state-snapshotter: чтение снимков для восстановления'
+    description:
+      en: Read a snapshot subtree in one response, with the manifests rewritten for the namespace they are restored into, for both Snapshot and VolumeSnapshot nodes.
+      ru: Чтение поддерева снимка одним ответом, с манифестами, переписанными под пространство имён восстановления, для узлов Snapshot и VolumeSnapshot.
+  namespace.upload_snapshots:
+    level: admin
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module state-snapshotter: upload snapshots'
+      ru: 'Модуль state-snapshotter: загрузка снимков'
+    description:
+      en: Load a snapshot tree back into a namespace, one node per request, including creating the VolumeSnapshot objects of its volume nodes.
+      ru: Загрузка дерева снимка обратно в пространство имён по одному узлу за запрос, включая создание объектов VolumeSnapshot его узлов-томов.
+  namespace.view_snapshots:
+    level: viewer
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module state-snapshotter: view snapshots'
+      ru: 'Модуль state-snapshotter: просмотр снимков'
+    description:
+      en: Read Snapshot objects in a namespace and the VolumeSnapshot objects that stand for their volume nodes, to walk a snapshot tree.
+      ru: Чтение объектов Snapshot в пространстве имён и объектов VolumeSnapshot, представляющих их узлы-тома, для обхода дерева снимка.
+serviceAccounts:
+  - name: controller
+    path: controller
+    labels:
+      app: controller
+    clusterRules:
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - customsnapshotdefinitions
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - customsnapshotdefinitions/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - apiextensions.k8s.io
+        resources:
+          - customresourcedefinitions
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcapturerequests
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcapturerequests/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcheckpoints
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcheckpoints/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcheckpointcontentchunks
+        verbs:
+          - create
+          - get
+          - delete
+      - apiGroups:
+          - deckhouse.io
+        resources:
+          - objectkeepers
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - namespaces
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - pods
+          - services
+          - configmaps
+          - secrets
+          - serviceaccounts
+          - persistentvolumeclaims
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - apps
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - batch
+        resources:
+          - jobs
+          - cronjobs
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - networking.k8s.io
+        resources:
+          - ingresses
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - rbac.authorization.k8s.io
+        resources:
+          - roles
+          - rolebindings
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshots
+          - snapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshots/status
+          - snapshotcontents/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - subresources.state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents/subtree-manifest-identities
+        verbs:
+          - get
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - dataimports
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - patch
+          - delete
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotclasses
+        verbs:
+          - get
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumes
+        verbs:
+          - get
+      - apiGroups:
+          - storage.k8s.io
+        resources:
+          - storageclasses
+        verbs:
+          - get
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - patch
+    namespaceRules:
+      - apiGroups:
+          - coordination.k8s.io
+        resources:
+          - leases
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - patch
+    roleName: controller-leader-election
+    bindClusterRoles:
+      - name: system:auth-delegator
+        bindingName: d8:state-snapshotter:controller:auth-delegator
+    bindRoles:
+      - namespace: kube-system
+        name: extension-apiserver-authentication-reader
+        bindingName: d8:state-snapshotter:controller-auth-reader
+    extraClusterRoles:
+      - name: d8:state-snapshotter:capture-namespace
+        rules:
+          - apiGroups:
+              - '*'
+            resources:
+              - '*'
+            verbs:
+              - get
+              - list
+        bind: false
+    automountServiceAccountToken: true
+  - name: webhooks
+    path: webhooks
+    labels:
+      app: webhooks
+    clusterRules:
+      - apiGroups:
+          - authorization.k8s.io
+        resources:
+          - subjectaccessreviews
+        verbs:
+          - create
+      - apiGroups:
+          - ""
+        resources:
+          - pods
+          - services
+          - configmaps
+          - secrets
+          - serviceaccounts
+          - persistentvolumeclaims
+        verbs:
+          - get
+      - apiGroups:
+          - apps
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+        verbs:
+          - get
+      - apiGroups:
+          - batch
+        resources:
+          - jobs
+          - cronjobs
+        verbs:
+          - get
+      - apiGroups:
+          - networking.k8s.io
+        resources:
+          - ingresses
+        verbs:
+          - get
+      - apiGroups:
+          - rbac.authorization.k8s.io
+        resources:
+          - roles
+          - rolebindings
+        verbs:
+          - get
+    automountServiceAccountToken: true
+prometheusAccess:
+  path: controller
+  name: prometheus-metrics
+  deployments:
+    - controller
+  when: (.Values.global.enabledModules | has "prometheus")
+  labels:
+    app: controller
+access:
+  - name: admin-kubeconfig
+    subjects:
+      - kind: Group
+        name: kubeadm:cluster-admins
+    clusterRules:
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcapturerequests
+          - manifestcheckpoints
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshots
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshots/status
+        verbs:
+          - get
+          - patch
+          - update
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+          - patch
+          - update
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents/status
+        verbs:
+          - get
+          - patch
+          - update
+      - apiGroups:
+          - subresources.state-snapshotter.deckhouse.io
+        resources:
+          - snapshots/manifests-download
+          - snapshots/manifests-with-data-restoration
+          - manifestcheckpoints/manifests
+        verbs:
+          - get
+      - apiGroups:
+          - subresources.storage-foundation.deckhouse.io
+        resources:
+          - volumesnapshots/manifests-download
+          - volumesnapshots/manifests-with-data-restoration
+        verbs:
+          - get
+      - apiGroups:
+          - subresources.storage-foundation.deckhouse.io
+        resources:
+          - volumesnapshots/manifests-and-children-refs-upload
+        verbs:
+          - create
+      - apiGroups:
+          - subresources.snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots/manifests-download
+          - volumesnapshots/manifests-with-data-restoration
+        verbs:
+          - get
+      - apiGroups:
+          - subresources.snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots/manifests-and-children-refs-upload
+        verbs:
+          - create
+      - apiGroups:
+          - deckhouse.io
+        resources:
+          - objectkeepers
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - customsnapshotdefinitions
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - customsnapshotdefinitions/status
+        verbs:
+          - get
+          - update
+          - patch
