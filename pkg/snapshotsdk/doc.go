@@ -48,8 +48,8 @@ limitations under the License.
 //
 // The label ExcludeLabelKey (state-snapshotter.deckhouse.io/exclude) is an absolute, always-active veto:
 // any object carrying it (value ignored) is dropped from every snapshot, at every level of the tree. The
-// core honors it on its own legs (ExcludeVetoSelector for the list-based ones, a direct label check where
-// the drop must also be recorded), but a domain enumerator sees only the child specs it builds —
+// core honors it on its own legs (domain sources, namespace manifests, PVC candidates) with a direct label
+// check, and records what it dropped in excludedRefs, but a domain enumerator sees only the child specs it builds —
 // not the source objects' labels — so it MUST apply the veto itself with PartitionExcluded: build children
 // from the kept objects, and hand the excluded refs to EnsureChildren. The SDK publishes those excluded
 // refs into status.captureState.domainSpecificController.excludedRefs (the transient INPUT); the core

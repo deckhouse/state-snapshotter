@@ -149,12 +149,11 @@ func targetNames(targets []ManifestTarget) map[string]struct{} {
 
 func TestBuildManifestCaptureTargets_EmptyNamespaceHasNoTargets(t *testing.T) {
 	entries := defaultGVRs()
-	targets, unreadable, err := BuildManifestCaptureTargets(
+	targets, _, unreadable, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dynamicFromEntries(entries),
 		discoveryFromEntries(entries, nil),
 		"ns1",
-		nil,
 		nil,
 	)
 	if err != nil {
@@ -205,12 +204,11 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		dataImport, vrr, backup, backupPlan, backupRestore, exampleClaim,
 	)
 
-	targets, unreadable, err := BuildManifestCaptureTargets(
+	targets, _, unreadable, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
-		nil,
 		nil,
 	)
 	if err != nil {
@@ -270,13 +268,12 @@ func TestBuildManifestCaptureTargets_ExcludesRegisteredSnapshotKinds(t *testing.
 	snapshotKinds := SnapshotMachineryGVKs{
 		{Group: "x.example.com", Version: "v1", Kind: "FooSnapshot"}: {},
 	}
-	targets, _, err := BuildManifestCaptureTargets(
+	targets, _, _, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
 		snapshotKinds,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("BuildManifestCaptureTargets: %v", err)
@@ -294,12 +291,11 @@ func TestBuildManifestCaptureTargets_ForbiddenListGoesToUnreadable(t *testing.T)
 		return true, nil, apierrors.NewForbidden(schema.GroupResource{Group: "kafka.example.com", Resource: "kafkas"}, "", errors.New("rbac not ready"))
 	})
 
-	targets, unreadable, err := BuildManifestCaptureTargets(
+	targets, _, unreadable, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
-		nil,
 		nil,
 	)
 	if err != nil {
@@ -324,12 +320,11 @@ func TestBuildManifestCaptureTargets_PartialDiscoveryGoesToUnreadable(t *testing
 	brokenGV := schema.GroupVersion{Group: "broken.example.com", Version: "v1"}
 	groupErr := &discovery.ErrGroupDiscoveryFailed{Groups: map[schema.GroupVersion]error{brokenGV: errors.New("aggregated apiservice down")}}
 
-	targets, unreadable, err := BuildManifestCaptureTargets(
+	targets, _, unreadable, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dynamicFromEntries(entries),
 		discoveryFromEntries(entries, groupErr),
 		"ns1",
-		nil,
 		nil,
 	)
 	if err != nil {
@@ -357,14 +352,16 @@ func TestBuildManifestCaptureTargets_ListErrorIsReturnedWrapped(t *testing.T) {
 		return true, nil, sentinel
 	})
 
-	_, _, err := BuildManifestCaptureTargets(
+	targets, _, _, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
 		nil,
-		nil,
 	)
+	if targets != nil {
+		t.Fatalf("expected no targets on a list failure, got %#v", targets)
+	}
 	if err == nil {
 		t.Fatal("expected a wrapped error for a non-Forbidden list failure")
 	}
@@ -383,12 +380,11 @@ func TestBuildManifestCaptureTargets_ExcludesResourcesWithoutWatchVerb(t *testin
 	widget := obj("vendor.example.com/v1", "Widget", "w1", nil)
 	dyn := dynamicFromEntries(entries, widget)
 
-	targets, _, err := BuildManifestCaptureTargets(
+	targets, _, _, err := BuildManifestCaptureTargets(
 		context.Background(),
 		dyn,
 		discoveryFromEntries(entries, nil),
 		"ns1",
-		nil,
 		nil,
 	)
 	if err != nil {

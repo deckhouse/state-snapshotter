@@ -44,10 +44,11 @@ var excludeVetoSelector = func() labels.Selector {
 	return labels.NewSelector().Add(*req)
 }()
 
-// ExcludeVetoSelector returns the label selector every list-based capture leg (namespace manifests, PVC
-// candidates) filters with: everything EXCEPT objects carrying ExcludeLabelKey. It is deliberately NOT
-// labels.Everything() — an empty selector would capture vetoed objects too. Enumeration legs that must
-// also RECORD what they dropped check the label directly instead, so the drop lands in excludedRefs.
+// ExcludeVetoSelector returns a label selector matching everything EXCEPT objects carrying ExcludeLabelKey.
+// It is deliberately NOT labels.Everything() — an empty selector would match vetoed objects too. A selector
+// only drops: the capture legs of the core (domain sources, namespace manifests, PVC candidates) must also
+// RECORD what they left out, so they check the label directly instead and the drop lands in excludedRefs.
+// The selector remains for a caller that filters without recording.
 //
 // The returned selector is shared and read-only (Selector.Add does not mutate its receiver), so callers
 // must only match against it.

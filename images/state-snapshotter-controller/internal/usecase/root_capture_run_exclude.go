@@ -82,12 +82,15 @@ func BuildRootNamespaceManifestCaptureTargets(
 	}
 
 	// The manifest base is the whole namespace minus the built-in exclusions, minus objects carrying the
-	// exclude veto label. The same veto selector filters the PVC leg, so a vetoed object is dropped from
-	// both and never half-captured.
-	base, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds, storagev1alpha1.ExcludeVetoSelector())
+	// exclude veto label. The PVC leg applies the same label check, so a vetoed object is dropped from both
+	// and never half-captured. The label-excluded objects are not recorded here: this leg runs after barrier
+	// 1, when the excluded membership is already frozen. RootLabelExcludedManifestRefs recorded them at
+	// planning time, and that frozen record is subtracted below as well.
+	base, _, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, targetNamespace, snapshotKinds)
 	if err != nil {
 		return nil, unreadable, err
 	}
+	base = withoutFrozenExcludedRefs(base, rootNS)
 
 	// Capture the Namespace object itself in the root node's own manifests. It is the only cluster-scoped
 	// target allowed in a namespace snapshot (name == the snapshot's target namespace, enforced by the MCR
@@ -121,6 +124,75 @@ func BuildRootNamespaceManifestCaptureTargets(
 		exclude[subtreeIdentityExcludeKey(id)] = struct{}{}
 	}
 	return namespacemanifest.FilterManifestTargets(base, exclude, targetNamespace), unreadable, nil
+}
+
+// RootLabelExcludedManifestRefs returns the objects of the root's target namespace that the manifest leg
+// leaves out because they carry the exclude label, as the ExcludedObjectRefs the root records in
+// status.captureState.domainSpecificController.excludedRefs. It is called at planning time, before barrier
+// 1 freezes the excluded membership, so the record is fixed together with the child set; the manifest leg
+// itself is planned later and only subtracts that record (see BuildRootNamespaceManifestCaptureTargets).
+//
+// Only objects the manifest leg would otherwise have captured are returned: namespacemanifest applies the
+// built-in rules first, so a labelled object those rules drop anyway is not a user exclusion and is not
+// here. PersistentVolumeClaims are left out as well: whether a PVC would otherwise have been captured
+// depends on the subtree coverage, which only the volume leg knows, so the volume leg records them
+// (volumecapture.ListResidualRootPVCTargets).
+//
+// unreadable carries the resource types that could not be listed; the caller must not freeze a record that
+// misses them, the same fail-closed rule the manifest leg follows.
+func RootLabelExcludedManifestRefs(
+	ctx context.Context,
+	dyn dynamic.Interface,
+	disco discovery.DiscoveryInterface,
+	rootNS *storagev1alpha1.Snapshot,
+	snapshotKinds namespacemanifest.SnapshotMachineryGVKs,
+) ([]storagev1alpha1.ExcludedObjectRef, []schema.GroupVersionResource, error) {
+	_, excluded, unreadable, err := namespacemanifest.BuildManifestCaptureTargets(ctx, dyn, disco, ResolveSnapshotTargetNamespace(rootNS), snapshotKinds)
+	if err != nil {
+		return nil, unreadable, err
+	}
+	out := make([]storagev1alpha1.ExcludedObjectRef, 0, len(excluded))
+	for _, t := range excluded {
+		if t.APIVersion == "v1" && t.Kind == "PersistentVolumeClaim" {
+			continue
+		}
+		out = append(out, storagev1alpha1.ExcludedObjectRef{APIVersion: t.APIVersion, Kind: t.Kind, Name: t.Name})
+	}
+	return out, unreadable, nil
+}
+
+// withoutFrozenExcludedRefs drops from the manifest base every object the root recorded as excluded at
+// planning time (status.captureState.domainSpecificController.excludedRefs). The label check alone would
+// capture an object whose label was removed after barrier 1, while the snapshot still lists it as
+// excluded; subtracting the record keeps the two consistent. The match is by group, kind and name: a
+// domain source may be recorded under a version other than the one discovery prefers.
+func withoutFrozenExcludedRefs(base []namespacemanifest.ManifestTarget, rootNS *storagev1alpha1.Snapshot) []namespacemanifest.ManifestTarget {
+	cs := rootNS.Status.CaptureState
+	if cs == nil || cs.DomainSpecificController == nil || len(cs.DomainSpecificController.ExcludedRefs) == 0 {
+		return base
+	}
+	frozen := make(map[string]struct{}, len(cs.DomainSpecificController.ExcludedRefs))
+	for _, ref := range cs.DomainSpecificController.ExcludedRefs {
+		frozen[groupKindNameKey(ref.APIVersion, ref.Kind, ref.Name)] = struct{}{}
+	}
+	out := make([]namespacemanifest.ManifestTarget, 0, len(base))
+	for _, t := range base {
+		if _, drop := frozen[groupKindNameKey(t.APIVersion, t.Kind, t.Name)]; drop {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// groupKindNameKey renders a version-agnostic identity. An unparsable apiVersion is kept verbatim as the
+// group so it still matches only itself.
+func groupKindNameKey(apiVersion, kind, name string) string {
+	group := apiVersion
+	if gv, err := schema.ParseGroupVersion(apiVersion); err == nil {
+		group = gv.Group
+	}
+	return group + "|" + kind + "|" + name
 }
 
 // subtreeIdentityExcludeKey renders a subtree-manifest identity to the same dedup key

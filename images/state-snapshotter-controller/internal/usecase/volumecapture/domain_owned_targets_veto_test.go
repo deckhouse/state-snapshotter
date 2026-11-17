@@ -22,6 +22,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -80,4 +81,47 @@ func TestListResidualRootOwnedPVCTargets_ExcludeVeto(t *testing.T) {
 		}
 	}
 	t.Logf("listed 4 namespace PVCs, %d survived the veto", len(uids))
+}
+
+// TestListResidualRootPVCTargets_RecordsLabelledUncoveredPVCs pins the planning-time record of the PVC leg:
+// a labelled PVC the orphan wave would otherwise have captured is left out of the targets and returned as
+// an excluded ref with its full identity, whatever the label value; a labelled PVC a descendant subtree
+// already covers is in neither list, since the snapshot does not exclude it; unlabelled PVCs are captured.
+func TestListResidualRootPVCTargets_RecordsLabelledUncoveredPVCs(t *testing.T) {
+	t.Parallel()
+	ns := "ns"
+	pvc := func(name string, vetoValue *string) *corev1.PersistentVolumeClaim {
+		p := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: "uid-" + types.UID(name)}}
+		if vetoValue != nil {
+			p.Labels = map[string]string{storagev1alpha1.ExcludeLabelKey: *vetoValue}
+		}
+		return p
+	}
+	empty, yes := "", "true"
+
+	// The child's bound content covers pvc-covered-vetoed, so that PVC is never residual.
+	child := snapNode("child", "content-child")
+	root := snapNode("root", "", snapChildRef("child"))
+	cl := buildSnapshotSubtreeClient(t, root, child, contentWithPVCUID("content-child", "uid-pvc-covered-vetoed"),
+		pvc("pvc-plain", nil), pvc("pvc-vetoed-b", &yes), pvc("pvc-vetoed-a", &empty), pvc("pvc-covered-vetoed", &yes))
+
+	targets, excluded, err := ListResidualRootPVCTargets(context.Background(), cl, root, allKindsDataBearing)
+	if err != nil {
+		t.Fatalf("ListResidualRootPVCTargets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Name != "pvc-plain" {
+		t.Fatalf("targets = %#v, want only pvc-plain", targets)
+	}
+	want := []storagev1alpha1.ExcludedObjectRef{
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-vetoed-a"},
+		{APIVersion: "v1", Kind: "PersistentVolumeClaim", Name: "pvc-vetoed-b"},
+	}
+	if len(excluded) != len(want) {
+		t.Fatalf("excluded = %#v, want %#v", excluded, want)
+	}
+	for i := range want {
+		if excluded[i] != want[i] {
+			t.Fatalf("excluded = %#v, want %#v", excluded, want)
+		}
+	}
 }

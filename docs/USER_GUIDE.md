@@ -141,11 +141,14 @@ a VirtualMachineSnapshot for it. Related VirtualDisks, PVCs, Secrets, and other 
 They can still be captured through their own child snapshots or as namespace manifests and PVC volume snapshots. To
 exclude them, add the label to each of them.
 
-**Some exclusions are recorded in the snapshot status.** Excluded objects with their own snapshot kind, such as
-VirtualMachine, and objects excluded by modules inside their child snapshots are listed in the root Snapshot's
-[`status.excludedRefs`](cr.html#snapshot-v1alpha1-status-excludedrefs). Not all exclusions appear in this field: for
-example, a ConfigMap excluded during namespace manifest selection is not listed. The absence of an entry does not mean
-the label was ignored.
+**Exclusions are recorded in the snapshot status.** The root Snapshot lists the excluded objects in
+[`status.excludedRefs`](cr.html#snapshot-v1alpha1-status-excludedrefs): objects with their own snapshot kind, such as
+VirtualMachine, objects excluded by modules inside their child snapshots, and the namespace objects and PVCs the root
+Snapshot leaves out of its own manifests and volume data. Use this field to find which objects a snapshot does not
+hold, for example the ConfigMaps, Secrets and PVCs a restored workload refers to. Only objects that would otherwise be
+captured are listed: an object the built-in rules exclude anyway is not listed even if it carries the label, and
+neither is a labeled PVC already covered by a captured child snapshot. The list is fixed when the snapshot finishes
+planning: an object labeled or created after that is still not captured, but is not added to the list.
 
 **Like the built-in exclusions, the label can only exclude objects from the capture.** There is no separate mechanism
 for including objects in a snapshot: a snapshot contains the objects of the namespace except the excluded ones. To get

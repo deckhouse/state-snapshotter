@@ -209,7 +209,9 @@ type DomainSpecificControllerCaptureState struct {
 	Message string `json:"message,omitempty"`
 
 	// ExcludedRefs are the domain's DIRECT exclusion vetoes at this node: the source objects it dropped
-	// (via the exclude label) while enumerating its children. It is the transient INPUT the core reads and
+	// (via the exclude label) while enumerating its children or planning its own capture. On a namespace
+	// Snapshot these are also the namespace objects and PersistentVolumeClaims left out of its own manifests
+	// and volume data. The set is fixed at phase Planned. It is the transient INPUT the core reads and
 	// folds into the durable SnapshotContent.status.excludedRefs aggregate; the domain never writes the
 	// aggregate or the top-level mirror (both are core-owned).
 	//

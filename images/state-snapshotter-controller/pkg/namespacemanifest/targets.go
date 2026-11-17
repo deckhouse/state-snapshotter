@@ -27,10 +27,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 )
 
 // ownMachineryGroup is the API group of state-snapshotter's own request objects, which discovery will
@@ -106,29 +107,32 @@ func (s SnapshotMachineryGVKs) containsGroupKind(gk schema.GroupKind) bool {
 //   - any other list/discovery error -> returned wrapped (%w) so the caller can classify it as a
 //     transient apiserver hiccup (requeue) or a structural/terminal failure.
 //
-// The returned target slice is sorted by (APIVersion, Kind, Name) for stable MCR spec and drift checks.
+// The exclude veto (storagev1alpha1.ExcludeLabelKey) is applied AFTER ShouldIncludeNamespaceObject, from the
+// same list: an object that passes the built-in rules but carries the veto label is not a target and is
+// returned in excluded instead, so the caller can record the drop in excludedRefs. An object the built-in
+// rules drop anyway (controller-owned, control-plane noise, machinery, heritage) is in neither slice, even
+// when it carries the label: it would never have been captured, so the user's veto did not exclude it.
+// Both lists come from the one List per type; the veto costs no extra request.
 //
-// selector is resolved by the caller and layered on top of ShouldIncludeNamespaceObject: an object is kept
-// only if it passes the built-in rules AND matches the selector. A nil selector means no filtering. The
-// capture callers pass the exclude-veto selector, so objects carrying the veto label never become targets.
+// The returned target and excluded slices are sorted by (APIVersion, Kind, Name) for stable MCR spec, drift
+// checks and a deterministic excludedRefs.
 func BuildManifestCaptureTargets(
 	ctx context.Context,
 	dyn dynamic.Interface,
 	disco discovery.DiscoveryInterface,
 	namespace string,
 	snapshotKinds SnapshotMachineryGVKs,
-	selector labels.Selector,
-) (targets []ManifestTarget, unreadable []schema.GroupVersionResource, err error) {
+) (targets, excluded []ManifestTarget, unreadable []schema.GroupVersionResource, err error) {
 	if dyn == nil {
-		return nil, nil, fmt.Errorf("namespacemanifest: dynamic client is nil")
+		return nil, nil, nil, fmt.Errorf("namespacemanifest: dynamic client is nil")
 	}
 	if disco == nil {
-		return nil, nil, fmt.Errorf("namespacemanifest: discovery client is nil")
+		return nil, nil, nil, fmt.Errorf("namespacemanifest: discovery client is nil")
 	}
 
 	gvrs, unreadable, err := enumerateNamespacedGVRs(disco)
 	if err != nil {
-		return nil, unreadable, err
+		return nil, nil, unreadable, err
 	}
 
 	// The per-type LIST sweep is the dominant cost of capture planning: a namespace exposes ~130
@@ -177,11 +181,6 @@ func BuildManifestCaptureTargets(
 				if !ShouldIncludeNamespaceObject(&item, snapshotKinds) {
 					continue
 				}
-				// The caller's selector is layered on top of the built-in exclusions: it can only narrow
-				// capture. A nil selector means no filtering.
-				if selector != nil && !selector.Matches(labels.Set(item.GetLabels())) {
-					continue
-				}
 				apiVersion := item.GetAPIVersion()
 				if apiVersion == "" {
 					apiVersion = gvr.GroupVersion().String()
@@ -190,21 +189,29 @@ func BuildManifestCaptureTargets(
 				if kind == "" {
 					continue
 				}
-				targets = append(targets, ManifestTarget{
+				t := ManifestTarget{
 					APIVersion: apiVersion,
 					Kind:       kind,
 					Name:       item.GetName(),
-				})
+				}
+				// The veto is checked on the label directly rather than through a selector, so the drop is
+				// returned to the caller instead of vanishing: the value is ignored, presence alone vetoes.
+				if _, vetoed := item.GetLabels()[storagev1alpha1.ExcludeLabelKey]; vetoed {
+					excluded = append(excluded, t)
+					continue
+				}
+				targets = append(targets, t)
 			}
 		}()
 	}
 	wg.Wait()
 	if firstErr != nil {
-		return nil, unreadable, firstErr
+		return nil, nil, unreadable, firstErr
 	}
 
 	sortManifestTargets(targets)
-	return targets, unreadable, nil
+	sortManifestTargets(excluded)
+	return targets, excluded, unreadable, nil
 }
 
 // enumerateNamespacedGVRs returns every namespaced GVR (preferred version) that supports list, get and

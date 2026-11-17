@@ -39,6 +39,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/namespacemanifest"
 	snapshotpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshot"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
+	vcpkg "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/volumecapture"
 	"github.com/deckhouse/state-snapshotter/pkg/snapshotsdk"
 )
 
@@ -65,7 +66,8 @@ func (r *SnapshotReconciler) captureSDK() snapshotsdk.CaptureSDK {
 //  2. planNamespaceChildren -> EnsureChildren (create/adopt + ADDITIVE publish of childrenSnapshotRefs).
 //  3. Residual/orphan PVC wave (root-owned), CONTENT-FREE and BEFORE barrier 1 ("late Planned"): create
 //     CSI VolumeSnapshots for uncovered PVCs and publish their leaves onto childrenSnapshotRefs, so the
-//     FULL child set (domain + orphan) is enumerated before its membership is frozen.
+//     FULL child set (domain + orphan) is enumerated before its membership is frozen. The excluded record
+//     is completed here too: the PVCs and namespace objects left out for the exclude label.
 //  4. DomainCaptureStatus Planned (barrier 1) — freezes that full child set and enables main-side
 //     leg/edge/status projection. The claim-gated binder may already have created and bound the eager
 //     SnapshotContent shell while the planning waves were running.
@@ -168,6 +170,8 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 		//    the namespace domain writes NO SnapshotContent (INV-CONTENT-WRITER-1 STRICT). Running the
 		//    enumeration before Planned means the FULL child set (domain children + orphan VolumeSnapshots)
 		//    is present when main projects the root's immutable child-edge set, so no orphan child is missed.
+		//    The same pass completes the excluded record with the label drops of the PVC and manifest legs,
+		//    so barrier 1 freezes it together with the child set.
 		if res, err := r.ensureOrphanVolumeSnapshotsPrePlanned(ctx, nsSnap, adapter, sdk, plan.excluded); err != nil {
 			return ctrl.Result{}, err
 		} else if res.Requeue || res.RequeueAfter > 0 {
@@ -258,12 +262,19 @@ func (r *SnapshotReconciler) reconcileNamespaceCapture(
 // created + bound by the generic binder, and its content status is projected by the aggregator
 // — the namespace domain writes no SnapshotContent.
 //
+// The wave also completes the root's excluded record, which barrier 1 freezes with the child set: to the
+// domain planning pass's drops (excluded) it adds the uncovered PVCs this wave leaves out for the exclude
+// label, and the namespace objects the manifest leg will leave out for it (rootLabelExcludedManifestRefs).
+// The manifest leg itself is planned only after barrier 1, so its label drops are determined here, from a
+// sweep of the namespace, and then subtracted from its targets.
+//
 // The wave is gated on all declared domain children being Ready so the subtree-covered PVC UID set (read
 // from each descendant's bound content) is complete — a PVC a domain child covers is never momentarily
 // treated as orphan. While the gate is closed, or while coverage is transiently unavailable (a child not
 // created/bound yet), it requeues on the child-graph poll cadence. A duplicate covered PVC UID is a
 // terminal invalid-plan failure; with no bound root content yet to carry it, it is surfaced on the
-// Snapshot's own Ready.
+// Snapshot's own Ready. The namespace sweep runs only past that gate, so it is done once per capture rather
+// than on every pending pass.
 func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -271,47 +282,101 @@ func (r *SnapshotReconciler) ensureOrphanVolumeSnapshotsPrePlanned(
 	sdk snapshotsdk.CaptureSDK,
 	excluded []storagev1alpha1.ExcludedObjectRef,
 ) (ctrl.Result, error) {
-	if !volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, nil) {
-		return ctrl.Result{}, nil
+	var targets []vcpkg.Target
+	var pvcExcluded []storagev1alpha1.ExcludedObjectRef
+	if volumecaptureuc.IsResidualRootPVCCaptureScope(nsSnap, nil) {
+		// The gate exists to guarantee the subtree-covered PVC UID set is COMPLETE before residual
+		// enumeration, so a PVC a domain child subtree covers is never momentarily mis-classified as orphan.
+		// That set is derived only from the COVERAGE-PROVIDING domain children — NOT from the orphan wave's
+		// own CSI VolumeSnapshot output (each orphan VS covers only its own already-residual PVC and is
+		// re-adopted idempotently). Gating on the orphan VS children too would (a) needlessly serialize
+		// Planned behind every orphan becoming fully Ready and (b) let a single stuck orphan VS wedge the
+		// whole root capture pre-Planned. So exclude CSI VolumeSnapshot refs from the readiness gate (they are
+		// still enumerated into coverage by CollectSubtreeCoveredPVCUIDs, which self-heals via re-adoption).
+		coverageChildren := nonOrphanCSIVolumeSnapshotChildRefs(nsSnap.Status.ChildrenSnapshotRefs)
+		ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, coverageChildren)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			log.FromContext(ctx).V(1).Info("deferring orphan PVC volume wave until domain children are Ready", "pending", summarizePendingChildren(pending))
+			return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+		}
+		dataBearing, dbErr := r.dataBearingKindFunc()
+		if dbErr != nil {
+			// Registry not built yet: requeue (fail-closed, never enumerate residuals with an empty coverage set).
+			return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+		}
+		targets, pvcExcluded, err = volumecaptureuc.ListResidualRootPVCTargets(ctx, r.Client, nsSnap, dataBearing)
+		if err != nil {
+			key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
+			if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
+				return ctrl.Result{}, r.patchSnapshotNotReadyLocal(ctx, key, "DuplicateCoveredPVCUID", err.Error())
+			}
+			// Transient (a child not created/bound yet, PVC list): requeue on the child-graph poll cadence.
+			return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+		}
 	}
-	// The gate exists to guarantee the subtree-covered PVC UID set is COMPLETE before residual enumeration,
-	// so a PVC a domain child subtree covers is never momentarily mis-classified as orphan. That set is
-	// derived only from the COVERAGE-PROVIDING domain children — NOT from the orphan wave's own CSI
-	// VolumeSnapshot output (each orphan VS covers only its own already-residual PVC and is re-adopted
-	// idempotently). Gating on the orphan VS children too would (a) needlessly serialize Planned behind
-	// every orphan becoming fully Ready and (b) let a single stuck orphan VS wedge the whole root capture
-	// pre-Planned. So exclude CSI VolumeSnapshot refs from the readiness gate (they are still enumerated into
-	// coverage by CollectSubtreeCoveredPVCUIDs, which self-heals via re-adoption).
-	coverageChildren := nonOrphanCSIVolumeSnapshotChildRefs(nsSnap.Status.ChildrenSnapshotRefs)
-	ready, pending, err := r.allDeclaredDomainChildSnapshotsReady(ctx, nsSnap.Namespace, coverageChildren)
+	manifestExcluded, res, err := r.rootLabelExcludedManifestRefs(ctx, nsSnap, adapter, sdk)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !ready {
-		log.FromContext(ctx).V(1).Info("deferring orphan PVC volume wave until domain children are Ready", "pending", summarizePendingChildren(pending))
-		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
+	if res.Requeue || res.RequeueAfter > 0 {
+		return res, nil
 	}
-	dataBearing, dbErr := r.dataBearingKindFunc()
-	if dbErr != nil {
-		// Registry not built yet: requeue (fail-closed, never enumerate residuals with an empty coverage set).
-		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
-	}
-	targets, err := volumecaptureuc.ListOwnedPVCTargetsForLogicalContent(ctx, r.Client, nsSnap, nil, dataBearing)
-	if err != nil {
-		key := types.NamespacedName{Namespace: nsSnap.Namespace, Name: nsSnap.Name}
-		if stderrors.Is(err, volumecaptureuc.ErrDuplicateCoveredPVCUID) {
-			return ctrl.Result{}, r.patchSnapshotNotReadyLocal(ctx, key, "DuplicateCoveredPVCUID", err.Error())
-		}
-		// Transient (a child not created/bound yet, PVC list): requeue on the child-graph poll cadence.
-		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, nil
-	}
+	all := make([]storagev1alpha1.ExcludedObjectRef, 0, len(excluded)+len(pvcExcluded)+len(manifestExcluded))
+	all = append(all, excluded...)
+	all = append(all, pvcExcluded...)
+	all = append(all, manifestExcluded...)
 	// ensureOrphanPVCVolumeSnapshots creates the CSI VolumeSnapshots and declares them as regular domain
-	// children (EnsureChildren), routing any terminal VolumeSnapshotClass failure onto the Snapshot's own
-	// Ready (failOrphanCaptureTerminal) — pre-Planned there is no bound root content to carry it.
-	if err := r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, adapter, sdk, excluded, targets); err != nil {
+	// children (EnsureChildren) together with the complete excluded record, routing any terminal
+	// VolumeSnapshotClass failure onto the Snapshot's own Ready (failOrphanCaptureTerminal) — pre-Planned
+	// there is no bound root content to carry it.
+	if err := r.ensureOrphanPVCVolumeSnapshots(ctx, nsSnap, adapter, sdk, all, targets); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// rootLabelExcludedManifestRefs sweeps the root's target namespace once, at planning time, for the objects
+// the manifest leg will leave out because they carry the exclude label (usecase.RootLabelExcludedManifestRefs).
+// It holds the same preconditions as the manifest leg's own sweep and requeues while one is not met: the
+// snapshot-kind registry (otherwise our own machinery would be taken for user objects), the per-namespace
+// capture RBAC, and a complete listing. An unreadable type fails closed like the manifest leg does — a
+// frozen record missing its objects could not be completed later — and is reported through the same
+// domain message and Warning Event, in phase Planning.
+func (r *SnapshotReconciler) rootLabelExcludedManifestRefs(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	adapter NamespaceSnapshotAdapter,
+	sdk snapshotsdk.CaptureSDK,
+) ([]storagev1alpha1.ExcludedObjectRef, ctrl.Result, error) {
+	if r.Dynamic == nil || r.Discovery == nil {
+		return nil, ctrl.Result{}, fmt.Errorf("snapshot reconciler: Dynamic/Discovery client is nil")
+	}
+	snapshotKinds, skErr := r.buildSnapshotMachineryGVKs()
+	if skErr != nil {
+		return nil, ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	if allowed, sarErr := r.namespaceCaptureRBACReady(ctx, nsSnap.Namespace); sarErr != nil {
+		return nil, ctrl.Result{}, sarErr
+	} else if !allowed {
+		return nil, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	refs, unreadable, err := usecase.RootLabelExcludedManifestRefs(ctx, r.Dynamic, r.Discovery, nsSnap, snapshotKinds)
+	if err != nil {
+		if isTransientCaptureTargetError(err) {
+			return nil, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+		}
+		return nil, ctrl.Result{}, err
+	}
+	if len(unreadable) > 0 {
+		if err := r.reportUnreadableNamespacePlanAt(ctx, nsSnap, adapter, sdk, snapshotsdk.PhasePlanning, unreadable); err != nil {
+			return nil, ctrl.Result{}, err
+		}
+		return nil, ctrl.Result{RequeueAfter: 500 * time.Millisecond}, nil
+	}
+	return refs, ctrl.Result{}, nil
 }
 
 // nonOrphanCSIVolumeSnapshotChildRefs drops the root's own orphan-wave output (CSI VolumeSnapshot children)
@@ -495,6 +560,20 @@ func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
 	sdk snapshotsdk.CaptureSDK,
 	unreadable []schema.GroupVersionResource,
 ) error {
+	return r.reportUnreadableNamespacePlanAt(ctx, nsSnap, adapter, sdk, snapshotsdk.PhasePlanned, unreadable)
+}
+
+// reportUnreadableNamespacePlanAt is reportUnreadableNamespacePlan in a given phase: Planned for the
+// manifest leg, Planning for the planning-time sweep of the label-excluded objects
+// (rootLabelExcludedManifestRefs), which runs before barrier 1. Barrier 1 clears the message.
+func (r *SnapshotReconciler) reportUnreadableNamespacePlanAt(
+	ctx context.Context,
+	nsSnap *storagev1alpha1.Snapshot,
+	adapter NamespaceSnapshotAdapter,
+	sdk snapshotsdk.CaptureSDK,
+	phase snapshotsdk.Phase,
+	unreadable []schema.GroupVersionResource,
+) error {
 	message := formatUnreadableNamespacePlan(unreadable)
 	previous := ""
 	if cs := nsSnap.Status.CaptureState; cs != nil && cs.DomainSpecificController != nil {
@@ -508,10 +587,10 @@ func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
 	// fails the reconcile errors out with the message still unpublished, so the retry re-enters this path
 	// and re-attempts the patch — but no premature Event was emitted. Once the message is durable the
 	// unchanged-message gate above suppresses any re-emission on subsequent reconciles.
-	// Manifest-leg diagnostic runs after barrier 1: keep phase=Planned and only refresh the message
-	// (same-phase DomainCaptureStatus Apply; never regress to Planning).
+	// Keep the caller's phase and only refresh the message (same-phase DomainCaptureStatus Apply): the
+	// manifest-leg diagnostic runs after barrier 1 and must never regress to Planning.
 	if err := sdk.DomainCaptureStatus(adapter).
-		Phase(snapshotsdk.PhasePlanned).
+		Phase(phase).
 		Message(message).
 		Apply(ctx); err != nil {
 		return err

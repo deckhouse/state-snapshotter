@@ -55,38 +55,84 @@ func listResidualRootOwnedPVCTargets(
 	_ *storagev1alpha1.SnapshotContent,
 	dataBearing DataBearingKindFunc,
 ) ([]vcpkg.Target, error) {
+	targets, _, err := residualRootPVCTargetsAndExcluded(ctx, c, namespace, snap, dataBearing)
+	return targets, err
+}
+
+// ListResidualRootPVCTargets is the residual root PVC leg at planning time: the uncovered PVCs of the root
+// Snapshot's namespace the orphan wave captures (targets, sorted by UID), and the ones it leaves out
+// because they carry the exclude label (excluded, sorted by name), as the ExcludedObjectRefs the root
+// records before barrier 1 freezes its excluded membership.
+//
+// Only a PVC the leg would otherwise have captured is recorded: a labelled PVC a descendant subtree
+// already covers is not excluded from the snapshot, so it is in neither list.
+func ListResidualRootPVCTargets(
+	ctx context.Context,
+	c client.Reader,
+	snap *storagev1alpha1.Snapshot,
+	dataBearing DataBearingKindFunc,
+) ([]vcpkg.Target, []storagev1alpha1.ExcludedObjectRef, error) {
+	namespace, err := snapshotNamespaceForOwnedTargets(snap, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets, vetoed, err := residualRootPVCTargetsAndExcluded(ctx, c, namespace, snap, dataBearing)
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].UID < targets[j].UID
+	})
+	excluded := make([]storagev1alpha1.ExcludedObjectRef, 0, len(vetoed))
+	for _, t := range vetoed {
+		excluded = append(excluded, storagev1alpha1.ExcludedObjectRef{APIVersion: t.APIVersion, Kind: t.Kind, Name: t.Name})
+	}
+	sort.Slice(excluded, func(i, j int) bool {
+		return excluded[i].Name < excluded[j].Name
+	})
+	return targets, excluded, nil
+}
+
+// residualRootPVCTargetsAndExcluded lists the namespace PVCs once and splits the uncovered ones by the
+// exclude label: targets are captured, vetoed are left out.
+func residualRootPVCTargetsAndExcluded(
+	ctx context.Context,
+	c client.Reader,
+	namespace string,
+	snap *storagev1alpha1.Snapshot,
+	dataBearing DataBearingKindFunc,
+) (targets, vetoed []vcpkg.Target, err error) {
 	// content-free coverage: derive the subtree-covered PVC UID set from the Snapshot child graph
 	// (status.childrenSnapshotRefs + each descendant's mirrored status.data), NOT the bound SnapshotContent
 	// tree — so residual/orphan discovery is computable before the root content is bound ("late Planned").
 	covered, err := CollectSubtreeCoveredPVCUIDsFromSnapshot(ctx, c, snap, dataBearing)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The exclude veto is applied here so vetoed PVCs are dropped consistently from BOTH the volume-data leg
 	// and the root PVC manifest exclude set (both consumers go through this lister via
 	// ListOwnedPVCTargetsForLogicalContent). This mirrors the manifest leg, so a PVC is never half-captured
-	// (volume node without manifest, or vice versa).
+	// (volume node without manifest, or vice versa). The label is checked directly, not through a selector,
+	// so the dropped PVCs are returned for the excludedRefs record.
 	candidates, labelsByUID, err := listNamespacePVCTargetsWithLabels(ctx, c, namespace)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	candidates = filterPVCTargetsBySelector(storagev1alpha1.ExcludeVetoSelector(), candidates, labelsByUID)
-	return residualPVCTargets(candidates, covered), nil
+	kept, labelled := splitPVCTargetsByExcludeLabel(candidates, labelsByUID)
+	return residualPVCTargets(kept, covered), residualPVCTargets(labelled, covered), nil
 }
 
-// filterPVCTargetsBySelector keeps only PVC targets whose labels (resolved by UID from the same List that
-// produced the candidates) match selector. A nil or Everything selector returns the candidates unchanged.
-func filterPVCTargetsBySelector(selector labels.Selector, candidates []vcpkg.Target, labelsByUID map[string]labels.Set) []vcpkg.Target {
-	if selector == nil || selector.Empty() || len(candidates) == 0 {
-		return candidates
-	}
-	out := make([]vcpkg.Target, 0, len(candidates))
+// splitPVCTargetsByExcludeLabel splits PVC targets by the exclude label (value ignored), resolving the
+// labels by UID from the same List that produced the candidates.
+func splitPVCTargetsByExcludeLabel(candidates []vcpkg.Target, labelsByUID map[string]labels.Set) (kept, vetoed []vcpkg.Target) {
 	for _, t := range candidates {
-		if selector.Matches(labelsByUID[t.UID]) {
-			out = append(out, t)
+		if _, ok := labelsByUID[t.UID][storagev1alpha1.ExcludeLabelKey]; ok {
+			vetoed = append(vetoed, t)
+			continue
 		}
+		kept = append(kept, t)
 	}
-	return out
+	return kept, vetoed
 }
 
 // listDomainNodeOwnedPVCTargets returns PVC volume targets explicitly owned by this logical node:

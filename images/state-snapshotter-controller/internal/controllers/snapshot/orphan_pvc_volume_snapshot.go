@@ -60,8 +60,9 @@ var (
 // The class is resolved + validated explicitly on the build path (PVC StorageClass annotation, checked
 // against the PV CSI driver): a non-empty terminalReason from that resolution is a non-recoverable
 // configuration problem surfaced on the Snapshot's own Ready (failOrphanCaptureTerminal) — pre-Planned
-// there is no bound root content to carry it. excluded is the domain planning pass's exclusion set,
-// re-passed to EnsureChildren so the additive child-ref union does not clobber status.excludedRefs.
+// there is no bound root content to carry it. excluded is the root's complete exclusion record (the domain
+// planning pass's drops plus the label drops of the PVC and manifest legs), published by EnsureChildren
+// with the orphan children before barrier 1 freezes both.
 func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 	ctx context.Context,
 	nsSnap *storagev1alpha1.Snapshot,
@@ -98,12 +99,11 @@ func (r *SnapshotReconciler) ensureOrphanPVCVolumeSnapshots(
 		}
 		specs = append(specs, snapshotsdk.ChildSpec{Object: orphanPVCVolumeSnapshotObject(nsSnap, target, name, className)})
 	}
-	if len(specs) == 0 {
-		return nil
-	}
 	// EnsureChildren creates each orphan VolumeSnapshot (stamping the controller ownerRef to the root Snapshot,
 	// its origin and its protection) and UNIONS their refs into status.childrenSnapshotRefs. Re-passing the planning excluded set
-	// keeps status.excludedRefs intact (EnsureChildren rewrites that field on every call).
+	// keeps status.excludedRefs intact (EnsureChildren rewrites that field on every call). It runs even with
+	// no orphan PVC: the excluded set passed here is the complete record, which may have grown by this
+	// wave's own label drops, and EnsureChildren is a no-op when nothing changed.
 	return sdk.EnsureChildren(ctx, adapter, specs, excluded)
 }
 

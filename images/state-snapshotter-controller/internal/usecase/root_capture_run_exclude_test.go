@@ -17,9 +17,15 @@ limitations under the License.
 package usecase
 
 import (
+	"context"
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	ssv1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
@@ -130,5 +136,103 @@ func TestRootNamespaceTarget_SurvivesSubtreeExclude(t *testing.T) {
 	}
 	if !haveNS {
 		t.Fatalf("Namespace target must survive the subtree exclude set, got %#v", out)
+	}
+}
+
+// labelExcludeDiscovery serves a fixed namespaced resource list; only ServerPreferredNamespacedResources is
+// called by the manifest sweep.
+type labelExcludeDiscovery struct {
+	discovery.DiscoveryInterface
+}
+
+func (labelExcludeDiscovery) ServerPreferredNamespacedResources() ([]*metav1.APIResourceList, error) {
+	verbs := metav1.Verbs{"get", "list", "watch"}
+	return []*metav1.APIResourceList{{
+		GroupVersion: "v1",
+		APIResources: []metav1.APIResource{
+			{Name: "configmaps", Namespaced: true, Kind: "ConfigMap", Verbs: verbs},
+			{Name: "persistentvolumeclaims", Namespaced: true, Kind: "PersistentVolumeClaim", Verbs: verbs},
+		},
+	}}, nil
+}
+
+func labelExcludeObject(kind, name string, vetoed bool) *unstructured.Unstructured {
+	o := &unstructured.Unstructured{}
+	o.SetAPIVersion("v1")
+	o.SetKind(kind)
+	o.SetNamespace("ns1")
+	o.SetName(name)
+	if vetoed {
+		o.SetLabels(map[string]string{storagev1alpha1.ExcludeLabelKey: "true"})
+	}
+	return o
+}
+
+// TestRootLabelExcludedManifestRefs_RecordsLabelledObjectsButNotPVCs pins the planning-time record of the
+// manifest leg: a labelled ConfigMap is returned as an excluded ref with its full identity, an unlabelled
+// one is not, and a labelled PVC is left to the volume leg, which alone knows whether it would otherwise
+// have been captured.
+func TestRootLabelExcludedManifestRefs_RecordsLabelledObjectsButNotPVCs(t *testing.T) {
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			{Version: "v1", Resource: "configmaps"}:             "ConfigMapList",
+			{Version: "v1", Resource: "persistentvolumeclaims"}: "PersistentVolumeClaimList",
+		},
+		labelExcludeObject("ConfigMap", "cm-plain", false),
+		labelExcludeObject("ConfigMap", "cm-vetoed", true),
+		labelExcludeObject("PersistentVolumeClaim", "pvc-vetoed", true),
+	)
+	root := &storagev1alpha1.Snapshot{ObjectMeta: metav1.ObjectMeta{Name: "root", Namespace: "ns1"}}
+
+	refs, unreadable, err := RootLabelExcludedManifestRefs(context.Background(), dyn, labelExcludeDiscovery{}, root, nil)
+	if err != nil {
+		t.Fatalf("RootLabelExcludedManifestRefs: %v", err)
+	}
+	if len(unreadable) != 0 {
+		t.Fatalf("unreadable = %v, want none", unreadable)
+	}
+	want := []storagev1alpha1.ExcludedObjectRef{{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-vetoed"}}
+	if len(refs) != len(want) || refs[0] != want[0] {
+		t.Fatalf("refs = %#v, want %#v", refs, want)
+	}
+}
+
+// TestWithoutFrozenExcludedRefs_DropsRecordedObjects pins the post-barrier half: the manifest leg subtracts
+// what the root recorded as excluded at planning time, matched by group, kind and name (a domain source
+// may be recorded under another version), and leaves everything else.
+func TestWithoutFrozenExcludedRefs_DropsRecordedObjects(t *testing.T) {
+	root := &storagev1alpha1.Snapshot{
+		Status: storagev1alpha1.SnapshotStatus{
+			CaptureState: &storagev1alpha1.CaptureStateStatus{
+				DomainSpecificController: &storagev1alpha1.DomainSpecificControllerCaptureState{
+					ExcludedRefs: []storagev1alpha1.ExcludedObjectRef{
+						{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-unlabelled-later"},
+						{APIVersion: "demo.example.com/v1beta1", Kind: "DemoThing", Name: "thing"},
+					},
+				},
+			},
+		},
+	}
+	base := []namespacemanifest.ManifestTarget{
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-keep"},
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "cm-unlabelled-later"},
+		{APIVersion: "demo.example.com/v1", Kind: "DemoThing", Name: "thing"},
+		{APIVersion: "v1", Kind: "Secret", Name: "cm-unlabelled-later"},
+	}
+	out := withoutFrozenExcludedRefs(base, root)
+	got := map[string]struct{}{}
+	for _, tgt := range out {
+		got[tgt.APIVersion+"/"+tgt.Kind+"/"+tgt.Name] = struct{}{}
+	}
+	if len(got) != 2 {
+		t.Fatalf("targets = %v, want only cm-keep and the Secret", got)
+	}
+	for _, k := range []string{"v1/ConfigMap/cm-keep", "v1/Secret/cm-unlabelled-later"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("targets = %v, missing %q", got, k)
+		}
+	}
+	if len(withoutFrozenExcludedRefs(base, &storagev1alpha1.Snapshot{})) != len(base) {
+		t.Fatal("a root without a recorded excluded set must keep the base unchanged")
 	}
 }
