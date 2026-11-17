@@ -517,7 +517,7 @@ func (r *SnapshotReconciler) reportUnreadableNamespacePlan(
 		return err
 	}
 	if r.Recorder != nil {
-		r.Recorder.Event(nsSnap, corev1.EventTypeWarning, eventReasonNamespacePlanUnreadable, message)
+		r.Recorder.Eventf(nsSnap, nil, corev1.EventTypeWarning, eventReasonNamespacePlanUnreadable, "CaptureNamespace", "%s", message)
 	}
 	return nil
 }

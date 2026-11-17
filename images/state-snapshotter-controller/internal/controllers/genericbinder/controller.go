@@ -346,7 +346,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 			if changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, contentObj, *contentOwnerRef); err != nil {
 				return ctrl.Result{}, err
 			} else if changed {
-				return ctrl.Result{Requeue: true}, nil
+				return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 			}
 		}
 	}
@@ -432,7 +432,7 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		// Log both field names for backward compatibility with log parsers
 		logger.Info("Updated Snapshot status.boundSnapshotContentName", "boundSnapshotContentName", contentName, "contentName", contentName)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 	}
 
 	// Step 3 (projection barrier): the content shell exists + is bound (eager, above). Publish the status

@@ -70,7 +70,7 @@ func TestReconcileSelfHealsMissingFinalizerWhenBoundSnapshotDeleted(t *testing.T
 	if err != nil {
 		t.Fatalf("reconcile (heal): %v", err)
 	}
-	if !res.Requeue {
+	if res.RequeueAfter == 0 {
 		t.Fatalf("expected Requeue after self-healing the finalizer, got %+v", res)
 	}
 	fresh := &storagev1alpha1.SnapshotContent{}

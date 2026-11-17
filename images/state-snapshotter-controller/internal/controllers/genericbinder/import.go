@@ -141,7 +141,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 			return ctrl.Result{}, err
 		}
 		logger.Info("Materialized import SnapshotContent", "name", contentName, "owner", ownerRef.Kind)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 	}
 
 	// Keep the parent ownerRef aligned on the already-bound content (e.g. parent content recreated).
@@ -169,7 +169,7 @@ func (r *GenericSnapshotBinderController) reconcileGenericImport(
 	if changed, err := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, *ownerRef); err != nil {
 		return ctrl.Result{}, err
 	} else if changed {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 	}
 
 	if isRoot {

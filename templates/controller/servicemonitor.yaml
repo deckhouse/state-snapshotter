@@ -1,8 +1,8 @@
 {{- if (include "helm_lib_api_version_exists" (list . "monitoring.coreos.com/v1/ServiceMonitor")) }}
 {{- /*
-  The metrics are served by the kube-rbac-proxy of the pod, over TLS and behind an
-  authorization check, so the scrape carries the Prometheus token. The certificate
-  is the proxy's own, hence insecureSkipVerify.
+  The controller serves its metrics over TLS and behind an authorization check,
+  so the scrape carries the Prometheus token. The certificate is the controller's
+  own self-signed one, hence insecureSkipVerify.
 */ -}}
 ---
 apiVersion: monitoring.coreos.com/v1

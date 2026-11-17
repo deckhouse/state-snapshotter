@@ -200,7 +200,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, bErr
 		}
 		logger.Info("Materialized import SnapshotContent for extended VolumeSnapshot", "name", contentName)
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 	}
 
 	content := &storagev1alpha1.SnapshotContent{}
@@ -211,7 +211,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if changed, eErr := controllercommon.EnsureLifecycleOwnerRef(ctx, r.Client, content, *ownerRef); eErr != nil {
 			return ctrl.Result{}, eErr
 		} else if changed {
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 		}
 	}
 

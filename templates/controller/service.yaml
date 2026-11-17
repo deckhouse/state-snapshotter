@@ -12,8 +12,7 @@ spec:
     protocol: TCP
     name: https
     appProtocol: https
-  # The port of the kube-rbac-proxy, not of the controller: the controller keeps
-  # its metrics on 127.0.0.1 and only the proxy can reach them.
+  # The controller serves its metrics here over HTTPS and authorizes every scrape.
   - port: {{ .Values.stateSnapshotter.internal.controllerMetricsProxyPort }}
     targetPort: https-metrics
     protocol: TCP

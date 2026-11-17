@@ -121,7 +121,7 @@ func (r *SnapshotContentController) notePublishedIdentityHeld(ctx context.Contex
 	}
 	logf.FromContext(ctx).Info(msg)
 	if r.Recorder != nil {
-		r.Recorder.Event(contentObj, corev1.EventTypeWarning, EventReasonPublishedIdentityHeld, msg)
+		r.Recorder.Eventf(contentObj, nil, corev1.EventTypeWarning, EventReasonPublishedIdentityHeld, "PublishIdentity", "%s", msg)
 	}
 }
 

@@ -60,7 +60,7 @@ func EnsureRootObjectKeeperWithTTL(
 	snapshotGVK schema.GroupVersionKind,
 ) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
 	if snapshotObj.GetUID() == "" {
-		return nil, ctrl.Result{Requeue: true}, nil
+		return nil, ctrl.Result{RequeueAfter: RequeueAfterWrite}, nil
 	}
 	name := RootObjectKeeperName(snapshotObj.GetUID())
 	want := deckhousev1alpha1.ObjectKeeperSpec{

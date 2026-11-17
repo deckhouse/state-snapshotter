@@ -11,12 +11,14 @@ git:
       - api
       - pkg/snapshotsdk
       - images/{{ $.ImageName }}
+      - images/webhooks
       - lib/go
     stageDependencies:
       install:
         - '**/*'
     excludePaths:
       - images/{{ $.ImageName }}/werf.inc.yaml
+      - images/webhooks/werf.inc.yaml
 
 shell:
   install:

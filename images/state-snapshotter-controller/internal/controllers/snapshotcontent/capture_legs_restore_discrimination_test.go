@@ -24,7 +24,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -82,7 +82,7 @@ func TestReconcileOwnerCaptureLegs_OrdinaryLatchIsNotARestore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			scheme := captureLegsScheme(t)
-			rec := record.NewFakeRecorder(8)
+			rec := events.NewFakeRecorder(8)
 			registerSnapshotContentMetrics()
 			before := testutil.ToFloat64(captureStateRestoredTotal)
 
@@ -116,7 +116,7 @@ func TestReconcileOwnerCaptureLegs_OrdinaryLatchIsNotARestore(t *testing.T) {
 // assertRestoreEvent requires exactly one CaptureStateRestored event naming every leg in wantLegs when
 // wantLegs is non-empty, and no event at all when it is empty. A leg NOT in wantLegs must not be named:
 // an event that lists a leg the core merely latched would mislead the same way the counter would.
-func assertRestoreEvent(t *testing.T, rec *record.FakeRecorder, wantLegs []string) {
+func assertRestoreEvent(t *testing.T, rec *events.FakeRecorder, wantLegs []string) {
 	t.Helper()
 	var events []string
 	for {

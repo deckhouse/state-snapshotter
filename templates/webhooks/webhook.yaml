@@ -4,7 +4,7 @@ kind: ValidatingWebhookConfiguration
 metadata:
   name: d8-{{ .Chart.Name }}-mcr-validation
   annotations:
-    werf.io/deploy-dependency-webhooks: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
+    werf.io/deploy-dependency-controller: state=ready,kind=Deployment,name=controller,namespace=d8-{{ .Chart.Name }}
     werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
   labels:
     heritage: deckhouse

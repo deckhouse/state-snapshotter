@@ -16,9 +16,13 @@ limitations under the License.
 
 package snaphelpers
 
+import "time"
+
 const (
 	KindSnapshot = "Snapshot"
 )
+
+const RequeueAfterWrite = time.Second
 
 // API constants for ObjectKeeper.
 const (

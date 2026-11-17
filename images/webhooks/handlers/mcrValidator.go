@@ -432,7 +432,7 @@ func findResourceNamespace(ctx context.Context, gv schema.GroupVersion, resource
 		// diagnostic naming the resource whose access is missing. Core-side read access for a domain type
 		// is granted to this ServiceAccount by the 030-domain-rbac hook once the type's
 		// CustomSnapshotDefinition reports AccessGranted=True.
-		return "", fmt.Errorf("access denied reading %s in group %q version %q: the webhooks ServiceAccount lacks 'get' on this resource: %w",
+		return "", fmt.Errorf("access denied reading %s in group %q version %q: the ServiceAccount serving this webhook lacks 'get' on this resource: %w",
 			resourceName, gv.Group, gv.Version, err)
 	}
 

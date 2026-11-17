@@ -27,8 +27,6 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/deckhouse/sds-common-lib/logger"
-	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
-	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/webhooks/handlers"
 )
 
@@ -52,10 +50,7 @@ func initFlags() config {
 	return cfg
 }
 
-const (
-	port           = ":8443"
-	MCRValidatorID = "MCRValidator"
-)
+const port = ":8443"
 
 func main() {
 	// LOG_LEVEL arrives as a number 0..4 from lib-helm, which is what the
@@ -67,14 +62,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unable to create the logger: %s\n", err)
 		os.Exit(1)
 	}
-	kwhLog := kwhlogger.New(log)
-	// One logger per process: the handlers are plain functions with nowhere to pass
-	// one through, so they read it from their own package.
-	handlers.SetLogger(log)
-
 	cfg := initFlags()
 
-	// Create Kubernetes client
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error getting in-cluster config: %s", err)
@@ -93,24 +82,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set the clients in handlers
-	handlers.SetKubernetesClient(clientset)
-	handlers.SetDynamicClient(dynClient)
-
-	// Create validating webhook handler
-	mcrValidatingWebhookHandler, err := handlers.GetValidatingWebhookHandler(
-		handlers.MCRValidate,
-		MCRValidatorID,
-		&storagev1alpha1.ManifestCaptureRequest{},
-		kwhLog,
-	)
+	hs, err := handlers.Handlers(log, clientset, dynClient)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating mcrValidatingWebhookHandler: %s", err)
+		fmt.Fprintf(os.Stderr, "error creating the webhook handlers: %s", err)
 		os.Exit(1)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/validate", mcrValidatingWebhookHandler)
+	for path, h := range hs {
+		mux.Handle(path, h)
+	}
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
 	log.Info("listening", "address", port)

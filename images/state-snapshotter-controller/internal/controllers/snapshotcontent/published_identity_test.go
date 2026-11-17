@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -80,7 +80,7 @@ func TestDataBindingIdentityEqualIgnoresUIDAndSize(t *testing.T) {
 }
 
 // drainEvents returns what the fake recorder has received so far.
-func drainEvents(rec *record.FakeRecorder) []string {
+func drainEvents(rec *events.FakeRecorder) []string {
 	var got []string
 	for {
 		select {
@@ -114,7 +114,7 @@ func TestPublishedIdentityHeldIsRecordedOncePerRefusal(t *testing.T) {
 		WithScheme(captureLegsScheme(t)).
 		WithObjects(&ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: candidate}}).
 		Build()
-	rec := record.NewFakeRecorder(16)
+	rec := events.NewFakeRecorder(16)
 	r := &SnapshotContentController{Client: cl, Recorder: rec}
 
 	pass := func(content *unstructured.Unstructured) []string {
@@ -156,7 +156,7 @@ func TestPublishedIdentityHeldIsRecordedOncePerRefusal(t *testing.T) {
 // make them take turns at the one remembered refusal and record both on every pass.
 func TestPublishedIdentityHeldKeepsTheTwoIdentitiesApart(t *testing.T) {
 	ctx := context.Background()
-	rec := record.NewFakeRecorder(16)
+	rec := events.NewFakeRecorder(16)
 	r := &SnapshotContentController{Recorder: rec}
 	content := heldTestContent("content-uid", "mcp-published")
 

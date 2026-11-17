@@ -24,7 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -46,7 +46,7 @@ func TestReconcileOwnerCaptureLegs_RestoreFromDurablePointer(t *testing.T) {
 	ctx := context.Background()
 	scheme := captureLegsScheme(t)
 	owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
-	rec := record.NewFakeRecorder(8)
+	rec := events.NewFakeRecorder(8)
 	registerSnapshotContentMetrics()
 	before := testutil.ToFloat64(captureStateRestoredTotal)
 
@@ -189,7 +189,7 @@ func TestReconcileOwnerCaptureLegs_RestoreSkippedWhenSchemaPrunesField(t *testin
 	ctx := context.Background()
 	scheme := captureLegsScheme(t)
 	owner := captureLegsOwner(clSnapGVK, projTestContent, "", "", string(storagev1alpha1.SnapshotCapturePhasePlanned))
-	rec := record.NewFakeRecorder(8)
+	rec := events.NewFakeRecorder(8)
 	registerSnapshotContentMetrics()
 	before := testutil.ToFloat64(captureStateRestoredTotal)
 
@@ -377,7 +377,7 @@ func TestReconcileOwnerCaptureLegs_PartiallyPersistedDeclarationIsNotSettled(t *
 			return nil
 		},
 	})
-	rec := record.NewFakeRecorder(8)
+	rec := events.NewFakeRecorder(8)
 	r := &SnapshotContentController{Client: base, APIReader: dropData, GVKRegistry: snapshot.NewGVKRegistry(), Recorder: rec}
 	r.MarkDomainCaptureKind(clSnapGVK)
 	r.MarkRequiresDataArtifact(clSnapGVK.Kind, true)

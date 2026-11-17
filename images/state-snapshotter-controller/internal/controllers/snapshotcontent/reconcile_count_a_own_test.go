@@ -83,7 +83,4 @@ func TestReconcileProbeReadsOwnContentFromCache(t *testing.T) {
 	if res.RequeueAfter != defaultSnapshotContentRequeueAfter {
 		t.Fatalf("RequeueAfter = %v, want %v", res.RequeueAfter, defaultSnapshotContentRequeueAfter)
 	}
-	if res.Requeue {
-		t.Fatalf("unexpected immediate Requeue=true for a not-ready leaf: %+v", res)
-	}
 }

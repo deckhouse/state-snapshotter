@@ -34,6 +34,8 @@ import (
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,6 +46,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring/metricsauth"
+	"github.com/deckhouse/sds-common-lib/webhookserver"
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	v1alpha1 "github.com/deckhouse/state-snapshotter/api/v1alpha1"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/api"
@@ -57,6 +61,7 @@ import (
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedbootstrap"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/unifiedruntime"
+	"github.com/deckhouse/state-snapshotter/images/webhooks/handlers"
 )
 
 var (
@@ -231,7 +236,7 @@ func main() {
 	// Cluster-scoped resources (ManifestCheckpoint, Retainer) are always watched
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
-		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
+		Metrics:                 metricsauth.ApplyFromEnv(metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress}),
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
@@ -476,6 +481,39 @@ func main() {
 
 	// NOTE: RetainerController (IRetainer) has been removed.
 	// ObjectKeeper is now used instead, which is managed by deckhouse-controller.
+
+	webhookOpts, webhooksEnabled, err := webhookserver.OptionsFromEnv()
+	if err != nil {
+		mainLog.Error("unable to read the webhook server configuration", logger.Err(err))
+		cancel()
+		os.Exit(1)
+	}
+	if webhooksEnabled {
+		cs, err := kubernetes.NewForConfig(kConfig)
+		if err != nil {
+			mainLog.Error("unable to create the Kubernetes client for the webhooks", logger.Err(err))
+			cancel()
+			os.Exit(1)
+		}
+		dyn, err := dynamic.NewForConfig(kConfig)
+		if err != nil {
+			mainLog.Error("unable to create the dynamic client for the webhooks", logger.Err(err))
+			cancel()
+			os.Exit(1)
+		}
+		hs, err := handlers.Handlers(log.Named("webhooks"), cs, dyn)
+		if err != nil {
+			mainLog.Error("unable to create the webhook handlers", logger.Err(err))
+			cancel()
+			os.Exit(1)
+		}
+		if err = webhookserver.Add(mgr, webhookOpts, hs); err != nil {
+			mainLog.Error("unable to add the webhook server", logger.Err(err))
+			cancel()
+			os.Exit(1)
+		}
+		mainLog.Info("serving the admission webhooks", "port", webhookOpts.Port, "certDir", webhookOpts.CertDir)
+	}
 
 	// Add health checks
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

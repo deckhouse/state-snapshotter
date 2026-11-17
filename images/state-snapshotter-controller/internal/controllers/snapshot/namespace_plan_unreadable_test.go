@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -48,7 +48,7 @@ func plannedNamespaceRoot(t *testing.T) *storagev1alpha1.Snapshot {
 	return snap
 }
 
-func newUnreadablePlanReconciler(t *testing.T, snap *storagev1alpha1.Snapshot, rec record.EventRecorder) (*SnapshotReconciler, snapshotsdk.CaptureSDK) {
+func newUnreadablePlanReconciler(t *testing.T, snap *storagev1alpha1.Snapshot, rec events.EventRecorder) (*SnapshotReconciler, snapshotsdk.CaptureSDK) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
@@ -66,7 +66,7 @@ func newUnreadablePlanReconciler(t *testing.T, snap *storagev1alpha1.Snapshot, r
 func TestReportUnreadableNamespacePlan_PublishesDomainMessageAndEvent(t *testing.T) {
 	ctx := context.Background()
 	snap := plannedNamespaceRoot(t)
-	rec := record.NewFakeRecorder(10)
+	rec := events.NewFakeRecorder(10)
 	r, sdk := newUnreadablePlanReconciler(t, snap, rec)
 	adapter := NewNamespaceSnapshotAdapter(snap)
 
@@ -122,7 +122,7 @@ func TestReportUnreadableNamespacePlan_PublishesDomainMessageAndEvent(t *testing
 func TestReportUnreadableNamespacePlan_IdempotentOnSameSet(t *testing.T) {
 	ctx := context.Background()
 	snap := plannedNamespaceRoot(t)
-	rec := record.NewFakeRecorder(10)
+	rec := events.NewFakeRecorder(10)
 	r, sdk := newUnreadablePlanReconciler(t, snap, rec)
 	adapter := NewNamespaceSnapshotAdapter(snap)
 

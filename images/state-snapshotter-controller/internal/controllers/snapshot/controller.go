@@ -33,7 +33,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -81,7 +81,7 @@ type SnapshotReconciler struct {
 	// Recorder emits Events on the root Snapshot for out-of-band diagnostics that must stay OUT of the
 	// core-owned Ready condition (e.g. NamespacePlanUnreadable — a fail-closed unreadable namespace
 	// manifest plan). May be nil in unit tests, in which case Event emission is skipped.
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 	childWatchMgr *snapshotDynamicWatchManager
 }
 
@@ -179,7 +179,7 @@ func AddSnapshotControllerToManager(mgr ctrl.Manager, cfg *config.Options, snaps
 		Archive:               usecase.NewArchiveService(mgr.GetAPIReader(), mgr.GetAPIReader(), logImpl),
 		SnapshotGraphRegistry: snapshotGraphRegistry,
 		Mgr:                   mgr,
-		Recorder:              mgr.GetEventRecorderFor("state-snapshotter-namespace-capture"),
+		Recorder:              mgr.GetEventRecorder("state-snapshotter-namespace-capture"),
 	}
 	// Options may override SubresourceREST (envtest injects a fake). Otherwise build the in-cluster client
 	// used for the root's manifest-exclude self-call (subtree-manifest-identities).
@@ -250,7 +250,7 @@ func (r *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.Client.Update(ctx, nsSnap); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 	}
 
 	// Ensure the root ObjectKeeper for the Snapshot record's own TTL GC. The returned keeper is no longer
@@ -316,14 +316,14 @@ const snapshotChildGraphPollInterval = 30 * time.Second
 
 // childGraphCaptureGate decides how reconcile proceeds after child-graph planning and reports whether
 // capture must be blocked (block=true means return the result, do not capture):
-//   - graphChanged: planner just wrote status; requeue immediately so the fresh status is re-read.
+//   - graphChanged: planner just wrote status; requeue shortly after the write so the fresh status is re-read.
 //     This is cheap (also woken by the self-watch) and avoids a 30s delay on an ordinary status update.
 //   - !graphReady: a priority layer is still pending; requeue via RequeueAfter polling fallback. This
 //     is intentionally unbounded — a child snapshot may stay pending for hours — and never a deadline.
 //   - otherwise: do not block; proceed to capture.
 func childGraphCaptureGate(graphChanged, graphReady bool) (ctrl.Result, bool) {
 	if graphChanged {
-		return ctrl.Result{Requeue: true}, true
+		return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, true
 	}
 	if !graphReady {
 		return ctrl.Result{RequeueAfter: snapshotChildGraphPollInterval}, true

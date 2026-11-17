@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -77,7 +77,7 @@ import (
 type SnapshotContentController struct {
 	client.Client
 	APIReader      client.Reader // Required: for reading resources directly from API server
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 	Scheme         *runtime.Scheme
 	Config         *config.Options
 	RESTMapper     meta.RESTMapper
@@ -322,7 +322,7 @@ func (r *SnapshotContentController) Reconcile(ctx context.Context, req ctrl.Requ
 				logger.Error(err, "Failed to add finalizer")
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{RequeueAfter: controllercommon.RequeueAfterWrite}, nil
 		}
 		if boundSnapshotDeleted, _, _ := unstructured.NestedBool(obj.Object, "status", "boundSnapshotDeleted"); boundSnapshotDeleted {
 			// Bound Snapshot is gone; the finalizer is confirmed present above. Skip status aggregation
@@ -2199,7 +2199,7 @@ func (r *SnapshotContentController) AddSnapshotStatusWatch(mgr ctrl.Manager, sna
 // Each GVK gets its own controller instance to ensure correct GVK context
 func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 	if r.Recorder == nil {
-		r.Recorder = mgr.GetEventRecorderFor("state-snapshotter-snapshot-content")
+		r.Recorder = mgr.GetEventRecorder("state-snapshotter-snapshot-content")
 	}
 	registerSnapshotContentMetrics()
 	r.watchMu.Lock()

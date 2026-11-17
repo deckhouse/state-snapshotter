@@ -86,7 +86,7 @@ var _ = Describe("Integration: core restores a wiped capture latch from the publ
 		)
 		Expect(err).NotTo(HaveOccurred())
 		contentCtrl.MarkDomainCaptureKind(ownerGVK)
-		contentCtrl.Recorder = mgr.GetEventRecorderFor("integration-capture-state-restore")
+		contentCtrl.Recorder = mgr.GetEventRecorder("integration-capture-state-restore")
 	})
 
 	It("copies manifestCaptured back from the published checkpoint without an intermediate false", func() {

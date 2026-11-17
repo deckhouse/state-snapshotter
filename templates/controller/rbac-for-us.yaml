@@ -185,6 +185,9 @@ rules:
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 
 # Domain/custom-resource RBAC (demo.* and any domain CSD) is intentionally NOT granted here.
 # Per rbac-source-of-truth, the controller SA's static RBAC stays domain-agnostic. The
@@ -226,6 +229,9 @@ rules:
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 # Allow controller to create Events in its namespace
 - apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+- apiGroups: ["events.k8s.io"]
   resources: ["events"]
   verbs: ["create", "patch"]
 

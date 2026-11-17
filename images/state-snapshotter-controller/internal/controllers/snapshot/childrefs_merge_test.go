@@ -483,15 +483,15 @@ func TestRecomputeChildGraphKeepsLowerPriorityStandalone(t *testing.T) {
 func TestChildGraphCaptureGate(t *testing.T) {
 	t.Run("status changed requeues immediately (not RequeueAfter)", func(t *testing.T) {
 		res, block := childGraphCaptureGate(true, true)
-		if !block || !res.Requeue || res.RequeueAfter != 0 {
-			t.Fatalf("changed graph must block with immediate Requeue:true; got block=%v res=%+v", block, res)
+		if !block || res.RequeueAfter != controllercommon.RequeueAfterWrite {
+			t.Fatalf("changed graph must block and requeue after the write; got block=%v res=%+v", block, res)
 		}
 	})
 
 	t.Run("changed takes precedence over pending", func(t *testing.T) {
 		res, block := childGraphCaptureGate(true, false)
-		if !block || !res.Requeue || res.RequeueAfter != 0 {
-			t.Fatalf("changed graph must requeue immediately even when pending; got block=%v res=%+v", block, res)
+		if !block || res.RequeueAfter != controllercommon.RequeueAfterWrite {
+			t.Fatalf("changed graph must requeue after the write even when pending; got block=%v res=%+v", block, res)
 		}
 	})
 
@@ -499,9 +499,6 @@ func TestChildGraphCaptureGate(t *testing.T) {
 		res, block := childGraphCaptureGate(false, false)
 		if !block {
 			t.Fatalf("pending graph must block capture")
-		}
-		if res.Requeue {
-			t.Fatalf("pending graph must not set Requeue:true (hot-loop); got %+v", res)
 		}
 		if res.RequeueAfter != snapshotChildGraphPollInterval {
 			t.Fatalf("pending graph RequeueAfter = %v, want poll interval %v", res.RequeueAfter, snapshotChildGraphPollInterval)

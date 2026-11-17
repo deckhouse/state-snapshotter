@@ -718,7 +718,7 @@ func (r *SnapshotContentController) declareOwnerCaptureLegsFromDurable(
 	captureStateRestoredTotal.Inc()
 	msg := "restored " + strings.Join(restored, ", ")
 	if r.Recorder != nil {
-		r.Recorder.Event(confirmed, corev1.EventTypeNormal, EventReasonCaptureStateRestored, msg)
+		r.Recorder.Eventf(confirmed, nil, corev1.EventTypeNormal, EventReasonCaptureStateRestored, "RestoreCaptureState", "%s", msg)
 	}
 	return content, true, nil
 }
