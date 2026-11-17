@@ -2151,8 +2151,7 @@ func (r *SnapshotContentController) AddWatchForContent(mgr ctrl.Manager, snapsho
 			r.clusterGVKs = append(r.clusterGVKs, contentGVK)
 		}
 	}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(contentGVK)
+	obj := controllercommon.WatchObjectForGVK(mgr.GetScheme(), contentGVK)
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(obj).
 		WithOptions(snapshotContentControllerOptions()).
@@ -2221,8 +2220,7 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		if _, ok := r.activeContentWatchSet[key]; ok {
 			continue
 		}
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(gvk)
+		obj := controllercommon.WatchObjectForGVK(mgr.GetScheme(), gvk)
 		builder := ctrl.NewControllerManagedBy(mgr).
 			For(obj).
 			WithOptions(snapshotContentControllerOptions()).
@@ -2232,7 +2230,7 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 		// MCP/VSC artifacts change. Guarded by RESTMapping so a not-yet-installed CRD (e.g.
 		// VolumeSnapshotContent under envtest) degrades to "no watch" instead of failing startup;
 		// revalidation on the next reconcile still recomputes state (INV-RECONCILE-TRUTH).
-		builder = r.addArtifactWakeUpWatches(builder)
+		builder = r.addArtifactWakeUpWatches(builder, mgr.GetScheme())
 		// Build (not Complete) so we keep the controller handle: the VolumeCaptureRequest watch is added
 		// to THIS existing controller later (AddVolumeCaptureRequestWatch), once the forked VCR CRD is
 		// guaranteed RESTMappable, instead of a static Watches that would fail startup when it is not.
@@ -2250,7 +2248,7 @@ func (r *SnapshotContentController) SetupWithManager(mgr ctrl.Manager) error {
 // VolumeSnapshotContent) routed by ownerRef -> SnapshotContent. Each watch is added only when the GVK is
 // RESTMappable so a missing CRD does not fail manager startup (the watch is simply absent and the next
 // reconcile still revalidates from truth refs). Handlers never write status.
-func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder) *builder.Builder {
+func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder, scheme *runtime.Scheme) *builder.Builder {
 	logger := ctrl.Log.WithName("snapshotcontent-controller")
 	for _, gvk := range artifactWakeUpGVKs() {
 		if _, err := r.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
@@ -2258,8 +2256,11 @@ func (r *SnapshotContentController) addArtifactWakeUpWatches(b *builder.Builder)
 				"gvk", gvk.String(), "reason", err.Error())
 			continue
 		}
-		artifactObj := &unstructured.Unstructured{}
-		artifactObj.SetGroupVersionKind(gvk)
+		artifactObj := controllercommon.WatchObjectForGVK(scheme, gvk)
+		if _, isUnstructured := artifactObj.(*unstructured.Unstructured); isUnstructured {
+			b = b.WatchesMetadata(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
+			continue
+		}
 		b = b.Watches(artifactObj, handler.EnqueueRequestsFromMapFunc(mapArtifactToOwningSnapshotContent))
 	}
 	return b
@@ -2301,8 +2302,9 @@ func (r *SnapshotContentController) addVolumeCaptureRequestWatch(c cache.Cache) 
 	if !ok || handle == nil {
 		return fmt.Errorf("cannot add VolumeCaptureRequest watch: content controller handle for %s not built (SetupWithManager must run first)", key)
 	}
-	var vcrObj client.Object = &unstructured.Unstructured{}
-	vcrObj.(*unstructured.Unstructured).SetGroupVersionKind(gvk)
+	vcrMeta := &metav1.PartialObjectMetadata{}
+	vcrMeta.SetGroupVersionKind(gvk)
+	var vcrObj client.Object = vcrMeta
 	if err := handle.Watch(source.Kind(c, vcrObj, handler.EnqueueRequestsFromMapFunc(r.mapVCRToOwningContent))); err != nil {
 		return fmt.Errorf("add VolumeCaptureRequest watch on content controller %s: %w", key, err)
 	}
@@ -2349,8 +2351,7 @@ func (r *SnapshotContentController) addSnapshotStatusWatchLocked(mgr ctrl.Manage
 	if _, err := r.RESTMapper.RESTMapping(snapshotGVK.GroupKind(), snapshotGVK.Version); err != nil {
 		return fmt.Errorf("RESTMapping for snapshot status watch %s: %w", snapshotGVK.String(), err)
 	}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(snapshotGVK)
+	obj := controllercommon.WatchObjectForGVK(mgr.GetScheme(), snapshotGVK)
 	if err := ctrl.NewControllerManagedBy(mgr).
 		Watches(obj, handler.EnqueueRequestsFromMapFunc(mapSnapshotStatusToBoundCommonContent)).
 		// Manifest-leg wake-up: the aggregator is the single

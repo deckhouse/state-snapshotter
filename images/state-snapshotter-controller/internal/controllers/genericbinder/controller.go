@@ -908,10 +908,8 @@ func (r *GenericSnapshotBinderController) registerSnapshotWatch(mgr ctrl.Manager
 	if contentGVK.Kind == "" {
 		return fmt.Errorf("empty SnapshotContent GVK for Snapshot %s: refusing to register content wake-up watch", gvk.String())
 	}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
-	contentObj := &unstructured.Unstructured{}
-	contentObj.SetGroupVersionKind(contentGVK)
+	obj := controllercommon.WatchObjectForGVK(mgr.GetScheme(), gvk)
+	contentObj := controllercommon.WatchObjectForGVK(mgr.GetScheme(), contentGVK)
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(obj).
 		// Reverse wake-up so Snapshot.Ready mirrors the bound SnapshotContent.Ready in both directions

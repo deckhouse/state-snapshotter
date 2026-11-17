@@ -52,6 +52,25 @@ func vcrWithOwner(owner *metav1.OwnerReference) *unstructured.Unstructured {
 	return vcr
 }
 
+func TestMapVCRToOwningContent_RoutesMetadataOnlyVCR(t *testing.T) {
+	scheme := vcrTestScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(boundSnapshot("ns1", "snap-a", "content-a")).Build()
+	r := &SnapshotContentController{Client: cl, APIReader: cl}
+
+	owner := ownerRefToSnapshot("snap-a", true)
+	vcr := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+		Namespace:       "ns1",
+		Name:            "vcr-a",
+		OwnerReferences: []metav1.OwnerReference{owner},
+	}}
+	vcr.SetGroupVersionKind(vcpkg.VolumeCaptureRequestGVK)
+	reqs := r.mapVCRToOwningContent(context.Background(), vcr)
+	if len(reqs) != 1 || reqs[0].Name != "content-a" {
+		t.Fatalf("want one request for content-a, got %v", reqs)
+	}
+}
+
 func ownerRefToSnapshot(name string, controller bool) metav1.OwnerReference {
 	ref := metav1.OwnerReference{
 		APIVersion: snapshotOwnerGVK.GroupVersion().String(),

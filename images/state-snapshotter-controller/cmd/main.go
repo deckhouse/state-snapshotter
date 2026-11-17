@@ -32,6 +32,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
@@ -39,6 +40,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -235,6 +237,20 @@ func main() {
 	// Don't restrict cache to specific namespace - ManifestCaptureRequest can be in any namespace
 	// Cluster-scoped resources (ManifestCheckpoint, Retainer) are always watched
 	managerOpts := manager.Options{
+		Cache: cache.Options{
+			DefaultTransform: cache.TransformStripManagedFields(),
+			ByObject: map[client.Object]cache.ByObject{
+				&v1.ConfigMap{}: {
+					Namespaces: map[string]cache.Config{cfgParams.ControllerNamespace: {}},
+					Field:      fields.OneTermEqualSelector("metadata.name", config.ConfigMapName),
+				},
+			},
+		},
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{&v1.PersistentVolumeClaim{}, &extv1.CustomResourceDefinition{}},
+			},
+		},
 		Scheme:                  scheme,
 		Metrics:                 metricsauth.ApplyFromEnv(metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress}),
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,

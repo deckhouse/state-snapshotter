@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
+	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/usecase"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/pkg/snapshotgraphregistry"
 )
@@ -84,8 +85,7 @@ func (m *snapshotDynamicWatchManager) ensureWatchLocked(ctx context.Context, gvk
 		return nil
 	}
 	relay := &nssChildSnapshotWatchRelay{gvk: gvk, client: m.main.Client, main: m.main}
-	obj := &unstructured.Unstructured{}
-	obj.SetGroupVersionKind(gvk)
+	obj := controllercommon.WatchObjectForGVK(m.mgr.GetScheme(), gvk)
 	name := controllerRuntimeNameForChildWatch(gvk)
 	// Explicit allow-all predicate: status-only updates on child snapshots must enqueue the relay
 	// (controller-runtime does not add GenerationChangedPredicate by default; this documents intent).

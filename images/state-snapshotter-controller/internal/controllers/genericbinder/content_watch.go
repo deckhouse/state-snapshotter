@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -113,16 +114,19 @@ func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(child
 		Kind:    childGVK.Kind + "List",
 	}
 	return func(ctx context.Context, obj client.Object) []reconcile.Request {
-		content, ok := obj.(*unstructured.Unstructured)
-		if !ok || content == nil {
+		if obj == nil {
 			return nil
 		}
-		parentName, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "name")
+		content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+		if err != nil {
+			return nil
+		}
+		parentName, _, _ := unstructured.NestedString(content, "spec", "snapshotRef", "name")
 		if parentName == "" {
 			return nil
 		}
-		parentUID, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "uid")
-		parentNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
+		parentUID, _, _ := unstructured.NestedString(content, "spec", "snapshotRef", "uid")
+		parentNS, _, _ := unstructured.NestedString(content, "spec", "snapshotRef", "namespace")
 
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(listGVK)
@@ -132,7 +136,7 @@ func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(child
 		}
 		if err := r.List(ctx, list, opts...); err != nil {
 			log.FromContext(ctx).V(1).Info("parent-content wake-up: failed to list child snapshots",
-				"childKind", childGVK.Kind, "content", content.GetName(), "error", err.Error())
+				"childKind", childGVK.Kind, "content", obj.GetName(), "error", err.Error())
 			return nil
 		}
 		var reqs []reconcile.Request
@@ -154,7 +158,7 @@ func (r *GenericSnapshotBinderController) mapParentContentToChildSnapshots(child
 		}
 		if len(reqs) > 0 {
 			log.FromContext(ctx).V(1).Info("parent SnapshotContent change enqueues waiting child snapshot(s)",
-				"childKind", childGVK.Kind, "content", content.GetName(), "count", len(reqs))
+				"childKind", childGVK.Kind, "content", obj.GetName(), "count", len(reqs))
 		}
 		return reqs
 	}

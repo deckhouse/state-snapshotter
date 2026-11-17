@@ -182,13 +182,14 @@ func (s *Syncer) Sync(ctx context.Context) error {
 			}
 			// Dedicated domain-capture kind (today only the namespace-root "Snapshot", dogfooding):
 			// the dedicated planning controller owns MCR/VCR/children + PlanningReady, while the generic
-			// binder owns its SnapshotContent. The binder uses its own unstructured informer and registers
-			// no field index, so it can be wired independently of the planning controller — EXCEPT in a
-			// single manager that runs both via a wired activator: there the planning controller's typed
-			// informer + field index must be registered first to avoid an indexer conflict on the shared
-			// informer, so the gate below waits for activation. With no activator wired (core registers the
-			// root's controller statically at startup, cmd/main.go), the binder is wired directly with no
-			// ordering hazard — the invariant stays "exactly one SnapshotContent owner: the generic binder".
+			// binder owns its SnapshotContent. The binder registers no field index, so it can be wired
+			// independently of the planning controller — EXCEPT in a single manager that runs both via a
+			// wired activator: the binder watches a scheme-registered kind through the same typed informer,
+			// so the planning controller's typed informer + field index must be registered first to avoid
+			// an indexer conflict on that shared informer, and the gate below waits for activation. With
+			// no activator wired (core registers the root's controller statically at startup,
+			// cmd/main.go), the binder is wired directly with no ordering hazard — the invariant stays
+			// "exactly one SnapshotContent owner: the generic binder".
 			if _, hasActivator := s.dedicatedActivators[snapGVK.Kind]; hasActivator {
 				if _, planningActive := s.activeSnapshotGVKKeys[snapGVK.String()]; !planningActive {
 					continue

@@ -209,6 +209,24 @@ func TestMapArtifactToOwningSnapshotContentWithOwnerRef(t *testing.T) {
 	}
 }
 
+func TestMapArtifactToOwningSnapshotContentWatchedForms(t *testing.T) {
+	ownerRefs := []metav1.OwnerReference{{
+		APIVersion: storagev1alpha1.SchemeGroupVersion.String(),
+		Kind:       "SnapshotContent",
+		Name:       "owning-content",
+		UID:        "uid-1",
+	}}
+	vsc := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: "vsc-1", OwnerReferences: ownerRefs}}
+	vsc.SetGroupVersionKind(unstructuredGVKForKind("VolumeSnapshotContent"))
+	mcp := &ssv1alpha1.ManifestCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "mcp-1", OwnerReferences: ownerRefs}}
+	for name, art := range map[string]client.Object{"metadata VolumeSnapshotContent": vsc, "typed ManifestCheckpoint": mcp} {
+		reqs := mapArtifactToOwningSnapshotContent(context.Background(), art)
+		if len(reqs) != 1 || reqs[0].Name != "owning-content" {
+			t.Fatalf("%s: got %v, want one request for owning-content", name, reqs)
+		}
+	}
+}
+
 // No SnapshotContent ownerRef (none at all, or only a foreign owner) must never route, for either
 // artifact kind. Covers MCP/VSC with no ownerRef and MCP/VSC with a foreign-only ownerRef.
 func TestMapArtifactToOwningSnapshotContentNoOwnerRef(t *testing.T) {
