@@ -543,5 +543,14 @@ described in [Backup integration](backup_integration.html), does not define the 
 with an archive through `d8` is given in [Working with Snapshots](user_guide.html). When the format changes, the
 `formatVersion` value in `snapshot.yaml` changes.
 
-To check your implementation, run `d8 snapshot local describe` on the directory tree you created. Check the upload
+The `snapshot.yaml` descriptor, its canonical form and the three checksums have a reference implementation in this
+repository: the Go package `snapshotarchive` of the module in `api/`. The `d8` client and a backup product written in Go
+share this code, so both compute the same descriptor and the same checksums for the same tree. The package does no I/O:
+the files a node's `checksum` covers, the payload, `data.tar` and the `.zip` container stay as described above. The
+golden vectors in `api/snapshotarchive/snapshotarchivetest` check an implementation in any other language: a five-node
+archive tree with the expected checksums of every node, and single descriptors with the exact canonical JSON their
+`metadataChecksum` is computed over. Where this page and the package disagree about the descriptor or a checksum, the
+package and its vectors are authoritative.
+
+To check the rest of the format in your implementation, run `d8 snapshot local describe` on the directory tree you created. Check the upload
 with `d8 snapshot upload` into a suitable target namespace. Repeat these checks after updating the client.

@@ -2,7 +2,10 @@ module github.com/deckhouse/state-snapshotter/api
 
 go 1.26.0
 
-require k8s.io/apimachinery v0.30.2
+require (
+	k8s.io/apimachinery v0.30.2
+	sigs.k8s.io/yaml v1.3.0
+)
 
 require (
 	github.com/go-logr/logr v1.4.1 // indirect
