@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io/fs"
 	"os"
 	"path"
@@ -143,7 +144,21 @@ func TestGoldenVectorTreeDigests(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root := loadVectorTree(t, snapshotarchivetest.TreeFS(), snapshotarchivetest.TreeRoot)
+	t.Run("version 3", func(t *testing.T) {
+		checkVectorTreeDigests(t, snapshotarchivetest.TreeFS(), snapshotarchive.FormatVersionPayloadSizes, expected.Nodes)
+	})
+	t.Run("version 4", func(t *testing.T) {
+		checkVectorTreeDigests(t, snapshotarchivetest.ChildMetadataTreeFS(), snapshotarchive.FormatVersionChildMetadata,
+			expected.ChildMetadataNodes)
+	})
+}
+
+// checkVectorTreeDigests validates the vector tree in tree and compares every node's recorded and
+// recomputed digests, and its format version, with want.
+func checkVectorTreeDigests(t *testing.T, tree fs.FS, version int, want []snapshotarchivetest.ExpectedNode) {
+	t.Helper()
+
+	root := loadVectorTree(t, tree, snapshotarchivetest.TreeRoot)
 
 	if err := snapshotarchive.ValidateTree(root.tree, snapshotarchive.ReadOptions{}); err != nil {
 		t.Fatalf("ValidateTree on the vector tree: %v", err)
@@ -152,17 +167,21 @@ func TestGoldenVectorTreeDigests(t *testing.T) {
 	nodes := map[string]*vectorNode{}
 	flattenVectorTree(root, nodes)
 
-	if len(nodes) != len(expected.Nodes) {
-		t.Fatalf("vector tree has %d nodes, expected.json lists %d", len(nodes), len(expected.Nodes))
+	if len(nodes) != len(want) {
+		t.Fatalf("vector tree has %d nodes, expected.json lists %d", len(nodes), len(want))
 	}
 
-	for _, want := range expected.Nodes {
+	for _, want := range want {
 		node, ok := nodes[want.Path]
 		if !ok {
 			t.Fatalf("expected node %q is not in the vector tree", want.Path)
 		}
 
 		d := node.tree.Descriptor
+		if d.FormatVersion != version {
+			t.Errorf("%s: formatVersion %d, want %d", want.Path, d.FormatVersion, version)
+		}
+
 		if got := node.tree.ContentChecksum.Hex; got != want.Checksum {
 			t.Errorf("%s: recomputed checksum %s, want %s", want.Path, got, want.Checksum)
 		}
@@ -185,39 +204,139 @@ func TestGoldenVectorTreeDigests(t *testing.T) {
 	}
 }
 
-// TestGoldenVectorTreeSealReproducesBytes strips every digest from the vector tree, seals it
-// again bottom up and requires every snapshot.yaml to come out byte for byte as stored.
+// TestGoldenVectorTreeSealReproducesBytes strips every digest from each vector tree, seals it
+// again bottom up at the tree's format version and requires every snapshot.yaml to come out byte
+// for byte as stored.
 func TestGoldenVectorTreeSealReproducesBytes(t *testing.T) {
-	root := loadVectorTree(t, snapshotarchivetest.TreeFS(), snapshotarchivetest.TreeRoot)
-
-	var strip func(node *vectorNode)
-	strip = func(node *vectorNode) {
-		node.tree.Descriptor.FormatVersion = 0
-		node.tree.Descriptor.Checksum = snapshotarchive.NodeChecksum{}
-		node.tree.Descriptor.ChildrenChecksum = nil
-		node.tree.Descriptor.MetadataChecksum = nil
-
-		for _, child := range node.children {
-			strip(child)
-		}
-	}
-	strip(root)
-
-	if err := snapshotarchive.SealTree(root.tree); err != nil {
-		t.Fatalf("SealTree: %v", err)
+	tests := []struct {
+		name string
+		tree fs.FS
+		seal func(root *snapshotarchive.TreeNode) error
+	}{
+		{
+			name: "version 3",
+			tree: snapshotarchivetest.TreeFS(),
+			seal: func(root *snapshotarchive.TreeNode) error {
+				return snapshotarchive.SealTreeAt(root, snapshotarchive.FormatVersionPayloadSizes)
+			},
+		},
+		{name: "version 4 with SealTree", tree: snapshotarchivetest.ChildMetadataTreeFS(), seal: snapshotarchive.SealTree},
 	}
 
-	nodes := map[string]*vectorNode{}
-	flattenVectorTree(root, nodes)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := loadVectorTree(t, tt.tree, snapshotarchivetest.TreeRoot)
 
-	for rel, node := range nodes {
-		got, err := snapshotarchive.MarshalDescriptor(node.tree.Descriptor)
-		if err != nil {
-			t.Fatalf("%s: MarshalDescriptor: %v", rel, err)
-		}
+			var strip func(node *vectorNode)
+			strip = func(node *vectorNode) {
+				node.tree.Descriptor.FormatVersion = 0
+				node.tree.Descriptor.Checksum = snapshotarchive.NodeChecksum{}
+				node.tree.Descriptor.ChildrenChecksum = nil
+				node.tree.Descriptor.MetadataChecksum = nil
 
-		if !bytes.Equal(got, node.raw) {
-			t.Errorf("%s: sealed snapshot.yaml differs from the vector\n got:\n%s\nwant:\n%s", rel, got, node.raw)
+				for _, child := range node.children {
+					strip(child)
+				}
+			}
+			strip(root)
+
+			if err := tt.seal(root.tree); err != nil {
+				t.Fatalf("seal: %v", err)
+			}
+
+			nodes := map[string]*vectorNode{}
+			flattenVectorTree(root, nodes)
+
+			for rel, node := range nodes {
+				got, err := snapshotarchive.MarshalDescriptor(node.tree.Descriptor)
+				if err != nil {
+					t.Fatalf("%s: MarshalDescriptor: %v", rel, err)
+				}
+
+				if !bytes.Equal(got, node.raw) {
+					t.Errorf("%s: sealed snapshot.yaml differs from the vector\n got:\n%s\nwant:\n%s", rel, got, node.raw)
+				}
+			}
+		})
+	}
+}
+
+// TestGoldenVectorTamperedChildMetadata puts each tampered descriptor in place of its node in the
+// version 4 vector tree and requires the tree to fail at the node's parent, while the descriptor
+// alone still decodes and validates.
+func TestGoldenVectorTamperedChildMetadata(t *testing.T) {
+	expected, err := snapshotarchivetest.LoadExpected()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(expected.TamperedChildMetadata) == 0 {
+		t.Fatal("expected.json lists no tampered descriptor vectors")
+	}
+
+	sentinels := map[string]error{"ErrChildrenChecksumMismatch": snapshotarchive.ErrChildrenChecksumMismatch}
+
+	for _, want := range expected.TamperedChildMetadata {
+		t.Run(want.File, func(t *testing.T) {
+			wantErr, ok := sentinels[want.Error]
+			if !ok {
+				t.Fatalf("unknown error %q", want.Error)
+			}
+
+			raw, err := fs.ReadFile(snapshotarchivetest.TamperedFS(), want.File)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tampered, err := snapshotarchive.UnmarshalDescriptor(raw, snapshotarchive.ReadOptions{})
+			if err != nil {
+				t.Fatalf("the tampered descriptor must decode on its own: %v", err)
+			}
+
+			root := loadVectorTree(t, snapshotarchivetest.ChildMetadataTreeFS(), snapshotarchivetest.TreeRoot)
+
+			nodes := map[string]*vectorNode{}
+			flattenVectorTree(root, nodes)
+
+			node, ok := nodes[want.Node]
+			if !ok {
+				t.Fatalf("node %q is not in the vector tree", want.Node)
+			}
+
+			if _, ok := nodes[want.FailingNode]; !ok {
+				t.Fatalf("failing node %q is not in the vector tree", want.FailingNode)
+			}
+
+			if err := snapshotarchive.ValidateDescriptor(tampered, node.tree.HasBlockData, node.tree.HasFilesystemData,
+				snapshotarchive.ReadOptions{}); err != nil {
+				t.Fatalf("the tampered descriptor must validate on its own: %v", err)
+			}
+
+			node.tree.Descriptor = tampered
+
+			err = snapshotarchive.ValidateTree(root.tree, snapshotarchive.ReadOptions{})
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("ValidateTree error = %v, want %v", err, wantErr)
+			}
+
+			if prefix := kindNamePath(nodes, want.FailingNode) + ": "; !strings.HasPrefix(err.Error(), prefix) {
+				t.Errorf("error %q does not name the node %q", err, want.FailingNode)
+			}
+		})
+	}
+}
+
+// kindNamePath renders the node at rel as ValidateTree names it: the kind/name of every node from
+// the root down to it, joined with " > ".
+func kindNamePath(nodes map[string]*vectorNode, rel string) string {
+	var elements []string
+
+	for current := rel; ; current = path.Dir(path.Dir(current)) {
+		d := nodes[current].tree.Descriptor
+		elements = append([]string{d.Kind + "/" + d.Name}, elements...)
+
+		if current == "." {
+			return strings.Join(elements, " > ")
 		}
 	}
 }
@@ -282,41 +401,54 @@ func TestGoldenEmptyChildrenChecksum(t *testing.T) {
 }
 
 func TestCopyTreeMaterializesVectorTree(t *testing.T) {
-	dir := t.TempDir()
-	if err := snapshotarchivetest.CopyTree(dir); err != nil {
-		t.Fatalf("CopyTree: %v", err)
+	tests := []struct {
+		name string
+		tree fs.FS
+		copy func(dir string) error
+	}{
+		{name: "version 3", tree: snapshotarchivetest.TreeFS(), copy: snapshotarchivetest.CopyTree},
+		{name: "version 4", tree: snapshotarchivetest.ChildMetadataTreeFS(), copy: snapshotarchivetest.CopyChildMetadataTree},
 	}
 
-	var count int
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := tt.copy(dir); err != nil {
+				t.Fatalf("copy the tree: %v", err)
+			}
 
-	err := fs.WalkDir(snapshotarchivetest.TreeFS(), ".", func(name string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() {
-			return err
-		}
+			var count int
 
-		want, err := fs.ReadFile(snapshotarchivetest.TreeFS(), name)
-		if err != nil {
-			return err
-		}
+			err := fs.WalkDir(tt.tree, ".", func(name string, entry fs.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return err
+				}
 
-		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
-		if err != nil {
-			return err
-		}
+				want, err := fs.ReadFile(tt.tree, name)
+				if err != nil {
+					return err
+				}
 
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s: copied bytes differ from the vector", name)
-		}
+				got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+				if err != nil {
+					return err
+				}
 
-		count++
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s: copied bytes differ from the vector", name)
+				}
 
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+				count++
 
-	if count == 0 {
-		t.Fatal("vector tree has no files")
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if count == 0 {
+				t.Fatal("vector tree has no files")
+			}
+		})
 	}
 }

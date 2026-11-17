@@ -39,8 +39,16 @@ type TreeNode struct {
 // SealTree fills in the digests of every descriptor in the tree bottom up: a node's Checksum is
 // set from ContentChecksum when that is not nil, its ChildrenChecksum is computed from its
 // children once they are sealed, and the descriptor is then sealed (see Seal). This is the order
-// the format requires, because a child's digests enter its parent's ChildrenChecksum.
+// the format requires, because a child's digests, its MetadataChecksum included, enter its
+// parent's ChildrenChecksum. Every node is stamped FormatVersionCurrent, whatever version its
+// descriptor declared before.
 func SealTree(root *TreeNode) error {
+	return sealTreeAt(root, FormatVersionCurrent)
+}
+
+// sealTreeAt is SealTree stamping formatVersion on every node and committing to the children
+// with that version's encoding. Like sealAt, it serves the tests of the older versions only.
+func sealTreeAt(root *TreeNode, formatVersion int) error {
 	return walkPostOrder(root, nil, func(node *TreeNode) error {
 		if node.ContentChecksum != nil {
 			node.Descriptor.Checksum = *node.ContentChecksum
@@ -51,14 +59,14 @@ func SealTree(root *TreeNode) error {
 			return err
 		}
 
-		children, err := ComputeChildrenChecksum(commitments)
+		children, err := ComputeChildrenChecksumAt(formatVersion, commitments)
 		if err != nil {
 			return err
 		}
 
 		node.Descriptor.ChildrenChecksum = &children
 
-		sealed, err := Seal(node.Descriptor)
+		sealed, err := sealAt(node.Descriptor, formatVersion)
 		if err != nil {
 			return err
 		}
@@ -71,9 +79,14 @@ func SealTree(root *TreeNode) error {
 
 // ValidateTree validates every node of the tree: its descriptor (see ValidateDescriptor), its
 // content checksum when ContentChecksum is set (ErrChecksumMismatch on a difference) and its
-// direct-child commitment against its actual children (see VerifyChildrenChecksum). A passing
-// tree is authenticated end to end by the root's descriptor, provided the caller computed every
-// ContentChecksum itself. Errors name the offending node by its kind/name path from the root.
+// direct-child commitment against its actual children (see VerifyChildrenChecksum), children
+// before their parent, so that every child's MetadataChecksum is verified before a parent commits
+// to it. A passing tree is authenticated end to end by the root's descriptor, provided the caller
+// computed every ContentChecksum itself: the content, the topology and, below a node at
+// FormatVersionChildMetadata, every descriptor field. Under an older parent a child's formatVersion,
+// sourceName, sourceObjectRef and volumes are covered by the child's own MetadataChecksum only,
+// which anyone able to rewrite the child can recompute. Errors name the offending node by its
+// kind/name path from the root.
 func ValidateTree(root *TreeNode, options ReadOptions) error {
 	return walkPostOrder(root, nil, func(node *TreeNode) error {
 		d := node.Descriptor

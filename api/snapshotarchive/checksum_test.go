@@ -152,38 +152,76 @@ func TestComputeContentChecksumRejectsDuplicatePath(t *testing.T) {
 }
 
 // TestComputeChildrenChecksumAlgorithm recomputes the direct-child commitment by hand from its
-// definition.
+// definition, at every format version.
 func TestComputeChildrenChecksumAlgorithm(t *testing.T) {
 	t.Parallel()
 
 	child := ChildCommitment{
 		APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "data-0", UID: "u",
 		NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+		MetadataChecksum: validChildChecksum("metadata"), FormatVersion: FormatVersionChildMetadata,
 	}
 
-	var input []byte
-
-	prefixed := func(s string) {
-		input = binary.BigEndian.AppendUint64(input, uint64(len(s)))
-		input = append(input, s...)
-	}
-
-	input = append(input, "d8-snapshot-children-checksum-v1\x00"...)
-	prefixed("1")
-
-	for _, field := range []string{
+	oldFields := []string{
 		child.APIVersion, child.Kind, "", child.Name, child.UID, child.NodeChecksum.Hex, child.ChildrenChecksum.Hex,
-	} {
-		prefixed(field)
 	}
 
-	got, err := ComputeChildrenChecksum([]ChildCommitment{child})
+	tests := []struct {
+		version int
+		fields  []string
+	}{
+		{version: FormatVersionLegacy, fields: oldFields},
+		{version: FormatVersionAuthenticatedChildren, fields: oldFields},
+		{version: FormatVersionPayloadSizes, fields: oldFields},
+		{version: FormatVersionChildMetadata, fields: append(oldFields[:len(oldFields):len(oldFields)], child.MetadataChecksum.Hex)},
+	}
+
+	for _, tt := range tests {
+		var input []byte
+
+		prefixed := func(s string) {
+			input = binary.BigEndian.AppendUint64(input, uint64(len(s)))
+			input = append(input, s...)
+		}
+
+		input = append(input, "d8-snapshot-children-checksum-v1\x00"...)
+		prefixed("1")
+
+		for _, field := range tt.fields {
+			prefixed(field)
+		}
+
+		got, err := ComputeChildrenChecksumAt(tt.version, []ChildCommitment{child})
+		if err != nil {
+			t.Fatalf("version %d: %v", tt.version, err)
+		}
+
+		if want := fmt.Sprintf("%x", sha256.Sum256(input)); got.Hex != want {
+			t.Errorf("version %d: ComputeChildrenChecksumAt = %s, want %s", tt.version, got.Hex, want)
+		}
+
+		empty, err := ComputeChildrenChecksumAt(tt.version, nil)
+		if err != nil {
+			t.Fatalf("version %d, no children: %v", tt.version, err)
+		}
+
+		if empty != EmptyChildrenChecksum() {
+			t.Errorf("version %d: empty commitment %s differs from EmptyChildrenChecksum", tt.version, empty.Hex)
+		}
+	}
+
+	current, err := ComputeChildrenChecksum([]ChildCommitment{child})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if want := fmt.Sprintf("%x", sha256.Sum256(input)); got.Hex != want {
-		t.Errorf("ComputeChildrenChecksum = %s, want %s", got.Hex, want)
+	atCurrent, err := ComputeChildrenChecksumAt(FormatVersionCurrent, []ChildCommitment{child})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if current != atCurrent {
+		t.Errorf("ComputeChildrenChecksum = %s, want the FormatVersionCurrent commitment %s", current.Hex, atCurrent.Hex)
 	}
 
 	if want := "926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701"; EmptyChildrenChecksum().Hex != want {
@@ -199,47 +237,69 @@ func TestComputeChildrenChecksumDeterministicAndOrderIndependent(t *testing.T) {
 	a := ChildCommitment{
 		APIVersion: "v1", Kind: "Snapshot", Name: "a", Namespace: "ns",
 		NodeChecksum: validChildChecksum("a-node"), ChildrenChecksum: validChildChecksum("a-children"),
+		MetadataChecksum: validChildChecksum("a-metadata"), FormatVersion: FormatVersionChildMetadata,
 	}
 	b := ChildCommitment{
 		APIVersion: "v1", Kind: "Snapshot", Name: "b", Namespace: "ns",
 		NodeChecksum: validChildChecksum("b-node"), ChildrenChecksum: validChildChecksum("b-children"),
+		MetadataChecksum: validChildChecksum("b-metadata"), FormatVersion: FormatVersionChildMetadata,
 	}
 
-	forward, err := ComputeChildrenChecksum([]ChildCommitment{a, b})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	reversed, err := ComputeChildrenChecksum([]ChildCommitment{b, a})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if forward.Hex != reversed.Hex {
-		t.Errorf("checksum depends on input order: %q vs %q", forward.Hex, reversed.Hex)
-	}
-
-	for name, mutate := range map[string]func(*ChildCommitment){
-		"node checksum":     func(c *ChildCommitment) { c.NodeChecksum = validChildChecksum("tampered") },
-		"children checksum": func(c *ChildCommitment) { c.ChildrenChecksum = validChildChecksum("tampered") },
-		"namespace":         func(c *ChildCommitment) { c.Namespace = "other" },
-		"uid":               func(c *ChildCommitment) { c.UID = "uid" },
-	} {
-		tampered := a
-		mutate(&tampered)
-
-		changed, err := ComputeChildrenChecksum([]ChildCommitment{tampered, b})
+	for _, version := range []int{FormatVersionPayloadSizes, FormatVersionChildMetadata} {
+		forward, err := ComputeChildrenChecksumAt(version, []ChildCommitment{a, b})
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatal(err)
 		}
 
-		if changed.Hex == forward.Hex {
-			t.Errorf("checksum did not change when the committed %s changed", name)
+		reversed, err := ComputeChildrenChecksumAt(version, []ChildCommitment{b, a})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if forward.Hex != reversed.Hex {
+			t.Errorf("version %d: checksum depends on input order: %q vs %q", version, forward.Hex, reversed.Hex)
+		}
+
+		if forward.Hex == EmptyChildrenChecksum().Hex {
+			t.Errorf("version %d: non-empty child set must not collide with the empty commitment", version)
+		}
+
+		for name, mutate := range map[string]func(*ChildCommitment){
+			"node checksum":     func(c *ChildCommitment) { c.NodeChecksum = validChildChecksum("tampered") },
+			"children checksum": func(c *ChildCommitment) { c.ChildrenChecksum = validChildChecksum("tampered") },
+			"metadata checksum": func(c *ChildCommitment) { c.MetadataChecksum = validChildChecksum("tampered") },
+			"namespace":         func(c *ChildCommitment) { c.Namespace = "other" },
+			"uid":               func(c *ChildCommitment) { c.UID = "uid" },
+		} {
+			tampered := a
+			mutate(&tampered)
+
+			changed, err := ComputeChildrenChecksumAt(version, []ChildCommitment{tampered, b})
+			if err != nil {
+				t.Fatalf("version %d, %s: %v", version, name, err)
+			}
+
+			// Below FormatVersionChildMetadata the child's metadata checksum is not committed.
+			committed := name != "metadata checksum" || version >= FormatVersionChildMetadata
+			if committed == (changed.Hex == forward.Hex) {
+				t.Errorf("version %d: changing the %s changed the checksum: %t, want %t",
+					version, name, changed.Hex != forward.Hex, committed)
+			}
 		}
 	}
 
-	if forward.Hex == EmptyChildrenChecksum().Hex {
-		t.Error("non-empty child set must not collide with the empty commitment")
+	old, err := ComputeChildrenChecksumAt(FormatVersionPayloadSizes, []ChildCommitment{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := ComputeChildrenChecksumAt(FormatVersionChildMetadata, []ChildCommitment{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if old.Hex == current.Hex {
+		t.Error("the same child set must commit differently at FormatVersionPayloadSizes and FormatVersionChildMetadata")
 	}
 }
 
@@ -250,6 +310,7 @@ func TestComputeChildrenChecksumRejectsInvalidCommitments(t *testing.T) {
 		return ChildCommitment{
 			APIVersion: "v1", Kind: "Snapshot", Name: "child", Namespace: "ns",
 			NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+			MetadataChecksum: validChildChecksum("metadata"), FormatVersion: FormatVersionChildMetadata,
 		}
 	}
 
@@ -266,8 +327,36 @@ func TestComputeChildrenChecksumRejectsInvalidCommitments(t *testing.T) {
 		c := base()
 		mutate(&c)
 
-		if _, err := ComputeChildrenChecksum([]ChildCommitment{c}); !errors.Is(err, ErrInvalidDescriptor) {
+		for _, version := range []int{FormatVersionPayloadSizes, FormatVersionChildMetadata} {
+			if _, err := ComputeChildrenChecksumAt(version, []ChildCommitment{c}); !errors.Is(err, ErrInvalidDescriptor) {
+				t.Errorf("version %d, %s: got %v, want ErrInvalidDescriptor", version, name, err)
+			}
+		}
+	}
+
+	// What only a FormatVersionChildMetadata parent requires of a child.
+	metadataTests := map[string]func(c *ChildCommitment){
+		"child at FormatVersionPayloadSizes":  func(c *ChildCommitment) { c.FormatVersion = FormatVersionPayloadSizes },
+		"legacy child":                        func(c *ChildCommitment) { c.FormatVersion, c.MetadataChecksum = 0, NodeChecksum{} },
+		"missing metadata checksum":           func(c *ChildCommitment) { c.MetadataChecksum = NodeChecksum{} },
+		"bad metadata checksum algorithm":     func(c *ChildCommitment) { c.MetadataChecksum.Algorithm = "md5" },
+		"bad metadata checksum short":         func(c *ChildCommitment) { c.MetadataChecksum.Short = "00000000" },
+		"uppercase metadata checksum hex":     func(c *ChildCommitment) { c.MetadataChecksum.Hex = strings.ToUpper(c.MetadataChecksum.Hex) },
+		"metadata checksum hex of wrong size": func(c *ChildCommitment) { c.MetadataChecksum.Hex = "abc" },
+	}
+
+	for name, mutate := range metadataTests {
+		c := base()
+		mutate(&c)
+
+		if _, err := ComputeChildrenChecksumAt(FormatVersionChildMetadata, []ChildCommitment{c}); !errors.Is(err, ErrInvalidDescriptor) {
 			t.Errorf("%s: got %v, want ErrInvalidDescriptor", name, err)
+		}
+
+		for _, version := range []int{FormatVersionLegacy, FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes} {
+			if _, err := ComputeChildrenChecksumAt(version, []ChildCommitment{c}); err != nil {
+				t.Errorf("version %d ignores the child's metadata, %s: %v", version, name, err)
+			}
 		}
 	}
 
@@ -277,6 +366,12 @@ func TestComputeChildrenChecksumRejectsInvalidCommitments(t *testing.T) {
 
 	if _, err := ComputeChildrenChecksum([]ChildCommitment{dup, other}); !errors.Is(err, ErrInvalidDescriptor) {
 		t.Errorf("duplicate identity: got %v, want ErrInvalidDescriptor", err)
+	}
+
+	for _, version := range []int{1, FormatVersionCurrent + 1, -1} {
+		if _, err := ComputeChildrenChecksumAt(version, nil); !errors.Is(err, ErrUnsupportedFormat) {
+			t.Errorf("version %d: got %v, want ErrUnsupportedFormat", version, err)
+		}
 	}
 }
 
@@ -288,6 +383,7 @@ func TestComputeChildrenChecksumRejectsTooManyChildren(t *testing.T) {
 		commitments[i] = ChildCommitment{
 			APIVersion: "v1", Kind: "Snapshot", Name: fmt.Sprintf("c-%d", i),
 			NodeChecksum: validChildChecksum("n"), ChildrenChecksum: EmptyChildrenChecksum(),
+			MetadataChecksum: validChildChecksum("m"), FormatVersion: FormatVersionChildMetadata,
 		}
 	}
 
@@ -303,9 +399,11 @@ func TestComputeChildrenChecksumRejectsTooManyChildren(t *testing.T) {
 func TestChildCommitmentOf(t *testing.T) {
 	t.Parallel()
 
+	metadata := validChildChecksum("metadata")
 	d := Descriptor{
-		APIVersion: "v1", Kind: "Snapshot", Name: "n", Namespace: "ns", UID: "u",
-		Checksum: validChecksum(), ChildrenChecksum: validChildrenChecksum(),
+		FormatVersion: FormatVersionChildMetadata,
+		APIVersion:    "v1", Kind: "Snapshot", Name: "n", Namespace: "ns", UID: "u",
+		Checksum: validChecksum(), ChildrenChecksum: validChildrenChecksum(), MetadataChecksum: &metadata,
 	}
 
 	got, err := ChildCommitmentOf(d)
@@ -316,9 +414,18 @@ func TestChildCommitmentOf(t *testing.T) {
 	want := ChildCommitment{
 		APIVersion: "v1", Kind: "Snapshot", Name: "n", Namespace: "ns", UID: "u",
 		NodeChecksum: validChecksum(), ChildrenChecksum: EmptyChildrenChecksum(),
+		MetadataChecksum: metadata, FormatVersion: FormatVersionChildMetadata,
 	}
 	if got != want {
 		t.Errorf("ChildCommitmentOf = %+v, want %+v", got, want)
+	}
+
+	// A legacy child has no metadata checksum; the commitment records it as the zero value.
+	d.FormatVersion, d.MetadataChecksum = FormatVersionLegacy, nil
+	want.FormatVersion, want.MetadataChecksum = FormatVersionLegacy, NodeChecksum{}
+
+	if got, err := ChildCommitmentOf(d); err != nil || got != want {
+		t.Errorf("legacy child: ChildCommitmentOf = %+v, %v, want %+v", got, err, want)
 	}
 
 	d.ChildrenChecksum = nil
@@ -333,6 +440,7 @@ func TestVerifyChildrenChecksum(t *testing.T) {
 	child := ChildCommitment{
 		APIVersion: "v1", Kind: "Snapshot", Name: "child",
 		NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+		MetadataChecksum: validChildChecksum("metadata"), FormatVersion: FormatVersionChildMetadata,
 	}
 
 	committed, err := ComputeChildrenChecksum([]ChildCommitment{child})
@@ -348,6 +456,41 @@ func TestVerifyChildrenChecksum(t *testing.T) {
 
 	if err := VerifyChildrenChecksum(d, nil); !errors.Is(err, ErrChildrenChecksumMismatch) {
 		t.Errorf("removed child: got %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	resealed := child
+	resealed.MetadataChecksum = validChildChecksum("resealed")
+
+	if err := VerifyChildrenChecksum(d, []ChildCommitment{resealed}); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Errorf("child metadata changed: got %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	// The parent's own version selects the encoding: a FormatVersionPayloadSizes parent verifies
+	// with the old one, ignores the child's metadata checksum, and a commitment recorded at one
+	// version does not verify under the other.
+	old, err := ComputeChildrenChecksumAt(FormatVersionPayloadSizes, []ChildCommitment{child})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldParent := Descriptor{FormatVersion: FormatVersionPayloadSizes, ChildrenChecksum: &old}
+	if err := VerifyChildrenChecksum(oldParent, []ChildCommitment{resealed}); err != nil {
+		t.Errorf("FormatVersionPayloadSizes parent: %v", err)
+	}
+
+	relabeled := Descriptor{FormatVersion: FormatVersionChildMetadata, ChildrenChecksum: &old}
+	if err := VerifyChildrenChecksum(relabeled, []ChildCommitment{child}); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Errorf("old commitment under a new parent: got %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	oldParent.ChildrenChecksum = &committed
+	if err := VerifyChildrenChecksum(oldParent, []ChildCommitment{child}); !errors.Is(err, ErrChildrenChecksumMismatch) {
+		t.Errorf("new commitment under an old parent: got %v, want ErrChildrenChecksumMismatch", err)
+	}
+
+	unsupported := Descriptor{FormatVersion: FormatVersionCurrent + 1, ChildrenChecksum: &committed}
+	if err := VerifyChildrenChecksum(unsupported, []ChildCommitment{child}); !errors.Is(err, ErrUnsupportedFormat) {
+		t.Errorf("unsupported parent version: got %v, want ErrUnsupportedFormat", err)
 	}
 
 	d.ChildrenChecksum = nil

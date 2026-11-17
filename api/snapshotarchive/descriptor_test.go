@@ -17,6 +17,7 @@ limitations under the License.
 package snapshotarchive
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -644,4 +645,68 @@ func TestMetadataChecksumCanonicalizesEmptyValues(t *testing.T) {
 	if _, err := UnmarshalDescriptor([]byte(quoted), ReadOptions{}); err == nil {
 		t.Error("a quoted formatVersion must be refused")
 	}
+}
+
+// TestMarshalKeepsAuthenticatedVersion proves that encoding keeps the version a descriptor was
+// sealed at, so that re-encoding a parent read from an older archive never pairs its commitment
+// with another version's encoding, and that a descriptor without a version gets the current one.
+func TestMarshalKeepsAuthenticatedVersion(t *testing.T) {
+	t.Parallel()
+
+	child := ChildCommitment{
+		APIVersion: "v1", Kind: "Snapshot", Name: "child",
+		NodeChecksum: validChildChecksum("node"), ChildrenChecksum: EmptyChildrenChecksum(),
+		MetadataChecksum: validChildChecksum("metadata"), FormatVersion: FormatVersionChildMetadata,
+	}
+
+	for _, version := range []int{FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes, FormatVersionChildMetadata} {
+		committed, err := ComputeChildrenChecksumAt(version, []ChildCommitment{child})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		sealed, err := sealAt(Descriptor{
+			APIVersion: "v1", Kind: "Snapshot", Name: "parent", Checksum: validChecksum(), ChildrenChecksum: &committed,
+		}, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		data := mustMarshal(t, sealed)
+		got := mustUnmarshal(t, data)
+
+		if !bytes.Equal(mustMarshal(t, got), data) {
+			t.Errorf("version %d: re-encoding a decoded descriptor changed its bytes", version)
+		}
+
+		if got.FormatVersion != version || got.MetadataChecksum.Hex != sealed.MetadataChecksum.Hex {
+			t.Errorf("version %d: encoded as version %d with metadata %s, want %s",
+				version, got.FormatVersion, got.MetadataChecksum.Hex, sealed.MetadataChecksum.Hex)
+		}
+
+		if err := VerifyChildrenChecksum(got, []ChildCommitment{child}); err != nil {
+			t.Errorf("version %d: %v", version, err)
+		}
+	}
+
+	for _, version := range []int{FormatVersionLegacy, FormatVersionCurrent + 1} {
+		got := mustUnmarshal(t, mustMarshal(t, Descriptor{
+			FormatVersion: version, APIVersion: "v1", Kind: "Snapshot", Name: "n", Checksum: validChecksum(),
+		}))
+		if got.FormatVersion != FormatVersionCurrent {
+			t.Errorf("version %d: encoded as version %d, want %d", version, got.FormatVersion, FormatVersionCurrent)
+		}
+	}
+}
+
+// mustUnmarshal decodes data under the default read options.
+func mustUnmarshal(t *testing.T, data []byte) Descriptor {
+	t.Helper()
+
+	d, err := UnmarshalDescriptor(data, ReadOptions{})
+	if err != nil {
+		t.Fatalf("UnmarshalDescriptor: %v", err)
+	}
+
+	return d
 }

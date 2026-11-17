@@ -20,18 +20,27 @@ limitations under the License.
 //
 // The vectors are:
 //
-//   - a small archive tree (TreeFS, rooted at TreeRoot) of five nodes: a namespace Snapshot root
-//     with a block VolumeSnapshot, a filesystem VolumeSnapshot and a domain snapshot that has a
-//     VolumeSnapshot child of its own. Every node's snapshot.yaml carries its three digests, and
-//     Expected lists them again per node. The root's manifests/ holds a notes.yml that the content
-//     checksum does not cover;
+//   - a small archive tree (TreeFS, rooted at TreeRoot) of five nodes at format version 3: a
+//     namespace Snapshot root with a block VolumeSnapshot, a filesystem VolumeSnapshot and a domain
+//     snapshot that has a VolumeSnapshot child of its own. Every node's snapshot.yaml carries its
+//     three digests, and Expected lists them again per node. The root's manifests/ holds a
+//     notes.yml that the content checksum does not cover;
+//   - the same tree at format version 4 (ChildMetadataTreeFS, Expected.ChildMetadataNodes): the
+//     same files and content checksums, with every childrenChecksum committing to the children's
+//     metadataChecksum;
+//   - tampered descriptors (TamperedFS, Expected.TamperedChildMetadata): a version 4 node of that
+//     tree with a field outside its checksum and childrenChecksum edited and its metadataChecksum
+//     recomputed. Each verifies on its own, and put in place of the node's snapshot.yaml it must
+//     fail its parent's children checksum;
 //   - stand-alone descriptors (Expected.Descriptors) pinning the canonical form: the example from
 //     docs/BACKUP_INTEGRATION.md at format version 2, and a version 3 descriptor exercising string
 //     escaping and the payload size fields. For each, CanonicalJSON is the exact byte string the
 //     metadata checksum is taken over.
 //
-// The vectors were produced by the d8 client before the format code moved into snapshotarchive.
-// They must never be regenerated to make a change pass (see the snapshotarchive package
+// The version 2 and 3 vectors were produced by the d8 client before the format code moved into
+// snapshotarchive. The version 4 vectors were produced by snapshotarchive when that version was
+// introduced, and their digests were recomputed independently of it from the format's definition.
+// None of them may ever be regenerated to make a change pass (see the snapshotarchive package
 // documentation).
 package snapshotarchivetest
 
@@ -71,6 +80,19 @@ type ExpectedDescriptor struct {
 	MetadataChecksum string `json:"metadataChecksum"`
 }
 
+// ExpectedTampered is one tampered descriptor vector.
+type ExpectedTampered struct {
+	// File is the descriptor's name in TamperedFS.
+	File string `json:"file"`
+	// Node is the path, relative to TreeRoot in ChildMetadataTreeFS, of the node whose
+	// snapshot.yaml the descriptor replaces.
+	Node string `json:"node"`
+	// FailingNode is the path of the node whose check must fail: the parent of Node.
+	FailingNode string `json:"failingNode"`
+	// Error names the snapshotarchive sentinel error the check fails with.
+	Error string `json:"error"`
+}
+
 // Expected is the full set of expected values.
 type Expected struct {
 	// EmptyChildrenChecksum is the hex ChildrenChecksum of a node without children.
@@ -81,6 +103,10 @@ type Expected struct {
 	Nodes []ExpectedNode `json:"nodes"`
 	// Descriptors lists the stand-alone descriptor vectors.
 	Descriptors []ExpectedDescriptor `json:"descriptors"`
+	// ChildMetadataNodes lists every node of the version 4 vector tree, sorted by Path.
+	ChildMetadataNodes []ExpectedNode `json:"childMetadataNodes"`
+	// TamperedChildMetadata lists the tampered descriptor vectors.
+	TamperedChildMetadata []ExpectedTampered `json:"tamperedChildMetadata"`
 }
 
 // LoadExpected returns the expected values of all vectors.
@@ -98,9 +124,20 @@ func LoadExpected() (Expected, error) {
 	return expected, nil
 }
 
-// TreeFS returns the vector tree; its only top-level entry is the TreeRoot directory.
+// TreeFS returns the version 3 vector tree; its only top-level entry is the TreeRoot directory.
 func TreeFS() fs.FS {
 	return mustSub("vectors/tree")
+}
+
+// ChildMetadataTreeFS returns the version 4 vector tree; its only top-level entry is the TreeRoot
+// directory.
+func ChildMetadataTreeFS() fs.FS {
+	return mustSub("vectors/tree-child-metadata")
+}
+
+// TamperedFS returns the tampered descriptor vectors, named as in Expected.TamperedChildMetadata.
+func TamperedFS() fs.FS {
+	return mustSub("vectors/tampered")
 }
 
 // DescriptorsFS returns the stand-alone descriptor vectors, named as in Expected.Descriptors.
@@ -119,11 +156,18 @@ func CanonicalJSON(descriptorFile string) ([]byte, error) {
 	return data, nil
 }
 
-// CopyTree writes the vector tree under dir, so that implementations that work on a real
-// directory can run against it. The root node ends up at filepath.Join(dir, TreeRoot).
+// CopyTree writes the version 3 vector tree under dir, so that implementations that work on a
+// real directory can run against it. The root node ends up at filepath.Join(dir, TreeRoot).
 func CopyTree(dir string) error {
-	tree := TreeFS()
+	return copyTree(TreeFS(), dir)
+}
 
+// CopyChildMetadataTree writes the version 4 vector tree under dir, as CopyTree does.
+func CopyChildMetadataTree(dir string) error {
+	return copyTree(ChildMetadataTreeFS(), dir)
+}
+
+func copyTree(tree fs.FS, dir string) error {
 	return fs.WalkDir(tree, ".", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err

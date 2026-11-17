@@ -44,5 +44,57 @@
       "metadataChecksum": "39fabb624de490ea82e32bf41070fb1e91b39c11f8d2b0a19b51eb9c17c8488b"
     }
   ],
-  "treeRoot": "namespace-snapshot"
+  "treeRoot": "namespace-snapshot",
+  "childMetadataNodes": [
+    {
+      "path": ".",
+      "checksum": "a793dfbfbe686deb3c51708aefd23de3df4ae4b11af4c071809512d137435fd5",
+      "childrenChecksum": "f00223f4b9f077ff4dc1e2a3337a58c9c5bc93d63e26738e3abc9fdc45c6f8fa",
+      "metadataChecksum": "6a90e994600e88fbb5a317f5415aba1a5f62f54fac42de727856e53b9e7cf8b1"
+    },
+    {
+      "path": "snapshots/demovirtualdisksnapshot_disk-a",
+      "checksum": "cbc6d0e5aaaf57420ac28e87d90046e068fb27641ec674f82d268780ede55648",
+      "childrenChecksum": "7aceac2581f7f4712ecf167e334ccb48f2b574e44a29c2315f786390e506191d",
+      "metadataChecksum": "4b36d37b7a3a7be70b01f3bda92f5b6bfed2e328b273efbc6d5706ea1bfc0cca"
+    },
+    {
+      "path": "snapshots/demovirtualdisksnapshot_disk-a/snapshots/volumesnapshot_disk-a-root",
+      "checksum": "c341cbb11097e2a59bf07a882584d8aa894c5feceb8934f46585a692f29b43aa",
+      "childrenChecksum": "926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701",
+      "metadataChecksum": "49a06e3af80342ade3ddcf1520899c3f9153e55511f05a28ad380892b3b175e5"
+    },
+    {
+      "path": "snapshots/volumesnapshot_data-0",
+      "checksum": "d7d0fd4cda95f3a51fe7383dcca30c81fc9cca29ed5f143a463d9d5152758e01",
+      "childrenChecksum": "926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701",
+      "metadataChecksum": "f85498578b94f9b9fcb646433d37e1ca6204d4a89fd34489e77fb874b15fae68"
+    },
+    {
+      "path": "snapshots/volumesnapshot_files-0",
+      "checksum": "94c5485f9a62245c0e0f161f508bc664303f5546b564a50f1eae86aa9f904de6",
+      "childrenChecksum": "926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701",
+      "metadataChecksum": "d7b5a2dfdead9a5cfe78ebb11c7242330c99b1b11aae0e4100eec1728a5915c7"
+    }
+  ],
+  "tamperedChildMetadata": [
+    {
+      "file": "v4-data-0-storage-class.yaml",
+      "node": "snapshots/volumesnapshot_data-0",
+      "failingNode": ".",
+      "error": "ErrChildrenChecksumMismatch"
+    },
+    {
+      "file": "v4-disk-a-root-size.yaml",
+      "node": "snapshots/demovirtualdisksnapshot_disk-a/snapshots/volumesnapshot_disk-a-root",
+      "failingNode": "snapshots/demovirtualdisksnapshot_disk-a",
+      "error": "ErrChildrenChecksumMismatch"
+    },
+    {
+      "file": "v4-disk-a-source-object-ref.yaml",
+      "node": "snapshots/demovirtualdisksnapshot_disk-a",
+      "failingNode": ".",
+      "error": "ErrChildrenChecksumMismatch"
+    }
+  ]
 }

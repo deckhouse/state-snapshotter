@@ -37,8 +37,16 @@ const (
 	// FormatVersionPayloadSizes adds VolumeInfo.RawSizeBytes/StoredSizeBytes, the measured
 	// on-disk payload footprint (as opposed to Size's nominal restoreSize).
 	FormatVersionPayloadSizes = 3
-	// FormatVersionCurrent is stamped by every descriptor marshal.
-	FormatVersionCurrent = FormatVersionPayloadSizes
+	// FormatVersionChildMetadata makes the direct-child commitment cover every child's
+	// MetadataChecksum as well (see ComputeChildrenChecksumAt), so that a child's descriptor
+	// metadata outside its two other digests (formatVersion, sourceName, sourceObjectRef and the
+	// volumes entry) is authenticated by its parent, and a root at this version authenticates
+	// every descriptor of its tree. A parent at this version accepts only children at this
+	// version or later. The descriptor schema is that of FormatVersionPayloadSizes.
+	FormatVersionChildMetadata = 4
+	// FormatVersionCurrent is stamped by Seal and SealTree, and by MarshalJSON on a descriptor
+	// that declares no authenticated version.
+	FormatVersionCurrent = FormatVersionChildMetadata
 )
 
 // Volume modes recorded in VolumeInfo.VolumeMode. They mirror the corev1.PersistentVolumeMode
@@ -83,7 +91,8 @@ type ReadOptions struct {
 // change without a format version change (see the package documentation).
 type Descriptor struct {
 	// FormatVersion identifies the descriptor schema. Missing decodes as legacy version zero,
-	// which normal readers reject; writers always stamp FormatVersionCurrent.
+	// which normal readers reject; a new descriptor is always stamped FormatVersionCurrent (see
+	// Seal and MarshalJSON).
 	FormatVersion int `json:"formatVersion,omitempty"`
 	// APIVersion is the apiVersion of the node's snapshot object
 	// (e.g. "state-snapshotter.deckhouse.io/v1alpha1").
@@ -165,10 +174,21 @@ type VolumeInfo struct {
 // descriptorWire is Descriptor without its JSON methods; it is the canonical encoding.
 type descriptorWire Descriptor
 
-// MarshalJSON encodes the sealed descriptor (see Seal): it stamps FormatVersionCurrent, defaults
-// a nil ChildrenChecksum to EmptyChildrenChecksum and records the canonical MetadataChecksum.
+// MarshalJSON encodes the sealed descriptor (see Seal): it defaults a nil ChildrenChecksum to
+// EmptyChildrenChecksum and records the canonical MetadataChecksum. A descriptor that already
+// declares an authenticated version (FormatVersionAuthenticatedChildren or later) keeps it, because
+// its ChildrenChecksum was committed with that version's encoding and restamping it would pair the
+// commitment with another encoding; any other descriptor, a new one included, is stamped
+// FormatVersionCurrent. A descriptor read from an archive therefore encodes back unchanged.
 func (d Descriptor) MarshalJSON() ([]byte, error) {
-	sealed, err := Seal(d)
+	version := FormatVersionCurrent
+
+	switch d.FormatVersion {
+	case FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes, FormatVersionChildMetadata:
+		version = d.FormatVersion
+	}
+
+	sealed, err := sealAt(d, version)
 	if err != nil {
 		return nil, err
 	}
@@ -202,9 +222,17 @@ func (d *Descriptor) UnmarshalJSON(data []byte) error {
 
 // Seal returns d stamped with FormatVersionCurrent, with a nil ChildrenChecksum replaced by
 // EmptyChildrenChecksum, and with MetadataChecksum set to its canonical value. Checksum and
-// ChildrenChecksum must already hold the node's digests.
+// ChildrenChecksum must already hold the node's digests, the latter computed at
+// FormatVersionCurrent (see ComputeChildrenChecksum).
 func Seal(d Descriptor) (Descriptor, error) {
-	d.FormatVersion = FormatVersionCurrent
+	return sealAt(d, FormatVersionCurrent)
+}
+
+// sealAt is Seal stamping formatVersion instead of FormatVersionCurrent. Writers never stamp an
+// older version: it serves MarshalJSON, which keeps the version of a descriptor already sealed,
+// and the tests that reproduce descriptors of the older versions.
+func sealAt(d Descriptor, formatVersion int) (Descriptor, error) {
+	d.FormatVersion = formatVersion
 	d.MetadataChecksum = nil
 
 	if d.ChildrenChecksum == nil {
@@ -222,7 +250,7 @@ func Seal(d Descriptor) (Descriptor, error) {
 	return d, nil
 }
 
-// MarshalDescriptor encodes the sealed descriptor as snapshot.yaml bytes.
+// MarshalDescriptor encodes the sealed descriptor as snapshot.yaml bytes (see MarshalJSON).
 func MarshalDescriptor(d Descriptor) ([]byte, error) {
 	data, err := sigsyaml.Marshal(d)
 	if err != nil {
@@ -278,7 +306,7 @@ func ValidateEnvelope(d Descriptor, options ReadOptions) error {
 		}
 
 		return validateChildrenChecksumPresent(d)
-	case FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes:
+	case FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes, FormatVersionChildMetadata:
 	default:
 		return fmt.Errorf("%d: %w", d.FormatVersion, ErrUnsupportedFormat)
 	}

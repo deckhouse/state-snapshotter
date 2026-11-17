@@ -34,7 +34,8 @@ finalized. To do this, follow these steps:
 1. Fill in everything in every `snapshot.yaml` except the checksums.
 1. Compute each node's `checksum`.
 1. **Starting from the child nodes**, compute `childrenChecksum`, then `metadataChecksum`, and write `snapshot.yaml`.
-   The order matters because the checksums of a child node go into the checksum of its parent node.
+   The order matters because the checksums of a child node go into the checksum of its parent node. At format version 4,
+   the child node's `metadataChecksum` goes there too.
 1. Check the directory: `d8 snapshot local describe <DIRECTORY>`.
 1. If a single file is wanted, pack the checked tree into a `.zip`.
 
@@ -307,10 +308,14 @@ volumes:
     storedSizeBytes: 10737418240
 ```
 
+The example is at format version 3, which readers accept. Write a new archive at version 4: in this file only the
+version number and `metadataChecksum` change. The version decides how the parent node's `childrenChecksum` is computed,
+and a node without child nodes has the same `childrenChecksum` at every version.
+
 **Write plain YAML scalars and do not include fields without values:**
 
-- Specify `formatVersion`, `rawSizeBytes` and `storedSizeBytes` **as numbers without quotes**: `formatVersion: 3`, not
-  `"3"`.
+- Specify `formatVersion`, `rawSizeBytes` and `storedSizeBytes` **as numbers without quotes**: `formatVersion: 4`, not
+  `"4"`.
 - An optional field without a value is **not included in the file**. Do not write it as `null`, `~` or an empty string.
   `metadataChecksum` is computed over the canonical form of the file, in which fields without values are absent. So an
   explicitly written `null` does not reproduce the checksum, and the archive is rejected.
@@ -318,16 +323,18 @@ volumes:
 
 | Field | Presence | Rule |
 |---|---|---|
-| `formatVersion` | Required for new archives | The value is `3`. Archives with the value `2` are accepted as well |
+| `formatVersion` | Required for new archives | Write `4` in every node of a new archive. Archives with the values `2` and `3` are accepted as well, with the earlier `childrenChecksum` rule |
 | `apiVersion`, `kind`, `name` | Required | The identity of the node object. For Snapshot and VolumeSnapshot, it also determines the required content of the node |
 | `namespace`, `uid` | Optional | Additional identity fields. Their values take part in computing the parent node's `childrenChecksum` |
 | `sourceName`, `sourceObjectRef` | Optional | Information about the source object. `sourceObjectRef` either contains `apiVersion`, `kind` and `name`, or is absent entirely |
 | `checksum`, `childrenChecksum`, `metadataChecksum` | Required | The checksums of the node's content, of its direct child nodes and of `snapshot.yaml` itself |
 | `volumes` | Depends on the payload | Describes the volume payload. The rules are given in [The volume payload](#the-volume-payload) |
 
-**`formatVersion`.** The current version is `3`, and `d8` writes it starting with version 0.33.16. Version `3` differs
+**`formatVersion`.** `d8` writes version `3` starting with version 0.33.16. Version `3` differs
 from version `2` only by the `rawSizeBytes` and `storedSizeBytes` fields of a `volumes` entry. An archive with version
-`2` is accepted: the payload size is measured on upload. An archive with any other `formatVersion` is rejected. A file without `formatVersion`
+`2` is accepted: the payload size is measured on upload. Version `4` adds the `metadataChecksum` of each child node to
+the parent node's `childrenChecksum`, see [Computing checksums](#computing-checksums). A tool released before version
+`4` rejects a version `4` archive. An archive with any other `formatVersion` is rejected. A file without `formatVersion`
 belongs to the format used before versioning was introduced. Its metadata is not integrity-protected. Do not create new
 archives without `formatVersion`. By default, `d8 snapshot upload` and `d8 snapshot local describe` reject such
 archives. The `--allow-unauthenticated-legacy` flag permits inspection or import only for trusted legacy archives, but
@@ -345,7 +352,7 @@ the parent node's
 **`sourceName`, `sourceObjectRef`.** `sourceName` contains the name of the captured source object, and
 `sourceObjectRef` contains its `apiVersion`, `kind` and `name`. When assembling an archive yourself, you may omit these
 fields. When re-uploading an archive created by Deckhouse Platform tools, keep them unchanged: their values go into
-`metadataChecksum`.
+`metadataChecksum` and, at version 4, through it into the parent node's `childrenChecksum`.
 
 **`checksum`, `childrenChecksum`, `metadataChecksum`.** `childrenChecksum` is specified even for a node without child
 nodes. All three checksums have the same format:
@@ -411,7 +418,25 @@ subdirectory with all child nodes, or files in `manifests/` whose names do not e
    - `name`;
    - `uid`;
    - `checksum.hex`;
-   - `childrenChecksum.hex`.
+   - `childrenChecksum.hex`;
+   - `metadataChecksum.hex`, only when the parent node is at version 4.
+
+**The parent node's own `formatVersion` decides which rule applies**, whatever versions its child nodes are at:
+
+| Parent node | Values per child node | Child nodes |
+|---|---|---|
+| `4` | Eight, the last one is the child node's `metadataChecksum.hex` | Every direct child node must be at version `4` and carry a valid `metadataChecksum`, otherwise the parent node is rejected |
+| `2` or `3` | Seven | At any version. Their `metadataChecksum` is not part of the parent node's checksum |
+
+Under a parent node at version 2 or 3, the `formatVersion`, `sourceName`, `sourceObjectRef` and `volumes` fields of a
+child node are covered only by the child node's own `metadataChecksum`. Whoever can rewrite that file can recompute it:
+change `size` or `storageClassName`, recompute `metadataChecksum`, and the checksums of the tree still match from the
+root. Under a parent node at version 4, the same change also changes the parent node's `childrenChecksum`. Every child
+node of a version 4 node is at version 4 too, so a root at version 4 certifies every `snapshot.yaml` of the tree.
+
+The checksums only make the archive consistent with itself: whoever can rewrite the whole archive can recompute the
+root's checksums too. To detect that, compare them with a copy kept outside the archive. At version 4, the root's
+`metadataChecksum` is enough for that copy; at version 2 or 3, the copy has to hold the checksums of every node.
 
 **A length-prefixed string** means that the length of the string in UTF-8 bytes is fed first, as an eight-byte
 big-endian integer, followed by the bytes themselves. If `namespace` or `uid` is absent, an empty string is used: zero
@@ -422,11 +447,13 @@ fields joined with the byte `0x1F`, in that order. The comparison is bytewise. T
 these fields are rejected.
 
 For a node without child nodes, the checksum of the empty set is computed. Its value is always
-`926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701`. Reproducing this constant lets you verify that your
+`926e82507890b7d5c7ad50f8cb7fd2172f81bfd2cf1d2ca86e3b644f66b02701` at every version. Reproducing this constant lets you verify that your
 checksum implementation is correct.
 
 The checksums of child nodes go into the checksum of the parent node, so `snapshot.yaml` files are written bottom up, as
-described in [Assembling an archive](#assembling-an-archive).
+described in [Assembling an archive](#assembling-an-archive). At version 4, this includes the child node's
+`metadataChecksum`, so a child node's `snapshot.yaml` must be final before the parent node's `childrenChecksum` is
+computed.
 
 **`metadataChecksum` is the checksum of the `snapshot.yaml` file.** The file is serialized into compact JSON with no
 whitespace between tokens, and the `metadataChecksum` field is excluded entirely. SHA-256 is computed over the bytes of
@@ -548,7 +575,9 @@ repository: the Go package `snapshotarchive` of the module in `api/`. The `d8` c
 share this code, so both compute the same descriptor and the same checksums for the same tree. The package does no I/O:
 the files a node's `checksum` covers, the payload, `data.tar` and the `.zip` container stay as described above. The
 golden vectors in `api/snapshotarchive/snapshotarchivetest` check an implementation in any other language: a five-node
-archive tree with the expected checksums of every node, and single descriptors with the exact canonical JSON their
+archive tree at version 3 and the same tree at version 4 with the expected checksums of every node; version 4
+`snapshot.yaml` files of that tree with a field changed and `metadataChecksum` recomputed, each of which must get its
+parent node rejected; and single descriptors with the exact canonical JSON their
 `metadataChecksum` is computed over. Where this page and the package disagree about the descriptor or a checksum, the
 package and its vectors are authoritative.
 

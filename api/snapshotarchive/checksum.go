@@ -176,9 +176,10 @@ func ComputeContentChecksum(files []FileDigest) (NodeChecksum, error) {
 }
 
 // ChildCommitment is the record a parent's ChildrenChecksum commits to for one direct child: the
-// child's identity plus its own Checksum and ChildrenChecksum. Chaining the child's own
-// ChildrenChecksum makes the root's commitment cover the whole tree once every node's commitment
-// is verified.
+// child's identity plus its own Checksum and ChildrenChecksum and, from FormatVersionChildMetadata
+// onward, its MetadataChecksum. Chaining the child's own ChildrenChecksum makes the root's
+// commitment cover the whole tree once every node's commitment is verified; chaining its
+// MetadataChecksum extends that to every child's descriptor.
 type ChildCommitment struct {
 	APIVersion       string
 	Kind             string
@@ -187,17 +188,28 @@ type ChildCommitment struct {
 	UID              string
 	NodeChecksum     NodeChecksum
 	ChildrenChecksum NodeChecksum
+	// MetadataChecksum is the child's recorded MetadataChecksum; the zero value stands for a child
+	// that has none (a legacy version-zero descriptor). The commitment trusts it as recorded, so
+	// the caller verifies the child's own envelope first (ValidateTree does, children before their
+	// parent). Only the FormatVersionChildMetadata encoding hashes it.
+	MetadataChecksum NodeChecksum
+	// FormatVersion is the child's format version. It is not hashed, because the child's
+	// MetadataChecksum covers it; a FormatVersionChildMetadata parent requires it to be
+	// FormatVersionChildMetadata or later.
+	FormatVersion int
 }
 
-// ChildCommitmentOf returns the commitment a parent records for the child described by d. It
-// fails with ErrInvalidDescriptor when d carries no ChildrenChecksum.
+// ChildCommitmentOf returns the commitment a parent records for the child described by d, every
+// field filled in. It fails with ErrInvalidDescriptor when d carries no ChildrenChecksum; a
+// missing MetadataChecksum is left zero for ComputeChildrenChecksumAt to judge by the parent's
+// version.
 func ChildCommitmentOf(d Descriptor) (ChildCommitment, error) {
 	if d.ChildrenChecksum == nil {
 		return ChildCommitment{}, fmt.Errorf("%s/%s has no authenticated children commitment: %w",
 			d.Kind, d.Name, ErrInvalidDescriptor)
 	}
 
-	return ChildCommitment{
+	commitment := ChildCommitment{
 		APIVersion:       d.APIVersion,
 		Kind:             d.Kind,
 		Name:             d.Name,
@@ -205,10 +217,18 @@ func ChildCommitmentOf(d Descriptor) (ChildCommitment, error) {
 		UID:              d.UID,
 		NodeChecksum:     d.Checksum,
 		ChildrenChecksum: *d.ChildrenChecksum,
-	}, nil
+		FormatVersion:    d.FormatVersion,
+	}
+
+	if d.MetadataChecksum != nil {
+		commitment.MetadataChecksum = *d.MetadataChecksum
+	}
+
+	return commitment, nil
 }
 
-// EmptyChildrenChecksum is the ChildrenChecksum of a node with no direct children.
+// EmptyChildrenChecksum is the ChildrenChecksum of a node with no direct children. It is the same
+// at every format version: with no child records the encodings do not differ.
 func EmptyChildrenChecksum() NodeChecksum {
 	checksum, err := ComputeChildrenChecksum(nil)
 	if err != nil {
@@ -219,16 +239,49 @@ func EmptyChildrenChecksum() NodeChecksum {
 	return checksum
 }
 
-// ComputeChildrenChecksum computes the digest committing to an exact set of direct children. It
-// is independent of the input order: the commitments are sorted by the identity tuple
-// (apiVersion, kind, namespace, name, uid) joined with 0x1f and compared bytewise. The hash input
-// is the domain string "d8-snapshot-children-checksum-v1" and a zero byte, the decimal child count,
-// then for every child its apiVersion, kind, namespace, name, uid, checksum hex and
-// childrenChecksum hex, every string prefixed with its byte length as a big-endian uint64.
+// ComputeChildrenChecksum computes the digest committing to an exact set of direct children for a
+// parent at FormatVersionCurrent (see ComputeChildrenChecksumAt).
+func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error) {
+	return ComputeChildrenChecksumAt(FormatVersionCurrent, commitments)
+}
+
+// ComputeChildrenChecksumAt computes the digest committing to an exact set of direct children for
+// a parent at formatVersion. It is independent of the input order: the commitments are sorted by
+// the identity tuple (apiVersion, kind, namespace, name, uid) joined with 0x1f and compared
+// bytewise. The hash input is the domain string "d8-snapshot-children-checksum-v1" and a zero
+// byte, the decimal child count, then for every child its apiVersion, kind, namespace, name, uid,
+// checksum hex and childrenChecksum hex and, at FormatVersionChildMetadata, its metadataChecksum
+// hex as the eighth and last field, every string prefixed with its byte length as a big-endian
+// uint64.
+//
+// The domain string is the same at every version. The encodings still never share a hash input
+// for a non-empty child set: the count is hashed first, and N children are 7N length-prefixed
+// fields in one encoding and 8N in the other, so no byte string parses as both. A commitment
+// recorded at one version therefore cannot be replayed at another; the empty set commits to
+// EmptyChildrenChecksum at every version.
+//
+// At FormatVersionChildMetadata every child must be at FormatVersionChildMetadata or later and
+// carry a well-formed MetadataChecksum (ErrInvalidDescriptor otherwise): a parent at that version
+// then authenticates each child's whole descriptor, and by induction a root at that version
+// authenticates every descriptor of its tree. The older versions (FormatVersionLegacy,
+// FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes) ignore MetadataChecksum and
+// FormatVersion and accept a child at any version. Any other formatVersion fails with
+// ErrUnsupportedFormat.
 //
 // It rejects more than MaxDirectChildren commitments (ErrTooManyDirectChildren), and a commitment
 // with an incomplete identity, a malformed digest or a duplicate identity (ErrInvalidDescriptor).
-func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error) {
+func ComputeChildrenChecksumAt(formatVersion int, commitments []ChildCommitment) (NodeChecksum, error) {
+	var commitsMetadata bool
+
+	switch formatVersion {
+	case FormatVersionLegacy, FormatVersionAuthenticatedChildren, FormatVersionPayloadSizes:
+	case FormatVersionChildMetadata:
+		commitsMetadata = true
+	default:
+		return NodeChecksum{}, fmt.Errorf("children checksum at format version %d: %w",
+			formatVersion, ErrUnsupportedFormat)
+	}
+
 	if len(commitments) > MaxDirectChildren {
 		return NodeChecksum{}, fmt.Errorf("%d direct children exceeds bound %d: %w",
 			len(commitments), MaxDirectChildren, ErrTooManyDirectChildren)
@@ -251,6 +304,21 @@ func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error
 
 		if err := ValidateChecksum(record.ChildrenChecksum); err != nil {
 			return NodeChecksum{}, fmt.Errorf("child %s/%s children checksum: %w", record.Kind, record.Name, err)
+		}
+
+		if !commitsMetadata {
+			continue
+		}
+
+		if record.FormatVersion < FormatVersionChildMetadata {
+			return NodeChecksum{}, fmt.Errorf(
+				"child %s/%s is at format version %d, a parent at version %d requires %d or later: %w",
+				record.Kind, record.Name, record.FormatVersion, formatVersion, FormatVersionChildMetadata,
+				ErrInvalidDescriptor)
+		}
+
+		if err := ValidateChecksum(record.MetadataChecksum); err != nil {
+			return NodeChecksum{}, fmt.Errorf("child %s/%s metadata checksum: %w", record.Kind, record.Name, err)
 		}
 	}
 
@@ -277,20 +345,26 @@ func ComputeChildrenChecksum(commitments []ChildCommitment) (NodeChecksum, error
 		writeLengthPrefixed(h, record.UID)
 		writeLengthPrefixed(h, record.NodeChecksum.Hex)
 		writeLengthPrefixed(h, record.ChildrenChecksum.Hex)
+
+		if commitsMetadata {
+			writeLengthPrefixed(h, record.MetadataChecksum.Hex)
+		}
 	}
 
 	return checksumFromSum(h.Sum(nil)), nil
 }
 
-// VerifyChildrenChecksum recomputes the commitment over children and compares it with
-// d.ChildrenChecksum (ErrChildrenChecksumMismatch on a difference). A legacy version-zero
-// descriptor is exempt: its commitment is as unauthenticated as the rest of its metadata.
+// VerifyChildrenChecksum recomputes the commitment over children with the encoding of d's own
+// format version (see ComputeChildrenChecksumAt) and compares it with d.ChildrenChecksum
+// (ErrChildrenChecksumMismatch on a difference). The parent's version alone selects the encoding,
+// whatever versions the children are at. A legacy version-zero descriptor is exempt: its
+// commitment is as unauthenticated as the rest of its metadata.
 func VerifyChildrenChecksum(d Descriptor, children []ChildCommitment) error {
 	if d.FormatVersion == FormatVersionLegacy {
 		return nil
 	}
 
-	computed, err := ComputeChildrenChecksum(children)
+	computed, err := ComputeChildrenChecksumAt(d.FormatVersion, children)
 	if err != nil {
 		return err
 	}

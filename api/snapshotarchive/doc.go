@@ -28,7 +28,8 @@ limitations under the License.
 //   - The canonical form of a descriptor and its YAML/JSON encoding: [MarshalDescriptor],
 //     [UnmarshalDescriptor], [Seal].
 //   - The digest algorithms: the content checksum ([NewFileHash], [ComputeFileDigest],
-//     [ComputeContentChecksum]), the direct-child commitment ([ComputeChildrenChecksum],
+//     [ComputeContentChecksum]), the direct-child commitment ([ChildCommitmentOf],
+//     [ComputeChildrenChecksum], [ComputeChildrenChecksumAt], [VerifyChildrenChecksum],
 //     [EmptyChildrenChecksum]) and the metadata checksum ([ComputeMetadataChecksum]).
 //   - Validation of one descriptor ([ValidateEnvelope], [ValidateDescriptor]) and of a whole
 //     descriptor tree held in memory ([ValidateTree]), plus sealing such a tree bottom up
@@ -46,8 +47,10 @@ limitations under the License.
 // # Compatibility contract
 //
 // The format is versioned by [Descriptor.FormatVersion]. Writers always stamp
-// [FormatVersionCurrent]; readers accept [FormatVersionAuthenticatedChildren] and
-// [FormatVersionPayloadSizes], accept [FormatVersionLegacy] only under
+// [FormatVersionCurrent] on a new descriptor, and an encoded descriptor keeps the authenticated
+// version it already declares (see [Descriptor.MarshalJSON]); readers accept
+// [FormatVersionAuthenticatedChildren], [FormatVersionPayloadSizes] and
+// [FormatVersionChildMetadata], accept [FormatVersionLegacy] only under
 // [ReadOptions.AllowUnauthenticatedLegacy], and refuse every other version, a future one included.
 //
 // The canonical form and the digest algorithms are part of the format. Any change that alters the
@@ -57,7 +60,22 @@ limitations under the License.
 // previous versions must keep being read with their original rules. Adding a descriptor field is
 // a format version change too, because the field enters the metadata checksum.
 //
-// The golden vectors in the snapshotarchivetest package pin the current rules. They must never be
+// # What a root authenticates
+//
+// A node's ChildrenChecksum is computed with the encoding of the node's own format version,
+// whatever versions its children are at (see [ComputeChildrenChecksumAt]). Up to
+// [FormatVersionPayloadSizes] it commits to each child's identity, Checksum and ChildrenChecksum,
+// so a verified root authenticates the content and the topology of its tree but not the rest of a
+// child's descriptor: its formatVersion, sourceName, sourceObjectRef and volumes are covered only
+// by the child's own MetadataChecksum, which whoever can rewrite the child can recompute.
+// [FormatVersionChildMetadata] also commits to each child's MetadataChecksum and admits only
+// children at that version or later, so a verified root at that version authenticates every
+// descriptor of its tree. A parent at an older version still verifies with the older encoding,
+// over children at any version. The root's own descriptor is authenticated by nothing inside the
+// archive: a caller that needs more than self-consistency compares the root's MetadataChecksum
+// with a copy recorded outside it.
+//
+// The golden vectors in the snapshotarchivetest package pin the rules of every version they cover. They must never be
 // regenerated to make a change pass: a vector that stops matching means the change breaks every
 // archive already written.
 package snapshotarchive
