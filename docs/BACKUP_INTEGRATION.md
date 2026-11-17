@@ -189,13 +189,16 @@ Send a Snapshot JSON object with the `Content-Type: application/json` header in 
 `{namespace}` is the namespace to capture and `{name}` is the name from `metadata.name`.
 A Snapshot with `spec: {}` captures the namespace state once.
 A Snapshot with `spec.mode: Import` accepts externally supplied data.
+The `spec.deletionPolicy` field sets what deleting the Snapshot does to the stored snapshot, see
+[Deleting the snapshot after export](#deleting-the-snapshot-after-export). The field is accepted only in `Capture` mode.
 The spec is immutable after creation. Readiness is checked through the `status.conditions` field of the created object.
 
 When creating a Snapshot, use the `fieldValidation=Strict` parameter in the `POST` request so that the API server
 rejects unknown and repeated fields. Without strict validation, the API server discards a field with a typo in its
 **name** (`mod: Import` instead of `mode: Import`). The Snapshot then captures the live namespace in the default
-`Capture` mode. An invalid **value**, such as `spec.mode: Imprt`, is rejected by the CRD enum validation. After
-creation, read back the stored `spec.mode` value and check `status.conditions`.
+`Capture` mode, and a typo in `deletionPolicy` gives a snapshot that is retained after deletion. An invalid **value**,
+such as `spec.mode: Imprt`, is rejected by the CRD enum validation. After creation, read back the stored `spec.mode` and
+`spec.deletionPolicy` values and check `status.conditions`.
 
 ### Snapshot tree and node API
 
@@ -279,6 +282,37 @@ spec: {}
 
 Objects with the `state-snapshotter.deckhouse.io/exclude` label are excluded if the label is set before capture.
 The selection rules are described in [What gets captured](user_guide.html#what-gets-captured).
+
+A backup system that keeps the snapshot outside the cluster should create it with `spec.deletionPolicy: Delete`, see
+[Deleting the snapshot after export](#deleting-the-snapshot-after-export):
+
+```yaml
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+kind: Snapshot
+metadata:
+  name: my-namespace-snapshot
+  namespace: my-app
+spec:
+  deletionPolicy: Delete
+```
+
+### Deleting the snapshot after export
+
+When the manifests of every node and the data of every volume are in the backup storage and have been checked, delete
+the root Snapshot. Do not delete the child nodes: they are protected from deletion and are removed by the module.
+
+What the deletion does to the stored snapshot is set by `spec.deletionPolicy` at creation and cannot be changed:
+
+| Value | On deletion of the Snapshot |
+|---|---|
+| `Retain` (default) | The stored snapshot stays in the cluster for the period set in the [`snapshotTtlAfterDelete`](configuration.html#parameters-snapshotttlafterdelete) module parameter (30 days by default). Its volume snapshots keep occupying space on the storage for that period. After the Snapshot is deleted, the stored snapshot is not available through the namespace API |
+| `Delete` | The stored snapshot is deleted together with the Snapshot, and the volume snapshots the module created for it are deleted from the storage. The CSI driver completes the deletion on the storage asynchronously |
+
+Keep `Retain` when the copy in the cluster is the fallback for an export that fails after the Snapshot is deleted. With
+`Delete`, delete the Snapshot only after the export is complete: a deleted snapshot cannot be downloaded again.
+
+Neither value affects volume snapshots the module did not create. A VolumeSnapshot created in the namespace before the
+capture keeps the deletion policy of its own class.
 
 ### Checking the snapshot state
 

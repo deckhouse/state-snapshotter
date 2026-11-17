@@ -60,6 +60,18 @@ spec:
           spec:
             description: Defines how snapshot content is obtained.
             properties:
+              deletionPolicy:
+                description: |-
+                  Defines what deleting the Snapshot does to the stored snapshot tree. Applies to Capture only.
+
+                  Retain (the default) keeps the stored tree until the retention period configured for the module expires.
+                  Delete removes the stored tree and the volume snapshots created for it as soon as the Snapshot is deleted.
+                  Use Delete when the snapshot has already been copied out of the cluster.
+                  A VolumeSnapshot that existed in the namespace before the capture keeps its own deletion policy.
+                enum:
+                - Retain
+                - Delete
+                type: string
               mode:
                 default: Capture
                 description: |-
@@ -130,6 +142,11 @@ spec:
                 with d8 snapshot create; to keep objects out of a snapshot, label
                 them state-snapshotter.deckhouse.io/exclude'
               rule: '!has(self.resourceSelector)'
+            - message: 'spec.deletionPolicy applies to Capture only: an imported snapshot
+                is always reclaimed when it is deleted. Drop the field from an Import
+                snapshot'
+              rule: '!has(self.deletionPolicy) || !has(self.mode) || self.mode !=
+                ''Import'''
           status:
             description: Current binding, tree, and readiness state of the Snapshot.
             properties:

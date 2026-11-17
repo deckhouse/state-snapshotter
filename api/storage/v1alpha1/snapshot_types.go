@@ -80,11 +80,15 @@ const (
 // client still sending a selector would be answered "created" and silently get a snapshot of the whole
 // namespace instead of the subset it asked for. Keeping the field declared and refusing it is the only way
 // to turn that silent widening into an error. Verified against a live apiserver, not assumed.
+//
+// The deletionPolicy rule keeps the field to the Capture mode: an imported tree is always reclaimed when its
+// root is deleted, so on Import the field could only repeat that or contradict it.
 
 // Defines how snapshot content is obtained.
 // +k8s:deepcopy-gen=true
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable"
 // +kubebuilder:validation:XValidation:rule="!has(self.resourceSelector)",message="spec.resourceSelector is not supported: a Snapshot captures its whole namespace. Remove the field and do not use -l/--selector with d8 snapshot create; to keep objects out of a snapshot, label them state-snapshotter.deckhouse.io/exclude"
+// +kubebuilder:validation:XValidation:rule="!has(self.deletionPolicy) || !has(self.mode) || self.mode != 'Import'",message="spec.deletionPolicy applies to Capture only: an imported snapshot is always reclaimed when it is deleted. Drop the field from an Import snapshot"
 type SnapshotSpec struct {
 	// Mode selects how this Snapshot obtains its content and is immutable (frozen by the spec-level rule):
 	//   - Capture (default): dynamic namespace capture from the live cluster.
@@ -97,6 +101,28 @@ type SnapshotSpec struct {
 	// +kubebuilder:default=Capture
 	// +optional
 	Mode SnapshotMode `json:"mode,omitempty"`
+
+	// DeletionPolicy decides what deleting this Snapshot does to the stored snapshot tree. It is set at
+	// creation and immutable, like the rest of the spec, and it applies to Capture only (refused on Import):
+	//   - Retain (the behaviour when the field is omitted): the stored tree outlives this object for the
+	//     retention TTL configured on the controller and is garbage-collected, together with its volume
+	//     snapshots, when that TTL expires.
+	//   - Delete: deleting this object deletes the stored tree right away, and the volume snapshots the tree
+	//     created are physically removed from the storage. Choose it when the snapshot has already been
+	//     copied out of the cluster and nothing is left to recover from it after deletion.
+	//
+	// Either way, a CSI VolumeSnapshot that existed in the namespace before capture keeps its own
+	// deletionPolicy: only the volume snapshots this module created for the tree are removed.
+
+	// Defines what deleting the Snapshot does to the stored snapshot tree. Applies to Capture only.
+	//
+	// Retain (the default) keeps the stored tree until the retention period configured for the module expires.
+	// Delete removes the stored tree and the volume snapshots created for it as soon as the Snapshot is deleted.
+	// Use Delete when the snapshot has already been copied out of the cluster.
+	// A VolumeSnapshot that existed in the namespace before the capture keeps its own deletion policy.
+	// +kubebuilder:validation:Enum=Retain;Delete
+	// +optional
+	DeletionPolicy string `json:"deletionPolicy,omitempty"`
 
 	// ResourceSelector is a REMOVED input that is NOT read by anything: it stays in the schema only so that
 	// the spec-level rule above can refuse a request that carries it. A Snapshot captures its whole
@@ -118,6 +144,16 @@ type SnapshotSpec struct {
 // snapshots are materialized from an uploaded payload and MUST NOT trigger dynamic namespace capture.
 func (s *Snapshot) IsImportMode() bool {
 	return s != nil && s.Spec.Mode == SnapshotModeImport
+}
+
+// ContentDeletionPolicy returns the SnapshotContent deletionPolicy the tree of this Snapshot is created
+// with: Delete for an import (an imported tree has no live source to recapture from), otherwise the
+// spec.deletionPolicy the creator chose, Retain when it is omitted.
+func (s *Snapshot) ContentDeletionPolicy() string {
+	if s.IsImportMode() || s.Spec.DeletionPolicy == SnapshotContentDeletionPolicyDelete {
+		return SnapshotContentDeletionPolicyDelete
+	}
+	return SnapshotContentDeletionPolicyRetain
 }
 
 // Current binding, tree, and readiness state of the Snapshot.

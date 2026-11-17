@@ -248,6 +248,19 @@ func SnapshotParentOwnerRef(obj client.Object) *metav1.OwnerReference {
 }
 
 func ResolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, child client.Object) (*metav1.OwnerReference, bool, error) {
+	parentContent, pending, err := ResolveParentSnapshotContent(ctx, c, child)
+	if err != nil || pending || parentContent == nil {
+		return nil, pending, err
+	}
+	ref := SnapshotContentOwnerReference(parentContent)
+	return &ref, false, nil
+}
+
+// ResolveParentSnapshotContent returns the SnapshotContent bound to the parent snapshot of child: the
+// content a child content is owned by, and the one it inherits spec.deletionPolicy from. It returns nil
+// without an error when child has no parent snapshot, and pending=true while the parent has not bound a
+// content yet.
+func ResolveParentSnapshotContent(ctx context.Context, c client.Client, child client.Object) (*storagev1alpha1.SnapshotContent, bool, error) {
 	parentRef := SnapshotParentOwnerRef(child)
 	if parentRef == nil {
 		return nil, false, nil
@@ -290,8 +303,7 @@ func ResolveParentSnapshotContentOwnerRef(ctx context.Context, c client.Client, 
 	if err := c.Get(ctx, client.ObjectKey{Name: parentContentName}, parentContent); err != nil {
 		return nil, false, err
 	}
-	ref := SnapshotContentOwnerReference(parentContent)
-	return &ref, false, nil
+	return parentContent, false, nil
 }
 
 func OwnerReferencesEqual(left, right []metav1.OwnerReference) bool {

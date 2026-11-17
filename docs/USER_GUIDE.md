@@ -367,7 +367,8 @@ Snapshot lifecycle is defined by immutability and retention of stored content af
   re-capture.
 - **Retention after deletion.** After the Snapshot is deleted, its stored data is kept for the period set in the
   [`snapshotTtlAfterDelete`](configuration.html#parameters-snapshotttlafterdelete) module parameter (30 days by
-  default) and then removed.
+  default) and then removed. The Snapshot can instead be created with `spec.deletionPolicy: Delete`, see
+  [Deletion policy](#deletion-policy).
 - **No background load.** The module captures only in response to explicit requests. It runs no continuous background
   capture; the only scheduled work is removing data whose retention period has expired.
 
@@ -381,8 +382,34 @@ d8 snapshot delete my-namespace-snapshot -n my-app --wait
 
 With the `--wait` flag, the command waits until the module deletes the Snapshot and its tree. The module deletes the
 child nodes of the tree together with the root Snapshot. The stored data is kept for the period set in the
-`snapshotTtlAfterDelete` parameter, as described above. Do not delete the child nodes directly: they are protected as
+`snapshotTtlAfterDelete` parameter, unless the Snapshot was created with `spec.deletionPolicy: Delete`. Do not delete
+the child nodes directly: they are protected as
 described in [Delete protection](#delete-protection).
+
+### Deletion policy
+
+The `spec.deletionPolicy` field is set at creation and cannot be changed. It sets what deleting the Snapshot does:
+
+| Value | On deletion of the Snapshot |
+|---|---|
+| `Retain` (default) | The stored data is kept for the period set in the `snapshotTtlAfterDelete` parameter. Its volume snapshots keep occupying space on the storage for that period |
+| `Delete` | The stored data is deleted right away, and the volume snapshots the module created for it are deleted from the storage |
+
+Use `Delete` when the snapshot is copied out of the cluster, for example by a backup system, and the copy in the
+cluster is not needed after the export:
+
+```yaml
+apiVersion: state-snapshotter.deckhouse.io/v1alpha1
+kind: Snapshot
+metadata:
+  name: my-namespace-snapshot
+  namespace: my-app
+spec:
+  deletionPolicy: Delete
+```
+
+The field is accepted only in `Capture` mode: deleting an imported Snapshot always deletes the loaded data. A
+VolumeSnapshot you created in the namespace yourself keeps the deletion policy of its own class.
 
 ### Delete protection
 

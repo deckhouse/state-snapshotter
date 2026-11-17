@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	storagev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	controllercommon "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snaphelpers"
 	"github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/controllers/snapshotbinding"
 	deckhousev1alpha1 "github.com/deckhouse/state-snapshotter/images/state-snapshotter-controller/internal/deckhouseio/v1alpha1"
@@ -289,8 +290,10 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 	// condition is needed; status.boundSnapshotContentName is the durable "content created" signal.
 	contentName := snapshotLike.GetStatusContentName()
 
-	// Step 1: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef)
+	// Step 1: Create ObjectKeeper for root snapshots first (needed for SnapshotContent ownerRef). The same
+	// switch settles the deletionPolicy a new content gets (see deletion_policy.go).
 	var contentOwnerRef *metav1.OwnerReference
+	contentDeletionPolicy := storagev1alpha1.SnapshotContentDeletionPolicyRetain
 	switch {
 	case isArtifactOwnedRoot(obj):
 		// A snapshot this module did not create is captured like any other, but its data belongs to
@@ -324,16 +327,23 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		}
 		ref := controllercommon.RootObjectKeeperOwnerReference(objectKeeper)
 		contentOwnerRef = &ref
+		if contentDeletionPolicy, err = rootContentDeletionPolicy(obj); err != nil {
+			return ctrl.Result{}, err
+		}
 
 	default:
-		ref, pending, err := controllercommon.ResolveParentSnapshotContentOwnerRef(ctx, r.Client, obj)
+		parentContent, pending, err := controllercommon.ResolveParentSnapshotContent(ctx, r.Client, obj)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if pending {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
-		contentOwnerRef = ref
+		if parentContent != nil {
+			ref := controllercommon.SnapshotContentOwnerReference(parentContent)
+			contentOwnerRef = &ref
+			contentDeletionPolicy = childContentDeletionPolicy(parentContent)
+		}
 	}
 	if contentName != "" && contentOwnerRef != nil {
 		contentGVK, err := r.getSnapshotContentGVK(obj.GetObjectKind().GroupVersionKind())
@@ -378,13 +388,13 @@ func (r *GenericSnapshotBinderController) Reconcile(ctx context.Context, req ctr
 		contentObj.SetName(contentName)
 		// SnapshotContent is cluster-scoped, no namespace
 
-		// Minimal spec: durable by default (deletionPolicy=Retain), same as the namespace path
-		// (snapshot/controller.go). The spec is immutable; all data/result wiring is published
+		// Minimal spec: the deletionPolicy the tree's creator chose (Retain unless the root Snapshot asked
+		// for Delete; see deletion_policy.go). The spec is immutable; all data/result wiring is published
 		// into content.status by the owning controller, never carried in spec. snapshotRef is the
 		// required anti-spoofing back-reference to this domain XXXSnapshot (the binding subject that sets
 		// status.boundSnapshotContentName on the content).
 		contentObj.Object["spec"] = map[string]interface{}{
-			"deletionPolicy": "Retain",
+			"deletionPolicy": contentDeletionPolicy,
 			"snapshotRef": map[string]interface{}{
 				"apiVersion": snapshotGVK.GroupVersion().String(),
 				"kind":       snapshotGVK.Kind,
