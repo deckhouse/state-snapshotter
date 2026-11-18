@@ -62,6 +62,7 @@ func (r *SnapshotContentController) resolveDataReadiness(ctx context.Context, ob
 	var unsupported []string
 	var missing []string
 	var notReady []string
+	var notReadyErrors []string
 
 	for _, binding := range refs {
 		ready, reason, msg, err := r.resolveOneDataBindingReadiness(ctx, binding)
@@ -83,10 +84,11 @@ func (r *SnapshotContentController) resolveDataReadiness(ctx context.Context, ob
 				missing = append(missing, msg)
 			}
 		case snapshot.ReasonArtifactNotReady:
-			if binding.Artifact.Name != "" {
-				notReady = append(notReady, binding.Artifact.Name)
-			} else {
-				notReady = append(notReady, msg)
+			// The artifact is named here (resolveOneDataBindingReadiness refuses an unnamed one as invalid);
+			// msg is the error it reports, if any.
+			notReady = append(notReady, binding.Artifact.Name)
+			if msg != "" {
+				notReadyErrors = append(notReadyErrors, msg)
 			}
 		default:
 			notReady = append(notReady, msg)
@@ -107,8 +109,14 @@ func (r *SnapshotContentController) resolveDataReadiness(ctx context.Context, ob
 		// Surface the data leg pending state as DataCapturePending with a progress count. When this branch
 		// is reached the terminal buckets (invalid/unsupported/missing) are empty, so ready = total - notReady.
 		ready := len(refs) - len(notReady)
-		return false, snapshot.ReasonDataCapturePending,
-			"waiting for volume snapshot artifacts: " + formatReadyProgress(ready, len(refs), notReady), nil
+		message := "waiting for volume snapshot artifacts: " + formatReadyProgress(ready, len(refs), notReady)
+		if len(notReadyErrors) > 0 {
+			// The error an artifact reports is what tells a reader why the wait does not end. It stays a
+			// pending state: the CSI snapshotter retries the snapshot, and it may still succeed once the
+			// cause (no free space in the pool, for example) is gone.
+			message += "; " + strings.Join(notReadyErrors, "; ")
+		}
+		return false, snapshot.ReasonDataCapturePending, message, nil
 	}
 
 	return true, "", "", nil
@@ -144,6 +152,9 @@ func (r *SnapshotContentController) resolveOneDataBindingReadiness(
 	return r.checkVolumeSnapshotContentReadiness(ctx, art.Name)
 }
 
+// checkVolumeSnapshotContentReadiness reads the readiness of one VolumeSnapshotContent artifact. For the
+// pending ArtifactNotReady the message is the error the artifact reports (volumeSnapshotContentErrorMessage),
+// empty while it reports none: the caller names the artifact in its own progress list.
 func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 	ctx context.Context,
 	name string,
@@ -182,11 +193,33 @@ func (r *SnapshotContentController) checkVolumeSnapshotContentReadiness(
 		return false, "", "", fmt.Errorf("read VolumeSnapshotContent %s status.readyToUse: %w", name, err)
 	}
 	if !found || !readyToUse {
-		return false, snapshot.ReasonArtifactNotReady,
-			fmt.Sprintf("VolumeSnapshotContent %s is not readyToUse", name), nil
+		return false, snapshot.ReasonArtifactNotReady, volumeSnapshotContentErrorMessage(artifactObj), nil
 	}
 
 	return true, "", "", nil
+}
+
+// volumeSnapshotContentErrorMessage renders the error a not-ready VolumeSnapshotContent reports in
+// status.error, naming the VolumeSnapshot it is bound to, or returns "" when it reports none:
+//
+//	VolumeSnapshotContent <name> of VolumeSnapshot <namespace>/<name> reports an error: <status.error.message>
+//
+// The CSI snapshotter writes the error of a failed CreateSnapshot call there and keeps retrying, so the
+// readiness stays pending; the message is what makes that wait explainable on the content and, through the
+// child aggregation, on every ancestor. The error time is left out on purpose: the text then stays the
+// same while the same error lasts, so re-deriving it every pass writes no status.
+func volumeSnapshotContentErrorMessage(vsc *unstructured.Unstructured) string {
+	errMsg, _, _ := unstructured.NestedString(vsc.Object, "status", "error", "message")
+	if errMsg == "" {
+		return ""
+	}
+	subject := "VolumeSnapshotContent " + vsc.GetName()
+	vsNamespace, _, _ := unstructured.NestedString(vsc.Object, "spec", "volumeSnapshotRef", "namespace")
+	vsName, _, _ := unstructured.NestedString(vsc.Object, "spec", "volumeSnapshotRef", "name")
+	if vsName != "" {
+		subject += fmt.Sprintf(" of VolumeSnapshot %s/%s", vsNamespace, vsName)
+	}
+	return subject + " reports an error: " + errMsg
 }
 
 // volumeSnapshotContentGVK returns the fixed GroupVersionKind of the CSI VolumeSnapshotContent artifact

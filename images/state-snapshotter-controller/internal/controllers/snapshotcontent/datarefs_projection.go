@@ -66,9 +66,9 @@ import (
 //
 // pendingDetail is the non-terminal twin of termMessage: a human-readable cause for a leg that is merely
 // PENDING, which the caller substitutes for the generic waiting text (see
-// reconcileCommonSnapshotContentStatus). Only the generic-import route fills it — an import can stall on a
-// DataImport whose own status says it will never deliver, while a capture leg either progresses or fails
-// terminally. Every other route returns it empty, so the capture path reads exactly as before.
+// reconcileCommonSnapshotContentStatus). The generic-import route fills it for a DataImport whose own status
+// says it will never deliver, and the native-CSI route for a VolumeSnapshot that is not bound yet and reports
+// an error in status.error. The VCR route returns it empty.
 func (r *SnapshotContentController) reconcileDataLegProjection(ctx context.Context, contentObj, owner *unstructured.Unstructured, ownerNamespace string, ownerFound bool) (requeue bool, termReason string, termMessage string, pendingDetail string, err error) {
 	if !ownerFound {
 		// spec.snapshotRef absent (synthetic/legacy) or owner not observable yet: nothing to project.
@@ -228,8 +228,11 @@ func (r *SnapshotContentController) projectContentDataLegFromBoundVSC(ctx contex
 		return false, "", "", "", err
 	}
 	if vscName == "" {
-		// CSI has not bound the VolumeSnapshot to a VolumeSnapshotContent yet: nothing to project.
-		return true, "", "", "", nil
+		// CSI has not bound the VolumeSnapshot to a VolumeSnapshotContent yet: nothing to project. The CSI
+		// snapshot controller writes why it cannot bind (a class it cannot read, a content it fails to create)
+		// into the VolumeSnapshot's status.error and keeps retrying, so the wait is pending and that error is
+		// its cause.
+		return true, "", "", unboundVolumeSnapshotErrorMessage(owner), nil
 	}
 
 	binding := storagev1alpha1.SnapshotDataBinding{
@@ -339,6 +342,18 @@ func fillEmptyVolumeMetadataFromPublished(published *storagev1alpha1.SnapshotDat
 			b.FsType = published.FsType
 		}
 	}
+}
+
+// unboundVolumeSnapshotErrorMessage renders the error a VolumeSnapshot not yet bound to a
+// VolumeSnapshotContent reports in status.error, or returns "" when it reports none. The error time is left
+// out so the text stays the same while the same error lasts.
+func unboundVolumeSnapshotErrorMessage(vs *unstructured.Unstructured) string {
+	errMsg, _, _ := unstructured.NestedString(vs.Object, "status", "error", "message")
+	if errMsg == "" {
+		return ""
+	}
+	return fmt.Sprintf("VolumeSnapshot %s/%s is not bound to a VolumeSnapshotContent and reports an error: %s",
+		vs.GetNamespace(), vs.GetName(), errMsg)
 }
 
 // importVolumeMetadata is the volume metadata that exists only on the import side, and only for as long as

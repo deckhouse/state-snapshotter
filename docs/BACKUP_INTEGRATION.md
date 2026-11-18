@@ -352,6 +352,11 @@ Act according to the class of the reason:
 
   If nothing changes, stop polling after a timeout of your own and report the failure.
 
+  A volume snapshot that the CSI driver refuses, for example for lack of free space in the storage pool, keeps the
+  capture in such a state: the CSI snapshot controller retries it, and the condition message names the VolumeSnapshot
+  and quotes the error it reports. Once only such volume snapshots are left, the message stops changing: report it as
+  the cause when your timeout ends the polling.
+
 ### Downloading a snapshot
 
 To download it, traverse the snapshot tree through

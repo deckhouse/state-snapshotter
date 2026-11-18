@@ -299,6 +299,12 @@ applied yet, the cause is reported in
 and in a `Warning` event with reason `NamespacePlanUnreadable`. The detailed meaning of each reason is given in
 [Checking the snapshot state](backup_integration.html#checking-the-snapshot-state).
 
+A volume snapshot that the CSI driver refuses, for example because the storage pool has no free space for it, does not
+fail the capture: the CSI snapshot controller keeps retrying it, and the capture continues once the cause is eliminated.
+While the capture waits, the condition message of the Snapshot names the VolumeSnapshot and quotes the error it reports
+in `status.error.message`. When several volume snapshots wait, the message quotes one of them and lists the waiting
+nodes.
+
 ## Restoring a snapshot
 
 The `d8 snapshot restore` command applies captured application objects in the namespace that contains a ready Snapshot.
