@@ -197,11 +197,15 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 	backupPlan := obj("storage.deckhouse.io/v1alpha1", "BackupPlan", "every-night", nil)
 	backupRestore := obj("storage.deckhouse.io/v1alpha1", "BackupRestore", "restore-a", nil)
 	exampleClaim := obj("storage.deckhouse.io/v1alpha1", "ExampleClaim", "claim-a", nil)
+	secretCopy := obj("v1", "Secret", "wildcard-tls", func(o map[string]interface{}) {
+		o["type"] = "kubernetes.io/tls"
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"secret-copier.deckhouse.io/enabled": "true"}
+	})
 
 	dyn := dynamicFromEntries(entries,
 		userCM, rootCA, defaultSA, userSA, opaqueSecret, tokenSecret,
 		standalonePod, ownedPod, endpoints, lease, ciliumEndpoint, podMetrics, csiVS, mcr, userRB, captureRB, kafka,
-		dataImport, vrr, backup, backupPlan, backupRestore, exampleClaim,
+		dataImport, vrr, backup, backupPlan, backupRestore, exampleClaim, secretCopy,
 	)
 
 	targets, _, unreadable, err := BuildManifestCaptureTargets(
@@ -250,6 +254,7 @@ func TestBuildManifestCaptureTargets_InclusionAndExclusionRules(t *testing.T) {
 		"Backup/nightly",                           // backup operations: restored, they would run again
 		"BackupPlan/every-night",
 		"BackupRestore/restore-a",
+		"Secret/wildcard-tls", // a secret-copier copy: the platform puts it into the namespace itself
 	}
 	for _, k := range mustExclude {
 		if _, ok := got[k]; ok {
@@ -441,5 +446,37 @@ func TestShouldIncludeNamespaceObject_ExcludesProjectManagedObjects(t *testing.T
 	})
 	if !ShouldIncludeNamespaceObject(userCM, nil) {
 		t.Fatal("a user object in a project namespace must be included")
+	}
+}
+
+func TestShouldIncludeNamespaceObject_ExcludesSecretCopierCopies(t *testing.T) {
+	copierLabels := func(namespace string) func(map[string]interface{}) {
+		return func(o map[string]interface{}) {
+			o["type"] = "kubernetes.io/tls"
+			meta := o["metadata"].(map[string]interface{})
+			meta["namespace"] = namespace
+			meta["labels"] = map[string]interface{}{
+				"secret-copier.deckhouse.io/enabled": "true",
+				"controller.cert-manager.io/fao":     "true",
+			}
+		}
+	}
+
+	// A copy secret-copier made of a Secret of `default`, as older releases make it: no heritage.
+	if ShouldIncludeNamespaceObject(obj("v1", "Secret", "wildcard-tls", copierLabels("app-ns")), nil) {
+		t.Fatal("a secret-copier copy outside the default namespace must be excluded from capture")
+	}
+
+	// The source in `default` is the user's own Secret: it must still be captured.
+	if !ShouldIncludeNamespaceObject(obj("v1", "Secret", "wildcard-tls", copierLabels("default")), nil) {
+		t.Fatal("the source Secret of secret-copier in the default namespace must be included")
+	}
+
+	// The label is the signal only on a Secret, which is all secret-copier copies.
+	cm := obj("v1", "ConfigMap", "app-config", func(o map[string]interface{}) {
+		o["metadata"].(map[string]interface{})["labels"] = map[string]interface{}{"secret-copier.deckhouse.io/enabled": ""}
+	})
+	if !ShouldIncludeNamespaceObject(cm, nil) {
+		t.Fatal("a ConfigMap carrying the secret-copier label must be included")
 	}
 }

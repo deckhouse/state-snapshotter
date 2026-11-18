@@ -81,6 +81,16 @@ const (
 	heritageLabelMultitenancy = "multitenancy-manager"
 )
 
+// secretCopierLabelKey marks a Secret of the `default` namespace that the secret-copier module of
+// Deckhouse copies into every other namespace (such as a wildcard TLS certificate), and every copy it
+// makes: a copy carries the labels of its source. Outside `default` the label therefore means a copy,
+// which is how secret-copier itself tells one (key presence, the value is ignored). Only recent Deckhouse
+// releases also stamp heritage=deckhouse on a copy; on the others the heritage rule does not see it. A
+// copy is never desired-state of its namespace: secret-copier puts it into a restored namespace by itself,
+// and an admission policy of the module refuses to have it created by anyone else. The source in
+// `default` is the user's and is captured.
+const secretCopierLabelKey = "secret-copier.deckhouse.io/enabled"
+
 // SnapshotMachineryGVKs is the set of snapshot/content GVKs created by the snapshotter itself
 // (mechanism 1, kind-level dedup). Built by the caller from the live snapshot.GVKRegistry; the
 // package does not import the registry to avoid an import cycle. Membership is matched by
@@ -277,8 +287,9 @@ func enumerateNamespacedGVRs(disco discovery.DiscoveryInterface) (gvrs []schema.
 //   - snapshot machinery (mechanism 1: kinds the snapshotter creates itself, from snapshotKinds + CSI);
 //   - own state-snapshotter machinery (request objects), and the machinery kinds of storage-foundation
 //     and backup (volume requests, data transfer, backup operations);
-//   - Deckhouse-managed objects (heritage=deckhouse), e.g. the transient capture RoleBinding, and
-//     Project-managed ones (heritage=multitenancy-manager).
+//   - Deckhouse-managed objects (heritage=deckhouse), e.g. the transient capture RoleBinding,
+//     Project-managed ones (heritage=multitenancy-manager), and the copies secret-copier makes of a
+//     Secret of the `default` namespace.
 func ShouldIncludeNamespaceObject(u *unstructured.Unstructured, snapshotKinds SnapshotMachineryGVKs) bool {
 	if hasControllerOwnerReference(u) {
 		return false
@@ -302,13 +313,23 @@ func ShouldIncludeNamespaceObject(u *unstructured.Unstructured, snapshotKinds Sn
 // isDeckhouseManagedObject reports objects stamped heritage=deckhouse or heritage=multitenancy-manager:
 // Deckhouse module/platform machinery (incl. the snapshotter's own transient capture RoleBinding and what
 // the multitenancy manager puts into a project namespace), never user desired-state. See heritageLabelKey.
+// The copies of secret-copier count too, whatever their heritage (see secretCopierLabelKey).
 func isDeckhouseManagedObject(u *unstructured.Unstructured) bool {
 	switch u.GetLabels()[heritageLabelKey] {
 	case heritageLabelDeckhouse, heritageLabelMultitenancy:
 		return true
-	default:
+	}
+	return isSecretCopierCopy(u)
+}
+
+// isSecretCopierCopy reports a Secret outside the `default` namespace that carries secretCopierLabelKey.
+func isSecretCopierCopy(u *unstructured.Unstructured) bool {
+	gvk := u.GroupVersionKind()
+	if gvk.Group != "" || gvk.Kind != "Secret" || u.GetNamespace() == metav1.NamespaceDefault {
 		return false
 	}
+	_, ok := u.GetLabels()[secretCopierLabelKey]
+	return ok
 }
 
 // isControlPlaneNoise reports control-plane-regenerated objects that are never user desired-state.
