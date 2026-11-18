@@ -161,16 +161,34 @@ Starting with Deckhouse Platform 1.78, namespace roles provide the following per
 | Role | Snapshot operations |
 |---|---|
 | `viewer` | View snapshots and their status |
-| `manager` | Create snapshots and download manifests, but not transfer volume data |
-| `admin` | Upload and restore snapshots and transfer volume data. Required for full snapshot download and upload with `d8` |
+| `manager` | Create and delete snapshots and transfer volume data |
+| `admin` | Download snapshot manifests, upload and restore snapshots. Required for full snapshot download and upload with `d8` |
 
-Volume data is transferred through the [`storage-foundation`](/modules/storage-foundation/) module, so downloading or uploading a snapshot that contains
-volumes also requires its `transfer_volume_data` capability (a named set of module permissions granted by a separate
-ClusterRole). The `manager` role does not include it. Starting with
-Deckhouse Platform 1.78, the capability is included in the namespace `admin` role. To grant it without the `admin` role,
-bind the `d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole in the namespace. In Deckhouse
-Platform 1.76.9 through 1.77, the capability is not included in namespace user roles: bind the
-`d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole in the namespace.
+In the current role model (`ClusterAuthorizationRule` and `AuthorizationRule`), the access levels give the matching
+permissions in every Deckhouse Platform version: `User` views snapshots and their status, `Editor` also creates and
+deletes snapshots, and `Admin` also downloads snapshot manifests and uploads and restores snapshots.
+
+The cluster-scoped objects of a snapshot tree are not part of these permissions. A SnapshotContent can be read with the
+`ClusterEditor` access level and higher, and a ManifestCheckpoint with the `SuperAdmin` access level only (in the new
+role model, with the roles of the `storage` subsystem). Work with a snapshot through the Snapshot, its status and its
+subresources.
+
+Downloading the manifests of a snapshot returns every object captured in the namespace, including the kinds the subject
+cannot read directly, for example custom resources of other operators. Grant it only to subjects that may read all
+objects of the namespace.
+
+In Deckhouse Platform 1.76.9 through 1.77, the namespace use roles of the new role model include viewing, creating and
+deleting snapshots only. To download, upload or restore snapshots there, bind the
+`d8:use:capability:module:state-snapshotter:download_snapshots`, `d8:use:capability:module:state-snapshotter:upload_snapshots`
+and `d8:use:capability:module:state-snapshotter:restore_snapshots` ClusterRoles in the namespace.
+
+Volume data is transferred through the [`storage-foundation`](/modules/storage-foundation/) module, so downloading or
+uploading a snapshot that contains volumes also requires its `transfer_volume_data` capability (a named set of module
+permissions granted by a separate ClusterRole). The `Editor` and higher access levels of the current role model include
+it, and so do the namespace `manager` and `admin` roles (in Deckhouse Platform 1.76.9 through 1.77, the `manager` and
+`admin` use roles). To grant it to another subject, bind the
+`d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole in the namespace (in Deckhouse Platform
+1.76.9 through 1.77, `d8:use:capability:module:storage-foundation:transfer_volume_data`).
 
 The `d8 snapshot restore` command needs the following permissions:
 
@@ -259,7 +277,8 @@ d8 k -n my-app get snap my-namespace-snapshot -o jsonpath='{.status.conditions}'
 A snapshot is ready when the `Ready` condition is `True` with reason `Completed`. Only this combination means that the
 capture is finished and its result is stored. While the
 [`status.boundSnapshotContentName`](cr.html#snapshot-v1alpha1-status-boundsnapshotcontentname) field is empty, the
-snapshot cannot yet be downloaded.
+snapshot cannot yet be downloaded. The field names a cluster-scoped SnapshotContent, which can be read with the
+`ClusterEditor` access level and higher.
 
 When the `Ready` condition is `False`, act according to its reason:
 

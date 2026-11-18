@@ -114,10 +114,12 @@ roles from the table:
 | Create DataExport and DataImport objects and transfer volume data through their HTTP endpoints | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
 
 The `transfer_volume_data` capability is provided by the [`storage-foundation`](/modules/storage-foundation/) module.
-In both role schemes it is aggregated into the backup agent ClusterRole. Starting with Deckhouse Platform 1.78, the
-capability is also part of the namespace `admin` role, but not of `manager`. In earlier versions it is not part of the
-namespace user roles. If such roles are used instead of the backup agent ClusterRole, bind the capability separately
-for volume-data transfer.
+In both role schemes it is aggregated into the backup agent ClusterRole. It is also part of the namespace `manager` and
+`admin` roles (in Deckhouse Platform 1.76.9 through 1.77, the `manager` and `admin` use roles) and of the `Editor` and
+higher access levels of the current role model. Downloading node manifests, uploading and restoring are part of the
+namespace `admin` role and of the `Admin` and higher access levels; in Deckhouse Platform 1.76.9 through 1.77 the
+namespace use roles do not include them. If such roles are used instead of the backup agent ClusterRole, bind the
+missing roles from the table separately.
 
 After an upgrade to Deckhouse Platform 1.78, bindings to the former ClusterRole
 `d8:use:capability:module:state-snapshotter:backup_agent` keep working as a deprecated alias. Use

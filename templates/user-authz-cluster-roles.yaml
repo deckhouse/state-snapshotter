@@ -11,11 +11,65 @@ rules:
   - state-snapshotter.deckhouse.io
   resources:
   - manifestcapturerequests
-  - manifestcheckpoints
+  - snapshots
+  - snapshots/status
   verbs:
   - get
   - list
   - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    user-authz.deckhouse.io/access-level: Editor
+  name: d8:user-authz:state-snapshotter:editor
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+rules:
+- apiGroups:
+  - state-snapshotter.deckhouse.io
+  resources:
+  - snapshots
+  verbs:
+  - create
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    user-authz.deckhouse.io/access-level: Admin
+  name: d8:user-authz:state-snapshotter:admin
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+rules:
+- apiGroups:
+  - subresources.state-snapshotter.deckhouse.io
+  resources:
+  - snapshots/manifests-download
+  - snapshots/manifests-with-data-restoration
+  verbs:
+  - get
+- apiGroups:
+  - subresources.storage-foundation.deckhouse.io
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-download
+  - volumesnapshots/manifests-with-data-restoration
+  verbs:
+  - get
+- apiGroups:
+  - subresources.state-snapshotter.deckhouse.io
+  resources:
+  - snapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
+- apiGroups:
+  - subresources.storage-foundation.deckhouse.io
+  - subresources.snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots/manifests-and-children-refs-upload
+  verbs:
+  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -28,34 +82,8 @@ rules:
 - apiGroups:
   - state-snapshotter.deckhouse.io
   resources:
-  - manifestcapturerequests
-  - manifestcheckpoints
-  verbs:
-  - create
-  - delete
-  - deletecollection
-  - patch
-  - update
-# state-snapshotter.deckhouse.io unified Snapshot API (cluster editor; mirrors admin-kubeconfig / controller)
-- apiGroups:
-  - state-snapshotter.deckhouse.io
-  resources:
-  - snapshots
   - snapshotcontents
   verbs:
   - get
   - list
   - watch
-  - create
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - state-snapshotter.deckhouse.io
-  resources:
-  - snapshots/status
-  - snapshotcontents/status
-  verbs:
-  - get
-  - update
-  - patch

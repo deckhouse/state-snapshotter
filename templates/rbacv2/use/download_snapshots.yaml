@@ -20,7 +20,7 @@ metadata:
     heritage: deckhouse
     module: state-snapshotter
     state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
-    rbac.deckhouse.io/aggregate-to-namespace-as: manager
+    rbac.deckhouse.io/aggregate-to-namespace-as: admin
     rbac.deckhouse.io/kind: capability
     rbac.deckhouse.io/capability: "namespace-capability.state-snapshotter.download_snapshots"
     rbac.deckhouse.io/scope: namespace
@@ -77,7 +77,6 @@ metadata:
     heritage: deckhouse
     module: state-snapshotter
     rbac.deckhouse.io/aggregate-to-backup-agent-as: member
-    rbac.deckhouse.io/aggregate-to-kubernetes-as: manager
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:state-snapshotter:download_snapshots
 rules:

@@ -155,16 +155,32 @@ VirtualMachine, объекты, которые модули исключили �
 | Роль | Операции со снимками |
 |---|---|
 | `viewer` | Просмотр снимков и их статусов |
-| `manager` | Создание снимков и скачивание манифестов, но не передача данных томов |
-| `admin` | Загрузка и восстановление снимков, передача данных томов. Нужна для полного скачивания и загрузки снимков через `d8` |
+| `manager` | Создание и удаление снимков, передача данных томов |
+| `admin` | Скачивание манифестов снимков, загрузка и восстановление снимков. Нужна для полного скачивания и загрузки снимков через `d8` |
 
-Данные томов передаются через модуль [`storage-foundation`](/modules/storage-foundation/), поэтому для скачивания или загрузки снимка с томами также
-нужна его capability `transfer_volume_data` (именованный набор прав модуля, который выдаётся отдельной ClusterRole).
-В роль `manager` она не входит. Начиная с Deckhouse Platform 1.78,
-capability входит в роль неймспейса `admin`. Чтобы выдать её без роли `admin`, привяжите в неймспейсе ClusterRole
-`d8:namespace-capability:storage-foundation:transfer_volume_data`. В Deckhouse Platform с 1.76.9 по 1.77 capability не
-входит в пользовательские роли неймспейса: привяжите в неймспейсе ClusterRole
-`d8:use:capability:module:storage-foundation:transfer_volume_data`.
+В текущей ролевой модели (`ClusterAuthorizationRule` и `AuthorizationRule`) соответствующие права во всех версиях
+Deckhouse Platform дают уровни доступа: `User` — просмотр снимков и их статусов, `Editor` — также создание и удаление
+снимков, `Admin` — также скачивание манифестов снимков, загрузку и восстановление снимков.
+
+Cluster-wide-объекты дерева снимка в эти права не входят. SnapshotContent можно читать с уровнем доступа `ClusterEditor`
+и выше, а ManifestCheckpoint — только с уровнем доступа `SuperAdmin` (в новой ролевой модели — с ролями подсистемы
+`storage`). Работайте со снимком через Snapshot, его статус и субресурсы.
+
+Скачивание манифестов снимка возвращает все объекты, захваченные в неймспейсе, в том числе тех видов, которые субъект
+не может прочитать напрямую, например пользовательские ресурсы других операторов. Выдавайте это право только тем, кому
+можно читать все объекты неймспейса.
+
+В Deckhouse Platform с 1.76.9 по 1.77 use-роли неймспейса новой ролевой модели включают только просмотр, создание и
+удаление снимков. Чтобы скачивать, загружать или восстанавливать снимки в этих версиях, привяжите в неймспейсе ClusterRole
+`d8:use:capability:module:state-snapshotter:download_snapshots`, `d8:use:capability:module:state-snapshotter:upload_snapshots`
+и `d8:use:capability:module:state-snapshotter:restore_snapshots`.
+
+Данные томов передаются через модуль [`storage-foundation`](/modules/storage-foundation/), поэтому для скачивания или
+загрузки снимка с томами также нужна его capability `transfer_volume_data` (именованный набор прав модуля, который
+выдаётся отдельной ClusterRole). Она входит в уровни доступа `Editor` и выше текущей ролевой модели, а также в роли
+неймспейса `manager` и `admin` (в Deckhouse Platform с 1.76.9 по 1.77 — в use-роли `manager` и `admin`). Чтобы выдать её
+другому субъекту, привяжите в неймспейсе ClusterRole `d8:namespace-capability:storage-foundation:transfer_volume_data`
+(в Deckhouse Platform с 1.76.9 по 1.77 — `d8:use:capability:module:storage-foundation:transfer_volume_data`).
 
 Команде `d8 snapshot restore` нужны следующие права:
 
@@ -252,7 +268,8 @@ d8 k -n my-app get snap my-namespace-snapshot -o jsonpath='{.status.conditions}'
 Снимок готов, когда условие `Ready` имеет значение `True` с reason `Completed`. Только это сочетание означает, что
 захват завершён и его результат сохранён. Пока поле
 [`status.boundSnapshotContentName`](cr.html#snapshot-v1alpha1-status-boundsnapshotcontentname) пустое, скачать снимок
-нельзя.
+нельзя. В поле указано имя cluster-wide-объекта SnapshotContent, читать который можно с уровнем доступа `ClusterEditor`
+и выше.
 
 Если условие `Ready` имеет значение `False`, действуйте в зависимости от reason:
 

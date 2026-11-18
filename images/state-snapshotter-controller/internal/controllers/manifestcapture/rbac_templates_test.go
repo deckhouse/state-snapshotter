@@ -553,8 +553,8 @@ func TestUserCapabilityRolesGrantExactRulesAndLabels(t *testing.T) {
 			},
 		},
 		"download_snapshots": {
-			namespaceAs:  "manager",
-			kubernetesAs: "manager",
+			namespaceAs:  "admin",
+			kubernetesAs: "",
 			backupAgent:  true,
 			grants: map[string][]string{
 				"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-download":        {"get"},
@@ -1084,9 +1084,9 @@ func checkSingleSelector(t *testing.T, file string, role rbacv1.ClusterRole, wan
 // templates/webhooks/rbac-for-us.yaml and templates/user-authz-cluster-roles.yaml — are out of scope,
 // and not because scanning them would prove nothing: they cannot be scanned here at all. Their labels
 // arrive from a Helm action, which templateBranch refuses, so pointing the walk at them would fail the
-// test on the read rather than check anything. What templates/user-authz-cluster-roles.yaml grants to
-// cluster-level roles is deliberate and long-standing, which TestUseRolesDoNotGrantClusterScopedSnapshotLayer
-// says where it draws its own scope; that is a separate question from the membership tracked here.
+// test on the read rather than check anything. What templates/user-authz-cluster-roles.yaml grants is a
+// separate question from the membership tracked here, and TestUseRolesDoNotGrantClusterScopedSnapshotLayer
+// says where it draws its own scope.
 //
 // LIMIT, and the blind spot worth watching is this rather than those four files being skipped: ANY
 // role outside the scanned trees that carries both selector labels joins the set unseen here — a
@@ -1244,10 +1244,10 @@ func TestBackupAgentSystemRoleGrantsOnlyDefinitionReads(t *testing.T) {
 // A prefix also covers every subresource of the resource (snapshotcontents/manifests-download,
 // manifestcheckpoints/manifests). No namespaced resource of this module starts with one of them.
 //
-// SCOPE — templates/rbacv2/use/** only, and widening it is NOT the fix if it ever fails elsewhere:
-// templates/user-authz-cluster-roles.yaml and templates/rbacv2/manage/** grant manifestcheckpoints
-// and snapshotcontents to cluster-level roles deliberately and have done so for a long time; taking
-// those grants away would silently remove access somebody depends on.
+// SCOPE — templates/rbacv2/use/** only. templates/user-authz-cluster-roles.yaml grants of these
+// resources only read of snapshotcontents to ClusterEditor (pinned by TestUserAuthzRolesGrantExactRules),
+// and templates/rbacv2/manage/** grants read of manifestcheckpoints to the cluster-level storage viewer
+// on purpose, so widening the walk to them is not the fix if it ever fails elsewhere.
 //
 // A wildcard is rejected outright, in both the resource and the group: "*" and "*/<subresource>" are
 // how the authorizer spells "everything", so a prefix comparison cannot see through one — a single
@@ -1297,6 +1297,72 @@ func TestUseRolesDoNotGrantClusterScopedSnapshotLayer(t *testing.T) {
 		len(files), len(rbacSchemes), rolesScanned, resourcesScanned, len(clusterScopedPrefixes))
 	if resourcesScanned == 0 {
 		t.Fatal("no resource grant scanned under templates/rbacv2/use — zero findings means the scan stopped reading the roles, not that they are clean")
+	}
+}
+
+func TestUserAuthzRolesGrantExactRules(t *testing.T) {
+	path := filepath.Join(filepath.Clean("../../../../.."), "templates", "user-authz-cluster-roles.yaml")
+	type role struct {
+		level  string
+		grants []string
+	}
+	want := map[string]role{
+		"d8:user-authz:state-snapshotter:user": {"User", []string{
+			"state-snapshotter.deckhouse.io/manifestcapturerequests: get,list,watch",
+			"state-snapshotter.deckhouse.io/snapshots/status: get,list,watch",
+			"state-snapshotter.deckhouse.io/snapshots: get,list,watch",
+		}},
+		"d8:user-authz:state-snapshotter:editor": {"Editor", []string{
+			"state-snapshotter.deckhouse.io/snapshots: create,delete",
+		}},
+		"d8:user-authz:state-snapshotter:admin": {"Admin", []string{
+			"subresources.snapshot.storage.k8s.io/volumesnapshots/manifests-and-children-refs-upload: create",
+			"subresources.snapshot.storage.k8s.io/volumesnapshots/manifests-download: get",
+			"subresources.snapshot.storage.k8s.io/volumesnapshots/manifests-with-data-restoration: get",
+			"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-and-children-refs-upload: create",
+			"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-download: get",
+			"subresources.state-snapshotter.deckhouse.io/snapshots/manifests-with-data-restoration: get",
+			"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-and-children-refs-upload: create",
+			"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-download: get",
+			"subresources.storage-foundation.deckhouse.io/volumesnapshots/manifests-with-data-restoration: get",
+		}},
+		"d8:user-authz:state-snapshotter:cluster-editor": {"ClusterEditor", []string{
+			"state-snapshotter.deckhouse.io/snapshotcontents: get,list,watch",
+		}},
+	}
+
+	var kept []string
+	for _, line := range strings.Split(readTemplate(t, path), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "{{") {
+			kept = append(kept, line)
+		}
+	}
+	seen := map[string]bool{}
+	for _, doc := range strings.Split(strings.Join(kept, "\n"), "\n---") {
+		if strings.TrimSpace(doc) == "" {
+			continue
+		}
+		var got rbacv1.ClusterRole
+		if err := yaml.Unmarshal([]byte(doc), &got); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		exp, ok := want[got.Name]
+		if !ok {
+			t.Errorf("%s: ClusterRole %q is not pinned here", path, got.Name)
+			continue
+		}
+		seen[got.Name] = true
+		if level := got.Annotations["user-authz.deckhouse.io/access-level"]; level != exp.level {
+			t.Errorf("%s: ClusterRole %q has access level %q, want %q", path, got.Name, level, exp.level)
+		}
+		if lines := sortedGrantLines(flattenPolicyRules(got.Rules)); !reflect.DeepEqual(lines, exp.grants) {
+			t.Errorf("%s: ClusterRole %q grants\n  %s\nwant\n  %s", path, got.Name, strings.Join(lines, "\n  "), strings.Join(exp.grants, "\n  "))
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%s holds no ClusterRole %q", path, name)
+		}
 	}
 }
 

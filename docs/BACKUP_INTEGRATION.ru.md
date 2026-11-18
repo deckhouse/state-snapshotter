@@ -115,10 +115,12 @@ roleRef:
 | Создание DataExport и DataImport и передача данных томов через их HTTP-эндпоинты | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
 
 Capability `transfer_volume_data` предоставляет модуль [`storage-foundation`](/modules/storage-foundation/).
-В обеих схемах ролей она агрегируется в ClusterRole агента резервного копирования. Начиная с Deckhouse Platform 1.78,
-capability также входит в роль неймспейса `admin`, но не в `manager`. В более ранних версиях она не входит в
-пользовательские роли неймспейса. Если вместо ClusterRole агента резервного копирования используются такие роли,
-для передачи данных томов назначьте capability отдельно.
+В обеих схемах ролей она агрегируется в ClusterRole агента резервного копирования. Она также входит в роли неймспейса
+`manager` и `admin` (в Deckhouse Platform с 1.76.9 по 1.77 — в use-роли `manager` и `admin`) и в уровни доступа
+`Editor` и выше текущей ролевой модели. Скачивание манифестов узлов, загрузка и восстановление входят в роль неймспейса
+`admin` и в уровни доступа `Admin` и выше; в Deckhouse Platform с 1.76.9 по 1.77 use-роли неймспейса их не включают.
+Если вместо ClusterRole агента резервного копирования используются такие роли, недостающие роли из таблицы назначьте
+отдельно.
 
 После обновления до Deckhouse Platform 1.78 привязки к прежней ClusterRole
 `d8:use:capability:module:state-snapshotter:backup_agent` продолжают работать как устаревший псевдоним. Для новых

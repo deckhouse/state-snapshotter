@@ -27,23 +27,11 @@ resources:
   - group: state-snapshotter.deckhouse.io
     resource: manifestcapturerequests
     namespace:
-      manager:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       viewer:
         - get
         - list
         - watch
     legacy:
-      ClusterEditor:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       User:
         - get
         - list
@@ -51,24 +39,7 @@ resources:
   - group: state-snapshotter.deckhouse.io
     resource: manifestcheckpoints
     system:
-      manager:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       viewer:
-        - get
-        - list
-        - watch
-    legacy:
-      ClusterEditor:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
-      User:
         - get
         - list
         - watch
@@ -76,20 +47,9 @@ resources:
     resource: snapshotcontents
     legacy:
       ClusterEditor:
-        - create
-        - delete
         - get
         - list
-        - patch
-        - update
         - watch
-  - group: state-snapshotter.deckhouse.io
-    resource: snapshotcontents/status
-    legacy:
-      ClusterEditor:
-        - get
-        - patch
-        - update
   - group: state-snapshotter.deckhouse.io
     resource: snapshots
     namespace:
@@ -101,13 +61,12 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      Editor:
         - create
         - delete
+      User:
         - get
         - list
-        - patch
-        - update
         - watch
   - group: state-snapshotter.deckhouse.io
     resource: snapshots/status
@@ -117,15 +76,18 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      User:
         - get
-        - patch
-        - update
+        - list
+        - watch
   - group: subresources.snapshot.storage.k8s.io
     resource: volumesnapshots/manifests-and-children-refs-upload
     scope: Namespaced
     namespace:
       upload_snapshots:
+        - create
+    legacy:
+      Admin:
         - create
   - group: subresources.snapshot.storage.k8s.io
     resource: volumesnapshots/manifests-download
@@ -133,11 +95,17 @@ resources:
     namespace:
       download_snapshots:
         - get
+    legacy:
+      Admin:
+        - get
   - group: subresources.snapshot.storage.k8s.io
     resource: volumesnapshots/manifests-with-data-restoration
     scope: Namespaced
     namespace:
       restore_snapshots:
+        - get
+    legacy:
+      Admin:
         - get
   - group: subresources.state-snapshotter.deckhouse.io
     resource: snapshots/manifests-and-children-refs-upload
@@ -145,11 +113,17 @@ resources:
     namespace:
       upload_snapshots:
         - create
+    legacy:
+      Admin:
+        - create
   - group: subresources.state-snapshotter.deckhouse.io
     resource: snapshots/manifests-download
     scope: Namespaced
     namespace:
       download_snapshots:
+        - get
+    legacy:
+      Admin:
         - get
   - group: subresources.state-snapshotter.deckhouse.io
     resource: snapshots/manifests-with-data-restoration
@@ -157,11 +131,17 @@ resources:
     namespace:
       restore_snapshots:
         - get
+    legacy:
+      Admin:
+        - get
   - group: subresources.storage-foundation.deckhouse.io
     resource: volumesnapshots/manifests-and-children-refs-upload
     scope: Namespaced
     namespace:
       upload_snapshots:
+        - create
+    legacy:
+      Admin:
         - create
   - group: subresources.storage-foundation.deckhouse.io
     resource: volumesnapshots/manifests-download
@@ -169,11 +149,17 @@ resources:
     namespace:
       download_snapshots:
         - get
+    legacy:
+      Admin:
+        - get
   - group: subresources.storage-foundation.deckhouse.io
     resource: volumesnapshots/manifests-with-data-restoration
     scope: Namespaced
     namespace:
       restore_snapshots:
+        - get
+    legacy:
+      Admin:
         - get
   - group: state-snapshotter.deckhouse.io
     resource: customsnapshotdefinitions
@@ -183,7 +169,7 @@ resources:
     noAccess: 'internal storage of the compressed data of a ManifestCheckpoint, written and read by the controller only'
 capabilities:
   namespace.download_snapshots:
-    level: manager
+    level: admin
     labels:
       state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
     title:
