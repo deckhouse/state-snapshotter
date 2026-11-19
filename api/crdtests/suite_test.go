@@ -28,6 +28,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/deckhouse/sds-common-lib/crdtest"
@@ -38,13 +39,16 @@ import (
 // testNamespace holds the namespaced objects; kube-apiserver creates it itself.
 const testNamespace = "default"
 
-var k8sClient client.Client
+var (
+	k8sClient  client.Client
+	restConfig *rest.Config
+)
 
 func TestMain(m *testing.M) {
 	os.Exit(crdtest.Main(m, crdtest.Options{
 		CRDPaths:    []string{"../../crds", "../../crds/internal"},
 		AddToScheme: []func(*runtime.Scheme) error{storagev1alpha1.AddToScheme, ssv1alpha1.AddToScheme},
-	}, func(env *crdtest.Env) { k8sClient = env.Client }))
+	}, func(env *crdtest.Env) { k8sClient, restConfig = env.Client, env.Config }))
 }
 
 // objectName turns a subtest name into an object name the apiserver accepts.

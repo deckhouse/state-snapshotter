@@ -1,0 +1,67 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: d8-{{ .Chart.Name }}-custom-snapshot-definition-guard
+  labels:
+    heritage: deckhouse
+    module: "{{ .Chart.Name }}"
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["state-snapshotter.deckhouse.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["customsnapshotdefinitions"]
+  variables:
+    - name: name
+      expression: '(request.operation == "DELETE" ? oldObject : object).metadata.?name.orValue("")'
+    - name: platform
+      expression: >-
+        request.userInfo.username == "system:serviceaccount:d8-system:deckhouse" ||
+        "kubeadm:cluster-admins" in request.userInfo.groups
+    - name: registers
+      expression: >-
+        authorizer.group("state-snapshotter.deckhouse.io").resource("customsnapshotdefinitions").subresource("register").check("create").allowed()
+    - name: sourceAPIVersion
+      expression: 'object.?spec.?source.?apiVersion.orValue("")'
+    - name: snapshotAPIVersion
+      expression: 'object.?spec.?apiVersion.orValue("")'
+    - name: builtinGroups
+      expression: 'r"^(|rbac\.authorization\.k8s\.io|admissionregistration\.k8s\.io|apps|batch)/"'
+  validations:
+    - expression: 'variables.platform || variables.registers'
+      reason: Forbidden
+      messageExpression: >-
+        "CustomSnapshotDefinition " + variables.name + " makes the state-snapshotter module grant its service
+        accounts access to the kinds it names, so it may be created, changed or deleted only by Deckhouse, the
+        kubeadm:cluster-admins group or a subject allowed to create customsnapshotdefinitions/register"
+    - expression: >-
+        request.operation == "DELETE" ||
+        (variables.sourceAPIVersion.contains("/") && !variables.sourceAPIVersion.matches(variables.builtinGroups))
+      reason: Invalid
+      messageExpression: >-
+        "spec.source.apiVersion " + variables.sourceAPIVersion + " belongs to the core, apps, batch,
+        rbac.authorization.k8s.io or admissionregistration.k8s.io API group, which a CustomSnapshotDefinition may
+        not name"
+    - expression: >-
+        request.operation == "DELETE" ||
+        (variables.snapshotAPIVersion.contains("/") && !variables.snapshotAPIVersion.matches(variables.builtinGroups))
+      reason: Invalid
+      messageExpression: >-
+        "spec.apiVersion " + variables.snapshotAPIVersion + " belongs to the core, apps, batch,
+        rbac.authorization.k8s.io or admissionregistration.k8s.io API group, which a CustomSnapshotDefinition may
+        not name"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: d8-{{ .Chart.Name }}-custom-snapshot-definition-guard
+  labels:
+    heritage: deckhouse
+    module: "{{ .Chart.Name }}"
+spec:
+  policyName: d8-{{ .Chart.Name }}-custom-snapshot-definition-guard
+  validationActions:
+    - Deny

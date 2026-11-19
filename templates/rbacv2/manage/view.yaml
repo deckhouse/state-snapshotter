@@ -31,6 +31,7 @@ rules:
 - apiGroups:
   - state-snapshotter.deckhouse.io
   resources:
+  - customsnapshotdefinitions
   - manifestcheckpoints
   verbs:
   - get
@@ -52,6 +53,7 @@ rules:
   - apiGroups:
       - state-snapshotter.deckhouse.io
     resources:
+      - customsnapshotdefinitions
       - manifestcheckpoints
     verbs:
       - get

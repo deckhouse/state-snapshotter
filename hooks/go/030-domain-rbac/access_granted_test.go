@@ -334,3 +334,42 @@ func TestReconcileDomainRBACApplyFailedWhenRBACWriteRejected(t *testing.T) {
 			cond.Message, rejection)
 	}
 }
+
+func TestReconcileDomainRBACGrantsNothingForADefinitionNotAccepted(t *testing.T) {
+	ctx := context.Background()
+	def := acceptedCSD("builtin-snapshot")
+	def.Spec.APIVersion = "v1"
+	def.Spec.Kind = "Secret"
+	def.Spec.Source = v1alpha1.SnapshotGVKRef{APIVersion: "apps/v1", Kind: "DaemonSet"}
+	def.Status.Conditions[0].Status = metav1.ConditionFalse
+	def.Status.Conditions[0].Reason = "SnapshotKindNotCustomResource"
+
+	mapper := agRESTMapper(agSourceKind, agSnapshotKind).(*apimeta.DefaultRESTMapper)
+	mapper.Add(schema.GroupVersionKind{Version: "v1", Kind: "Secret"}, apimeta.RESTScopeNamespace)
+	mapper.Add(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "DaemonSet"}, apimeta.RESTScopeNamespace)
+	cl := fake.NewClientBuilder().
+		WithScheme(agScheme(t)).
+		WithRESTMapper(mapper).
+		WithStatusSubresource(&v1alpha1.CustomSnapshotDefinition{}).
+		WithObjects(def).
+		Build()
+
+	if err := reconcileDomainRBAC(ctx, agHookInput(cl)); err != nil {
+		t.Fatalf("reconcileDomainRBAC: %v", err)
+	}
+
+	if cond := agAccessGranted(t, cl, def.Name); cond != nil {
+		t.Errorf("%s = %s/%s on a definition that is not Accepted, want no condition", consts.CSDConditionAccessGranted, cond.Status, cond.Reason)
+	}
+	managed := new(rbacv1.ClusterRoleList)
+	if err := cl.List(ctx, managed, ctrlclient.MatchingLabels(moduleLabels())); err != nil {
+		t.Fatalf("list hook-managed ClusterRoles: %v", err)
+	}
+	for i := range managed.Items {
+		for _, rule := range managed.Items[i].Rules {
+			if slices.Contains(rule.APIGroups, "") || slices.Contains(rule.APIGroups, "apps") {
+				t.Errorf("ClusterRole %q grants %v on %v/%v for a definition that is not Accepted", managed.Items[i].Name, rule.Verbs, rule.APIGroups, rule.Resources)
+			}
+		}
+	}
+}

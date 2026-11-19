@@ -18,6 +18,7 @@ package csd
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 
@@ -49,7 +50,8 @@ const (
 	CSDReasonInvalidSpec  = "InvalidSpec"
 	// CSDReasonSnapshotContractUnsatisfied is set when a registered snapshot kind's CRD does not
 	// expose the framework status protocol fields the generic orchestration reads by fixed name.
-	CSDReasonSnapshotContractUnsatisfied = "SnapshotContractUnsatisfied"
+	CSDReasonSnapshotContractUnsatisfied   = "SnapshotContractUnsatisfied"
+	CSDReasonSnapshotKindNotCustomResource = "SnapshotKindNotCustomResource"
 	// CSDReadyReasonNotReady is the Ready condition reason when the aggregate is false (not a spec-level standardized reason).
 	CSDReadyReasonNotReady = "NotReady"
 )
@@ -132,9 +134,14 @@ func (r *CustomSnapshotDefinitionReconciler) Reconcile(ctx context.Context, _ ct
 
 // csdEntryResolution is the resolution of a CSD's single snapshot mapping (flat schema).
 type csdEntryResolution struct {
-	snapshotGK  schema.GroupKind
-	resolveErr  error
-	contractErr error
+	snapshotGK           schema.GroupKind
+	resolveErr           error
+	notCustomResourceErr error
+	contractErr          error
+}
+
+func (res csdEntryResolution) rejected() bool {
+	return res.resolveErr != nil || res.notCustomResourceErr != nil || res.contractErr != nil
 }
 
 func (r *CustomSnapshotDefinitionReconciler) reconcileAll(ctx context.Context, items []storagev1alpha1.CustomSnapshotDefinition) error {
@@ -163,7 +170,7 @@ func (r *CustomSnapshotDefinitionReconciler) computeCSDGlobalStateFromItems(
 	for i := range items {
 		d := &items[i]
 		res := resByName[d.Name]
-		if res.resolveErr != nil || res.contractErr != nil {
+		if res.rejected() {
 			continue
 		}
 		gkKey := res.snapshotGK.String()
@@ -192,9 +199,16 @@ func (r *CustomSnapshotDefinitionReconciler) resolveCSDSpec(ctx context.Context,
 		return out
 	}
 	out.snapshotGK = snapGVK.GroupKind()
-	out.contractErr = r.validateSnapshotStatusContract(ctx, snapGVK)
+	err = r.validateSnapshotStatusContract(ctx, snapGVK)
+	if stderrors.Is(err, errSnapshotKindNotCustomResource) {
+		out.notCustomResourceErr = err
+	} else {
+		out.contractErr = err
+	}
 	return out
 }
+
+var errSnapshotKindNotCustomResource = stderrors.New("the snapshot kind must be a custom resource")
 
 func (r *CustomSnapshotDefinitionReconciler) resolveMappingGVKs(ctx context.Context, d *storagev1alpha1.CustomSnapshotDefinition) (schema.GroupVersionKind, schema.GroupVersionKind, error) {
 	_ = ctx
@@ -220,9 +234,9 @@ func (r *CustomSnapshotDefinitionReconciler) resolveMappingGVKs(ctx context.Cont
 // validateSnapshotStatusContract performs a shallow check that the snapshot kind's CRD exposes the
 // canonical framework status protocol fields the generic orchestration reads by fixed name. It only
 // blocks (returns a non-nil error) when it can positively determine, from a structural schema, that
-// the fields are absent. It is intentionally lenient (returns nil) when introspection is not possible:
-// no RESTMapper (focused unit tests), kind not CRD-backed (built-in/aggregated; out of scope this
-// slice), or status is schemaless / preserve-unknown.
+// the fields are absent, and when the kind is served by no CRD (built-in or aggregated), which it
+// reports as errSnapshotKindNotCustomResource. It is lenient (returns nil) when introspection is not
+// possible: no RESTMapper (focused unit tests), or status is schemaless / preserve-unknown.
 func (r *CustomSnapshotDefinitionReconciler) validateSnapshotStatusContract(ctx context.Context, snapGVK schema.GroupVersionKind) error {
 	if r.Client == nil || r.RESTMapper == nil {
 		return nil
@@ -236,7 +250,7 @@ func (r *CustomSnapshotDefinitionReconciler) validateSnapshotStatusContract(ctx 
 	crd := &extv1.CustomResourceDefinition{}
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
 		if errors.IsNotFound(err) {
-			return nil
+			return fmt.Errorf("%w: no CustomResourceDefinition %q serves %s", errSnapshotKindNotCustomResource, crdName, snapGVK.String())
 		}
 		return err
 	}
@@ -393,6 +407,9 @@ func (r *CustomSnapshotDefinitionReconciler) computeAccepted(
 	}
 	if res.resolveErr != nil {
 		return metav1.ConditionFalse, CSDReasonInvalidSpec, res.resolveErr.Error()
+	}
+	if res.notCustomResourceErr != nil {
+		return metav1.ConditionFalse, CSDReasonSnapshotKindNotCustomResource, res.notCustomResourceErr.Error()
 	}
 	if res.contractErr != nil {
 		return metav1.ConditionFalse, CSDReasonSnapshotContractUnsatisfied, res.contractErr.Error()

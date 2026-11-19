@@ -42,8 +42,9 @@ const (
 )
 
 const (
-	CSDReasonKindConflict                = csd.CSDReasonKindConflict
-	CSDReasonInvalidSpec                 = csd.CSDReasonInvalidSpec
-	CSDReasonSnapshotContractUnsatisfied = csd.CSDReasonSnapshotContractUnsatisfied
-	CSDReadyReasonNotReady               = csd.CSDReadyReasonNotReady
+	CSDReasonKindConflict                  = csd.CSDReasonKindConflict
+	CSDReasonInvalidSpec                   = csd.CSDReasonInvalidSpec
+	CSDReasonSnapshotContractUnsatisfied   = csd.CSDReasonSnapshotContractUnsatisfied
+	CSDReasonSnapshotKindNotCustomResource = csd.CSDReasonSnapshotKindNotCustomResource
+	CSDReadyReasonNotReady                 = csd.CSDReadyReasonNotReady
 )

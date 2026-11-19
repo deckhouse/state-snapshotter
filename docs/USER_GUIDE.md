@@ -41,7 +41,9 @@ For some Kubernetes objects, a manifest alone is not sufficient to restore their
 objects can define its own snapshot kind and its contents. To do this, the module registers a mapping from the source
 object kind to the snapshot kind using
 [CustomSnapshotDefinition](cr.html#customsnapshotdefinition-v1alpha1-spec). `state-snapshotter` uses the definition only
-when the `Accepted=True` and `AccessGranted=True` conditions are set for its current generation.
+when the `Accepted=True` and `AccessGranted=True` conditions are set for its current generation. The snapshot kind must
+be a custom resource: for a built-in or aggregated kind the module sets `Accepted=False` with the
+`SnapshotKindNotCustomResource` reason and grants no access for the definition.
 
 For example, the [`virtualization`](/modules/virtualization/) module can register VirtualMachineSnapshot as the snapshot kind for VirtualMachine
 objects. During planning, `state-snapshotter` creates a child VirtualMachineSnapshot for each virtual machine (VM). The
@@ -177,6 +179,16 @@ The cluster-scoped objects of a snapshot tree are not part of these permissions.
 `ClusterEditor` access level and higher, and a ManifestCheckpoint with the `SuperAdmin` access level only (in the new
 role model, with the roles of the `storage` subsystem). Work with a snapshot through the Snapshot, its status and its
 subresources.
+
+CustomSnapshotDefinition objects can be read with the `ClusterAdmin` access level and higher, and in the new role model
+with the `viewer` role of the `storage` subsystem and higher, to find out which kinds have their own snapshots and why a
+definition is not `Ready`. No access level below `SuperAdmin` creates, changes or deletes them: the platform modules
+ship them. For every accepted definition the module grants its own service accounts access to the kinds the definition
+names, so an admission policy also refuses such a write to any subject other than Deckhouse, the
+`kubeadm:cluster-admins` group and the subjects allowed to create the `customsnapshotdefinitions/register`
+subresource of the `state-snapshotter.deckhouse.io` group, which `SuperAdmin` is. The policy refuses, to every subject,
+a definition whose source or snapshot kind belongs to the core, `apps`, `batch`, `rbac.authorization.k8s.io` or
+`admissionregistration.k8s.io` API group.
 
 Downloading the manifests of a snapshot returns every object captured in the namespace, including the kinds the subject
 cannot read directly, for example custom resources of other operators. Grant it only to subjects that may read all

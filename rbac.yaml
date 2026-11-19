@@ -163,7 +163,17 @@ resources:
         - get
   - group: state-snapshotter.deckhouse.io
     resource: customsnapshotdefinitions
-    noAccess: 'the registrations other platform modules ship for their snapshot kinds; the controller reads them, and nothing in them is for users'
+    reason: 'read by the levels that diagnose snapshots; no level writes it, because the 030-domain-rbac hook grants the service accounts of the module access to the kinds a definition names, so only the platform modules that ship a definition create, change or delete it'
+    system:
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterAdmin:
+        - get
+        - list
+        - watch
   - group: state-snapshotter.deckhouse.io
     resource: manifestcheckpointcontentchunks
     noAccess: 'internal storage of the compressed data of a ManifestCheckpoint, written and read by the controller only'

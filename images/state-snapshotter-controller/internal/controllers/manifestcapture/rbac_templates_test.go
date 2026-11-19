@@ -1245,9 +1245,11 @@ func TestBackupAgentSystemRoleGrantsOnlyDefinitionReads(t *testing.T) {
 // manifestcheckpoints/manifests). No namespaced resource of this module starts with one of them.
 //
 // SCOPE — templates/rbacv2/use/** only. templates/user-authz-cluster-roles.yaml grants of these
-// resources only read of snapshotcontents to ClusterEditor (pinned by TestUserAuthzRolesGrantExactRules),
-// and templates/rbacv2/manage/** grants read of manifestcheckpoints to the cluster-level storage viewer
-// on purpose, so widening the walk to them is not the fix if it ever fails elsewhere.
+// resources only read of snapshotcontents to ClusterEditor and read of customsnapshotdefinitions to
+// ClusterAdmin (pinned by TestUserAuthzRolesGrantExactRules), and templates/rbacv2/manage/** grants read
+// of manifestcheckpoints and customsnapshotdefinitions to the cluster-level storage viewer (pinned by
+// TestManageRolesGrantExactRules) on purpose, so widening the walk to them is not the fix if it ever
+// fails elsewhere.
 //
 // A wildcard is rejected outright, in both the resource and the group: "*" and "*/<subresource>" are
 // how the authorizer spells "everything", so a prefix comparison cannot see through one — a single
@@ -1329,6 +1331,9 @@ func TestUserAuthzRolesGrantExactRules(t *testing.T) {
 		"d8:user-authz:state-snapshotter:cluster-editor": {"ClusterEditor", []string{
 			"state-snapshotter.deckhouse.io/snapshotcontents: get,list,watch",
 		}},
+		"d8:user-authz:state-snapshotter:cluster-admin": {"ClusterAdmin", []string{
+			"state-snapshotter.deckhouse.io/customsnapshotdefinitions: get,list,watch",
+		}},
 	}
 
 	var kept []string
@@ -1364,6 +1369,70 @@ func TestUserAuthzRolesGrantExactRules(t *testing.T) {
 			t.Errorf("%s holds no ClusterRole %q", path, name)
 		}
 	}
+}
+
+func TestManageRolesGrantExactRules(t *testing.T) {
+	dir := filepath.Join(filepath.Clean("../../../../.."), "templates", "rbacv2", "manage")
+	want := map[rbacScheme]map[string][]string{
+		schemeNew: {
+			"d8:system-capability:state-snapshotter:view": {
+				"deckhouse.io/moduleconfigs[state-snapshotter]: get,list,watch",
+				"state-snapshotter.deckhouse.io/customsnapshotdefinitions: get,list,watch",
+				"state-snapshotter.deckhouse.io/manifestcheckpoints: get,list,watch",
+			},
+			"d8:system-capability:state-snapshotter:edit": {
+				"deckhouse.io/moduleconfigs[state-snapshotter]: create,delete,patch,update",
+			},
+		},
+		schemeLegacy: {
+			"d8:manage:permission:module:state-snapshotter:view": {
+				"state-snapshotter.deckhouse.io/customsnapshotdefinitions: get,list,watch",
+				"state-snapshotter.deckhouse.io/manifestcheckpoints: get,list,watch",
+			},
+		},
+	}
+
+	files := templateYAMLFiles(t, dir)
+	for _, scheme := range rbacSchemes {
+		seen := map[string]bool{}
+		for _, file := range files {
+			for _, role := range clusterRolesFromTemplate(t, file, scheme) {
+				exp, ok := want[scheme][role.Name]
+				if !ok {
+					t.Errorf("%s (%s): ClusterRole %q is not pinned here", file, scheme, role.Name)
+					continue
+				}
+				seen[role.Name] = true
+				if got := namedGrantLines(role.Rules); !reflect.DeepEqual(got, exp) {
+					t.Errorf("%s (%s): ClusterRole %q grants\n  %s\nwant\n  %s", file, scheme, role.Name, strings.Join(got, "\n  "), strings.Join(exp, "\n  "))
+				}
+			}
+		}
+		for name := range want[scheme] {
+			if !seen[name] {
+				t.Errorf("%s (%s) holds no ClusterRole %q", dir, scheme, name)
+			}
+		}
+	}
+}
+
+func namedGrantLines(rules []rbacv1.PolicyRule) []string {
+	var lines []string
+	for _, rule := range rules {
+		verbs := slices.Clone(rule.Verbs)
+		sort.Strings(verbs)
+		names := ""
+		if len(rule.ResourceNames) > 0 {
+			names = "[" + strings.Join(rule.ResourceNames, ",") + "]"
+		}
+		for _, group := range rule.APIGroups {
+			for _, resource := range rule.Resources {
+				lines = append(lines, group+"/"+resource+names+": "+strings.Join(verbs, ","))
+			}
+		}
+	}
+	sort.Strings(lines)
+	return lines
 }
 
 // TestEveryNamespacedSubresourceRouteHasCapabilityRole is the guard against the drift "an endpoint was
